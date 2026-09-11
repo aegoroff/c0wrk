@@ -1040,10 +1040,6 @@ func (f *FrontendAPI) ListProviderModels(req ListProviderModelsRequest) ([]strin
 // the frontend draft (not yet written to config.yaml). cfg must be a
 // throwaway ToBuilderConfig result — this mutates its ProviderConfigs map.
 func applyListProviderModelsOverrides(cfg *core.BuilderConfig, req ListProviderModelsRequest) error {
-	if cfg == nil || cfg.LLM.ProviderConfigs == nil {
-		return errors.New("builder config not initialized")
-	}
-
 	existing, exists := cfg.LLM.ProviderConfigs[req.Provider]
 
 	apiKey := req.APIKey
