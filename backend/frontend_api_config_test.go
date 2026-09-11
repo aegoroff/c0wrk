@@ -2231,7 +2231,7 @@ func TestListProviderModels_DraftCompatibleProvider(t *testing.T) {
 	mock.listProviderModelsRes = []string{"gpt-custom"}
 
 	models, err := f.ListProviderModels(ListProviderModelsRequest{
-		Provider: "Positive",
+		Provider: "custom",
 		APIKey:   "sk-draft",
 		BaseURL:  "https://api-llm.example.com/v1",
 		Type:     "openai",
@@ -2244,12 +2244,12 @@ func TestListProviderModels_DraftCompatibleProvider(t *testing.T) {
 	}
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
-	if mock.listProviderModelsLastProvider != "Positive" {
-		t.Errorf("provider = %q, want Positive", mock.listProviderModelsLastProvider)
+	if mock.listProviderModelsLastProvider != "custom" {
+		t.Errorf("provider = %q, want custom", mock.listProviderModelsLastProvider)
 	}
-	pc, ok := mock.listProviderModelsLastCfg.LLM.ProviderConfigs["Positive"]
+	pc, ok := mock.listProviderModelsLastCfg.LLM.ProviderConfigs["custom"]
 	if !ok {
-		t.Fatal("expected Positive to be injected into BuilderConfig")
+		t.Fatal("expected custom to be injected into BuilderConfig")
 	}
 	if pc.ProviderType != "openai" {
 		t.Errorf("ProviderType = %q, want openai", pc.ProviderType)

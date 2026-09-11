@@ -72,12 +72,11 @@ describe('useLLMConfig default replacement', () => {
     expect(result.defaultModel).toBe('')
     expect(result.providerConfigs.anthropic?.models).toEqual([])
 
+    // Enabling a model while default is empty auto-claims it as the default
+    // and persists in one shot (first-run / recovery after clearing default).
     act(() => result.toggleModel('anthropic', 'new-model'))
     expect(result.providerConfigs.anthropic?.models).toEqual(['new-model'])
-    await act(async () => { await vi.advanceTimersByTimeAsync(300) })
-    expect(mocks.updateLLMConfig).not.toHaveBeenCalled()
-
-    act(() => result.setDefaultModel('anthropic/new-model'))
+    expect(result.defaultModel).toBe('anthropic/new-model')
     await act(async () => { await vi.advanceTimersByTimeAsync(300) })
 
     expect(mocks.updateLLMConfig).toHaveBeenCalledTimes(1)
@@ -85,6 +84,46 @@ describe('useLLMConfig default replacement', () => {
       default_model: 'anthropic/new-model',
       anthropic: { api_key: '', models: ['new-model'] },
       openai_compatible: {},
+      anthropic_compatible: {},
+    })
+  })
+
+  it('auto-sets default_model when enabling the first model with no default', async () => {
+    mocks.getConfig.mockResolvedValue({
+      loaded: true,
+      llm: {
+        default_model: '',
+        anthropic: { api_key: '', models: [] },
+        openai_compatible: {},
+      },
+    })
+
+    act(() => root.render(<HookHarness />))
+    await flush()
+    expect(result.defaultModel).toBe('')
+
+    act(() => result.addProvider('custom', {
+      api_key: 'sk-test',
+      base_url: 'https://api.example.com/v1',
+      models: [],
+      type: 'openai',
+    }))
+    act(() => result.toggleModel('custom', 'org/model-a'))
+
+    expect(result.defaultModel).toBe('custom/org/model-a')
+    expect(result.providerConfigs.custom?.models).toEqual(['org/model-a'])
+    await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+
+    expect(mocks.updateLLMConfig).toHaveBeenCalledWith({
+      default_model: 'custom/org/model-a',
+      anthropic: { api_key: '', models: [] },
+      openai_compatible: {
+        custom: {
+          api_key: 'sk-test',
+          base_url: 'https://api.example.com/v1',
+          models: ['org/model-a'],
+        },
+      },
       anthropic_compatible: {},
     })
   })

@@ -230,16 +230,25 @@ export function useLLMConfig(onSettingsSaved?: () => void, onDefaultModelChange?
         const prev = configsRef.current
         const existing = prev[provider]
         if (!existing) return
-        const models = existing.models.includes(model)
-            ? existing.models.filter((m) => m !== model)
-            : [...existing.models, model]
+        const enabling = !existing.models.includes(model)
+        const models = enabling
+            ? [...existing.models, model]
+            : existing.models.filter((m) => m !== model)
         const updated = { ...existing, models }
         const next = { ...prev, [provider]: updated }
         // If disabling this model invalidated the current default, clear it
         // so the dialog blocks close until a new default is picked. The
         // backend re-validation (UpdateLLMConfig) is a second line of
         // defense; doing it here keeps local UI state in sync immediately.
-        const effectiveDefault = defaultModelIsValid(defaultModel, next) ? defaultModel : ''
+        let effectiveDefault = defaultModelIsValid(defaultModel, next) ? defaultModel : ''
+        // First-run / empty default: enabling a model also claims it as the
+        // default so provider credentials and the model list can persist
+        // without a separate trip to the Default Model picker. Without this,
+        // Fetch Models works but "Add provider" appears stuck — drafts never
+        // reach config.yaml while default_model is unset.
+        if (!effectiveDefault && enabling) {
+            effectiveDefault = compositeModelId(provider, model)
+        }
         setProviderConfigs(next)
         if (effectiveDefault !== defaultModel) {
             setDefaultModelState(effectiveDefault)
