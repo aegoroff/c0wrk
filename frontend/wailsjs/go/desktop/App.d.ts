@@ -205,7 +205,7 @@ export function ListProjectWorkDirectories(arg1:string):Promise<Array<project.Wo
 
 export function ListProjects():Promise<Array<project.ProjectInfo>>;
 
-export function ListProviderModels(arg1:string):Promise<Array<string>>;
+export function ListProviderModels(arg1:backend.ListProviderModelsRequest):Promise<Array<string>>;
 
 export function ListSessionWorkDirectories(arg1:string):Promise<Array<project.WorkDirectoryRecord>>;
 

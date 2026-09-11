@@ -61,7 +61,7 @@ export interface McpAPI {
   getMCPServers(): Promise<Record<string, MCPServerConfig>>
   updateMCPServers(servers: Record<string, MCPServerConfig>): Promise<void>
   getToolList(): Promise<ToolInfo[]>
-  listProviderModels(provider: string): Promise<string[]>
+  listProviderModels(req: import('./models').ListProviderModelsRequest): Promise<string[]>
 }
 
 export interface AttachmentAPI {

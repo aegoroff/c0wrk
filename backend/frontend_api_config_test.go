@@ -49,11 +49,15 @@ type mockBuilder struct {
 	updateShellBlacklistErr error
 	listProviderModelsRes   []string
 	listProviderModelsErr   error
-	optimizePromptRes       *core.OptimizePromptResult
-	optimizePromptErr       error
-	generateCommitMsgRes    string
-	generateCommitMsgErr    error
-	generateCommitMsgDiff   string
+	// listProviderModelsLastProvider / LastCfg capture the most recent
+	// ListProviderModels arguments so tests can assert draft-credential merges.
+	listProviderModelsLastProvider string
+	listProviderModelsLastCfg      *core.BuilderConfig
+	optimizePromptRes              *core.OptimizePromptResult
+	optimizePromptErr              error
+	generateCommitMsgRes           string
+	generateCommitMsgErr           error
+	generateCommitMsgDiff          string
 
 	// rebuildRouterHook, when non-nil, runs inside RebuildRouter while the
 	// call is being recorded. Tests use it to block the rebuild phase (e.g.
@@ -129,9 +133,11 @@ func (m *mockBuilder) ReconfigureMCP(_ context.Context, _ *core.BuilderConfig) e
 	m.mu.Unlock()
 	return m.reconfigureMCPErr
 }
-func (m *mockBuilder) ListProviderModels(_ context.Context, _ string, _ *core.BuilderConfig) ([]string, error) {
+func (m *mockBuilder) ListProviderModels(_ context.Context, provider string, cfg *core.BuilderConfig) ([]string, error) {
 	m.mu.Lock()
 	m.listProviderModelsCalls++
+	m.listProviderModelsLastProvider = provider
+	m.listProviderModelsLastCfg = cfg
 	m.mu.Unlock()
 	return m.listProviderModelsRes, m.listProviderModelsErr
 }
@@ -2203,7 +2209,7 @@ func TestListProviderModels_Delegates(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 	mock.listProviderModelsRes = []string{"model-a", "model-b"}
 
-	models, err := f.ListProviderModels("anthropic")
+	models, err := f.ListProviderModels(ListProviderModelsRequest{Provider: "anthropic"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2212,6 +2218,95 @@ func TestListProviderModels_Delegates(t *testing.T) {
 	}
 	if len(models) != 2 || models[0] != "model-a" || models[1] != "model-b" {
 		t.Errorf("models = %v, want [model-a model-b]", models)
+	}
+}
+
+// TestListProviderModels_DraftCompatibleProvider verifies that an unsaved
+// OpenAI-compatible provider (not yet in config.yaml) can still fetch models
+// when the settings UI supplies draft base_url / api_key / type. Without this
+// merge, Fetch Models fails with "unknown provider" during first-run setup
+// where saves are blocked until a default_model is chosen.
+func TestListProviderModels_DraftCompatibleProvider(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	mock.listProviderModelsRes = []string{"gpt-custom"}
+
+	models, err := f.ListProviderModels(ListProviderModelsRequest{
+		Provider: "Positive",
+		APIKey:   "sk-draft",
+		BaseURL:  "https://api-llm.example.com/v1",
+		Type:     "openai",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(models) != 1 || models[0] != "gpt-custom" {
+		t.Errorf("models = %v, want [gpt-custom]", models)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.listProviderModelsLastProvider != "Positive" {
+		t.Errorf("provider = %q, want Positive", mock.listProviderModelsLastProvider)
+	}
+	pc, ok := mock.listProviderModelsLastCfg.LLM.ProviderConfigs["Positive"]
+	if !ok {
+		t.Fatal("expected Positive to be injected into BuilderConfig")
+	}
+	if pc.ProviderType != "openai" {
+		t.Errorf("ProviderType = %q, want openai", pc.ProviderType)
+	}
+	if pc.APIKey != "sk-draft" {
+		t.Errorf("APIKey = %q, want sk-draft", pc.APIKey)
+	}
+	if pc.BaseURL != "https://api-llm.example.com/v1" {
+		t.Errorf("BaseURL = %q, want https://api-llm.example.com/v1", pc.BaseURL)
+	}
+}
+
+// TestListProviderModels_MaskedKeyFallsBackToSaved verifies that a masked
+// sentinel from the UI does not wipe a saved API key when re-fetching models.
+func TestListProviderModels_MaskedKeyFallsBackToSaved(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	f.config.LLM.OpenAICompatible = map[string]config.OpenAICompatibleConfig{
+		"lmstudio": {
+			APIKey:  "sk-saved",
+			BaseURL: "http://localhost:1234/v1",
+			Models:  []string{"local"},
+		},
+	}
+	mock.listProviderModelsRes = []string{"local"}
+
+	_, err := f.ListProviderModels(ListProviderModelsRequest{
+		Provider: "lmstudio",
+		APIKey:   maskedAPIKey,
+		BaseURL:  "http://localhost:1234/v1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	pc := mock.listProviderModelsLastCfg.LLM.ProviderConfigs["lmstudio"]
+	if pc.APIKey != "sk-saved" {
+		t.Errorf("APIKey = %q, want sk-saved (masked sentinel must fall back)", pc.APIKey)
+	}
+}
+
+func TestListProviderModels_UnknownWithoutBaseURL(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	_, err := f.ListProviderModels(ListProviderModelsRequest{Provider: "ghost"})
+	if err == nil {
+		t.Fatal("expected error for unknown provider without base URL")
+	}
+	if !strings.Contains(err.Error(), "unknown provider") {
+		t.Errorf("error = %q, want mention of unknown provider", err)
+	}
+}
+
+func TestListProviderModels_EmptyProvider(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	_, err := f.ListProviderModels(ListProviderModelsRequest{})
+	if err == nil {
+		t.Fatal("expected error for empty provider")
 	}
 }
 
