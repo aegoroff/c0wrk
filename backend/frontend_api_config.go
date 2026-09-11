@@ -1061,18 +1061,11 @@ func applyListProviderModelsOverrides(cfg *core.BuilderConfig, req ListProviderM
 	case "openai", "anthropic":
 		// explicit draft transport
 	case "":
-		if exists && existing.ProviderType != "" {
+		if exists {
 			providerType = existing.ProviderType
 		} else {
-			switch req.Provider {
-			case "anthropic":
-				providerType = "anthropic"
-			case "chatgpt":
-				providerType = "openai"
-			default:
-				// Unsaved compatible providers default to OpenAI Chat Completions.
-				providerType = "openai"
-			}
+			// Unsaved compatible providers default to OpenAI Chat Completions.
+			providerType = "openai"
 		}
 	default:
 		return fmt.Errorf("unsupported provider type %q", providerType)
