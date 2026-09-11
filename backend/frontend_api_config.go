@@ -1047,12 +1047,8 @@ func applyListProviderModelsOverrides(cfg *core.BuilderConfig, req ListProviderM
 	existing, exists := cfg.LLM.ProviderConfigs[req.Provider]
 
 	apiKey := req.APIKey
-	if apiKey == "" || apiKey == maskedAPIKey {
-		if exists {
-			apiKey = existing.APIKey
-		} else {
-			apiKey = ""
-		}
+	if (apiKey == "" || apiKey == maskedAPIKey) && exists {
+		apiKey = existing.APIKey
 	}
 
 	baseURL := req.BaseURL
