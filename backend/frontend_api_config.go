@@ -1082,15 +1082,10 @@ func applyListProviderModelsOverrides(cfg *core.BuilderConfig, req ListProviderM
 		return fmt.Errorf("unsupported provider type %q", providerType)
 	}
 
-	if !exists {
+	if !exists && baseURL == "" {
 		// Fixed providers are always present in ToBuilderConfig; reaching here
 		// means a named compatible provider that has not been saved yet.
-		if providerType == "openai" && baseURL == "" {
-			return fmt.Errorf("unknown provider: %s (set a base URL to fetch models before saving)", req.Provider)
-		}
-		if providerType == "anthropic" && baseURL == "" {
-			return fmt.Errorf("unknown provider: %s (set a base URL to fetch models before saving)", req.Provider)
-		}
+		return fmt.Errorf("unknown provider: %s (set a base URL to fetch models before saving)", req.Provider)
 	}
 
 	cfg.LLM.ProviderConfigs[req.Provider] = core.BuilderProviderConfig{
