@@ -243,10 +243,44 @@ func (f *FrontendAPI) PinSession(id string) error {
 // any /goal command prefix the message text may carry). goalBudget is an optional
 // JSON budget override ({"max_turns":N}) tightening the goal's turn cap;
 // empty = use defaults (unlimited).
+// e2s, when true, enables the E2S (explicit-state) execution mode for the task.
+// It is an experimental feature: the send fails closed (before any side effect)
+// when the experimental gate is off, and it is mutually exclusive with goal.
 // reviewMode, when true, marks the message as carrying code review feedback the
 // agent must address (review status == "submitted"); the system prompt gains a
 // Code Review section directing the agent to edit code.
-func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, reviewMode /* reviewMode */ bool) error {
+func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool) error {
+	// E2S and goal are alternative task modes with incompatible loop
+	// semantics; the frontend store enforces exclusivity, this is the
+	// server-side defense so a hand-crafted call cannot arm both. Checked
+	// first: a both-flags request is malformed regardless of the gate.
+	if e2s && goal {
+		return errors.New("E2S mode and goal mode are mutually exclusive — disable one of the toggles before sending")
+	}
+	// A leading "/goal" command arms goal mode in the manager even when the
+	// explicit flag is absent (goalEnabled := isGoal || goal), so it must not
+	// slip past the exclusivity check above: otherwise the manager would build
+	// a HandleOptions with BOTH Goal and E2S set, which core rejects as a
+	// wiring mistake (ErrE2SGoalConflict) AFTER the run's E2S takeover cleanup
+	// was skipped. Reject it here, before any side effect, exactly like the
+	// explicit-flag case.
+	if e2s {
+		if _, isGoalPrefix := core.DetectAndStripGoalMode(text); isGoalPrefix {
+			return errors.New("E2S mode and goal mode are mutually exclusive — an E2S message cannot carry a /goal command")
+		}
+	}
+	// E2S is experimental: fail closed BEFORE any side effect (no activity
+	// timestamp, no persisted message, no task launch) when the flag arrives
+	// while BOTH gates are not satisfied. experimentalFeaturesEnabled also
+	// returns false for a not-yet-loaded config, so an early send can never
+	// slip past the gate. Checked even before the manager-initialized guard:
+	// a gated request is rejected on principle, regardless of runtime state.
+	if e2s && !f.experimentalFeaturesEnabled() {
+		return errors.New("E2S mode is experimental and currently disabled — enable experimental features in settings to use it")
+	}
+	if e2s && !f.e2sEnabled() {
+		return errors.New("E2S mode is disabled — set e2s.enabled: true in the config file (with experimental features on) to use it")
+	}
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
 	}
@@ -257,15 +291,15 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 			f.log().Error("failed to update session activity", "error", err)
 		}
 	}
-	// Authoritative live-send gate: validate the pause window, goal mode, and
-	// skill/agent references BEFORE persisting anything, so a rejected live
-	// send never leaves a phantom persisted message. The manager re-checks the
-	// same conditions under the session lock in sendMessage; this early call
-	// only moves the common rejection ahead of the store write (the race
-	// between this check and the authoritative queue is harmless — a message
-	// that passes but finds the task finished afterwards simply starts a
-	// normal task).
-	if err := f.app.Manager().ValidateLiveSend(id, goal, text, activeSkills, activeAgents); err != nil {
+	// Authoritative live-send gate: validate the pause window, goal/E2S mode,
+	// and skill/agent references BEFORE persisting anything, so a rejected
+	// live send never leaves a phantom persisted message. The manager
+	// re-checks the same conditions under the session lock in sendMessage;
+	// this early call only moves the common rejection ahead of the store
+	// write (the race between this check and the authoritative queue is
+	// harmless — a message that passes but finds the task finished
+	// afterwards simply starts a normal task).
+	if err := f.app.Manager().ValidateLiveSend(id, goal, e2s, text, activeSkills, activeAgents); err != nil {
 		return err
 	}
 
@@ -273,7 +307,7 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	// blackboard/context only at task start. This UX gate uses the runtime
 	// status snapshot; the manager's authoritative live branch ignores
 	// attachments (it queues text only), so this is purely a guard.
-	if !goal {
+	if !goal && !e2s {
 		if status, statusErr := f.app.Manager().GetSessionRuntimeStatus(id); statusErr == nil {
 			if status.Active && !status.Paused && f.app.Manager().HasPendingAttachments(id) {
 				return errors.New("attachments cannot be sent while a task is running — send text only, or wait for the pause/completion")
@@ -311,7 +345,7 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	// session-scoped auxiliary working directories (best-effort: never blocks).
 	f.autoAddPromptWorkDirs(id, text)
 
-	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, reviewMode)
+	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

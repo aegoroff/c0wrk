@@ -1,0 +1,619 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/v0lka/c0wrk/core/e2s"
+	"github.com/v0lka/c0wrk/core/tools"
+	"github.com/v0lka/sp4rk/agent"
+	"github.com/v0lka/sp4rk/llm"
+	"github.com/v0lka/sp4rk/orchestration"
+	sdktools "github.com/v0lka/sp4rk/tools"
+)
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+// e2sStepResponse builds an LLM response carrying exactly one e2s_step tool
+// call with the given patch and action.
+func e2sStepResponse(callID, patchJSON, tool, argsJSON string) *llm.ChatResponse {
+	input := fmt.Sprintf(`{"state_patch": %s, "action": {"tool": %q, "args": %s}}`, patchJSON, tool, argsJSON)
+	return &llm.ChatResponse{
+		Message: llm.Message{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:    callID,
+				Name:  e2s.StepToolName,
+				Input: json.RawMessage(input),
+			}},
+		},
+		StopReason: "tool_use",
+	}
+}
+
+// e2sFinishResponse builds an e2s_step response that finishes the run.
+func e2sFinishResponse(callID, answer string) *llm.ChatResponse {
+	return e2sStepResponse(callID, `{}`, e2s.FinishActionName, fmt.Sprintf(`{"answer": %q}`, answer))
+}
+
+// mockDelegationLauncher records Launch invocations and returns canned
+// results — the injected-launcher seam (Orchestrator.e2sLauncher) test double.
+type mockDelegationLauncher struct {
+	mu     sync.Mutex
+	launch int
+	tasks  []tools.DelegationTask
+	out    []tools.DelegationResult
+}
+
+func (m *mockDelegationLauncher) Launch(_ context.Context, tasks []tools.DelegationTask, _ *tools.DelegationRegistry) []tools.DelegationResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.launch++
+	m.tasks = append(m.tasks, tasks...)
+	return m.out
+}
+
+func (m *mockDelegationLauncher) CompletedStep(string) (tools.DelegationCompletedStep, bool) {
+	return tools.DelegationCompletedStep{}, false
+}
+
+// e2sCheckpointStore extends the plain mock task store with the optional
+// E2S persistence capability (e2sStatePersister), keeping the persisted
+// checkpoints in memory.
+type e2sCheckpointStore struct {
+	*mockTaskStore
+	mu    sync.Mutex
+	saved map[string]*e2s.E2SState
+}
+
+func newE2SCheckpointStore() *e2sCheckpointStore {
+	return &e2sCheckpointStore{mockTaskStore: &mockTaskStore{}, saved: map[string]*e2s.E2SState{}}
+}
+
+func (s *e2sCheckpointStore) PersistE2SState(taskID string, state *e2s.E2SState) error {
+	cp := *state
+	s.mu.Lock()
+	s.saved[taskID] = &cp
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *e2sCheckpointStore) LoadE2SState(taskID string) (*e2s.E2SState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if es, ok := s.saved[taskID]; ok {
+		cp := *es
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (s *e2sCheckpointStore) load(taskID string) *e2s.E2SState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if es, ok := s.saved[taskID]; ok {
+		return es
+	}
+	return nil
+}
+
+// newE2STestOrchestrator wires an orchestrator for E2S-mode tests. When store
+// is non-nil the blackboard factory produces PersistableBlackboards wired to
+// it, so checkpoint persistence (pause/resume) can be exercised.
+func newE2STestOrchestrator(mockLLM *mockLLMCaller, registry *sdktools.ToolRegistry, emitter Emitter, store TaskPersistence) *Orchestrator {
+	deps := OrchestratorDeps{
+		Router:         newCoreRouter(mockLLM, 5),
+		LLM:            mockLLM,
+		ToolExec:       registry,
+		ToolRegistry:   registry,
+		TokenCounter:   llm.NewSimpleTokenCounter(),
+		ContextFactory: testContextFactory,
+		CircuitBreaker: defaultCircuitBreakerConfig,
+	}
+	if emitter != nil {
+		deps.Emitter = emitter
+	}
+	if store != nil {
+		deps.BBFactory = func(taskID string) orchestration.Blackboard {
+			return &testPersistableBlackboard{
+				MapBlackboard: orchestration.NewMapBlackboard(),
+				taskID:        taskID,
+				store:         store,
+			}
+		}
+	}
+	o := NewOrchestrator(OrchestratorConfig{E2S: E2SSettings{Enabled: true}}, deps)
+	if store != nil {
+		o.SetTaskStore(store)
+	}
+	return o
+}
+
+// ----------------------------------------------------------------------------
+// Pure unit tests: tool stripping + registry adapter
+// ----------------------------------------------------------------------------
+
+func TestStripE2SUnavailableTools(t *testing.T) {
+	in := []sdktools.ToolDescriptor{
+		{Name: "read_file"}, {Name: "bash_exec"}, {Name: "delegate"},
+		{Name: "cancel_delegation"}, {Name: "finish"}, {Name: "update_checklist"},
+		{Name: "declare_plan"}, {Name: "execute_plan"}, {Name: "declare_step_complete"},
+		{Name: "reflect"},
+	}
+	got := stripE2SUnavailableTools(in)
+	want := map[string]bool{
+		"read_file": true, "bash_exec": true, "delegate": true,
+		"cancel_delegation": true, "finish": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stripped list = %v, want exactly %d entries", got, len(want))
+	}
+	for _, d := range got {
+		if !want[d.Name] {
+			t.Errorf("tool %q survived the E2S strip; plan-workflow tools must be removed", d.Name)
+		}
+	}
+}
+
+// recordingToolExec captures Execute calls; the adapter test double.
+type recordingToolExec struct {
+	mu    sync.Mutex
+	calls []struct {
+		name  string
+		input json.RawMessage
+	}
+}
+
+func (r *recordingToolExec) Execute(_ context.Context, name string, input json.RawMessage) (sdktools.ToolResult, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, struct {
+		name  string
+		input json.RawMessage
+	}{name, input})
+	r.mu.Unlock()
+	return sdktools.ToolResult{Content: "ok:" + name}, nil
+}
+func (r *recordingToolExec) GetToolSource(string) string { return "core" }
+func (r *recordingToolExec) IsToolUntrusted(string) bool { return false }
+func (r *recordingToolExec) CacheStrategy(context.Context, string, json.RawMessage) sdktools.CacheMode {
+	return sdktools.CacheModeDefault
+}
+
+var _ agent.ToolExecutor = (*recordingToolExec)(nil)
+
+func TestE2SRegistryAdapter_CatalogFilteredAndDispatchGated(t *testing.T) {
+	inner := &recordingToolExec{}
+	descs := []sdktools.ToolDescriptor{
+		{Name: "bash_exec"}, {Name: "read_file"}, {Name: "delegate"},
+	}
+	adapter := newE2SRegistryAdapter(inner, descs)
+
+	// Catalog exposes exactly the filtered descriptors.
+	listed := adapter.List()
+	if len(listed) != 3 {
+		t.Fatalf("List() = %d descriptors, want 3", len(listed))
+	}
+
+	// Allowed tool dispatches to the inner executor with name + args intact.
+	res, err := adapter.Execute(context.Background(), "bash_exec", json.RawMessage(`{"command":"echo hi"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("Execute(allowed) = (%v, %v), want clean dispatch", res, err)
+	}
+	if len(inner.calls) != 1 || inner.calls[0].name != "bash_exec" {
+		t.Fatalf("inner executor saw %v, want one bash_exec dispatch", inner.calls)
+	}
+
+	// A stripped (hallucinated) plan tool is rejected fail-closed and never
+	// reaches the real executor.
+	res, err = adapter.Execute(context.Background(), "declare_plan", json.RawMessage(`{"steps":[]}`))
+	if err != nil {
+		t.Fatalf("Execute(stripped) returned error %v, want error RESULT (not a Go error)", err)
+	}
+	if !res.IsError {
+		t.Fatal("Execute(stripped) must return an error result — the catalog is the contract")
+	}
+	if len(inner.calls) != 1 {
+		t.Fatalf("stripped dispatch reached the real executor: %v", inner.calls)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Acceptance: E2S=true never calls routeOrContinue / runConductor
+// ----------------------------------------------------------------------------
+
+// TestHandleMessage_E2S_SkipsRoutingAndConductor drives HandleMessage with
+// E2S=true and a mock LLM whose ONLY call must be the E2S loop's one-shot
+// [system, user] dialog. If routeOrContinue ran, the router's classification
+// call would arrive first (and a Routing event would be emitted); if
+// runConductor ran, the request would carry the full Conductor system prompt
+// and tool definitions for every registry tool instead.
+func TestHandleMessage_E2S_SkipsRoutingAndConductor(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			// Every call answers the same finish-on-turn-1; the assertions
+			// below pin the CALL COUNT to exactly one.
+			return e2sFinishResponse("e2s-1", "e2s finished the task"), nil
+		},
+	}
+	emitter := &spyEmitter{}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), emitter, nil)
+
+	result, err := o.HandleMessage(context.Background(), "do the thing in e2s mode", "session-e2s-1", HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+
+	t.Run("exactly one LLM call, fresh [system,user] dialog", func(t *testing.T) {
+		mockLLM.mu.Lock()
+		calls := len(mockLLM.calls)
+		var first llm.ChatRequest
+		if calls > 0 {
+			first = mockLLM.calls[0]
+		}
+		mockLLM.mu.Unlock()
+		if calls != 1 {
+			t.Fatalf("LLM calls = %d, want exactly 1 (the E2S loop's single turn; a router or Conductor call would add more)", calls)
+		}
+		if len(first.Messages) != 2 || first.Messages[0].Role != "system" || first.Messages[1].Role != "user" {
+			t.Fatalf("request shape = %d messages, want exactly [system, user] (the E2S one-shot dialog)", len(first.Messages))
+		}
+		if !strings.Contains(first.Messages[0].Content, "## Available Tools") {
+			t.Error("system prompt lacks the E2S '## Available Tools' section — this is not the E2S prompt")
+		}
+		if !strings.Contains(first.Messages[1].Content, "<state>") {
+			t.Error("user message lacks the <state> block — this is not the E2S per-turn user message")
+		}
+	})
+
+	t.Run("no Routing event (routeOrContinue skipped)", func(t *testing.T) {
+		if _, _, _, ok := routingCall(emitter); ok {
+			t.Error("a Routing event was emitted — routeOrContinue must not run in E2S mode")
+		}
+	})
+
+	t.Run("e2s_state event emitted", func(t *testing.T) {
+		for _, c := range emitter.calls {
+			if c.method == "E2SState" {
+				return
+			}
+		}
+		t.Error("expected an E2SState event from the loop's state snapshot emission")
+	})
+
+	t.Run("finish answer becomes the successful result", func(t *testing.T) {
+		if result == nil || result.Status != orchestration.ExecutionStatusSuccess {
+			t.Fatalf("HandleResult.Status = %+v, want success", result)
+		}
+		if result.Output != "e2s finished the task" {
+			t.Errorf("HandleResult.Output = %q, want the finish answer", result.Output)
+		}
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Acceptance: Goal + E2S → explicit error
+// ----------------------------------------------------------------------------
+
+// TestHandleMessage_E2S_GoalMutualExclusion verifies the server-side
+// exclusivity defense: arming both mode flags is rejected outright, before
+// either mode runs.
+func TestHandleMessage_E2S_GoalMutualExclusion(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return e2sFinishResponse("x", "should never run"), nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), nil, nil)
+
+	result, err := o.HandleMessage(context.Background(), "conflicting modes", "session-e2s-conflict", HandleOptions{E2S: true, Goal: true})
+	if !errors.Is(err, ErrE2SGoalConflict) {
+		t.Fatalf("HandleMessage error = %v, want ErrE2SGoalConflict", err)
+	}
+	if result != nil {
+		t.Errorf("HandleMessage result = %+v, want nil on the conflict", result)
+	}
+	mockLLM.mu.Lock()
+	calls := len(mockLLM.calls)
+	mockLLM.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("LLM calls = %d, want 0 — the conflict must fail before any mode runs", calls)
+	}
+}
+
+// TestHandleMessage_E2S_DisabledFailsClosed verifies the core-side master
+// gate: with the effective E2S toggle off, a HandleOptions.E2S request is
+// rejected before the loop starts (defense in depth behind the API gate).
+func TestHandleMessage_E2S_DisabledFailsClosed(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return e2sFinishResponse("x", "should never run"), nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), nil, nil)
+	o.config.E2S.Enabled = false // effective master toggle off
+
+	result, err := o.HandleMessage(context.Background(), "run e2s", "session-e2s-disabled", HandleOptions{E2S: true})
+	if !errors.Is(err, ErrE2SModeDisabled) {
+		t.Fatalf("HandleMessage error = %v, want ErrE2SModeDisabled", err)
+	}
+	if result != nil {
+		t.Errorf("HandleMessage result = %+v, want nil when the mode is disabled", result)
+	}
+	mockLLM.mu.Lock()
+	calls := len(mockLLM.calls)
+	mockLLM.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("LLM calls = %d, want 0 — a disabled mode must not start the loop", calls)
+	}
+}
+
+// TestOrchestrator_SetE2SSettings_OverridesBuildTimeGate pins the runtime
+// override contract used by the experimental-features toggle: a setter call
+// after Build supersedes config.E2S for both the gate and the loop knobs, so
+// an already-built orchestrator does not stay disabled (or keep stale
+// thresholds) until an app restart.
+func TestOrchestrator_SetE2SSettings_OverridesBuildTimeGate(t *testing.T) {
+	o := &Orchestrator{}
+	o.config.E2S = E2SSettings{Enabled: false, MaxSteps: 7}
+
+	if got := o.e2sSettings(); got.Enabled || got.MaxSteps != 7 {
+		t.Fatalf("e2sSettings() before override = %+v, want the build-time snapshot", got)
+	}
+
+	o.SetE2SSettings(E2SSettings{Enabled: true, MaxSteps: 11})
+	if got := o.e2sSettings(); !got.Enabled || got.MaxSteps != 11 {
+		t.Fatalf("e2sSettings() after override = %+v, want the override applied", got)
+	}
+
+	// Disabling via the override must also win over a build-time-enabled gate.
+	o.SetE2SSettings(E2SSettings{Enabled: false})
+	if got := o.e2sSettings(); got.Enabled {
+		t.Fatalf("e2sSettings() after disabling override = %+v, want disabled", got)
+	}
+}
+
+// TestHandleMessage_E2S_RuntimeDisableFailsClosed verifies that HandleMessage's
+// gate reads the runtime override, not the stale build-time snapshot: a
+// build-time-enabled orchestrator that a later SetE2SSettings disables must
+// reject an E2S request before the loop starts.
+func TestHandleMessage_E2S_RuntimeDisableFailsClosed(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return e2sFinishResponse("x", "should never run"), nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), nil, nil)
+	o.config.E2S.Enabled = true
+	o.SetE2SSettings(E2SSettings{Enabled: false})
+
+	result, err := o.HandleMessage(context.Background(), "run e2s", "session-e2s-runtime-disabled", HandleOptions{E2S: true})
+	if !errors.Is(err, ErrE2SModeDisabled) {
+		t.Fatalf("HandleMessage error = %v, want ErrE2SModeDisabled", err)
+	}
+	if result != nil {
+		t.Errorf("HandleMessage result = %+v, want nil when the mode is disabled", result)
+	}
+}
+
+// TestE2SDomainStatus_CanceledLeavesStateResumable pins the shutdown-resume
+// contract: a context cancellation persists a NON-terminal (active) status, so
+// an app shutdown does not permanently drop an interrupted run's Σ (the
+// manager terminalizes only a user cancel via abandonE2SIfUnfinished).
+func TestE2SDomainStatus_CanceledLeavesStateResumable(t *testing.T) {
+	got := e2sDomainStatus(&e2s.Result{Status: e2s.RunStatusCanceled})
+	if got != e2s.StateStatusActive {
+		t.Fatalf("canceled run persisted status = %q, want %q (non-terminal so a shutdown-interrupted run resumes with its Σ)", got, e2s.StateStatusActive)
+	}
+	if !e2sStatusResumable(got) {
+		t.Errorf("status %q must be resumable", got)
+	}
+	// The other terminals keep their mappings.
+	for _, tc := range []struct {
+		in   e2s.RunStatus
+		want e2s.StateStatus
+	}{
+		{e2s.RunStatusFinished, e2s.StateStatusMet},
+		{e2s.RunStatusPaused, e2s.StateStatusPaused},
+		{e2s.RunStatusStepLimit, e2s.StateStatusFailed},
+		{e2s.RunStatusSpinStop, e2s.StateStatusFailed},
+		{e2s.RunStatusFailed, e2s.StateStatusFailed},
+	} {
+		if got := e2sDomainStatus(&e2s.Result{Status: tc.in}); got != tc.want {
+			t.Errorf("e2sDomainStatus(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := e2sDomainStatus(nil); got != e2s.StateStatusFailed {
+		t.Errorf("e2sDomainStatus(nil) = %q, want %q", got, e2s.StateStatusFailed)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Acceptance: a delegate action reaches the injected launcher and its output
+// becomes the next observation
+// ----------------------------------------------------------------------------
+
+func TestRunE2SLoop_DelegateReachesInjectedLauncher(t *testing.T) {
+	const delegationOutput = "SUBAGENT-OUTPUT-7f3a"
+	launcher := &mockDelegationLauncher{
+		out: []tools.DelegationResult{{
+			ID:     "del_1",
+			Status: tools.DelegationStatusCompleted,
+			Output: delegationOutput,
+		}},
+	}
+
+	var secondUserMessage string
+	var mockLLM *mockLLMCaller
+	mockLLM = &mockLLMCaller{
+		callFn: func(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+			mockLLM.mu.Lock()
+			n := len(mockLLM.calls)
+			mockLLM.mu.Unlock()
+			if n == 1 {
+				// Turn 1: delegate a self-contained exploration.
+				return e2sStepResponse("e2s-d1", `{"findings": []}`, "delegate",
+					`{"tasks":[{"id":"del_1","summary":"explore auth module","task":"Find where auth middleware lives and report the file path."}]}`), nil
+			}
+			// Turn 2: the delegation output must be the observation.
+			if len(req.Messages) > 0 && req.Messages[len(req.Messages)-1].Role == "user" {
+				secondUserMessage = req.Messages[len(req.Messages)-1].Content
+			}
+			return e2sFinishResponse("e2s-d2", "delegation done"), nil
+		},
+	}
+
+	o := newE2STestOrchestrator(mockLLM, createTestRegistryWithDelegate(t), &spyEmitter{}, nil)
+	o.e2sLauncher = launcher
+
+	result, err := o.HandleMessage(context.Background(), "explore via delegation", "session-e2s-delegate", HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+
+	t.Run("launcher received the delegate action", func(t *testing.T) {
+		launcher.mu.Lock()
+		defer launcher.mu.Unlock()
+		if launcher.launch != 1 {
+			t.Fatalf("Launch calls = %d, want exactly 1", launcher.launch)
+		}
+		if len(launcher.tasks) != 1 || launcher.tasks[0].ID != "del_1" {
+			t.Fatalf("launched tasks = %+v, want the single del_1 task", launcher.tasks)
+		}
+	})
+
+	t.Run("launcher output became the next observation", func(t *testing.T) {
+		if secondUserMessage == "" {
+			t.Fatal("the second LLM call never ran — the loop did not continue past the delegation turn")
+		}
+		if !strings.Contains(secondUserMessage, delegationOutput) {
+			t.Errorf("turn-2 user message does not carry the delegation output %q:\n%s", delegationOutput, secondUserMessage)
+		}
+	})
+
+	t.Run("run finished successfully", func(t *testing.T) {
+		if result == nil || result.Status != orchestration.ExecutionStatusSuccess {
+			t.Fatalf("HandleResult.Status = %+v, want success", result)
+		}
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Acceptance: pause mid-run → ExecutionStatusPaused + Σ persisted; Resume
+// continues from the same Σ
+// ----------------------------------------------------------------------------
+
+const e2sSigmaMarker = "ALPHA-FINDING-9c2e"
+
+func TestRunE2SLoop_PausePersistsSigmaAndResumeContinues(t *testing.T) {
+	store := newE2SCheckpointStore()
+
+	var resumedUserMessage string
+	var o *Orchestrator
+	var mockLLM *mockLLMCaller
+	mockLLM = &mockLLMCaller{
+		callFn: func(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+			mockLLM.mu.Lock()
+			n := len(mockLLM.calls)
+			mockLLM.mu.Unlock()
+			switch n {
+			case 1:
+				// Turn 1 of the initial run: patch Σ with a distinctive
+				// finding and dispatch a tool; arm the pause signal so the
+				// next step boundary checkpoints the run cooperatively.
+				o.PauseSession()
+				return e2sStepResponse("e2s-p1",
+					fmt.Sprintf(`{"findings": [%q]}`, e2sSigmaMarker),
+					"bash_exec", `{"command":"echo hi"}`), nil
+			default:
+				// Resumed run: the first user message must carry the SAME Σ
+				// (the persisted finding), proving resume seeded it verbatim.
+				if len(req.Messages) > 0 && req.Messages[len(req.Messages)-1].Role == "user" {
+					resumedUserMessage = req.Messages[len(req.Messages)-1].Content
+				}
+				return e2sFinishResponse("e2s-p2", "resumed and finished"), nil
+			}
+		},
+	}
+
+	emitter := &spyEmitter{}
+	o = newE2STestOrchestrator(mockLLM, createTestRegistry(), emitter, store)
+
+	paused, err := o.HandleMessage(context.Background(), "work until paused", "session-e2s-pause", HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+
+	var taskID string
+	if pbb, ok := paused.Blackboard.(PersistableBlackboard); ok {
+		taskID = pbb.TaskID()
+	}
+	if taskID == "" {
+		t.Fatal("the paused blackboard carries no task id — persistence cannot be asserted (BBFactory wiring broken)")
+	}
+
+	t.Run("paused at the boundary with ExecutionStatusPaused", func(t *testing.T) {
+		if paused.Status != orchestration.ExecutionStatusPaused {
+			t.Fatalf("HandleResult.Status = %q, want paused", paused.Status)
+		}
+		if pbb, ok := paused.Blackboard.(*testPersistableBlackboard); ok && !pbb.paused {
+			t.Error("blackboard was not persisted as paused (PauseTask not called)")
+		}
+	})
+
+	t.Run("Σ persisted with the turn-1 finding", func(t *testing.T) {
+		es := store.load(taskID)
+		if es == nil {
+			t.Fatal("no E2S state was persisted for the paused task")
+		}
+		if es.Status != e2s.StateStatusPaused {
+			t.Errorf("persisted status = %q, want paused (resumable)", es.Status)
+		}
+		if es.TurnCount != 1 {
+			t.Errorf("persisted TurnCount = %d, want 1 (one patch applied before the pause)", es.TurnCount)
+		}
+		findings, _ := es.Sigma["findings"].([]any)
+		if len(findings) != 1 || findings[0] != e2sSigmaMarker {
+			t.Errorf("persisted Σ findings = %#v, want [%q] — the turn-1 patch must be in the checkpoint", es.Sigma["findings"], e2sSigmaMarker)
+		}
+	})
+
+	// --- Resume: re-enter with the SAME Σ and a user follow-up ---
+	const resumeNudge = "also verify the resume nudge reaches the model"
+	resumed, err := o.Resume(context.Background(), paused.Blackboard, nil, "", nil, nil, resumeNudge)
+	if err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	t.Run("resume continues from the same Σ", func(t *testing.T) {
+		if resumedUserMessage == "" {
+			t.Fatal("the resumed run never made an LLM call")
+		}
+		if !strings.Contains(resumedUserMessage, e2sSigmaMarker) {
+			t.Errorf("resumed turn-1 user message does not carry the persisted Σ finding %q:\n%s", e2sSigmaMarker, resumedUserMessage)
+		}
+	})
+
+	t.Run("resume delivers the user nudge as the turn-1 observation", func(t *testing.T) {
+		// Σ precedence would otherwise drop the follow-up: it must reach the
+		// model as the first observation instead of being silently ignored.
+		if !strings.Contains(resumedUserMessage, resumeNudge) {
+			t.Errorf("resumed turn-1 user message does not carry the nudge %q — the follow-up was dropped:\n%s", resumeNudge, resumedUserMessage)
+		}
+	})
+
+	t.Run("resumed run finishes successfully", func(t *testing.T) {
+		if resumed.Status != orchestration.ExecutionStatusSuccess {
+			t.Fatalf("resumed HandleResult.Status = %q, want success", resumed.Status)
+		}
+		if resumed.Output != "resumed and finished" {
+			t.Errorf("resumed output = %q, want the finish answer", resumed.Output)
+		}
+	})
+}

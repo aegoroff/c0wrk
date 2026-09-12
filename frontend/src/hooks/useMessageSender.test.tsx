@@ -17,6 +17,8 @@ import { useMessageSender, type UseMessageSenderResult } from '@/hooks/useMessag
 import { useSessionStore } from '@/stores/sessionStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
+import { useExperimentalStore } from '@/stores/experimentalStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
 import type { SessionInfo, AttachmentInfoUI } from '@/types/models'
 import type { ChatMessageUI } from '@/types/messages'
@@ -102,7 +104,11 @@ beforeEach(() => {
   act(() => {
     useSessionStore.setState({ sessions: [], activeSessionId: null })
     useChatStore.setState({ messages: {}, messageOrder: {}, paused: {}, taskActive: {} })
-    useInputModeStore.setState({ goalEnabled: false, goalBudget: '', selectedModel: null, selectedReasoning: null })
+    useInputModeStore.setState({ goalEnabled: false, goalBudget: '', e2sEnabled: false, selectedModel: null, selectedReasoning: null })
+    // Default the effective E2S gate ON so E2S-specific tests exercise the
+    // armed path; tests that cover the gate off override these explicitly.
+    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: true })
+    useE2SStore.getState().clearAll()
     useAttachmentsStore.setState({ attachmentsBySession: {}, uploadsBySession: {}, namesById: {}, imageErrorBySession: {} })
   })
   container = document.createElement('div')
@@ -136,7 +142,7 @@ describe('useMessageSender optimistic metadata', () => {
     })
 
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's-origin', 'review this', [], [], '', '', false, '',
+      's-origin', 'review this', [], [], '', '', false, '', false,
     )
     expect(userMessages('s-origin')).toHaveLength(1)
     expect(userMessages('s-other')).toHaveLength(0)
@@ -155,8 +161,60 @@ describe('useMessageSender optimistic metadata', () => {
     expect(useInputModeStore.getState().goalEnabled).toBe(false)
     expect(useInputModeStore.getState().goalBudget).toBe('')
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'fix the bug', [], [], '', '', true, '{"max_turns":3}',
+      's1', 'fix the bug', [], [], '', '', true, '{"max_turns":3}', false,
     )
+  })
+
+  it('mirrors the e2s flag into the send and resets the toggle (disarming goal)', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    act(() => {
+      // Arm goal first, then switch to E2S — the store's mutual exclusion
+      // must leave E2S as the only armed mode before the send.
+      useInputModeStore.setState({ goalEnabled: true })
+      useInputModeStore.getState().setE2sEnabled(true)
+    })
+    expect(useInputModeStore.getState().goalEnabled).toBe(false)
+    await act(async () => {
+      await capturedSend!('run with explicit state')
+    })
+    // e2s rides in position 9 (after goalBudget) — and goal must NOT be
+    // re-armed by the send.
+    expect(spies.sendMessage).toHaveBeenCalledWith(
+      's1', 'run with explicit state', [], [], '', '', false, '', true,
+    )
+    // E2S is per-task opt-in: the toggle resets after the defining message.
+    expect(useInputModeStore.getState().e2sEnabled).toBe(false)
+    expect(useInputModeStore.getState().goalEnabled).toBe(false)
+  })
+
+  it('suppresses the e2s flag when the effective gate is off (stale persisted toggle)', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    act(() => {
+      useInputModeStore.getState().setE2sEnabled(true)
+      // A persisted arming outlives the gate: experimental off (or e2s.enabled
+      // off) must neutralize it so the backend never sees a rejected send.
+      useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: true })
+    })
+    await act(async () => {
+      await capturedSend!('plain message')
+    })
+    expect(spies.sendMessage).toHaveBeenCalledWith(
+      's1', 'plain message', [], [], '', '', false, '', false,
+    )
+  })
+
+  it('drops a stale E2S snapshot when a fresh non-E2S task starts', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    // A previous E2S run left a snapshot for this session.
+    useE2SStore.getState().applySnapshot('s1', { state: { objective: 'old' }, turn: 3 })
+    expect(useE2SStore.getState().snapshots['s1']).toBeDefined()
+
+    await act(async () => {
+      await capturedSend!('follow-up in the default flow')
+    })
+    // The default-flow task supersedes the prior E2S run: the panel's snapshot
+    // must not shadow the plan view.
+    expect(useE2SStore.getState().snapshots['s1']).toBeUndefined()
   })
 
   it('mirrors document and image attachments into the optimistic message', async () => {

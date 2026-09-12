@@ -19,12 +19,22 @@ type ConfigResponse struct {
 	Search       ConfigSearchResp             `json:"search"`
 	Proxy        ProxySettingsResponse        `json:"proxy"`
 	Experimental ExperimentalSettingsResponse `json:"experimental"`
+	E2S          E2SConfigResponse            `json:"e2s"`
 }
 
 // ExperimentalSettingsResponse exposes the master experimental-features switch
 // to the settings UI. It carries no feature-specific state by design — the
-// switch is all-or-nothing and gates only the Small-LLM profile.
+// switch is all-or-nothing and gates every experimental feature (currently the
+// Small-LLM profile and the E2S execution mode).
 type ExperimentalSettingsResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+// E2SConfigResponse exposes the E2S (explicit-state) execution mode's own
+// master toggle to the UI, so the per-message E2S control can hide itself
+// while the mode is disabled (the fail-closed UX mirror of the backend gate).
+// The effective mode requires BOTH this toggle and Experimental.Enabled.
+type E2SConfigResponse struct {
 	Enabled bool `json:"enabled"`
 }
 

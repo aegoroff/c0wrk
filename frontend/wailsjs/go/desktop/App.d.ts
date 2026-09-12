@@ -293,7 +293,7 @@ export function SearchBlackboardStepOutputs(arg1:string,arg2:string):Promise<Arr
 
 export function SearchVectorStore(arg1:backend.SearchRequest):Promise<Array<backend.VectorStoreEntry>>;
 
-export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:string,arg6:string,arg7:boolean,arg8:string,arg9:boolean):Promise<void>;
+export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:string,arg6:string,arg7:boolean,arg8:string,arg9:boolean,arg10:boolean):Promise<void>;
 
 export function SetActiveResearch(arg1:string,arg2:string):Promise<backend.ResearchStatusDTO>;
 

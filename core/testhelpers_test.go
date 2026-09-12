@@ -301,6 +301,7 @@ func (m *mockEmitter) Service(_ string)                             {}
 func (m *mockEmitter) ServiceWithMeta(_ string, _ map[string]any)   {}
 func (m *mockEmitter) GoalStatus(_ map[string]any)                  {}
 func (m *mockEmitter) GoalProgress(_ map[string]any)                {}
+func (m *mockEmitter) E2SState(_ map[string]any)                    {}
 
 func (m *mockEmitter) ReplanFailed(_ error)                                 {}
 func (m *mockEmitter) SkillsActivated(_ []string)                           {}

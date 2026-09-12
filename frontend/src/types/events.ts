@@ -322,6 +322,59 @@ export interface GoalProgressData {
   readonly condition: string
 }
 
+// --- E2S (execution-state stream) event payloads ---
+
+/** One checklist entry of the execution state Σ: a task line plus whether it
+ *  is done. Mirrors the backend's checklist item record (snake_case). */
+export interface E2SChecklistItem {
+  readonly text: string
+  readonly checked: boolean
+}
+
+/**
+ * The accumulated execution state Σ for an E2S session — the running summary
+ * the agent maintains instead of a plan DAG. Every field is optional: the
+ * backend seeds the core keys (objective, checklist, files_touched, findings,
+ * decisions, next_steps, done_criteria, status) but the shape is
+ * model-patched, and unknown extension keys pass through untouched.
+ */
+export interface E2SSigma {
+  readonly objective?: string
+  readonly status?: string
+  readonly files_touched?: readonly string[]
+  readonly findings?: readonly string[]
+  readonly decisions?: readonly string[]
+  readonly next_steps?: readonly string[]
+  readonly done_criteria?: readonly string[]
+  readonly checklist?: readonly E2SChecklistItem[]
+  /** Extension keys: arbitrary JSON values the model added (add-only). */
+  readonly [key: string]: unknown
+}
+
+/**
+ * Payload of the dedicated `e2s_state` session event — the execution-state
+ * snapshot for an E2S session, emitted after every applied state patch.
+ * `state` is the FULL Σ snapshot (the backend owns the merge; the store keeps
+ * only the latest). `turn` is the current turn number.
+ *
+ * `max_turns` (the run's turn budget; 0 = unbudgeted), `status` (the domain
+ * lifecycle status) and `patch` are validated when present but OPTIONAL for
+ * backward compatibility with older emitters: the store falls back to
+ * Σ.status for the badge and treats a missing max_turns as an unbudgeted run
+ * (panel shows "turn N" without a cap). `patch: true` marks `state` as a
+ * partial slice the FRONTEND merges over the previously seen Σ
+ * (absent/false = full replacement).
+ */
+export interface E2SStateData {
+  readonly state: E2SSigma
+  readonly turn: number
+  readonly max_turns?: number
+  readonly status?: string
+  /** True when `state` carries only the changed slice (merge over the previous
+   *  Σ); absent/false means a full replacement. */
+  readonly patch?: boolean
+}
+
 // --- Tool manager event payloads ---
 
 export interface ToolManagerToolInfo { readonly name: string; readonly version: string }
@@ -412,6 +465,9 @@ export interface SessionEventMap {
   readonly goal_proposal: GoalProposalData
   readonly goal_status: GoalStatusData
   readonly goal_progress: GoalProgressData
+  /** E2S execution-state snapshot (Σₜ): emitted per step/turn transition; the
+   *  Execution State panel replaces the plan view for E2S sessions. */
+  readonly e2s_state: E2SStateData
   /** Attachment list + optional per-file failures. Replace the store, toast failures. */
   readonly 'attachments:changed': AttachmentsChangedData
 }
@@ -869,6 +925,59 @@ export function isGoalProgressData(d: unknown): d is GoalProgressData {
   return typeof d.turn === 'number'
     && typeof d.max_turns === 'number'
     && typeof d.condition === 'string'
+}
+
+// --- E2S event type guards ---
+
+/** Guard for a single Σ checklist item: text + checked flag. */
+function isE2SChecklistItem(v: unknown): v is E2SChecklistItem {
+  return isObj(v) && typeof v.text === 'string' && typeof v.checked === 'boolean'
+}
+
+function isStringArray(v: unknown): v is readonly string[] {
+  return isArrayOf(v, (s): s is string => typeof s === 'string')
+}
+
+/**
+ * Guard for a Σ slice (full snapshot or patch): every PRESENT field must be
+ * correctly typed. Absent fields are fine — the backend seeds core keys but
+ * the shape is model-patched, and unknown extension keys pass through
+ * untouched (they are not rejected).
+ *
+ * The element shapes mirror the backend merge operator (core/e2s/merge.go),
+ * which rejects a wrong-shaped element before it can be persisted — checklist
+ * items are `{text, checked}` and the other list keys hold strings — so a
+ * conforming snapshot always passes this guard.
+ */
+export function isE2SSigma(v: unknown): v is E2SSigma {
+  if (!isObj(v) || Array.isArray(v)) return false
+  if (v.objective !== undefined && typeof v.objective !== 'string') return false
+  if (v.status !== undefined && typeof v.status !== 'string') return false
+  if (v.files_touched !== undefined && !isStringArray(v.files_touched)) return false
+  if (v.findings !== undefined && !isStringArray(v.findings)) return false
+  if (v.decisions !== undefined && !isStringArray(v.decisions)) return false
+  if (v.next_steps !== undefined && !isStringArray(v.next_steps)) return false
+  if (v.done_criteria !== undefined && !isStringArray(v.done_criteria)) return false
+  if (v.checklist !== undefined && !isArrayOf(v.checklist, isE2SChecklistItem)) return false
+  return true
+}
+
+/**
+ * Guard for an `e2s_state` payload. `state` must be a valid Σ (full snapshot
+ * or patch slice) and `turn` a number — both are always present. The forward
+ * fields (`max_turns`, `status`, `patch`) are OPTIONAL: validated when
+ * present, tolerated when absent. An invalid payload is dropped at the
+ * boundary (reportDroppedEvent) — it must never reach the e2s store's merge
+ * logic.
+ */
+export function isE2SStateData(d: unknown): d is E2SStateData {
+  if (!isObj(d)) return false
+  if (!isE2SSigma(d.state)) return false
+  if (typeof d.turn !== 'number') return false
+  if (d.max_turns !== undefined && typeof d.max_turns !== 'number') return false
+  if (d.status !== undefined && typeof d.status !== 'string') return false
+  if (d.patch !== undefined && typeof d.patch !== 'boolean') return false
+  return true
 }
 
 // --- Global event type guards ---

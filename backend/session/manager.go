@@ -377,6 +377,33 @@ func (m *Manager) SetSmallLLMProfile(cfg config.SmallLLMConfig) {
 	m.mu.Unlock()
 }
 
+// SetE2SSettings refreshes the E2S execution-mode settings on every live
+// session orchestrator so a runtime experimental-features toggle takes effect
+// on sessions built before the change. The builder seeds config.E2S once at
+// Build, and the orchestrator factory reads the live config only for sessions
+// built afterwards, so an already-built orchestrator would otherwise keep the
+// stale gate (leaving an enabled E2S mode unusable until restart). Mirrors
+// SetSmallLLMProfile. Safe while a session's task is running.
+//
+// A session's orchestrator pointer is set in the Session literal before the
+// session is published in m.sessions and is never reassigned afterwards, so
+// reading it under m.mu alone is race-free (the same immutability contract the
+// orchestratorFactory relies on); the per-orchestrator override applied here
+// is itself atomic.
+func (m *Manager) SetE2SSettings(settings core.E2SSettings) {
+	m.mu.RLock()
+	orchestrators := make([]*core.Orchestrator, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if s.orchestrator != nil {
+			orchestrators = append(orchestrators, s.orchestrator)
+		}
+	}
+	m.mu.RUnlock()
+	for _, o := range orchestrators {
+		o.SetE2SSettings(settings)
+	}
+}
+
 // smallLLMProfile returns the recorded Small-LLM profile snapshot.
 func (m *Manager) smallLLMProfile() SmallLLMMetaInfo {
 	m.mu.RLock()

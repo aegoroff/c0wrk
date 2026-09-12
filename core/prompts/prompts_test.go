@@ -23,6 +23,7 @@ func TestEmbeddedPrompts_NonEmpty(t *testing.T) {
 		{"RouterSystem", RouterSystem},
 		{"VerificationMandate", VerificationMandate},
 		{"InjectionDefense", InjectionDefense},
+		{"E2SSystem", E2SSystem},
 		{"CodeReviewMode", CodeReviewMode},
 		{"CompactionSummarize", CompactionSummarize},
 		// Prompt optimizer prompts
@@ -71,6 +72,7 @@ func TestEmbeddedPrompts_ContainExpectedKeywords(t *testing.T) {
 		{"PromptOptimizeExtract", PromptOptimizeExtract, []string{"translate", "keyword", "json"}},
 		{"PromptOptimizeRewrite", PromptOptimizeRewrite, []string{"optim", "prompt"}},
 		{"GoalDerivation", GoalDerivation, []string{"verification_mode", "executable", "re_derivation"}},
+		{"E2SSystem", E2SSystem, []string{"e2s_step", "state_patch", "finish"}},
 		{"GoalVerification", GoalVerification, []string{"verify clause", "work product"}},
 		{"GoalReDerivation", GoalReDerivation, []string{"re-derivation", "delegate"}},
 	}

@@ -1063,6 +1063,20 @@ func (e *EventEmitter) GoalProgress(data map[string]any) {
 	})
 }
 
+// E2SState emits a dedicated e2s_state session event carrying the full
+// execution-state snapshot (Σ map, turn, max turns, status) of an E2S-mode
+// run. Emitted after every applied state patch so the frontend's Execution
+// State panel renders the live Σ.
+func (e *EventEmitter) E2SState(data map[string]any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.emitEvent(Event{
+		SessionID: e.sessionID,
+		Type:      "e2s_state",
+		Data:      data,
+	})
+}
+
 // ExecutorDiagnostic logs an internal executor diagnostic at DEBUG level.
 // These are internal diagnostics, not user-facing events.
 func (e *EventEmitter) ExecutorDiagnostic(stepNum int, event string, details map[string]any) {

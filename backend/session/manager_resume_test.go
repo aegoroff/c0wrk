@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/v0lka/c0wrk/core"
+	"github.com/v0lka/c0wrk/core/e2s"
 	"github.com/v0lka/c0wrk/core/prompts"
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
@@ -974,6 +975,7 @@ type inMemoryTaskStore struct {
 	facts        map[string]json.RawMessage
 	attachments  map[string]json.RawMessage
 	goalStates   map[string]json.RawMessage
+	e2sStates    map[string]json.RawMessage
 	delegSpecs   map[string][]TaskDelegationRecord // taskID → records (replace by DelegationID)
 
 	pauseCalls      int
@@ -989,6 +991,7 @@ func newInMemoryTaskStore() *inMemoryTaskStore {
 		facts:        make(map[string]json.RawMessage),
 		attachments:  make(map[string]json.RawMessage),
 		goalStates:   make(map[string]json.RawMessage),
+		e2sStates:    make(map[string]json.RawMessage),
 		delegSpecs:   make(map[string][]TaskDelegationRecord),
 	}
 }
@@ -1195,6 +1198,19 @@ func (s *inMemoryTaskStore) LoadGoalState(_ context.Context, taskID string) (jso
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.goalStates[taskID], nil
+}
+
+func (s *inMemoryTaskStore) SaveE2SState(_ context.Context, taskID string, e2sStateJSON json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.e2sStates[taskID] = e2sStateJSON
+	return nil
+}
+
+func (s *inMemoryTaskStore) LoadE2SState(_ context.Context, taskID string) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.e2sStates[taskID], nil
 }
 
 func (s *inMemoryTaskStore) SaveDelegationSpec(_ context.Context, taskID string, rec TaskDelegationRecord) error {
@@ -1433,7 +1449,7 @@ func TestResumeTask_PausedMidPlan_ResumeCompletesAllStepsTerminal(t *testing.T) 
 		t.Fatalf("CreateSession failed: %v", err)
 	}
 
-	if err := mgr.SendMessage(context.Background(), info.ID, "build the widget in two planned steps", nil, nil, "", "", false, "", false); err != nil {
+	if err := mgr.SendMessage(context.Background(), info.ID, "build the widget in two planned steps", nil, nil, "", "", false, "", false, false); err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
 
@@ -1531,4 +1547,47 @@ func TestResumeTask_PausedMidPlan_ResumeCompletesAllStepsTerminal(t *testing.T) 
 		finalState.Plan.Steps[0].Summary != "Do the groundwork" {
 		t.Errorf("plan after resume = %+v, want the originally declared two-step plan (append-only)", finalState.Plan)
 	}
+}
+
+// e2sRecordingLLM records every ChatRequest it serves and always answers with
+// a valid e2s_step finish call. It is the E2S stand-in for finishLLM: the
+// recorded user message carries the loop's <state> block, so the test can
+// assert exactly which Σ the resumed run saw.
+type e2sRecordingLLM struct {
+	mu       sync.Mutex
+	requests []llm.ChatRequest
+}
+
+func (e *e2sRecordingLLM) Call(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+	e.mu.Lock()
+	e.requests = append(e.requests, req)
+	e.mu.Unlock()
+	return &llm.ChatResponse{
+		Message: llm.Message{
+			Role:    "assistant",
+			Content: "checkpoint carried over",
+			ToolCalls: []llm.ToolCall{{
+				ID:    "e2s-resume-1",
+				Name:  e2s.StepToolName,
+				Input: json.RawMessage(`{"state_patch":{},"action":{"tool":"finish","args":{"answer":"e2s resumed with restored sigma"}}}`),
+			}},
+		},
+		StopReason: "tool_use",
+	}, nil
+}
+
+// userMessages returns the user-role message contents of the recorded
+// requests, in call order.
+func (e *e2sRecordingLLM) userMessages() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, 0, len(e.requests))
+	for _, r := range e.requests {
+		for _, m := range r.Messages {
+			if m.Role == "user" {
+				out = append(out, m.Content)
+			}
+		}
+	}
+	return out
 }

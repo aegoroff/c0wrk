@@ -239,7 +239,21 @@ type OrchestratorConfig struct {
 	// by BOTH the master Enabled toggle and its own sub-toggle
 	// (defense-in-depth). Inert when the master toggle is disabled.
 	SmallLLM SmallLLMSettings
+
+	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
+	// the effective master toggle (e2s.enabled already combined with the
+	// experimental gate by the builder). When false, an E2S request is
+	// rejected fail-closed before the loop starts; the numeric fields
+	// configure the loop (turn budget, Σ byte cap, retry/observation caps,
+	// anti-spin thresholds) and fall back to the core/e2s defaults when zero.
+	E2S E2SSettings
 }
+
+// E2SSettings is the runtime mirror of BuilderE2SConfig carried on
+// OrchestratorConfig. It is a type alias: the E2S settings are a flat,
+// behavior-only value with no core-side reshaping, so a distinct struct would
+// only duplicate the fields.
+type E2SSettings = BuilderE2SConfig
 
 // GoalLoopSettings mirrors the config-layer GoalLoopConfig for the
 // orchestrator's runtime config field. Verification is "independent"
@@ -333,6 +347,16 @@ type Orchestrator struct {
 	// write of these two fields escapes those helpers; the rest of config is
 	// immutable after Build.
 	modelMu sync.RWMutex
+
+	// e2sSettingsOverride, when set, supersedes config.E2S for the effective
+	// E2S execution-mode settings. config is immutable after Build, so a
+	// runtime experimental-features toggle (which flips the effective E2S
+	// gate) cannot mutate it directly — it stores the refreshed settings here
+	// via SetE2SSettings and every reader goes through e2sSettings(). The
+	// pointer is swapped atomically so a toggle is safe against an in-flight
+	// HandleMessage / E2S loop.
+	e2sSettingsOverride atomic.Pointer[E2SSettings]
+
 	// historyMu guards conversationHistory against cross-goroutine access.
 	// Writers run on the request goroutine (the recordConversationOutcome /
 	// recordResumeOutcome epilogues, CompactConversationHistory's swap) and
@@ -450,6 +474,13 @@ type Orchestrator struct {
 	// the full routing+LLM+executor stack. The default (nil) resolves to
 	// defaultGoalTurnRunner, which reuses runConductor under the hood.
 	goalTurnRunner func(ctx context.Context, turn int, message string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, plansDir string, conversationHistory []llm.Message, deps conductorDeps) (toolCallCount int, result *orchestration.ExecutionResult, err error)
+
+	// e2sLauncher overrides the delegation launcher injected into the E2S
+	// loop's context (test seam, mirroring goalTurnRunner). The default (nil)
+	// resolves to the standard conductorLauncher built over conductorDeps —
+	// the SAME launcher a Conductor run uses, so delegated subagents inherit
+	// identical wiring (executor options, security gates, resolvers).
+	e2sLauncher tools.DelegationLauncher
 
 	// goalVerifier is the independent verifier that re-checks an agent's "met"
 	// goal verdict. When the goal loop reaches a "met" verdict and independent
@@ -1199,6 +1230,14 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 			goalMessage += waveFallbackNote
 		}
 		return o.resumeGoalLoop(ctx, goalMessage, bb, availableTools, plansDir, routing, goalState, resumeSteps, nudge, forceCompactionStrategy)
+	}
+
+	// E2S-mode resume: a paused/interrupted E2S task re-enters the E2S loop
+	// with its persisted Σ (loaded best-effort from the task store's optional
+	// E2S capability). Terminal or absent E2S states fall through to the
+	// normal resume path below.
+	if e2sState := o.loadE2SResumeState(bb); e2sState != nil {
+		return o.resumeE2SLoop(ctx, bb, availableTools, routing, e2sState, nudge)
 	}
 
 	// Goal-mode-only tools exist solely for goal mode and must not reach a
@@ -2172,6 +2211,25 @@ func (o *Orchestrator) SetReasoningEffort(effort string) {
 	}
 }
 
+// SetE2SSettings replaces the effective E2S execution-mode settings. It exists
+// for runtime config changes (the experimental-features toggle) that must
+// reach orchestrators built before the change: OrchestratorConfig is immutable
+// after Build, so the refreshed settings are stored in an atomic override
+// (e2sSettingsOverride) that e2sSettings reads. It is safe to call while a
+// task runs — the override is swapped atomically and read once per request.
+func (o *Orchestrator) SetE2SSettings(settings E2SSettings) {
+	o.e2sSettingsOverride.Store(&settings)
+}
+
+// e2sSettings returns the effective E2S settings: the runtime override when a
+// toggle has refreshed them, otherwise the build-time config snapshot.
+func (o *Orchestrator) e2sSettings() E2SSettings {
+	if p := o.e2sSettingsOverride.Load(); p != nil {
+		return *p
+	}
+	return o.config.E2S
+}
+
 // ApplyRequestOverrides applies per-request model and reasoning-effort
 // overrides to all LLM-calling components (router, reflector, the direct LLM
 // caller, and config.Model for metadata resolution). It is the shared step 0
@@ -2615,6 +2673,28 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		}
 	}
 	o.logDebug("orchestrator: tools loaded from registry", "total", len(availableTools), "mcp", mcpCount)
+
+	// E2S MODE: an explicit-execution-state request enters runE2SLoop instead
+	// of the route→Conductor flow. The run maintains an externalized state Σ
+	// the model reads and patches each turn (bounded O(1) context), with
+	// actions dispatching through the tool registry and delegation through
+	// the same launcher a Conductor run uses. E2S and Goal are mutually
+	// exclusive — both set is a wiring mistake, surfaced as an explicit error
+	// rather than a silent preference. This branch must precede the goal
+	// branch: the goal check below would otherwise win and swallow the E2S
+	// request (and the conflict).
+	if opts.E2S {
+		if opts.Goal {
+			return nil, ErrE2SGoalConflict
+		}
+		if !o.e2sSettings().Enabled {
+			return nil, ErrE2SModeDisabled
+		}
+		// Commit point for an E2S continuation (mirrors the goal branch):
+		// reactivation happens only now, after blackboard restore succeeded.
+		o.reactivateContinuationTask(bb, opts.TaskID)
+		return o.runE2SLoop(ctx, message, opts, bb, availableTools)
+	}
 
 	// GOAL MODE: a goal request enters the multi-turn goal loop instead of the
 	// single-pass route→Conductor flow. The loop derives a crisp {condition,

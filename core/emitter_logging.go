@@ -241,6 +241,11 @@ func (l *loggingEmitter) GoalProgress(data map[string]any) {
 	l.inner.GoalProgress(data)
 }
 
+func (l *loggingEmitter) E2SState(data map[string]any) {
+	l.logger.Debug("e2s_state", "data", data)
+	l.inner.E2SState(data)
+}
+
 func (l *loggingEmitter) ReplanFailed(err error) {
 	l.logger.Warn("replan failed", "error", err)
 	l.inner.ReplanFailed(err)

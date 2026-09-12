@@ -29,6 +29,15 @@ interface InputModeState {
    * defaults (unlimited). Persisted.
    */
   goalBudget: string
+  /**
+   * E2S-mode toggle for the next sent message. When true, the backend runs
+   * the explicit-execution-state loop instead of the default ReAct flow.
+   * Mutually exclusive with goalEnabled (enabling either disables the other
+   * — see setE2sEnabled/setGoalEnabled). Unlike goalEnabled it IS persisted:
+   * E2S is an experimental workflow preference the user keeps armed across
+   * reloads; useMessageSender still resets it after each E2S send.
+   */
+  e2sEnabled: boolean
 }
 
 interface InputModeActions {
@@ -47,10 +56,15 @@ interface InputModeActions {
   setSelectedModel: (model: string | null) => void
   /** Set the per-message reasoning override. null = use family default. */
   setSelectedReasoning: (value: string | null) => void
-  /** Toggle goal mode for the next sent message. */
+  /** Toggle goal mode for the next sent message. Enabling it disables E2S. */
   setGoalEnabled: (enabled: boolean) => void
   /** Set the goal budget override for the next sent message (JSON or empty). */
   setGoalBudget: (budget: string) => void
+  /**
+   * Toggle E2S mode for the next sent message. Enabling it disables goal
+   * mode (the two modes are mutually exclusive execution strategies).
+   */
+  setE2sEnabled: (enabled: boolean) => void
 }
 
 const DEFAULT_HEIGHT = 200
@@ -71,6 +85,7 @@ export const useInputModeStore = create<InputModeState & InputModeActions>()(
       selectedReasoning: null,
       goalEnabled: false,
       goalBudget: '',
+      e2sEnabled: false,
 
       setMode: (mode) => set({ mode }),
 
@@ -98,8 +113,16 @@ export const useInputModeStore = create<InputModeState & InputModeActions>()(
       clearPendingTerminalDir: () => set({ pendingTerminalDir: null }),
       setSelectedModel: (model) => set({ selectedModel: model }),
       setSelectedReasoning: (value) => set({ selectedReasoning: value }),
-      setGoalEnabled: (enabled) => set({ goalEnabled: enabled }),
+      setGoalEnabled: (enabled) => set(
+        // Mutual exclusion: arming goal mode disarms E2S (and vice versa) —
+        // the two are alternative execution strategies for the next task, so
+        // exactly one may be armed at a time.
+        enabled ? { goalEnabled: true, e2sEnabled: false } : { goalEnabled: false },
+      ),
       setGoalBudget: (budget) => set({ goalBudget: budget }),
+      setE2sEnabled: (enabled) => set(
+        enabled ? { e2sEnabled: true, goalEnabled: false } : { e2sEnabled: false },
+      ),
     }),
     {
       name: 'c0wrk-input-mode',
@@ -127,10 +150,14 @@ export const useInputModeStore = create<InputModeState & InputModeActions>()(
         isExpanded: state.isExpanded,
         selectedModel: state.selectedModel,
         selectedReasoning: state.selectedReasoning,
+        e2sEnabled: state.e2sEnabled,
         // goalEnabled/goalBudget are intentionally NOT persisted: goal mode is
         // first-message-only and per-task, so persisting the toggle would
         // silently activate goal mode on every fresh session. They live in
-        // memory only (reset to their defaults on reload).
+        // memory only (reset to their defaults on reload). e2sEnabled IS
+        // persisted (an experimental workflow preference), and the
+        // goal↔E2S mutual exclusion keeps the two from ever being armed
+        // together across reloads (goalEnabled always re-arms as false).
       }),
     }
   )

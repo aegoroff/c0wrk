@@ -18,6 +18,7 @@ import { useReviewActions } from './useReviewActions'
 import { useReviewStore } from '@/stores/reviewStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import { logger } from '@/lib/logger'
 import type { ChatMessageUI } from '@/types/messages'
 
@@ -115,6 +116,7 @@ beforeEach(() => {
       activeReviewSession: null,
       reviewLoopActive: {},
     })
+    useE2SStore.getState().clearAll()
   })
 
   container = document.createElement('div')
@@ -147,10 +149,11 @@ describe('useReviewActions.handleSubmit optimistic presentation', () => {
     expect(msgs[0]!.content).toBe('General comment:\nfix the null deref')
     expect(msgs[0]!.sessionId).toBe('s1')
 
-    // The message is dispatched as review feedback (reviewMode = true).
+    // The message is dispatched as review feedback (reviewMode = true, in the
+    // LAST position — e2s sits before it and must stay false here).
     expect(spies.sendMessage).toHaveBeenCalledTimes(1)
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'General comment:\nfix the null deref', [], [], '', '', false, '', true,
+      's1', 'General comment:\nfix the null deref', [], [], '', '', false, '', false, true,
     )
 
     // Fresh-task state: the session shows as running with an activity label,
@@ -178,6 +181,33 @@ describe('useReviewActions.handleSubmit optimistic presentation', () => {
     expect(useReviewStore.getState().bySession['s1']?.generalComment).toBe('fix the null deref')
     expect(spies.clearReviewComments).not.toHaveBeenCalled()
     expect(spies.setReviewStatus).not.toHaveBeenCalled()
+  })
+
+  it('clears a stale E2S snapshot once the review task starts', async () => {
+    seedReviewComment('s1', 'fix the null deref')
+    useE2SStore.getState().applySnapshot('s1', { state: { objective: 'old' }, turn: 3 })
+
+    await act(async () => {
+      await capturedSubmit!()
+    })
+
+    // The fresh, non-E2S review task supersedes the prior E2S run: its panel
+    // must not shadow the plan view.
+    expect(useE2SStore.getState().snapshots['s1']).toBeUndefined()
+  })
+
+  it('keeps the E2S snapshot when the review send is rejected', async () => {
+    seedReviewComment('s1', 'fix the null deref')
+    useE2SStore.getState().applySnapshot('s1', { state: { objective: 'old' }, turn: 3 })
+    spies.sendMessage.mockRejectedValue(new Error('router offline'))
+
+    await act(async () => {
+      await capturedSubmit!()
+    })
+
+    // The clear runs only after a successful send, so a rejected send leaves
+    // the previous (finished) run's Σ snapshot intact.
+    expect(useE2SStore.getState().snapshots['s1']).toBeDefined()
   })
 
   it('mirrors a live interjection when a task is already running', async () => {

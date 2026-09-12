@@ -877,11 +877,12 @@ orchestration:
 # ---------------------------------------------------------------------------
 # Master switch for features that are still under active development. It is
 # all-or-nothing: enabling it exposes every gated feature, disabling it hides
-# every gated feature and treats each as off. The only gated feature today:
+# every gated feature and treats each as off. Gated features today:
 #   - the Small-LLM profile settings tab (small_llm.*)
+#   - the E2S explicit-state execution mode (e2s.*)
 #
 # experimental:
-#   # Master switch. Default: false (Small-LLM profile off).
+#   # Master switch. Default: false (Small-LLM profile and E2S mode off).
 #   enabled: false
 
 # ---------------------------------------------------------------------------
@@ -1183,3 +1184,47 @@ orchestration:
 #   env:
 #     C0WRK_TERMINAL: "1"
 #     # MY_MARKER: ${MY_MARKER_VALUE}
+
+# ---------------------------------------------------------------------------
+# E2S — explicit-state execution mode (experimental)
+# ---------------------------------------------------------------------------
+# An alternative run style where the model maintains an externalized state Σ
+# ("sigma") that is patched and re-presented every turn, instead of replaying
+# a growing transcript — the request size stays O(1) in the number of turns.
+# Every turn the model emits a state patch ΔΣ and one step action (a tool
+# call, or a finish with the final answer). The state carries a fixed core
+# schema (objective, checklist, files_touched, findings, decisions,
+# next_steps, done_criteria, status) that is validated on every merge; core
+# keys can be updated in place (same JSON type) but never deleted or
+# re-typed, and any other key is an add-only extension. A JSON null patch
+# value deletes a key (extension keys only). The domain types and the merge
+# operator live in core/e2s.
+#
+# GATED: the entire section is ineffective while experimental.enabled is
+# false — exactly like the Small-LLM profile, the master toggle below only
+# takes effect when the experimental gate is also on.
+#
+# e2s:
+#   # Master toggle. Effective only while experimental.enabled is true.
+#   # Default: false.
+#   enabled: false
+#   # Maximum number of E2S turns (patch+action cycles) per run before the
+#   # run fails as budget exhaustion. Default: 50.
+#   max_steps: 50
+#   # Hard cap on the JSON-encoded size of the working state Σ, in bytes.
+#   # A patch whose merged state exceeds the cap is rejected as a
+#   # validation error (the model may retry). Default: 16384.
+#   state_byte_limit: 16384
+#   # How many times a rejected state patch may be re-requested from the
+#   # model before the run fails. Default: 1.
+#   patch_retries: 1
+#   # Cap on the tool observation fed back to the model each turn, in
+#   # characters (longer observations are truncated). Default: 2000.
+#   observation_truncate: 2000
+#   # Anti-spin: consecutive identical step actions (same tool + same args)
+#   # before a corrective nudge observation is injected instead of
+#   # dispatching the redundant action again. Default: 3.
+#   repeat_nudge_threshold: 3
+#   # Anti-spin: consecutive identical step actions before the run is
+#   # aborted as a spin. Must be >= the nudge threshold. Default: 5.
+#   repeat_abort_threshold: 5

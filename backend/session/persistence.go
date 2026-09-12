@@ -255,6 +255,18 @@ func (s *SQLiteSessionStore) createTables() error {
 		updated_at TIMESTAMP NOT NULL
 	);
 
+	-- task_e2s_state mirrors task_goal_state for the E2S (explicit-state)
+	-- execution mode: the JSON-marshaled e2s.E2SState (Σ + bookkeeping) of a
+	-- task, persisted after every applied state patch so an interrupted run
+	-- survives app restart and resumes with the restored Σ. The CREATE TABLE
+	-- IF NOT EXISTS is the migration for databases created before E2S existed:
+	-- it adds the table on the next open without touching any existing row.
+	CREATE TABLE IF NOT EXISTS task_e2s_state (
+		task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+		e2s_state TEXT NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS task_delegations (
 		task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 		delegation_id TEXT NOT NULL,
@@ -1193,6 +1205,12 @@ type TaskStore interface {
 	// LoadGoalState loads the goal-loop state for a task.
 	// Returns nil, nil when no goal state has been persisted.
 	LoadGoalState(ctx context.Context, taskID string) (json.RawMessage, error)
+	// SaveE2SState inserts or replaces the E2S execution state
+	// (JSON-marshaled e2s.E2SState) for a task.
+	SaveE2SState(ctx context.Context, taskID string, e2sStateJSON json.RawMessage) error
+	// LoadE2SState loads the E2S execution state for a task.
+	// Returns nil, nil when no E2S state has been persisted.
+	LoadE2SState(ctx context.Context, taskID string) (json.RawMessage, error)
 	// SaveDelegationSpec inserts or replaces a delegation spec for a task.
 	SaveDelegationSpec(ctx context.Context, taskID string, rec TaskDelegationRecord) error
 	// LoadDelegationSpecs loads all delegation specs for a task, ordered by
@@ -1630,6 +1648,35 @@ func (s *SQLiteSessionStore) LoadGoalState(ctx context.Context, taskID string) (
 		return nil, fmt.Errorf("failed to load goal state: %w", err)
 	}
 	return json.RawMessage(goalStateStr), nil
+}
+
+// SaveE2SState inserts or replaces the E2S execution state for a task.
+func (s *SQLiteSessionStore) SaveE2SState(ctx context.Context, taskID string, e2sStateJSON json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO task_e2s_state (task_id, e2s_state, updated_at)
+		VALUES (?, ?, ?)`,
+		taskID, string(e2sStateJSON), time.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save e2s state: %w", err)
+	}
+	return nil
+}
+
+// LoadE2SState loads the E2S execution state for a task.
+// Returns nil, nil when no E2S state has been persisted.
+func (s *SQLiteSessionStore) LoadE2SState(ctx context.Context, taskID string) (json.RawMessage, error) {
+	var e2sStateStr string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT e2s_state FROM task_e2s_state WHERE task_id = ?`, taskID,
+	).Scan(&e2sStateStr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load e2s state: %w", err)
+	}
+	return json.RawMessage(e2sStateStr), nil
 }
 
 // SaveDelegationSpec inserts or replaces a delegation spec for a task.

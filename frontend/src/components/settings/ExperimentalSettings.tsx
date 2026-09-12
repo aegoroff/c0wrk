@@ -3,14 +3,16 @@ import { FlaskConical } from 'lucide-react'
 import { updateExperimentalFeatures } from '@/api/config'
 import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
 import { useExperimentalStore } from '@/stores/experimentalStore'
+import { useInputModeStore } from '@/stores/inputModeStore'
 import { logger } from '@/lib/logger'
 import { Toggle } from './SmallLLMControls'
 
 /**
  * General-tab control for the master experimental-features switch. The switch
- * gates only the Small-LLM settings tab: when disabled, that tab is hidden
- * and the backend treats the Small-LLM profile as off. RESEARCH mode is
- * always available and is unaffected by this toggle.
+ * gates every experimental feature: the Small-LLM settings tab and the E2S
+ * explicit-state execution mode. When disabled, the Small-LLM tab is hidden and
+ * the profile treated as off, and the per-message E2S control is hidden (and
+ * disarmed). RESEARCH mode is always available and is unaffected by this toggle.
  */
 export function ExperimentalSettings() {
   const enabled = useExperimentalFeatures()
@@ -22,6 +24,12 @@ export function ExperimentalSettings() {
     try {
       await updateExperimentalFeatures(next)
       useExperimentalStore.getState().setEnabled(next)
+      // Disabling the master switch also disarms the persisted per-message E2S
+      // toggle: while the gate is off the E2S control is hidden, leaving no way
+      // to disarm it — so re-enabling must not silently re-arm E2S.
+      if (!next) {
+        useInputModeStore.getState().setE2sEnabled(false)
+      }
     } catch (err) {
       logger.error('Failed to toggle experimental features:', err)
     } finally {
@@ -40,7 +48,7 @@ export function ExperimentalSettings() {
         onChange={handleChange}
         disabled={!loaded || saving}
         label={enabled ? 'Enabled' : 'Disabled'}
-        description="Enable the Small-LLM settings tab. When disabled, that tab is hidden and the Small-LLM profile is treated as off. RESEARCH mode is always available."
+        description="Enable experimental features (the Small-LLM settings tab and the E2S execution mode). When disabled, both are hidden and treated as off. RESEARCH mode is always available."
       />
     </div>
   )

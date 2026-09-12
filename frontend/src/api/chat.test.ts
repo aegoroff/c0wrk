@@ -111,6 +111,49 @@ describe('sendMessage forwards skill and agent refs', () => {
   })
 })
 
+// e2s must land in the EXACT Go-binding argument position (after goalBudget,
+// before reviewMode): (id, text, skills, agents, modelOverride, reasoning,
+// goal, goalBudget, e2s, reviewMode). A positional drift silently reroutes
+// mode flags — e.g. a review submit's reviewMode=true would arm E2S instead.
+describe('sendMessage forwards the e2s flag positionally', () => {
+  beforeEach(() => {
+    delete mockApp.SendMessage
+  })
+
+  it('passes e2s in position 8 and keeps reviewMode in position 9', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'run with state', [], [], '', '', false, '{"max_turns":5}', true, true)
+
+    expect(mockApp.SendMessage).toHaveBeenCalledTimes(1)
+    const args = calls[0]!
+    expect(args[6]).toBe(false) // goal
+    expect(args[7]).toBe('{"max_turns":5}') // goalBudget
+    expect(args[8]).toBe(true) // e2s — the wiring under test
+    expect(args[9]).toBe(true) // reviewMode — must stay the LAST arg
+    expect(args).toHaveLength(10)
+  })
+
+  it('defaults e2s to false (and reviewMode stays false) when omitted', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'plain message')
+
+    const args = calls[0]!
+    expect(args[8]).toBe(false)
+    expect(args[9]).toBe(false)
+    expect(args).toHaveLength(10)
+  })
+})
+
 describe('resumeTask forwards model/reasoning overrides', () => {
   beforeEach(() => {
     delete mockApp.ResumeTask

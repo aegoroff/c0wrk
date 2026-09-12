@@ -19,6 +19,7 @@ type BuilderConfig struct {
 	Orchestration BuilderOrchestrationConfig
 	GoalLoop      BuilderGoalLoopConfig
 	SmallLLM      BuilderSmallLLMConfig
+	E2S           BuilderE2SConfig
 	ToolLimits    BuilderToolLimitsConfig
 	Timeouts      BuilderTimeoutsConfig
 	Proxy         proxy.Config
@@ -507,6 +508,30 @@ type BuilderOrchestrationConfig struct {
 // BuilderGoalLoopConfig holds goal-loop settings.
 type BuilderGoalLoopConfig struct {
 	Verification string // "independent" (default) | "off"
+}
+
+// BuilderE2SConfig mirrors config.E2SConfig for the subset core consumes. core
+// never imports backend/config, so the values are copied via ToBuilderConfig,
+// where Enabled is already combined with the experimental gate (fail-closed).
+// A zero value means "disabled with loop defaults" — core falls back to the
+// core/e2s Config defaults for every numeric field.
+type BuilderE2SConfig struct {
+	// Enabled is the effective master toggle (e2s.enabled AND
+	// experimental.enabled). When false the E2S execution mode is rejected
+	// fail-closed; the numeric fields below are then inert.
+	Enabled bool
+	// MaxSteps caps the number of turns (patch+action cycles) per run.
+	MaxSteps int
+	// StateByteLimit caps the JSON-encoded size of Σ in bytes.
+	StateByteLimit int
+	// PatchRetries bounds the corrective re-requests for a rejected patch.
+	PatchRetries int
+	// MaxObservationChars caps the per-turn observation fed back to the model.
+	MaxObservationChars int
+	// RepeatNudgeThreshold / RepeatAbortThreshold are the anti-spin
+	// thresholds (identical consecutive actions before a nudge / an abort).
+	RepeatNudgeThreshold int
+	RepeatAbortThreshold int
 }
 
 // ---------------------------------------------------------------------------

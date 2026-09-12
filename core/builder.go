@@ -542,6 +542,15 @@ func (b *OrchestratorBuilder) Build(
 		GoalLoop: GoalLoopSettings{
 			Verification: cfg.GoalLoop.Verification,
 		},
+		E2S: E2SSettings{
+			Enabled:              cfg.E2S.Enabled,
+			MaxSteps:             cfg.E2S.MaxSteps,
+			StateByteLimit:       cfg.E2S.StateByteLimit,
+			PatchRetries:         cfg.E2S.PatchRetries,
+			MaxObservationChars:  cfg.E2S.MaxObservationChars,
+			RepeatNudgeThreshold: cfg.E2S.RepeatNudgeThreshold,
+			RepeatAbortThreshold: cfg.E2S.RepeatAbortThreshold,
+		},
 		SmallLLM: SmallLLMSettings{
 			Enabled: cfg.SmallLLM.Enabled,
 			EssentialTools: SmallLLMEssentialSettings{

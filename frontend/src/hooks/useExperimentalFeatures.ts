@@ -3,6 +3,7 @@ import { getConfig } from '@/api/config'
 import { onGlobalEvent } from '@/api/runtime'
 import { logger } from '@/lib/logger'
 import { useExperimentalStore } from '@/stores/experimentalStore'
+import { useInputModeStore } from '@/stores/inputModeStore'
 
 /**
  * Reads the master experimental-features switch from the shared store and
@@ -53,7 +54,17 @@ export function useExperimentalFeatures(): boolean {
           // backend:ready / config:updated retries re-fetch once the config
           // is live.
           if (cfg.loaded === false) return
-          useExperimentalStore.getState().setEnabled(cfg.experimental?.enabled ?? false)
+          const experimentalEnabled = cfg.experimental?.enabled ?? false
+          const e2sConfigEnabled = cfg.e2s?.enabled ?? false
+          useExperimentalStore.getState().setEnabled(experimentalEnabled)
+          useExperimentalStore.getState().setE2SConfigEnabled(e2sConfigEnabled)
+          // The persisted per-message E2S arming must not outlive the gate:
+          // disarm it while the effective availability (experimental AND
+          // e2s.enabled) is off, so a stale `true` cannot arm a send the
+          // backend would reject.
+          if (!(experimentalEnabled && e2sConfigEnabled)) {
+            useInputModeStore.getState().setE2sEnabled(false)
+          }
           useExperimentalStore.getState().setLoaded(true)
         })
         .catch((err) => {

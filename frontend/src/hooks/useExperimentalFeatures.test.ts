@@ -21,6 +21,7 @@ vi.mock('@/lib/logger', () => ({
 
 import { useExperimentalFeatures } from './useExperimentalFeatures'
 import { useExperimentalStore } from '@/stores/experimentalStore'
+import { useInputModeStore } from '@/stores/inputModeStore'
 import type { ConfigResponse } from '@/types/models'
 
 /**
@@ -37,6 +38,7 @@ function makeConfig(loaded: boolean, experimentalEnabled: boolean): ConfigRespon
     search: { provider: '', api_key: '' },
     proxy: {} as ConfigResponse['proxy'],
     experimental: { enabled: experimentalEnabled },
+    e2s: { enabled: experimentalEnabled },
   }
 }
 
@@ -87,7 +89,8 @@ beforeEach(() => {
   configMocks.getConfig.mockReset()
   onGlobalEventMock.mockClear()
   capturedHandlers.clear()
-  useExperimentalStore.setState({ enabled: false, loaded: false })
+  useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: false, loaded: false })
+  useInputModeStore.setState({ e2sEnabled: false })
 })
 
 afterEach(() => {
@@ -115,6 +118,28 @@ describe('useExperimentalFeatures', () => {
     // The hook subscribes to both retry triggers.
     expect(onGlobalEventMock).toHaveBeenCalledWith('backend:ready', expect.any(Function))
     expect(onGlobalEventMock).toHaveBeenCalledWith('config:updated', expect.any(Function))
+  })
+
+  it('latches the effective E2S toggle from config', async () => {
+    configMocks.getConfig.mockResolvedValue(makeConfig(true, true))
+
+    renderHook()
+    await flushMicrotasks()
+
+    expect(useExperimentalStore.getState().e2sConfigEnabled).toBe(true)
+  })
+
+  it('disarms a persisted E2S arming when the gate is off on load', async () => {
+    // experimental off (and therefore e2s off too): the persisted per-message
+    // arming must not outlive the gate, or the next send would be rejected.
+    configMocks.getConfig.mockResolvedValue(makeConfig(true, false))
+    useInputModeStore.setState({ e2sEnabled: true })
+
+    renderHook()
+    await flushMicrotasks()
+
+    expect(useExperimentalStore.getState().e2sConfigEnabled).toBe(false)
+    expect(useInputModeStore.getState().e2sEnabled).toBe(false)
   })
 
   it('does NOT latch when the backend answers loaded=false during startup', async () => {

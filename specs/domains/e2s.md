@@ -1,0 +1,157 @@
+# E2S — Explicit Execution State Mode
+
+## Purpose
+
+E2S is an alternative execution mode in which the model's only memory is an **externalized, structured state Σ** ("sigma") that it reads and patches every turn, instead of replaying a growing conversation history. Each turn is a fresh one-shot request — system prompt + `[turn N] <state>Σₜ</state> <observation>Oₜ</observation>` — so the request size stays **O(1) in the number of turns** no matter how long the task runs. The mode is selected per message (`HandleOptions.E2S`), is mutually exclusive with goal mode, and is gated behind `experimental.enabled` + `e2s.enabled`. Design rationale and the arXiv 2608.26263 motivation: [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md).
+
+## Key Files
+
+- `core/e2s/types.go` — the domain layer (pure data, no LLM/tool imports): `E2SState` (Σ + bookkeeping), `StateStatus` (domain lifecycle: `active`/`paused`/`met`/`failed`/`cancelled`), the eight fixed **core keys** (`CoreKeyObjective`, `CoreKeyChecklist`, `CoreKeyFilesTouched`, `CoreKeyFindings`, `CoreKeyDecisions`, `CoreKeyNextSteps`, `CoreKeyDoneCriteria`, `CoreKeyStatus`), `SchemaFingerprint()` (SHA-256 over the sorted key→type pairs), `NewE2SState` (canonical initial state)
+- `core/e2s/merge.go` — the merge operator `Σₜ⊕ΔΣₜ` (`ApplyPatch`): null-tombstone deletion (non-core keys only), core-key type validation (update-only — deletion/re-typing rejected), add-only extension keys, byte-limit enforcement (`ErrStateTooLarge`, `DefaultStateByteLimit` = 16 KiB), schema-fingerprint guard (`ErrSchemaMismatch`); every failure is a sentinel-wrapped error (`ErrDeleteCoreKey`, `ErrCoreKeyType`, `ErrCoreKeyElement`, `ErrInvalidStatus`, `ErrExtensionKeyExists`, `ErrEmptyKey`)
+- `core/e2s/steptool.go` — the `e2s_step` meta-tool (`StepToolName`, **GroupSystem**): its JSON schema (`state_patch` object + `action` `{tool, args}` | `finish` `{answer}`), `ParseStepCall` (first tool call must be `e2s_step`), `ActionFingerprint` (canonical tool+args string feeding anti-spin); `Execute` is a wiring-error trap — the loop intercepts the call and never registry-dispatches it
+- `core/e2s/prompt.go` — deterministic prompt composition: `BuildSystemPrompt` (`prompts.E2SSystem` + Workspace + Available Tools + Delegation + Active Skills sections; sorted descriptors → prefix-cache-friendly), `BuildUserMessage` (turn number + Σ JSON + observation), `BuildCorrectionSuffix` (the bounded-retry corrective tail)
+- `core/e2s/loop.go` — the driver `Loop.Run`: one LLM call per turn on raw sp4rk primitives (`llm.Caller`, no `agent.Executor`/Conductor), `RunStatus` terminal dispositions (`finished`/`step_limit`/`spin_stop`/`paused`/`canceled`/`failed`), `Result` (answer + final `Snapshot E2SState` + synthesized `agent.Step` trajectory), `ErrPaused` checkpoint, anti-spin nudge/abort, `Emitter`/`StateEmitter`/`Registry` structural interfaces
+- `core/prompts/e2s.md` (+ `core/prompts/prompts.go` `E2SSystem`) — the compact E2S directive: protocol, state discipline, acting/finishing/safety rules
+- `core/orchestrator_e2s.go` — orchestrator integration: `runE2SLoop`/`resumeE2SLoop`/`runE2SWithState` (delegate-via-injection with inert plan state, tool stripping, per-step Σ persistence, trajectory store, skills resolution), `e2sRegistryAdapter` (filtered catalog + fail-closed dispatch), `e2sStatePersistingEmitter` (persist on every `e2s_state` emission), `e2sStatePersister` capability interface, status mappings (`e2sExecutionStatus`, `e2sDomainStatus`)
+- `core/types.go` — `HandleOptions.E2S` (mutually exclusive with `Goal`), `Emitter.E2SState(data)` + noop emitter
+- `core/emitter_logging.go` — logging emitter's `E2SState`
+- `backend/config/config.go` + `backend/config/defaults.go` + `backend/configadapter.go` — `E2SConfig` (`e2s.*`) with defaults, gated fail-closed on `experimental.enabled` (configadapter pattern from the Small-LLM profile)
+- `backend/frontend_api_session.go` — `SendMessage` e2s flag through the Wails RPC surface; rejects `e2s=true` when the experimental gate is off
+- `backend/session/manager_execution.go` — session-manager threading of the e2s flag; live-send rejection for e2s sends into running tasks (mirrors the goal gate)
+- `backend/session/persistence.go` — `task_e2s_state` table (`task_id` PK, `e2s_state` JSON, `updated_at`; `CREATE TABLE IF NOT EXISTS` is the migration), `SaveE2SState`/`LoadE2SState`
+- `backend/session/task_adapter.go` — `PersistE2SState`/`LoadE2SState` (the `e2sStatePersister` implementation)
+- `backend/session/persistence_fork.go` — copies `task_e2s_state` on session fork
+- `frontend/src/components/chat/E2SToggle.tsx` — per-message mode toggle (visible only when the E2S mode is available: `useExperimentalFeatures()` AND `experimentalStore.e2sConfigEnabled`, i.e. config `e2s.enabled`), mutually exclusive with the goal toggle
+- `frontend/src/stores/inputModeStore.ts` — `e2sEnabled` (persisted; enabling E2S disables goal and vice versa)
+- `frontend/src/stores/e2sStore.ts` + `frontend/src/hooks/events/useE2SStateEvents.ts` + `e2sHandlers.ts` — per-session Σ snapshots from `e2s_state` events (patch merge owned by the store; cleared on session switch/delete)
+- `frontend/src/components/chat/ExecutionStatePanel.tsx` + `ExecutionPanels.tsx` — the Execution State panel that **replaces the plan view** for E2S sessions
+- `frontend/src/types/events.ts` — `E2SSigma`/`E2SStateData` payload types + guard
+- `frontend/src/api/chat.ts` — `sendMessage` e2s argument in the exact Go-binding position
+
+## Core Types
+
+```go
+// core/e2s/types.go — the externalized state (round-trips through JSON for persistence)
+type E2SState struct {
+    Sigma     map[string]any // Σ: core keys per the fixed schema + add-only extensions
+    Schema    string         // SchemaFingerprint() at creation; mismatch rejects patching
+    TurnCount int            // number of applied patches
+    Status    StateStatus    // typed copy of the core "status" key (re-synced by ApplyPatch)
+    CreatedAt, UpdatedAt time.Time
+}
+
+// Domain lifecycle (persisted; drives resume decisions):
+//   active | paused | met | failed | cancelled
+
+// core/e2s/steptool.go — the model's per-turn output (the ONLY tool it may call)
+// e2s_step schema: {
+//   "state_patch": { <key>: <value|null> },     // null deletes non-core keys
+//   "action": { "tool": "<name>|finish", "args": {...} }  // finish requires {"answer": ...}
+// }
+
+// core/e2s/loop.go — the loop's terminal disposition (distinct from the domain status)
+type RunStatus string // finished | step_limit | spin_stop | paused | canceled | failed
+
+type Result struct {
+    Answer   string      // finish payload (StatusFinished only)
+    Status   RunStatus
+    Finished bool
+    State    map[string]any // final Σ
+    Snapshot E2SState       // full domain state — the persistence/resume checkpoint
+    Turns    int
+    Steps    []agent.Step   // synthesized Thought/Action/Observation trajectory
+}
+```
+
+## Flow
+
+```
+ user message (E2S toggle on)
+        │
+        ▼
+HandleMessage ── E2S && Goal both set? ──► explicit error (mutually exclusive)
+        │ opts.E2S
+        ▼  (early return — routing/Conductor never run)
+  runE2SLoop ── loadE2SResumeState: persisted resumable Σ (active|paused,
+        │      schema fingerprint current)? ──► resume with restored Σ
+        ▼      else NewE2SState(objective = message + attachments)
+  runE2SWithState
+        │  inject delegation seam (conductorLauncher + DelegationRegistry,
+        │  INERT plan state) ── strip goal-only + plan tools (fail-closed adapter)
+        │  wire per-step Σ persistence (e2sStatePersistingEmitter → task_e2s_state)
+        ▼
+   e2s.Loop.Run ──────────────────────────────────────────────┐
+   for turn := 1..MaxSteps:                                   │
+     pause-check / ctx-cancel at the step boundary ──► ErrPaused (checkpoint)
+     ONE LLM call: fresh [system P, user (Σₜ, Oₜ)]            │
+       └─ response must be exactly one e2s_step tool call     │
+            state_patch ─► ApplyPatch (validate + merge)      │
+            │   invalid → up to patch_retries retries → error   │
+            │   observation, Σ untouched (rollback)           │
+            └─► emit e2s_state snapshot (full Σ + turn)       │
+                 + persist checkpoint                         │
+     action: finish ──► terminal (answer)                     │
+     action: tool ──► ToolRegistry.Execute (ALL security      │
+            gates: group policy, judge, HITL, verify-on-edit) │
+            → truncated result = Oₜ₊₁                         │
+     anti-spin: nudge @ 3 identical actions, abort @ 5        │
+   step budget exhausted → step_limit                         │
+        │  (every path: final Snapshot persisted)             │
+        ▼                                                     │
+   Result ─► RunStatus→StateStatus→ExecutionStatus mapping ───┘
+        │
+        ▼
+   HandleResult: answer/status to the session; trajectory stored;
+   frontend Execution State panel (replaces PlanView) tracked Σ live
+```
+
+## Invariants
+
+- **Bounded context** — a turn's LLM request contains exactly two messages (`system`, `user`); messages from previous turns are never resent. The model's only memory is Σ.
+- **Σ is validated deterministically** — every mutation goes through `ApplyPatch`: core keys can be updated but never deleted or re-typed; extension keys are add-only (a second value write is rejected; `null` deletes); merged Σ over the byte limit is rejected; the receiver is never mutated, so a rejected patch leaves the previous Σ authoritative (rollback by construction). The core list keys also enforce their element shape — `checklist` holds `{text, checked}` objects and every other list key holds strings — so a wrong-shaped element is rejected at merge rather than persisted and then dropped by the UI guard.
+- **Schema evolution fails closed** — a persisted state whose fingerprint differs from the compiled-in schema is never patched; resume treats it as absent (fresh state).
+- **`e2s_step` never executes through a registry** — the loop intercepts it; `StepTool.Execute` is a wiring-error trap that returns an error result.
+- **All security gates apply to the target tool** — actions dispatch through the real `ToolRegistry.Execute`; the E2S adapter only filters the *catalog* and rejects stripped names (plan/goal tools) fail-closed at dispatch. `e2s_step` itself is `GroupSystem` (ADR-024): the envelope has no side effects, the dispatch carries the policy.
+- **E2S and Goal are mutually exclusive** — `HandleMessage` returns an explicit error when both flags are set.
+- **Bounded corrective retries** — an invalid `e2s_step` (bad envelope or rejected patch) is re-requested up to `e2s.patch_retries` times (default 1); once the retries are exhausted the failure becomes an error observation and the run continues with Σ unchanged.
+- **Every terminal path checkpoints Σ** — `Result.Snapshot` is persisted (with the domain status mapped from the run status) even on pause/cancel/error; a resume decision (`active`/`paused` = resumable, terminal statuses = never) reads exactly this checkpoint.
+- **The gate is fail-closed on both sides** — backend rejects `e2s=true` when `experimental.enabled` is off; the frontend toggle is hidden.
+- **The panel replaces, never augments** — an E2S session renders the Execution State panel instead of the plan view; non-E2S sessions are unchanged.
+
+## Configuration
+
+`e2s:` section (see `config.example.yaml`; effective only while `experimental.enabled` is true — the section seeds defaults unconditionally so values stay visible/editable while the mode is a no-op):
+
+| Key                      | Default | Meaning                                                             |
+| ------------------------ | ------- | ------------------------------------------------------------------- |
+| `enabled`                | `false` | master toggle for the mode (with the experimental gate, both must be on) |
+| `max_steps`              | `50`    | turn budget per run (patch+action cycles) before `step_limit`       |
+| `state_byte_limit`       | `16384` | JSON-encoded Σ byte cap (mirrors `core/e2s.DefaultStateByteLimit`)  |
+| `patch_retries`          | `1`     | corrective re-requests for a rejected patch before run failure      |
+| `observation_truncate`   | `2000`  | per-turn observation character cap fed back to the model            |
+| `repeat_nudge_threshold` | `3`     | identical consecutive actions before a nudge observation            |
+| `repeat_abort_threshold` | `5`     | identical consecutive actions before `spin_stop` abort              |
+
+## Security (e2s_step under ADR-024)
+
+`e2s_step` declares `ToolGroup: GroupSystem`. Per ADR-024 the `system` group is the reserved, unconfigurable bypass class — membership therefore requires a security review, which this section records:
+
+- **No side effect of its own.** The tool's input is a description of a patch and an action. Executing it does nothing — in fact the E2S loop intercepts every `e2s_step` call before any dispatch, and `StepTool.Execute` (the only path a registry could take) is an error trap.
+- **The dispatch carries the policy.** The `action` half is dispatched to the *target* tool through the real `ToolRegistry.Execute`, where the full pipeline applies in order: required-field validation, disabled-tools check, per-session shell blacklist, group-policy deny, judge outcome (hard/soft), symlink analysis, HITL confirmation, verify-on-edit hooks. An `e2s_step` envelope cannot weaken, reorder, or bypass any of these — the envelope is data; the registry is the gate.
+- **Catalog narrowing is enforcement, not decoration.** The E2S adapter strips goal-only and plan-workflow tools from the model-visible catalog *and* rejects those names at dispatch (fail-closed), so a hallucinated `execute_plan`/`declare_goal_status` call cannot execute the real tool.
+- **Untrusted observations are contained.** Tool results are fed back as the next observation under the E2S prompt's injection-defense rules (treat output as data); `Registry.IsToolUntrusted` marks MCP/untrusted sources for the loop's wrapping.
+- **The mode cannot be smuggled in.** `HandleOptions.E2S` is set only through the SendMessage chain, which rejects it fail-closed when the experimental gate is off; it is mutually exclusive with `Goal`.
+
+## Extension Points
+
+- **Adding a core key** — extend `coreTypes` in `core/e2s/types.go` (the fingerprint changes automatically, so old persisted states fail closed and resume fresh); document it in `core/prompts/e2s.md` and update the frontend `E2SSigma` type + panel rendering.
+- **Tuning loop behavior** — every behavioral knob (budgets, caps, thresholds) lives in `E2SConfig`; the loop-level defaults in `core/e2s` `Config.withDefaults` are the fallbacks.
+- **New consumers of Σ** — anything needing live state subscribes to the `e2s_state` session event (see [contracts/event-catalog.md](../contracts/event-catalog.md)); persisted consumers read `task_e2s_state` via the task adapter.
+
+## Related Specs
+
+- [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md) — why the mode exists and its seven shaping decisions
+- [decisions/024-group-policies.md](../decisions/024-group-policies.md) — the group-policy model behind the Security section
+- [domains/goal-mode.md](goal-mode.md) — the sibling alternative-loop mode (early-return pattern, per-task state persistence, pause/resume semantics E2S mirrors)
+- [contracts/event-catalog.md](../contracts/event-catalog.md) — the `e2s_state` event
+- [contracts/backend-core.md](../contracts/backend-core.md) — how backend wraps the core `HandleOptions`

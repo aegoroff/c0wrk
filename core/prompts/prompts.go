@@ -143,6 +143,15 @@ var VerificationMandate string
 //go:embed injection_defense.md
 var InjectionDefense string
 
+// E2S system directive — the compact core prompt for the E2S execution loop
+// (core/e2s). Defines the agent role, the e2s_step protocol (state_patch +
+// action), state discipline, acting/finishing rules. The loop's prompt
+// builder (core/e2s/prompt.go) appends the workspace, available-tools,
+// delegation, and active-skills sections around this directive.
+
+//go:embed e2s.md
+var E2SSystem string
+
 // Code review mode — injected into the system prompt when the user submitted
 // review feedback (ReviewModeKey). Directs the agent to treat the user's
 // message as actionable review comments and edit code to address them, so the

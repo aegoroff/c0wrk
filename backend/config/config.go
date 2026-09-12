@@ -48,9 +48,19 @@ type Config struct {
 	// is exposed so behaviour can be tuned without a rebuild.
 	SmallLLM SmallLLMConfig `yaml:"small_llm"`
 
-	// Experimental gates the Small-LLM profile, which is still under active
-	// development, as a single master switch. When disabled, the profile is
-	// treated as off and its UI affordances are hidden. Default: off.
+	// E2S configures the E2S (explicit-state) execution mode: a run style
+	// where the model maintains an externalized state Σ that is patched and
+	// re-presented every turn (context bounded at O(1)) instead of replaying
+	// a growing transcript. The domain types and the validated merge operator
+	// live in core/e2s. The section is gated by experimental.enabled exactly
+	// like the Small-LLM profile: while the gate is off the section is
+	// ineffective (treated as disabled) regardless of its own master toggle.
+	E2S E2SConfig `yaml:"e2s"`
+
+	// Experimental gates features that are still under active development
+	// (currently the Small-LLM profile and the E2S execution mode) behind a
+	// single master switch. When disabled, every gated feature is treated as
+	// off. Default: off.
 	Experimental ExperimentalConfig `yaml:"experimental"`
 
 	// Updates configures the automatic "check for updates" subsystem that runs
@@ -803,12 +813,15 @@ type AgentsConfig struct {
 // envVarPattern matches ${ENV_VAR} patterns for substitution.
 var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 
-// ExperimentalConfig gates the Small-LLM profile behind a single master switch.
-// It is all-or-nothing by design: there is no per-feature toggle, so enabling
-// it exposes the profile and disabling it hides it.
+// ExperimentalConfig gates features that are still under active development
+// behind a single master switch. It is all-or-nothing by design: there is no
+// per-feature toggle, so enabling it exposes every gated feature and
+// disabling it treats each as off. Currently gated: the Small-LLM profile
+// (small_llm.*) and the E2S execution mode (e2s.*).
 type ExperimentalConfig struct {
-	// Enabled is the master switch for the Small-LLM profile. When false, the
-	// profile is treated as off regardless of its own toggles. Default: false.
+	// Enabled is the master switch for the gated experimental features (the
+	// Small-LLM profile, the E2S execution mode). When false, every gated
+	// feature is treated as off regardless of its own toggles. Default: false.
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -991,6 +1004,49 @@ type SmallLLMCompactionConfig struct {
 	// TriggerPercent overrides the predictive compaction trigger percentage
 	// (variant default 80 vs the general 85).
 	TriggerPercent int `yaml:"trigger_percent"`
+}
+
+// E2SConfig configures the E2S (explicit-state) execution mode. The mode is
+// experimental and fail-closed gated by experimental.enabled (see
+// effectiveE2SConfig in backend/configadapter.go): when the gate is off the
+// whole section is ineffective regardless of e2s.enabled. Like the Small-LLM
+// profile, every knob is seeded with a default so tuning never requires a
+// rebuild, while the master toggle defaults to false.
+type E2SConfig struct {
+	// Enabled is the master toggle for the E2S execution mode. Effective only
+	// while experimental.enabled is also true. Default: false.
+	Enabled bool `yaml:"enabled"`
+
+	// MaxSteps caps the number of E2S turns (patch+action cycles) per run
+	// before the run fails as budget exhaustion. Default: 50.
+	MaxSteps int `yaml:"max_steps"`
+
+	// StateByteLimit caps the JSON-encoded size of the working state Σ, in
+	// bytes. A patch whose merged Σ exceeds the limit is rejected as a
+	// validation error (bounded retry, then run failure). Default: 16384
+	// (mirrors core/e2s.DefaultStateByteLimit).
+	StateByteLimit int `yaml:"state_byte_limit"`
+
+	// PatchRetries is how many times a rejected state patch (validation
+	// error or over-limit Σ) may be re-requested from the model before the
+	// run fails. Default: 1.
+	PatchRetries int `yaml:"patch_retries"`
+
+	// ObservationTruncate caps the tool observation fed back to the model per
+	// turn, in characters; longer observations are truncated. Default: 2000.
+	ObservationTruncate int `yaml:"observation_truncate"`
+
+	// RepeatNudgeThreshold is the number of consecutive identical step
+	// actions (same tool + same args) before a corrective nudge observation
+	// is injected instead of dispatching the redundant action again.
+	// Default: 3.
+	RepeatNudgeThreshold int `yaml:"repeat_nudge_threshold"`
+
+	// RepeatAbortThreshold is the number of consecutive identical step
+	// actions before the run is aborted as a spin. Must be >= the nudge
+	// threshold so the model always gets at least one nudge first.
+	// Default: 5.
+	RepeatAbortThreshold int `yaml:"repeat_abort_threshold"`
 }
 
 // ExpandEnvVars expands ${ENV_VAR} patterns in a string with their environment variable values.
@@ -1366,6 +1422,30 @@ func validate(cfg *Config) error {
 		return fmt.Errorf(
 			"goal_loop.verification %q is not valid; must be one of: independent, off",
 			cfg.GoalLoop.Verification,
+		)
+	}
+
+	// Validate the E2S section: explicit numeric values must be non-negative
+	// (the seeded defaults are positive, so only a hand-written YAML can go
+	// below zero), and the anti-spin thresholds must keep their ordering —
+	// the model always gets at least one corrective nudge before the loop
+	// aborts. Fail fast at load rather than misbehaving mid-run.
+	for name, v := range map[string]int{
+		"max_steps":              cfg.E2S.MaxSteps,
+		"state_byte_limit":       cfg.E2S.StateByteLimit,
+		"patch_retries":          cfg.E2S.PatchRetries,
+		"observation_truncate":   cfg.E2S.ObservationTruncate,
+		"repeat_nudge_threshold": cfg.E2S.RepeatNudgeThreshold,
+		"repeat_abort_threshold": cfg.E2S.RepeatAbortThreshold,
+	} {
+		if v < 0 {
+			return fmt.Errorf("e2s.%s must be >= 0, got %d", name, v)
+		}
+	}
+	if cfg.E2S.RepeatNudgeThreshold > cfg.E2S.RepeatAbortThreshold {
+		return fmt.Errorf(
+			"e2s.repeat_nudge_threshold (%d) must be <= e2s.repeat_abort_threshold (%d) so a nudge always precedes the abort",
+			cfg.E2S.RepeatNudgeThreshold, cfg.E2S.RepeatAbortThreshold,
 		)
 	}
 

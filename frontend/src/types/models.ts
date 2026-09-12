@@ -396,10 +396,19 @@ export interface ConfigResponse {
   proxy: ProxySettingsResponse
   /** Optional to keep existing typed mocks/test fixtures compatible. */
   experimental?: ConfigExperimentalResponse
+  /** E2S execution-mode master toggle (config `e2s.enabled`). Optional to keep
+   *  existing typed mocks/test fixtures compatible. */
+  e2s?: ConfigE2SResponse
 }
 
 /** Master experimental-features switch (all-or-nothing). */
 export interface ConfigExperimentalResponse {
+  enabled: boolean
+}
+
+/** E2S explicit-state execution-mode master toggle (config `e2s.enabled`). The
+ *  effective mode additionally requires the experimental switch. */
+export interface ConfigE2SResponse {
   enabled: boolean
 }
 

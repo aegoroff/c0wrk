@@ -116,6 +116,12 @@ All session-scoped events may additionally include `plan_step_id` and `retry_att
 
 See [../domains/goal-mode.md](../domains/goal-mode.md).
 
+### Execution State (E2S)
+
+| Event Type  | Payload                                                                                                                                                                                                                                                    | Handler Hook       | Description             |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | ----------------------- |
+| `e2s_state` | `{state, turn, max_turns?, status?, patch?}` — dedicated event type. `state` carries the FULL execution-state snapshot Σₜ (the backend loop owns the merge; `{objective?, status?, files_touched?, findings?, decisions?, next_steps?, done_criteria?, checklist?: [{text, checked}]}` + free-form extension keys); `turn` is the current turn number. Emitted after every applied state patch. `max_turns` (the run's turn budget; 0 = unbudgeted) and `status` (the domain lifecycle status) are emitted alongside `{state, turn}` by core/e2s/loop.go `emitState`; a missing `max_turns` is treated as an unbudgeted run ("turn N" without a cap). `patch` remains a forward-contract flag — optional, validated when present — where `patch: true` would mark `state` as a changed slice merged client-side over the previous Σ | useE2SStateEvents | E2S execution-state snapshot. The Execution State panel replaces the plan view for E2S sessions (`e2sStore` `active`); the snapshot is dropped on session switch/delete (live-only stream, no persisted restore) |
+
 ### Agent Internals
 
 | Event Type          | Payload                                                             | Handler Hook      | Description             |

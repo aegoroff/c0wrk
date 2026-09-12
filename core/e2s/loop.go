@@ -1,0 +1,700 @@
+package e2s
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"time"
+
+	"github.com/v0lka/sp4rk/agent"
+	"github.com/v0lka/sp4rk/llm"
+	"github.com/v0lka/sp4rk/strutil"
+	sdktools "github.com/v0lka/sp4rk/tools"
+)
+
+// ErrPaused is returned by Loop.Run when a cooperative pause signal trips at
+// a step boundary. It is a recoverable checkpoint, not a failure: the result
+// carries the state snapshot, the trajectory collected so far, and
+// RunStatusPaused, and the host may resume later by re-running with the
+// returned snapshot's Sigma seeded via Config.ResumeState (the same
+// checkpoint Run returns in Result.Snapshot).
+var ErrPaused = errors.New("e2s loop paused at step boundary")
+
+// RunStatus is the terminal disposition of an E2S loop run. It is the LOOP's
+// status (why Run returned), distinct from the domain StateStatus — the
+// model-managed core Σ key that the run's lifecycle mirrors.
+type RunStatus string
+
+const (
+	// RunStatusFinished — the model called the finish action; Answer is set.
+	RunStatusFinished RunStatus = "finished"
+	// RunStatusStepLimit — the step budget was exhausted before finish.
+	RunStatusStepLimit RunStatus = "step_limit"
+	// RunStatusSpinStop — the anti-spin detector aborted the loop after the
+	// model repeated the identical action past the abort threshold.
+	RunStatusSpinStop RunStatus = "spin_stop"
+	// RunStatusPaused — a cooperative pause checkpoint at a step boundary.
+	RunStatusPaused RunStatus = "paused"
+	// RunStatusCanceled — the context was canceled mid-run.
+	RunStatusCanceled RunStatus = "canceled"
+	// RunStatusFailed — a fatal error (e.g. LLM call failure) ended the run;
+	// the accompanying error is non-nil.
+	RunStatusFailed RunStatus = "failed"
+)
+
+// Result is the outcome of an E2S run.
+type Result struct {
+	// Answer is the final answer delivered by the finish action (empty for
+	// non-finished terminations).
+	Answer string `json:"answer"`
+	// Status is the terminal disposition.
+	Status RunStatus `json:"status"`
+	// Finished is true only for RunStatusFinished.
+	Finished bool `json:"finished"`
+	// State is the final working state Σ (the Snapshot's Sigma).
+	State map[string]any `json:"state"`
+	// Snapshot is the full domain state (Σ + schema fingerprint + turn
+	// count + lifecycle status) — the resumable checkpoint for a paused run.
+	Snapshot E2SState `json:"snapshot"`
+	// Turns is the number of completed turns (LLM steps).
+	Turns int `json:"turns"`
+	// Steps is the synthesized agent.Step trajectory (Thought, Action,
+	// Observation per step) for the trajectory store.
+	Steps []agent.Step `json:"steps"`
+}
+
+// Emitter is the event surface the E2S loop requires. It is a structural
+// subset of github.com/v0lka/sp4rk/agent.Events, so every agent.Events /
+// core.Emitter implementation satisfies it without adaptation — the loop
+// deliberately declares its own minimal interface instead of importing the
+// host interface to stay decoupled from the core package (import cycle).
+//
+// A nil emitter is treated as a no-op.
+type Emitter interface {
+	StepStart(stepNum int)
+	Thought(stepNum int, content, reasoning string)
+	ToolCall(stepNum, callIdx int, toolName, argsPreview, source string)
+	ToolResult(stepNum, callIdx int, resultLen int, preview string, isError bool)
+	StepComplete(stepNum int, duration time.Duration)
+	AssistantChunk(content string)
+	AssistantDone(content string, inputTokens, outputTokens int)
+	ContextFill(fillPercent float64, usedTokens, maxTokens int, status string, stepID string)
+	Finishing(stepNum int, summary string)
+	ExecutorDiagnostic(stepNum int, event string, details map[string]any)
+}
+
+// StateEmitter is an optional Emitter capability for the loop's live state
+// snapshots. When the underlying emitter implements it, the loop emits the
+// full Σ + turn snapshot after every applied state patch (the e2s_state
+// event); otherwise snapshots are skipped silently (graceful degradation).
+type StateEmitter interface {
+	E2SState(data map[string]any)
+}
+
+// Registry is the tool surface the E2S loop requires: the dispatch target
+// for actions (inheriting every security gate the registry applies — group
+// policies, judge, HITL confirmation, verify-on-edit) and the descriptor
+// catalog for the Available Tools section. Satisfied by
+// *core/tools.ToolRegistry (which embeds sp4rk's ToolRegistry) and by test
+// doubles.
+type Registry interface {
+	List() []sdktools.ToolDescriptor
+	Execute(ctx context.Context, name string, input json.RawMessage) (sdktools.ToolResult, error)
+	IsToolUntrusted(name string) bool
+}
+
+// Config configures an E2S loop run. Zero values fall back to defaults
+// (see withDefaults).
+type Config struct {
+	// Model is the LLM model id passed through to every ChatRequest.
+	Model string
+	// MaxTokens is the per-call output limit.
+	MaxTokens int
+	// MaxSteps caps the number of turns (LLM steps). Default 50 from
+	// e2s.max_steps; 16 when the config supplies no value (withDefaults
+	// fallback).
+	MaxSteps int
+	// MaxObservationChars caps an observation fed back to the model. Default
+	// 4000 runes when the config supplies no value (withDefaults fallback);
+	// the shipped e2s.observation_truncate default is 2000.
+	MaxObservationChars int
+	// StateByteLimit caps the JSON-encoded Σ (ApplyPatch's byte limit).
+	// Default DefaultStateByteLimit. A patch whose merged Σ exceeds the cap
+	// is rejected (validation error path: bounded retry, then error
+	// observation).
+	StateByteLimit int
+	// SpinNudgeThreshold is the count of consecutive identical actions at
+	// which a nudge observation is injected (the redundant action is not
+	// dispatched again). Default 3.
+	SpinNudgeThreshold int
+	// SpinAbortThreshold is the count of consecutive identical actions at
+	// which the loop aborts with RunStatusSpinStop. Default 5.
+	SpinAbortThreshold int
+	// PatchRetries bounds the corrective re-requests for an invalid turn
+	// (bad envelope or rejected patch) before the failure becomes the next
+	// observation. Default 1 (a single corrective retry); values <= 0 fall
+	// back to the default.
+	PatchRetries int
+	// ContextWindowTokens, when > 0, enables the flat per-request
+	// ContextFill emission (last request input tokens vs the window). Zero
+	// disables the emission.
+	ContextWindowTokens int
+	// Task is the run objective: it seeds the core "objective" Σ key (Σ is
+	// the model's only memory, so the objective must live there).
+	Task string
+	// InitialState seeds extension keys of the initial Σ (copied; never
+	// mutated). Non-core keys are added as extensions; the core schema is
+	// built canonically by NewE2SState.
+	InitialState map[string]any
+	// ResumeState, when non-nil, seeds the ENTIRE run state instead of a
+	// fresh NewE2SState: the checkpoint (a previous Run's Result.Snapshot)
+	// continues with its Σ — core keys, extensions, turn count, and
+	// bookkeeping — exactly where it stopped. Takes precedence over Task +
+	// InitialState; a resumed run therefore inherits the accumulated working
+	// state (findings, decisions, files_touched …), not just extension keys.
+	ResumeState *E2SState
+	// ResumeNote, when non-empty, replaces the generic turn-1 observation on a
+	// resumed run. The E2S turn exposes no separate message channel (the model
+	// sees only Σ + O), so a user's follow-up sent into a paused/interrupted
+	// task — a nudge-resume — has nowhere else to go; delivering it as the
+	// first observation is what keeps it from being silently dropped.
+	ResumeNote string
+	// WorkspacePath and TempDir render the workspace containment sections
+	// of the system prompt.
+	WorkspacePath string
+	TempDir       string
+	// DelegateDirective is an optional "## Delegation" section body for the
+	// system prompt (e.g. how/when to use the delegate tool).
+	DelegateDirective string
+	// Skills are the active skill sections injected into the system prompt.
+	Skills []SkillSection
+	// ContentBlocks, when non-empty, are attached to every turn's user message
+	// (image attachments staged for the run). Each turn is a fresh one-shot
+	// [system, user] request, so the blocks are re-sent every turn — otherwise
+	// the model would lose sight of them after turn 1. The per-turn text (Σ +
+	// observation) stays in Message.Content; the provider prepends it as a
+	// text block when the blocks carry no text, so it always reaches the model.
+	ContentBlocks []llm.ContentBlock
+	// TrajectoryStore, when non-nil, is synced with the growing step
+	// trajectory after every completed step.
+	Trajectory agent.TrajectoryStore
+	// PauseChecker is a cooperative pause signal checked once per step
+	// boundary; a true return stops the loop with ErrPaused.
+	PauseChecker func(ctx context.Context) bool
+	// Logger; nil → slog.Default().
+	Logger *slog.Logger
+}
+
+func (c Config) withDefaults() Config {
+	if c.MaxSteps <= 0 {
+		c.MaxSteps = 16
+	}
+	if c.MaxObservationChars <= 0 {
+		c.MaxObservationChars = 4000
+	}
+	if c.StateByteLimit <= 0 {
+		c.StateByteLimit = DefaultStateByteLimit
+	}
+	if c.SpinNudgeThreshold <= 0 {
+		c.SpinNudgeThreshold = 3
+	}
+	if c.SpinAbortThreshold <= 0 {
+		c.SpinAbortThreshold = 5
+	}
+	if c.PatchRetries <= 0 {
+		c.PatchRetries = 1
+	}
+	if c.SpinAbortThreshold <= c.SpinNudgeThreshold {
+		// Fail-safe ordering: abort must strictly exceed nudge so the model
+		// gets at least one corrective nudge before the loop stops.
+		c.SpinAbortThreshold = c.SpinNudgeThreshold + 1
+	}
+	return c
+}
+
+// stepResult is the outcome of one turn's LLM interaction: either a valid
+// e2s_step call with its applied state, or a marker that the turn was
+// invalid after the bounded retry (error becomes the observation), or a
+// fatal error.
+type stepResult struct {
+	// call is the validated step call (zero when invalid or fatal).
+	call StepCall
+	// state is Σ with the turn's patch applied (ApplyRawPatch result; the
+	// domain TurnCount is bumped). Zero value only when invalid/fatal.
+	state E2SState
+	// applied reports whether the patch merge succeeded (always true when
+	// call is valid — kept explicit for readability).
+	applied bool
+	// thought is the response reasoning text (Rₜ).
+	thought string
+	// usage is the token usage of the successful LLM call.
+	usage llm.TokenUsage
+	// invalid is non-nil when both the turn and its corrective retry failed
+	// validation: no patch is applied, no action dispatched; the error
+	// becomes the next observation.
+	invalid error
+	// fatal is a terminal LLM error for the run.
+	fatal error
+}
+
+// Loop runs the E2S cycle on raw sp4rk primitives (llm.Caller + Registry +
+// Emitter). It deliberately does NOT use agent.Executor or the Conductor:
+// every turn is a fresh one-shot [system, user] dialog, so the request size
+// is O(1) in the number of turns. State evolves through the domain merge
+// operator (ApplyRawPatch), which owns patch validation and rollback.
+type Loop struct {
+	cfg      Config
+	caller   llm.Caller
+	registry Registry
+	emitter  Emitter
+	system   string
+	toolDefs []llm.ToolDefinition
+}
+
+// New creates an E2S loop. caller must be non-nil. A nil registry allows
+// only finish-only runs (any dispatch attempt surfaces an error
+// observation); a nil emitter is treated as a no-op.
+func New(caller llm.Caller, registry Registry, emitter Emitter, cfg Config) *Loop {
+	cfg = cfg.withDefaults()
+	stepTool := NewStepTool()
+	l := &Loop{
+		cfg:      cfg,
+		caller:   caller,
+		registry: registry,
+		emitter:  emitter,
+		toolDefs: []llm.ToolDefinition{{
+			Name:        stepTool.Name(),
+			Description: stepTool.Description(),
+			InputSchema: stepTool.InputSchema(),
+		}},
+	}
+	l.system = BuildSystemPrompt(cfg, l.descriptors())
+	return l
+}
+
+// descriptors returns the registry's tool catalog, or nil without a registry.
+func (l *Loop) descriptors() []sdktools.ToolDescriptor {
+	if l.registry == nil {
+		return nil
+	}
+	return l.registry.List()
+}
+
+// log returns the configured logger or the default.
+func (l *Loop) log() *slog.Logger {
+	if l.cfg.Logger != nil {
+		return l.cfg.Logger
+	}
+	return slog.Default()
+}
+
+// emit safely invokes f when an emitter is configured.
+func (l *Loop) emit(f func(e Emitter)) {
+	if l.emitter != nil {
+		f(l.emitter)
+	}
+}
+
+// Run executes the E2S cycle until finish, a stop condition, or a fatal
+// error. The returned Result is non-nil even on error paths (carrying the
+// checkpoint snapshot and trajectory); errors.Is(err, ErrPaused)
+// distinguishes a cooperative pause, context.Canceled/DeadlineExceeded a
+// cancellation.
+func (l *Loop) Run(ctx context.Context) (*Result, error) {
+	state := l.seedState()
+	observation := initialObservation
+	if l.cfg.ResumeNote != "" {
+		// A resumed run carrying a user follow-up delivers it as the turn-1
+		// observation so the model reacts to it instead of silently continuing
+		// the old objective (Σ precedence never lets the follow-up in otherwise).
+		observation = l.cfg.ResumeNote
+	}
+	steps := make([]agent.Step, 0, l.cfg.MaxSteps)
+	spinCount := 0
+	spinFingerprint := ""
+
+	for turn := 1; turn <= l.cfg.MaxSteps; turn++ {
+		// Step boundary: cancellation first, then the cooperative pause —
+		// the checks run before any work of the turn so a paused run
+		// consumes nothing.
+		if err := ctx.Err(); err != nil {
+			return l.checkpoint(RunStatusCanceled, state, turn-1, steps), err
+		}
+		if l.cfg.PauseChecker != nil && l.cfg.PauseChecker(ctx) {
+			return l.checkpoint(RunStatusPaused, state, turn-1, steps), ErrPaused
+		}
+
+		started := time.Now()
+		l.emit(func(e Emitter) { e.StepStart(turn) })
+
+		// One LLM call per step (plus at most one bounded corrective retry):
+		// a fresh [system, user] dialog — no history from previous turns.
+		res := l.turnCall(ctx, state, observation, turn)
+		if res.fatal != nil {
+			// A cancellation that surfaced INSIDE the LLM call (the task
+			// context was canceled while the request was in flight) arrives
+			// here as a fatal error — the step-boundary checks above already
+			// ran. Re-check the context so a shutdown is checkpointed as a
+			// cancellation (non-terminal, resumable) instead of a failure
+			// that would drop the Σ on restart. Mirrors runGoalTurns's
+			// post-turn ctx.Err() re-check.
+			if err := ctx.Err(); err != nil {
+				return l.checkpoint(RunStatusCanceled, state, turn-1, steps), err
+			}
+			return l.checkpoint(RunStatusFailed, state, turn-1, steps), res.fatal
+		}
+		l.reportResponse(turn, res)
+
+		// Invalid turn (both attempts failed): the error becomes the next
+		// observation; Σ is untouched (ApplyPatch never mutated it), nothing
+		// is dispatched.
+		if res.invalid != nil {
+			obs := invalidTurnObservation(res.invalid)
+			steps = append(steps, agent.Step{
+				Thought:     res.thought,
+				Action:      llm.ToolCall{Name: StepToolName},
+				Observation: obs,
+				IsError:     true,
+			})
+			l.syncTrajectory(steps)
+			observation = obs
+			l.emit(func(e Emitter) { e.StepComplete(turn, time.Since(started)) })
+			continue
+		}
+
+		// The patch was validated and applied inside turnCall; adopt the
+		// merged state and publish the full Σ + turn snapshot.
+		state = res.state
+		if res.applied {
+			l.emitState(state)
+		}
+
+		// Finish: intercepted by the loop, never dispatched.
+		if res.call.Action.IsFinish() {
+			steps = append(steps, agent.Step{
+				Thought: res.thought,
+				Action: llm.ToolCall{
+					ID:    res.call.ID,
+					Name:  FinishActionName,
+					Input: json.RawMessage(`{"answer":` + mustMarshalString(res.call.Action.Answer) + `}`),
+				},
+			})
+			l.syncTrajectory(steps)
+			l.emit(func(e Emitter) { e.Finishing(turn, res.call.Action.Answer) })
+			out := l.checkpoint(RunStatusFinished, state, turn, steps)
+			out.Answer = res.call.Action.Answer
+			out.Finished = true
+			return out, nil
+		}
+
+		// Anti-spin: fingerprint on tool + canonical args; identical
+		// consecutive actions are nudged, then abort the loop.
+		fp := ActionFingerprint(res.call.Action.Tool, res.call.Action.Args)
+		if fp == spinFingerprint {
+			spinCount++
+		} else {
+			spinCount = 1
+			spinFingerprint = fp
+		}
+		if spinCount >= l.cfg.SpinAbortThreshold {
+			l.emit(func(e Emitter) {
+				e.ExecutorDiagnostic(turn, "spin_stop", map[string]any{
+					"tool":            res.call.Action.Tool,
+					"repeat_count":    spinCount,
+					"abort_threshold": l.cfg.SpinAbortThreshold,
+				})
+			})
+			l.log().Warn("e2s: anti-spin abort", "tool", res.call.Action.Tool, "repeat_count", spinCount)
+			return l.checkpoint(RunStatusSpinStop, state, turn, steps), nil
+		}
+		if spinCount >= l.cfg.SpinNudgeThreshold {
+			nudge := fmt.Sprintf(
+				"You repeated the identical action (%s) %d times in a row. Do NOT repeat it again. Reassess the state, change the approach or the arguments, or call finish with your best answer.",
+				res.call.Action.Tool, spinCount)
+			l.emit(func(e Emitter) {
+				e.ExecutorDiagnostic(turn, "spin_nudge", map[string]any{
+					"tool":         res.call.Action.Tool,
+					"repeat_count": spinCount,
+				})
+			})
+			steps = append(steps, agent.Step{
+				Thought:     res.thought,
+				Action:      llm.ToolCall{ID: res.call.ID, Name: res.call.Action.Tool, Input: res.call.Action.Args},
+				Observation: nudge,
+				UserNudge:   nudge,
+			})
+			l.syncTrajectory(steps)
+			observation = nudge
+			l.emit(func(e Emitter) { e.StepComplete(turn, time.Since(started)) })
+			continue
+		}
+
+		// Dispatch the action through the registry (all security gates).
+		step := l.dispatch(ctx, turn, res.thought, res.call)
+		steps = append(steps, step)
+		l.syncTrajectory(steps)
+		observation = step.Observation
+
+		if err := ctx.Err(); err != nil {
+			return l.checkpoint(RunStatusCanceled, state, turn, steps), err
+		}
+		l.emit(func(e Emitter) { e.StepComplete(turn, time.Since(started)) })
+	}
+
+	// Step budget exhausted.
+	l.log().Info("e2s: step budget exhausted", "max_steps", l.cfg.MaxSteps)
+	return l.checkpoint(RunStatusStepLimit, state, l.cfg.MaxSteps, steps), nil
+}
+
+// initialObservation is the turn-1 observation when no action ran yet.
+const initialObservation = "(no observation yet — this is turn 1; act according to the task in your state)"
+
+// turnCall performs the turn's LLM interaction: the one-shot call, and — when
+// the response fails validation — up to cfg.PatchRetries corrective retries
+// (default 1) with the same Σ + Oₜ plus a correction tail describing the
+// failure. After the retries are exhausted the failure becomes the next
+// observation (Σ untouched).
+func (l *Loop) turnCall(ctx context.Context, state E2SState, observation string, turn int) stepResult {
+	user := BuildUserMessage(state.Sigma, observation, turn)
+
+	var (
+		lastResp    *llm.ChatResponse
+		lastInvalid error
+	)
+	for attempt := 0; attempt <= l.cfg.PatchRetries; attempt++ {
+		prompt := user
+		if attempt > 0 {
+			prompt = user + BuildCorrectionSuffix(lastInvalid)
+		}
+		resp, err := l.callLLM(ctx, prompt)
+		if err != nil {
+			return stepResult{fatal: err}
+		}
+		res, invalidErr := l.validateTurn(resp, state)
+		if invalidErr == nil {
+			return res
+		}
+		lastResp, lastInvalid = resp, invalidErr
+
+		// A further retry is available: log/emit it and re-ask with the tail.
+		if attempt < l.cfg.PatchRetries {
+			l.log().Warn("e2s: invalid step call, retrying", "turn", turn, "attempt", attempt+1, "error", invalidErr)
+			l.emit(func(e Emitter) {
+				e.ExecutorDiagnostic(turn, "step_retry", map[string]any{"error": invalidErr.Error()})
+			})
+		}
+	}
+
+	// Retries exhausted: the error becomes the observation; Σ untouched.
+	return stepResult{
+		thought: thoughtOf(lastResp),
+		usage:   lastResp.Usage,
+		invalid: lastInvalid,
+	}
+}
+
+// validateTurn parses and validates a response against the current state,
+// applying the patch through the domain merge operator. A non-nil error
+// means the turn is invalid (bad envelope or rejected patch — ApplyPatch
+// guarantees Σ was not mutated) — the caller drives the bounded retry /
+// error-as-observation path with it.
+func (l *Loop) validateTurn(resp *llm.ChatResponse, state E2SState) (stepResult, error) {
+	call, err := ParseStepCall(resp.Message.ToolCalls)
+	if err != nil {
+		return stepResult{}, err
+	}
+	merged, err := ApplyRawPatch(state, call.StatePatch, MergeOptions{
+		StateByteLimit: l.cfg.StateByteLimit,
+	})
+	if err != nil {
+		return stepResult{}, err
+	}
+	return stepResult{
+		call:    call,
+		state:   merged,
+		applied: true,
+		thought: thoughtOf(resp),
+		usage:   resp.Usage,
+	}, nil
+}
+
+// invalidTurnObservation renders the error-as-observation text used after a
+// failed retry: the state is unchanged and the model sees exactly why.
+func invalidTurnObservation(err error) string {
+	return "Your previous " + StepToolName + " call was invalid and was NOT applied; the state is unchanged. Error: " + err.Error()
+}
+
+// thoughtOf extracts the response's reasoning text (Rₜ).
+func thoughtOf(resp *llm.ChatResponse) string {
+	if resp == nil {
+		return ""
+	}
+	if resp.Reasoning != "" {
+		return resp.Reasoning
+	}
+	return resp.Message.ReasoningContent
+}
+
+// callLLM performs the fresh one-shot request for a turn.
+func (l *Loop) callLLM(ctx context.Context, user string) (*llm.ChatResponse, error) {
+	userMsg := llm.Message{Role: "user", Content: user}
+	// Image attachments ride on every turn's user message: each turn is a
+	// fresh dialog, so the blocks are re-attached or the model would lose
+	// sight of them after turn 1. The provider prepends Content as a text
+	// block when the blocks carry no text, so Σ + observation still reach it.
+	if len(l.cfg.ContentBlocks) > 0 {
+		userMsg.ContentBlocks = l.cfg.ContentBlocks
+	}
+	req := llm.ChatRequest{
+		Model:       l.cfg.Model,
+		Messages:    []llm.Message{{Role: "system", Content: l.system}, userMsg},
+		Tools:       l.toolDefs,
+		MaxTokens:   l.cfg.MaxTokens,
+		CallPurpose: llm.CallPurposeExecutor,
+	}
+	resp, err := l.caller.Call(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("e2s llm call failed: %w", err)
+	}
+	if resp == nil {
+		return nil, errors.New("e2s llm call returned nil response")
+	}
+	return resp, nil
+}
+
+// mustMarshalString JSON-encodes s for inline embedding; it cannot fail for
+// a string.
+func mustMarshalString(s string) string {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(data)
+}
+
+// reportResponse emits the per-response events: the finish answer as
+// assistant chunk/done, the turn thought, and the flat context fill.
+func (l *Loop) reportResponse(turn int, res stepResult) {
+	if res.call.Action.IsFinish() && res.call.Action.Answer != "" {
+		answer := res.call.Action.Answer
+		l.emit(func(e Emitter) { e.AssistantChunk(answer) })
+		l.emit(func(e Emitter) { e.AssistantDone(answer, res.usage.InputTokens, res.usage.OutputTokens) })
+	}
+	l.emit(func(e Emitter) { e.Thought(turn, res.thought, "") })
+	if l.cfg.ContextWindowTokens > 0 {
+		pct := float64(res.usage.InputTokens) / float64(l.cfg.ContextWindowTokens) * 100
+		l.emit(func(e Emitter) { e.ContextFill(pct, res.usage.InputTokens, l.cfg.ContextWindowTokens, "ok", "") })
+	}
+}
+
+// dispatch executes the validated action via the registry and synthesizes
+// the trajectory step. The observation is the truncated result, wrapped in
+// untrusted-content tags when the source tool is untrusted.
+func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call StepCall) agent.Step {
+	argsPreview := strutil.TruncateUTF8(compactJSON(call.Action.Args), 200)
+	l.emit(func(e Emitter) { e.ToolCall(turn, 0, call.Action.Tool, argsPreview, "e2s") })
+
+	observation := ""
+	isError := false
+	if l.registry == nil {
+		observation = "no tool registry configured for the E2S loop"
+		isError = true
+	} else {
+		result, err := l.registry.Execute(ctx, call.Action.Tool, call.Action.Args)
+		switch {
+		case err != nil:
+			observation = fmt.Sprintf("tool execution error: %v", err)
+			isError = true
+		case result.IsError:
+			observation, isError = result.Content, true
+		default:
+			observation = result.Content
+		}
+	}
+
+	truncated := strutil.TruncateUTF8(observation, l.cfg.MaxObservationChars)
+	// Wrapping is decided by TOOL CLASS (IsUntrusted), not by result type: an
+	// untrusted tool's error diagnostic is attacker-influenceable too and must
+	// be delivered inside the boundary exactly like successful output (see
+	// specs/architecture/security-model.md, "Error-Recovery Carve-Out").
+	if l.registry != nil && l.registry.IsToolUntrusted(call.Action.Tool) {
+		truncated = untrustedWrap(call.Action.Tool, truncated)
+	}
+
+	// The event preview mirrors the raw (pre-wrap) result, matching the
+	// Conductor: the <untrusted-content> boundary belongs to the model context,
+	// not the UI preview.
+	preview := strutil.TruncateUTF8(observation, 200)
+	l.emit(func(e Emitter) { e.ToolResult(turn, 0, len(observation), preview, isError) })
+
+	return agent.Step{
+		Thought:     thought,
+		Action:      llm.ToolCall{ID: call.ID, Name: call.Action.Tool, Input: call.Action.Args},
+		Observation: truncated,
+		IsError:     isError,
+	}
+}
+
+// emitState publishes the full Σ + turn snapshot via the optional
+// StateEmitter capability (skipped silently when unsupported). The turn is
+// the domain TurnCount — the number of applied patches, bumped by the merge
+// that produced this state. max_turns carries the run's turn budget (a zero
+// value means unbudgeted) and status the current domain lifecycle status, so
+// the UI can render a turn/budget counter and a status badge without
+// inferring them from Σ.
+func (l *Loop) emitState(state E2SState) {
+	if l.emitter == nil {
+		return
+	}
+	if se, ok := l.emitter.(StateEmitter); ok {
+		se.E2SState(map[string]any{
+			"state":     state.Sigma,
+			"turn":      state.TurnCount,
+			"max_turns": l.cfg.MaxSteps,
+			"status":    string(state.Status),
+		})
+	}
+}
+
+// syncTrajectory pushes the trajectory to the configured store.
+func (l *Loop) syncTrajectory(steps []agent.Step) {
+	if l.cfg.Trajectory != nil {
+		l.cfg.Trajectory.Sync(steps)
+	}
+}
+
+// seedState builds the initial domain state: a resumed checkpoint verbatim
+// (ResumeState — core keys, extensions, and turn count all continue), or the
+// canonical core schema with the task as the objective plus extension seeds
+// from InitialState.
+func (l *Loop) seedState() E2SState {
+	if l.cfg.ResumeState != nil {
+		resumed := *l.cfg.ResumeState
+		resumed.Sigma = maps.Clone(l.cfg.ResumeState.Sigma)
+		if resumed.Sigma == nil {
+			resumed.Sigma = map[string]any{}
+		}
+		return resumed
+	}
+	state := NewE2SState(l.cfg.Task, time.Time{})
+	for k, v := range l.cfg.InitialState {
+		if !IsCoreKey(k) {
+			state.Sigma[k] = v
+		}
+	}
+	return state
+}
+
+// checkpoint assembles a terminal Result snapshot.
+func (l *Loop) checkpoint(status RunStatus, state E2SState, turns int, steps []agent.Step) *Result {
+	return &Result{
+		Status:   status,
+		State:    state.Sigma,
+		Snapshot: state,
+		Turns:    turns,
+		Steps:    steps,
+	}
+}

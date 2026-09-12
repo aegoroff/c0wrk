@@ -5,8 +5,10 @@ import { useCallback, useState } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStore'
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
+import { isE2SSendEnabled } from '@/lib/e2sGate'
 import { sendMessage, cancelTask } from '@/api/chat'
 import { createSession } from '@/api/sessions'
 import { generateMessageId } from '@/lib/ids'
@@ -96,6 +98,12 @@ export function useMessageSender(): UseMessageSenderResult {
     // message is already rendered with its goal/attachment badges, so the
     // indicators no longer wait for a session/project switch to appear.
     const goalEnabled = useInputModeStore.getState().goalEnabled
+    // E2S is mutually exclusive with goal (the store's setters enforce it), so
+    // at most one of the two flags is armed here. `isE2SSendEnabled` is the
+    // single fail-closed gate: it composes the effective E2S availability
+    // (experimental AND e2s.enabled) with the armed toggle so a stale persisted
+    // `true` can never arm a send the backend would reject.
+    const e2sEnabled = isE2SSendEnabled()
     const pendingAttachments =
       useAttachmentsStore.getState().attachmentsBySession[sessionId] ?? EMPTY_ATTACHMENTS
     const metadata = buildUserMessageMeta(goalEnabled, pendingAttachments, wasPaused || isRunning)
@@ -128,7 +136,16 @@ export function useMessageSender(): UseMessageSenderResult {
       const modelOverride = useInputModeStore.getState().selectedModel ?? ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
       const goalBudget = useInputModeStore.getState().goalBudget
-      await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget)
+      await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled)
+      // A confirmed fresh non-E2S task supersedes any prior E2S run in this
+      // session: drop the stale Σ snapshot so the Execution State panel does
+      // not shadow the plan view for the new task (E2S is selected per
+      // message, not per session). Cleared AFTER a successful send so a
+      // rejected send leaves the previous snapshot intact; a live interjection
+      // into a running task or a nudge-resume leaves it untouched.
+      if (!e2sEnabled && !wasPaused && !isRunning) {
+        useE2SStore.getState().clearSession(sessionId)
+      }
       // Goal is per-task opt-in: after a goal-defining message is sent, reset
       // the toggle so the user explicitly re-enables it for the next goal
       // (rather than silently staying in goal mode across every subsequent
@@ -137,6 +154,13 @@ export function useMessageSender(): UseMessageSenderResult {
       if (goalEnabled) {
         useInputModeStore.getState().setGoalEnabled(false)
         useInputModeStore.getState().setGoalBudget('')
+      }
+      // E2S mirrors goal's per-task opt-in: an E2S-defining message disarms
+      // the toggle after the send, so the next message runs the default flow
+      // unless the user re-arms it (the persisted preference only bridges
+      // reloads of an armed-but-unsent toggle).
+      if (e2sEnabled) {
+        useInputModeStore.getState().setE2sEnabled(false)
       }
     } catch (error) {
       logger.error('Failed to send message:', error)

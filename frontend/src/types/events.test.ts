@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isAgentMetricsData, normalizeAgentMetricsData, isTaskCompleteData, isCompactionFinishedData, isPlanStepPausedData, isSubAgentPausedData, isGitConfigRiskData } from './events'
+import { isAgentMetricsData, normalizeAgentMetricsData, isTaskCompleteData, isCompactionFinishedData, isPlanStepPausedData, isSubAgentPausedData, isGitConfigRiskData, isE2SStateData, isE2SSigma } from './events'
 
 describe('isTaskCompleteData', () => {
     it('accepts valid data with string output', () => {
@@ -308,5 +308,122 @@ describe('isGitConfigRiskData', () => {
         expect(isGitConfigRiskData({ path: '/repo', source: 'project' })).toBe(false)
         expect(isGitConfigRiskData(null)).toBe(false)
         expect(isGitConfigRiskData(undefined)).toBe(false)
+    })
+})
+
+describe('isE2SStateData', () => {
+    const valid = {
+        state: {
+            objective: 'Ship the E2S panel',
+            status: 'in progress',
+            files_touched: ['frontend/src/stores/e2sStore.ts'],
+            findings: ['guard pattern mirrors goal events'],
+            decisions: ['store owns the patch merge'],
+            next_steps: ['write tests'],
+            checklist: [
+                { text: 'types + guard', checked: true },
+                { text: 'panel', checked: false },
+            ],
+        },
+        turn: 3,
+        max_turns: 10,
+        status: 'running',
+    }
+
+    it('accepts a full valid snapshot', () => {
+        expect(isE2SStateData(valid)).toBe(true)
+    })
+
+    it('accepts a minimal snapshot (empty Σ slice, no patch flag)', () => {
+        expect(isE2SStateData({ state: {}, turn: 0, max_turns: 10, status: 'running' })).toBe(true)
+    })
+
+    it('accepts a patch payload (patch: true, partial Σ)', () => {
+        expect(isE2SStateData({ state: { checklist: [{ text: 'x', checked: true }] }, turn: 4, max_turns: 10, status: 'running', patch: true })).toBe(true)
+    })
+
+    it('accepts patch: false as an explicit full snapshot', () => {
+        expect(isE2SStateData({ ...valid, patch: false })).toBe(true)
+    })
+
+    it('requires a state object', () => {
+        expect(isE2SStateData({ ...valid, state: undefined })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: 'running' })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: null })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: [] })).toBe(false)
+    })
+
+    it('rejects wrong-typed Σ fields', () => {
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, objective: 7 } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, status: true } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, files_touched: 'a.go' } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, findings: [1, 2] } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, decisions: null } })).toBe(false)
+    })
+
+    it('rejects a malformed checklist item', () => {
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, checklist: [{ text: 'no flag' }] } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, checklist: [{ text: 3, checked: true }] } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, checklist: [{ checked: true }] } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, checklist: 'not-a-list' } })).toBe(false)
+    })
+
+    it('accepts done_criteria and ignores unknown extension keys', () => {
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, done_criteria: ['all tests green'] } })).toBe(true)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, done_criteria: 'green' } })).toBe(false)
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, custom_extension: { any: 'shape' } } })).toBe(true)
+    })
+
+    it('accepts the minimal real-backend payload ({state, turn} only)', () => {
+        expect(isE2SStateData({ state: { objective: 'o' }, turn: 1 })).toBe(true)
+        expect(isE2SStateData({ state: {}, turn: 0 })).toBe(true)
+    })
+
+    it('requires turn to be a number', () => {
+        expect(isE2SStateData({ ...valid, turn: '3' })).toBe(false)
+        expect(isE2SStateData({ ...valid, turn: undefined })).toBe(false)
+        expect(isE2SStateData({ state: {} })).toBe(false)
+    })
+
+    it('accepts absent max_turns/status but rejects wrong types', () => {
+        const { max_turns, status, ...minimal } = valid
+        expect(isE2SStateData({ ...minimal, max_turns, status })).toBe(true)
+        expect(isE2SStateData({ ...valid, max_turns: '10' })).toBe(false)
+        expect(isE2SStateData({ ...valid, status: 3 })).toBe(false)
+    })
+
+    it('rejects a wrong-typed patch flag', () => {
+        expect(isE2SStateData({ ...valid, patch: 'yes' })).toBe(false)
+        expect(isE2SStateData({ ...valid, patch: 1 })).toBe(false)
+    })
+
+    it('rejects non-objects', () => {
+        expect(isE2SStateData(null)).toBe(false)
+        expect(isE2SStateData(undefined)).toBe(false)
+        expect(isE2SStateData('e2s_state')).toBe(false)
+        expect(isE2SStateData([])).toBe(false)
+        expect(isE2SStateData({})).toBe(false)
+    })
+})
+
+describe('isE2SSigma', () => {
+    it('accepts an empty slice (a patch may carry nothing new)', () => {
+        expect(isE2SSigma({})).toBe(true)
+    })
+
+    it('accepts fully-typed sigma', () => {
+        expect(isE2SSigma({
+            objective: 'o', status: 's',
+            files_touched: [], findings: [], decisions: [], next_steps: [],
+            checklist: [],
+        })).toBe(true)
+    })
+
+    it('rejects non-objects and wrong types', () => {
+        expect(isE2SSigma(null)).toBe(false)
+        expect(isE2SSigma('sigma')).toBe(false)
+        expect(isE2SSigma([])).toBe(false)
+        expect(isE2SSigma({ next_steps: [null] })).toBe(false)
+        expect(isE2SSigma({ checklist: [{ text: 't', checked: 'yes' }] })).toBe(false)
     })
 })

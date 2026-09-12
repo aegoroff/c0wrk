@@ -19,11 +19,13 @@ Manages real-time event subscription, validation, and store updates. Events flow
 - `frontend/src/hooks/events/hitlHandlers.ts` — shared HITL event handlers (`handleToolConfirmEvent`, `handleAskUserEvent`, `handleStepLimitEvent`, `handlePlanReviewEvent`) used by `useToolEvents` (`tool_confirm`) and `useActionEvents` (`ask_user`/`step_limit`/`plan_review`), plus the background-session watcher
 - `frontend/src/hooks/events/useReviewRestore.ts` — restores code-review buffer state on session activation (reloads comments, reopens review page if mid-loop, reconciles stale loop flags)
 - `frontend/src/hooks/events/useGoalEvents.ts` — goal-mode events (`goal_proposal` pending action + `goal_status`/`goal_progress` service-phase events → goalStore + chat message)
+- `frontend/src/hooks/events/useE2SStateEvents.ts` — E2S execution-state events (`e2s_state` Σ snapshots → e2sStore via `e2sHandlers`; the outgoing session's snapshot is dropped on switch)
 - `frontend/src/hooks/events/useSoundEvents.ts` — sound-notification events (plays Web Audio tones on task lifecycle milestones when `soundStore.enabled`); composed by `useSessionEvents`
 - `frontend/src/hooks/useFileDrop.ts` — global `files:dropped` subscription, HTML5 drag overlay, and navigation suppression
 - `frontend/src/hooks/useExitGuard.ts` — global `app:exit_requested` subscription (mounted once at the app root, above the per-phase renders): validates the intercepted-quit payload and writes `exitGuardStore`; a malformed payload is reported via `reportDroppedEvent` and still opens the generic list-less modal — the backend has already prevented the quit, so an unanswered dialog would leave the app unclosable. The user's decision travels back through the `ConfirmExit` RPC from `ExitConfirmDialog` (a pure view over the store; `update_pending` in the payload switches it to restart context)
 - `frontend/src/hooks/useStageAttachments.ts` — shared picker/drop attachment staging and model-vision filtering
 - `frontend/src/hooks/events/goalHandlers.ts` — shared goal event handlers (`handleGoalProposalEvent`, `handleGoalStatusEvent`, `handleGoalProgressEvent`) used by `useGoalEvents` (foreground) and the background-session watcher (mirrors the `hitlHandlers.ts` pattern)
+- `frontend/src/hooks/events/e2sHandlers.ts` — shared E2S state handler (`handleE2SStateEvent`, applies a full or patch `e2s_state` snapshot to the e2sStore) used by `useE2SStateEvents` (mirrors the `goalHandlers.ts` pattern)
 - `frontend/src/hooks/events/sessionLifecycleHandlers.ts` — shared session pause/resume handlers (`handleSessionPausedEvent`, `handleSessionResumedEvent`) used by `useChatEvents` (foreground) and the background-session watcher (mirrors the `hitlHandlers.ts` pattern)
 - `frontend/src/hooks/events/useTerminalEvents.ts` — terminal output events; **component-mounted** by `terminal/Terminal.tsx` (not delegated by `useSessionEvents`)
 - `frontend/src/hooks/events/useToolJudgeEvents.ts` — LLM judge response events; **component-mounted** by `chat/ToolConfirmation.tsx` (not delegated by `useSessionEvents`)
@@ -40,7 +42,7 @@ useSessionEvents(sessionId)
   │   ├─ Subscribe to session:${sessionId}:* events
   │   └─ Set up dispatch to type-specific handlers
   │
-  ├─ Delegates to focused hooks (the 12 composed by useSessionEvents):
+  ├─ Delegates to focused hooks (the 13 composed by useSessionEvents):
   │   ├─ useChatEvents → chatStore updates (streaming, thoughts, errors, task lifecycle)
   │   ├─ usePlanEvents → planStore updates
   │   ├─ useToolEvents → chatStore (tool messages, tool_confirm via hitlHandlers)
@@ -52,6 +54,7 @@ useSessionEvents(sessionId)
   │   ├─ useAttachmentEvents → attachmentsStore
   │   ├─ useReviewRestore → reviewStore (restores code-review buffer on session activation)
   │   ├─ useGoalEvents → goalStore (goal status/progress) + chatStore (goal_proposal message, via goalHandlers)
+  │   ├─ useE2SStateEvents → e2sStore (E2S execution-state Σ snapshots, via e2sHandlers)
   │   └─ useSoundEvents → sound playback (task lifecycle milestones, gated by soundStore.enabled)
   │
   │  (useTerminalEvents and useToolJudgeEvents are component-mounted, not

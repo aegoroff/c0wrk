@@ -86,6 +86,9 @@ func seedSessionForFork(t *testing.T, store *SQLiteSessionStore, name string) (s
 	if err := store.SaveGoalState(ctx, taskID, json.RawMessage(`{"condition":"make tests green"}`)); err != nil {
 		t.Fatalf("SaveGoalState: %v", err)
 	}
+	if err := store.SaveE2SState(ctx, taskID, json.RawMessage(`{"sigma":{"objective":"make tests green"},"status":"paused"}`)); err != nil {
+		t.Fatalf("SaveE2SState: %v", err)
+	}
 	if err := store.SaveDelegationSpec(ctx, taskID, TaskDelegationRecord{
 		DelegationID: "del_1", TaskID: taskID, ParentID: "", Depth: 0,
 		Spec:      json.RawMessage(`{"task":{"id":"del_1","summary":"s","task":"do the delegated thing"}}`),
@@ -239,6 +242,11 @@ func TestForkSession_FullCopyAndRemapping(t *testing.T) {
 	goal, err := store.LoadGoalState(ctx, newTaskID)
 	if err != nil || goal == nil || string(goal) != `{"condition":"make tests green"}` {
 		t.Errorf("forked goal state not remapped: %s (err %v)", string(goal), err)
+	}
+	// E2S state remapped onto the new task id (same deep-copy contract).
+	e2sState, err := store.LoadE2SState(ctx, newTaskID)
+	if err != nil || e2sState == nil || string(e2sState) != `{"sigma":{"objective":"make tests green"},"status":"paused"}` {
+		t.Errorf("forked e2s state not remapped: %s (err %v)", string(e2sState), err)
 	}
 	// Delegation specs remapped onto the new task id; delegation ids are
 	// preserved verbatim (they reference step ids, which the fork keeps).

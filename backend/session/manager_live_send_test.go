@@ -44,7 +44,7 @@ func liveTestSession(t *testing.T) (*Manager, *Session, *core.Orchestrator, chan
 func TestSendMessage_LiveQueuesIntoRunningTask(t *testing.T) {
 	manager, sess, orch, events := liveTestSession(t)
 
-	err := manager.SendMessage(context.Background(), sess.ID, "steer left", nil, nil, "", "", false, "", false)
+	err := manager.SendMessage(context.Background(), sess.ID, "steer left", nil, nil, "", "", false, "", false, false)
 	if err != nil {
 		t.Fatalf("live SendMessage returned error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSendMessage_LiveRejectedWhilePausing(t *testing.T) {
 	sess.pausing = true
 	sess.mu.Unlock()
 
-	err := manager.SendMessage(context.Background(), sess.ID, "too late", nil, nil, "", "", false, "", false)
+	err := manager.SendMessage(context.Background(), sess.ID, "too late", nil, nil, "", "", false, "", false, false)
 	if !errors.Is(err, ErrPausePending) {
 		t.Fatalf("expected ErrPausePending, got %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSendMessage_LiveRejectedWhilePausing(t *testing.T) {
 func TestSendMessage_LiveRejectedForGoal(t *testing.T) {
 	manager, sess, orch, _ := liveTestSession(t)
 
-	err := manager.SendMessage(context.Background(), sess.ID, "/goal chase it", nil, nil, "", "", true, "", false)
+	err := manager.SendMessage(context.Background(), sess.ID, "/goal chase it", nil, nil, "", "", true, "", false, false)
 	if err == nil {
 		t.Fatal("expected an error for a goal request into a running task")
 	}
@@ -108,12 +108,30 @@ func TestSendMessage_LiveRejectedForGoal(t *testing.T) {
 	}
 }
 
+// TestSendMessage_LiveRejectedForE2S verifies E2S requests are rejected on
+// the live path exactly like goal requests: an E2S run seeds its Σ only at
+// task start, so it can never join a running task as an interjection.
+func TestSendMessage_LiveRejectedForE2S(t *testing.T) {
+	manager, sess, orch, _ := liveTestSession(t)
+
+	err := manager.SendMessage(context.Background(), sess.ID, "run with explicit state", nil, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error for an E2S request into a running task")
+	}
+	if !strings.Contains(err.Error(), "E2S") {
+		t.Errorf("expected an E2S-specific rejection, got: %v", err)
+	}
+	if got := orch.DrainLiveUserMessages(); got != "" {
+		t.Errorf("queue holds %q after a rejected e2s send, want empty", got)
+	}
+}
+
 // TestSendMessage_LiveRejectedForSkills verifies skill/agent references never
 // take the live path (they reshape task context at HandleMessage time).
 func TestSendMessage_LiveRejectedForSkills(t *testing.T) {
 	manager, sess, orch, _ := liveTestSession(t)
 
-	err := manager.SendMessage(context.Background(), sess.ID, "run the checker", []string{"reviewer"}, nil, "", "", false, "", false)
+	err := manager.SendMessage(context.Background(), sess.ID, "run the checker", []string{"reviewer"}, nil, "", "", false, "", false, false)
 	if err == nil {
 		t.Fatal("expected an error for a skill send into a running task")
 	}

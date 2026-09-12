@@ -250,6 +250,16 @@ func (s *SQLiteSessionStore) forkTasks(ctx context.Context, tx *sql.Tx, srcID, n
 			return fmt.Errorf("failed to copy task goal state for %q: %w", oldTaskID, err)
 		}
 
+		// task_e2s_state — E2S execution state Σ (PK = task_id). Preserved so
+		// the fork keeps the same resumable Σ snapshot as its source task.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO task_e2s_state (task_id, e2s_state, updated_at)
+			SELECT ?, e2s_state, updated_at FROM task_e2s_state WHERE task_id = ?`,
+			newTaskID, oldTaskID,
+		); err != nil {
+			return fmt.Errorf("failed to copy task e2s state for %q: %w", oldTaskID, err)
+		}
+
 		// task_delegations — persisted delegation specs, the input of the
 		// system auto-resume wave. delegation_id/parent_id reference step
 		// ids, which this fork preserves verbatim, so a plain row copy keeps

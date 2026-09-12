@@ -47,6 +47,9 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
 		},
+		E2S: E2SConfigResponse{
+			Enabled: f.config.E2S.Enabled,
+		},
 	}
 
 	// Populate AllModels: flat list of all enabled models.
@@ -86,6 +89,16 @@ func (f *FrontendAPI) experimentalFeaturesEnabled() bool {
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
 	return f.config != nil && f.config.Experimental.Enabled
+}
+
+// e2sEnabled reports whether the E2S execution mode's own master toggle is on.
+// It returns false when the config is not yet initialized (fail-closed). The
+// effective E2S gate requires experimentalFeaturesEnabled too; callers combine
+// the two (see SendMessage).
+func (f *FrontendAPI) e2sEnabled() bool {
+	f.configMu.RLock()
+	defer f.configMu.RUnlock()
+	return f.config != nil && f.config.E2S.Enabled
 }
 
 // buildLLMResponse constructs the sanitized ConfigLLMResponse from config.
@@ -456,18 +469,24 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 
 	// Rebuild the LLM router so the Small-LLM profile (sampling overrides,
 	// essential-tools narrowing, context management) is applied or removed
-	// immediately.
+	// immediately. The same builder config carries the effective E2S settings,
+	// reused below to refresh the live orchestrators.
+	builderCfg := ToBuilderConfig(f.config)
 	if b := f.builder(); b != nil {
-		if err := b.RebuildRouter(ToBuilderConfig(f.config)); err != nil {
+		if err := b.RebuildRouter(builderCfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after experimental-features toggle", "error", err)
 		}
 	}
 
 	// Keep the session manager's Small-LLM snapshot in sync so agent_metrics
-	// events created afterwards are annotated with the effective profile.
+	// events created afterwards are annotated with the effective profile, and
+	// push the refreshed E2S gate onto already-built session orchestrators —
+	// otherwise the mode stays disabled there (stale config.E2S) until an app
+	// restart even though the live config now enables it.
 	if app := f.app; app != nil {
 		if mgr := app.Manager(); mgr != nil {
 			mgr.SetSmallLLMProfile(effectiveSmallLLMConfig(f.config))
+			mgr.SetE2SSettings(builderCfg.E2S)
 		}
 	}
 

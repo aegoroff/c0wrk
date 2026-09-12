@@ -240,3 +240,35 @@ func TestToBuilderConfig_WebFetchTimeouts(t *testing.T) {
 		t.Errorf("WebFetchRetries = %d, want 3", got)
 	}
 }
+
+// TestEffectiveE2SConfig pins the fail-closed experimental gate for the E2S
+// execution mode, mirroring effectiveSmallLLMConfig: while
+// experimental.enabled is false the section is forced off even when
+// e2s.enabled is true, and the stored values are preserved so re-enabling
+// the gate restores them.
+func TestEffectiveE2SConfig(t *testing.T) {
+	cfg := &config.Config{}
+	config.ApplyDefaults(cfg)
+	cfg.E2S.Enabled = true
+	cfg.E2S.MaxSteps = 42
+
+	// Fail-closed: the experimental gate off neutralizes the master toggle.
+	cfg.Experimental.Enabled = false
+	section := effectiveE2SConfig(cfg)
+	if section.Enabled {
+		t.Error("effective e2s.Enabled must be false while the experimental gate is off")
+	}
+	if section.MaxSteps != 42 {
+		t.Errorf("stored MaxSteps = %d, want 42 (values preserved, not zeroed)", section.MaxSteps)
+	}
+	// The live config is untouched by the gate's copy.
+	if !cfg.E2S.Enabled {
+		t.Error("effectiveE2SConfig must not mutate the stored config")
+	}
+
+	// Gate on: the section passes through verbatim.
+	cfg.Experimental.Enabled = true
+	if section = effectiveE2SConfig(cfg); !section.Enabled {
+		t.Error("effective e2s.Enabled must follow the stored toggle when the gate is on")
+	}
+}

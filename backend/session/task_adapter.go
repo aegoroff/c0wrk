@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/v0lka/c0wrk/core"
+	"github.com/v0lka/c0wrk/core/e2s"
 	"github.com/v0lka/c0wrk/core/goal"
 	"github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
@@ -188,6 +189,36 @@ func (a *TaskStoreAdapter) LoadGoalState(taskID string) (*goal.GoalState, error)
 		return nil, fmt.Errorf("unmarshal goal state: %w", err)
 	}
 	return &gs, nil
+}
+
+// PersistE2SState JSON-marshals the E2S execution state (Σ + bookkeeping) and
+// stores it for a task, inserting or replacing any previously persisted state.
+// Called after every applied state patch so an interrupted run checkpoints its
+// Σ and survives app restart.
+func (a *TaskStoreAdapter) PersistE2SState(taskID string, st *e2s.E2SState) error {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal e2s state: %w", err)
+	}
+	return a.store.SaveE2SState(context.Background(), taskID, data)
+}
+
+// LoadE2SState loads the E2S execution state for a task and unmarshals it into
+// an *e2s.E2SState. Returns nil, nil when no E2S state has been persisted
+// (non-E2S tasks).
+func (a *TaskStoreAdapter) LoadE2SState(taskID string) (*e2s.E2SState, error) {
+	data, err := a.store.LoadE2SState(context.Background(), taskID)
+	if err != nil {
+		return nil, fmt.Errorf("load e2s state: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var st e2s.E2SState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("unmarshal e2s state: %w", err)
+	}
+	return &st, nil
 }
 
 // PersistDelegationSpec JSON-marshals the delegation spec (task text, tools,

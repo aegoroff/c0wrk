@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/v0lka/c0wrk/core/e2s"
 	"github.com/v0lka/c0wrk/core/vectorindex"
 )
 
@@ -554,6 +555,31 @@ func ApplyDefaults(cfg *Config) {
 	// over this seed (zero → default, non-zero → kept).
 	if cfg.SmallLLM.Context.OutputTokenReserve == 0 {
 		cfg.SmallLLM.Context.OutputTokenReserve = 16384
+	}
+
+	// E2S execution-mode defaults. Like the Small-LLM profile the section is
+	// seeded unconditionally (zero → default) so the values stay visible and
+	// editable while the mode itself stays a no-op until BOTH
+	// experimental.enabled and e2s.enabled are true. The byte limit mirrors
+	// core/e2s.DefaultStateByteLimit so the domain default and the config
+	// default cannot drift apart.
+	if cfg.E2S.MaxSteps == 0 {
+		cfg.E2S.MaxSteps = 50
+	}
+	if cfg.E2S.StateByteLimit == 0 {
+		cfg.E2S.StateByteLimit = e2s.DefaultStateByteLimit
+	}
+	if cfg.E2S.PatchRetries == 0 {
+		cfg.E2S.PatchRetries = 1
+	}
+	if cfg.E2S.ObservationTruncate == 0 {
+		cfg.E2S.ObservationTruncate = 2000
+	}
+	if cfg.E2S.RepeatNudgeThreshold == 0 {
+		cfg.E2S.RepeatNudgeThreshold = 3
+	}
+	if cfg.E2S.RepeatAbortThreshold == 0 {
+		cfg.E2S.RepeatAbortThreshold = 5
 	}
 
 	// Self-update defaults. Enabled is the master switch and defaults to true
