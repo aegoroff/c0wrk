@@ -291,7 +291,13 @@ describe('sound coverage across CHAT↔CODE toggles', () => {
     expect(listenerCount(A, 'task_complete')).toBeGreaterThan(0)
 
     playSoundMock.mockClear()
-    emitSession(A, 'task_complete', { success: true })
+    // The completion handler finalizes the session's UI state (chatStore +
+    // sessionStore writes), which re-renders the Harness — wrap the
+    // bus emission in act() so the store-driven update is flushed like any
+    // other state change under test.
+    await act(async () => {
+      emitSession(A, 'task_complete', { success: true })
+    })
     expect(playSoundMock).toHaveBeenCalledWith('success')
   })
 
@@ -319,7 +325,11 @@ describe('sound coverage across CHAT↔CODE toggles', () => {
     expect(listenerCount(B, 'task_complete')).toBeGreaterThan(0)
 
     playSoundMock.mockClear()
-    emitSession(B, 'task_complete', { success: true })
+    // Same as above: the terminal handler re-renders the Harness via store
+    // writes, so the emission is act()-wrapped.
+    await act(async () => {
+      emitSession(B, 'task_complete', { success: true })
+    })
     expect(playSoundMock).toHaveBeenCalledWith('success')
   })
 

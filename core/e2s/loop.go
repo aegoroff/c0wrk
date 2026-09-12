@@ -264,8 +264,8 @@ type Loop struct {
 	toolDefs []llm.ToolDefinition
 	// schemas maps tool name → raw input schema from the registry catalog,
 	// powering the pre-dispatch structural validation of action.args (see
-	// ValidateActionArgs). Built once in New from the same descriptor list
-	// the system prompt renders.
+	// sdktools.ValidateToolInput). Built once in New from the same descriptor
+	// list the system prompt renders.
 	schemas map[string]json.RawMessage
 }
 
@@ -638,7 +638,7 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 		// applied and no patch-retry budget is consumed; the model corrects
 		// the arguments next turn using the valid-parameter list.
 		if schema, known := l.schemas[call.Action.Tool]; known {
-			if verr := ValidateActionArgs(call.Action.Tool, schema, call.Action.Args); verr != nil {
+			if verr := sdktools.ValidateToolInput(call.Action.Tool, schema, call.Action.Args); verr != nil {
 				observation = "action arguments rejected: " + verr.Error()
 				isError = true
 			}
@@ -742,7 +742,7 @@ func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (string,
 			continue
 		}
 		if schema, known := l.schemas[sub.Tool]; known {
-			if verr := ValidateActionArgs(sub.Tool, schema, sub.Input); verr != nil {
+			if verr := sdktools.ValidateToolInput(sub.Tool, schema, sub.Input); verr != nil {
 				sb.WriteString("action arguments rejected: " + verr.Error() + "\n\n")
 				anyError = true
 				continue

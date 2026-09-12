@@ -127,7 +127,9 @@ security:
 `core/tools/registry.go` `Execute` enforces, in order:
 
 ```
-1. Required-field validation (JSON-Schema "required", defense-in-depth)
+1. Structural input validation (sdktools.ValidateToolInput — required keys,
+   declared types, unknown keys, recursive; defense-in-depth, fail-open on
+   unmodeled schema constructs)
 2. Disabled-tools check (No Project mode) — applies to ALL tools incl. system
 3. group == system → execute immediately (bypasses everything below)
 4. [PostExecuteHook deferred]

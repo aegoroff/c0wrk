@@ -70,7 +70,8 @@ sp4rk (module `github.com/v0lka/sp4rk`) lives in its [own repository](https://gi
 | `Tool`                 | github.com/v0lka/sp4rk/tools   | core/tools (embedded registry) | Tool interface (incl. IsUntrusted())          |
 | `BaseTool`             | github.com/v0lka/sp4rk/tools   | core/tools/builtins, MCP tools | Base impl with Untrusted field               |
 | `ContentBackedReader`  | github.com/v0lka/sp4rk/tools   | core/tools (`read_file_doc.go`) | Optional interface; `IsContentBacked` opts document-format `read_file` reads into content-backed caching |
-| `ToolRegistry`         | github.com/v0lka/sp4rk/tools   | core/tools (embedded)          | Basic tool store                |
+| `ToolRegistry`         | github.com/v0lka/sp4rk/tools   | core/tools (embedded)          | Tool store; SDK `Execute` adds pre-dispatch input validation + policy enforcement (shadowed by the core wrapper) |
+| `ValidateToolInput`    | github.com/v0lka/sp4rk/tools   | core/tools (registry Gate 1 in `Execute`/`ExecuteUnattended`), core/e2s (pre-dispatch action-args validation) | Recursive structural tool-input validator (closed-set schemas, fail-open on unmodeled constructs) |
 | `ToolRegistry.ListFiltered` | github.com/v0lka/sp4rk/tools | core/orchestrator              | Method on `ToolRegistry` — `ListFiltered(excludeNames map[string]bool) []ToolDescriptor`; filtered tool listing (e.g., exclude disabled tools) |
 | `ToolDescriptor`       | github.com/v0lka/sp4rk/tools   | core/orchestrator, planner     | Tool metadata                                 |
 | `ToolPolicy`           | github.com/v0lka/sp4rk/tools   | core/tools                     | Policy enum                                   |

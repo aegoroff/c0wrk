@@ -25,6 +25,11 @@ import (
 // user_confirm-postured mutating group) and newMockReadOnlyTool to
 // local_read (the allow-postured read group). defaultPolicy stays for the
 // sdktools.Tool interface; the registry resolves policy from the GROUP.
+// The schema declares additionalProperties:true because these doubles
+// exercise the POLICY gates (confirm/judge/hook flows), not Gate 1 input
+// validation — tests freely pass ad-hoc payload keys through them; the
+// structural validator's closed-set rejection is covered by the dedicated
+// gateProbe tests below.
 type mockTool struct {
 	name          string
 	description   string
@@ -37,7 +42,7 @@ func newMockTool(name, description string) *mockTool {
 	return &mockTool{
 		name:          name,
 		description:   description,
-		inputSchema:   json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}}}`),
+		inputSchema:   json.RawMessage(`{"type":"object","additionalProperties":true,"properties":{"input":{"type":"string"}}}`),
 		defaultPolicy: sdktools.PolicyUserConfirm,
 		group:         sdktools.GroupLocalWrite,
 	}
@@ -47,7 +52,7 @@ func newMockReadOnlyTool(name, description string) *mockTool {
 	return &mockTool{
 		name:          name,
 		description:   description,
-		inputSchema:   json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}}}`),
+		inputSchema:   json.RawMessage(`{"type":"object","additionalProperties":true,"properties":{"input":{"type":"string"}}}`),
 		defaultPolicy: sdktools.PolicyAlwaysAllow,
 		group:         sdktools.GroupLocalRead,
 	}
@@ -57,7 +62,7 @@ func newMockSystemTool(name, description string) *mockTool {
 	return &mockTool{
 		name:          name,
 		description:   description,
-		inputSchema:   json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}}}`),
+		inputSchema:   json.RawMessage(`{"type":"object","additionalProperties":true,"properties":{"input":{"type":"string"}}}`),
 		defaultPolicy: sdktools.PolicyAlwaysAllow,
 		group:         sdktools.GroupSystem,
 	}
@@ -228,7 +233,7 @@ func TestToolRegistry_List(t *testing.T) {
 	if desc.Source != "core" {
 		t.Errorf("expected descriptor source 'core', got %q", desc.Source)
 	}
-	if string(desc.InputSchema) != `{"type":"object","properties":{"input":{"type":"string"}}}` {
+	if string(desc.InputSchema) != `{"type":"object","additionalProperties":true,"properties":{"input":{"type":"string"}}}` {
 		t.Errorf("unexpected input schema: %s", string(desc.InputSchema))
 	}
 }
@@ -813,7 +818,7 @@ func newMockJudgerTool(name string, allow bool, reasoning string) *mockJudgerToo
 		mockTool: mockTool{
 			name:          name,
 			description:   "A tool with ToolJudger",
-			inputSchema:   json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}}}`),
+			inputSchema:   json.RawMessage(`{"type":"object","additionalProperties":true,"properties":{"input":{"type":"string"}}}`),
 			defaultPolicy: sdktools.PolicyAlwaysAllow,
 			group:         sdktools.GroupLocalRead,
 		},
@@ -860,7 +865,7 @@ func newMockConfirmJudgerTool(name string, policy sdktools.ToolPolicy, allow boo
 		mockTool: mockTool{
 			name:          name,
 			description:   "A confirm tool with ToolJudger",
-			inputSchema:   json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+			inputSchema:   json.RawMessage(`{"type":"object","additionalProperties":true,"properties":{"path":{"type":"string"}}}`),
 			defaultPolicy: sdktools.PolicyUserConfirm,
 			group:         sdktools.GroupLocalWrite,
 		},
@@ -2559,41 +2564,147 @@ func TestGateOrder_DenyBeforeJudgeAndSymlink(t *testing.T) {
 	}
 }
 
-// TestValidateRequiredFields verifies the centralized schema required-field
-// validator (ASI02-R2 defense-in-depth).
-func TestValidateRequiredFields(t *testing.T) {
-	schema := json.RawMessage(`{"type":"object","required":["path","content"],"properties":{}}`)
-
-	tests := []struct {
-		name  string
-		input string
-		want  int // number of missing fields
-	}{
-		{"both present", `{"path":"/x","content":"y"}`, 0},
-		{"path missing", `{"content":"y"}`, 1},
-		{"content missing", `{"path":"/x"}`, 1},
-		{"both missing", `{}`, 2},
-		{"non-object input", `"rawstring"`, 0}, // fail-safe: skip
-		{"null input", `null`, 0},              // fail-safe: skip (non-object)
-		{"empty input", ``, 0},                 // fail-safe: skip
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			missing := validateRequiredFields(schema, json.RawMessage(tt.input))
-			if len(missing) != tt.want {
-				t.Errorf("got %d missing (%v), want %d", len(missing), missing, tt.want)
+// gateProbePlanSchema mirrors declare_plan's schema shape (the incident that
+// motivated Gate 1's structural validator): a tasks array whose item objects
+// declare id, summary, description as required.
+const gateProbePlanSchema = `{
+	"type": "object",
+	"properties": {
+		"tasks": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id":          {"type": "string"},
+					"summary":     {"type": "string"},
+					"description": {"type": "string"},
+					"depends_on":  {"type": "array", "items": {"type": "string"}}
+				},
+				"required": ["id", "summary", "description"]
 			}
-		})
-	}
+		},
+		"mode": {"type": "string"}
+	},
+	"required": ["tasks"]
+}`
 
-	// Schema with no "required" → always empty (fail-safe).
-	noReq := json.RawMessage(`{"type":"object","properties":{}}`)
-	if m := validateRequiredFields(noReq, json.RawMessage(`{}`)); len(m) != 0 {
-		t.Errorf("expected no missing for schema without required, got %v", m)
-	}
+// gateProbeTool is a system-group tool that records whether its Execute body
+// was reached, so Gate 1 tests can assert that rejection happens BEFORE
+// dispatch. The system group lets a VALID control input execute directly
+// (bypassing confirmation flows), isolating Gate 1 as the variable under test.
+type gateProbeTool struct {
+	mockTool
+	execCalls int
+}
 
-	// Unparseable schema → fail-safe empty.
-	if m := validateRequiredFields(json.RawMessage(`{bad`), json.RawMessage(`{}`)); len(m) != 0 {
-		t.Errorf("expected no missing for unparseable schema, got %v", m)
+func (g *gateProbeTool) Execute(ctx context.Context, input json.RawMessage) (sdktools.ToolResult, error) {
+	g.execCalls++
+	return sdktools.ToolResult{Content: "executed"}, nil
+}
+
+func newGateProbeRegistry(t *testing.T) (*ToolRegistry, *gateProbeTool) {
+	t.Helper()
+	probe := &gateProbeTool{mockTool: mockTool{
+		name:          "gate_probe",
+		description:   "gate 1 probe",
+		inputSchema:   json.RawMessage(gateProbePlanSchema),
+		defaultPolicy: sdktools.PolicyAlwaysAllow,
+		group:         sdktools.GroupSystem,
+	}}
+	registry := NewToolRegistry()
+	registry.Register(probe)
+	return registry, probe
+}
+
+// gateProbeIncidentInput reproduces the declare_plan incident: tasks[2]
+// carries only a description — no id, no summary — violating the items
+// schema's required fields. The old shallow gate missed this (the top-level
+// "tasks" key was present); the structural validator must reject it naming
+// the nested path.
+const gateProbeIncidentInput = `{
+	"tasks": [
+		{"id": "step_1", "summary": "first", "description": "d1"},
+		{"id": "step_2", "summary": "second", "description": "d2"},
+		{"description": "no id, no summary"}
+	]
+}`
+
+func TestExecute_Gate1_NestedInvalidInputRejectedBeforeDispatch(t *testing.T) {
+	registry, probe := newGateProbeRegistry(t)
+
+	result, err := registry.Execute(context.Background(), "gate_probe", json.RawMessage(gateProbeIncidentInput))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected IsError for nested schema violation, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "tasks[2]") {
+		t.Errorf("expected the nested path in the message, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, `"id"`) {
+		t.Errorf("expected the missing parameter \"id\" in the message, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "valid parameters") {
+		t.Errorf("expected the valid-parameters hint in the message, got %q", result.Content)
+	}
+	if probe.execCalls != 0 {
+		t.Errorf("Gate 1 must reject BEFORE tool.Execute; tool body ran %d time(s)", probe.execCalls)
+	}
+}
+
+func TestExecute_Gate1_ValidNestedInputDispatches(t *testing.T) {
+	registry, probe := newGateProbeRegistry(t)
+
+	input := json.RawMessage(`{"tasks":[{"id":"step_1","summary":"s","description":"d"}],"mode":"present"}`)
+	result, err := registry.Execute(context.Background(), "gate_probe", input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("valid input must pass Gate 1, got %q", result.Content)
+	}
+	if probe.execCalls != 1 {
+		t.Errorf("expected the tool body to run once, ran %d time(s)", probe.execCalls)
+	}
+}
+
+func TestExecuteUnattended_Gate1_NestedInvalidInputRejectedBeforeDispatch(t *testing.T) {
+	registry, probe := newGateProbeRegistry(t)
+
+	result, err := registry.ExecuteUnattended(context.Background(), "gate_probe", json.RawMessage(gateProbeIncidentInput))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected IsError for nested schema violation, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "tasks[2]") {
+		t.Errorf("expected the nested path in the message, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, `"id"`) {
+		t.Errorf("expected the missing parameter \"id\" in the message, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "valid parameters") {
+		t.Errorf("expected the valid-parameters hint in the message, got %q", result.Content)
+	}
+	if probe.execCalls != 0 {
+		t.Errorf("Gate 1 must reject BEFORE tool.Execute; tool body ran %d time(s)", probe.execCalls)
+	}
+}
+
+func TestExecuteUnattended_Gate1_ValidNestedInputDispatches(t *testing.T) {
+	registry, probe := newGateProbeRegistry(t)
+
+	input := json.RawMessage(`{"tasks":[{"id":"step_1","summary":"s","description":"d"}],"mode":"present"}`)
+	result, err := registry.ExecuteUnattended(context.Background(), "gate_probe", input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("valid input must pass Gate 1, got %q", result.Content)
+	}
+	if probe.execCalls != 1 {
+		t.Errorf("expected the tool body to run once, ran %d time(s)", probe.execCalls)
 	}
 }

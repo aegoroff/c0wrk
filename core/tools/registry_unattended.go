@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
@@ -19,7 +18,9 @@ import (
 //
 // Every hard security gate still applies, fail-closed:
 //
-//  1. required-field validation (defense-in-depth),
+//  1. structural input validation (sdktools.ValidateToolInput — required
+//     keys, JSON types, unknown keys, recursively into nested objects and
+//     array items),
 //  2. disabled tools (No Project mode),
 //  3. the per-session extra shell blacklist (No Project mode),
 //  4. group policy deny,
@@ -42,12 +43,12 @@ func (r *ToolRegistry) ExecuteUnattended(ctx context.Context, name string, input
 		return sdktools.ToolResult{}, fmt.Errorf("tool %q not found", name)
 	}
 
-	// Gate 1: required-field validation — same fail-safe behavior as Execute.
-	if missing := validateRequiredFields(tool.InputSchema(), input); len(missing) > 0 {
-		return sdktools.ToolResult{
-			Content: "validation error: missing required parameter(s): " + strings.Join(missing, ", "),
-			IsError: true,
-		}, nil
+	// Gate 1: structural input validation — the SDK's general validator
+	// (sdktools.ValidateToolInput), same as Execute: required keys, JSON
+	// types, unknown keys, recursively into nested objects and array items,
+	// with fail-open semantics on unmodeled schema constructs.
+	if verr := sdktools.ValidateToolInput(name, tool.InputSchema(), input); verr != nil {
+		return sdktools.ErrorResult("%s", verr), nil
 	}
 
 	// Gate 2: disabled tools (No Project mode).

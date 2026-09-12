@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
@@ -103,6 +105,54 @@ type declarePlanInput struct {
 	Tasks []PlanTaskInput `json:"tasks"`
 }
 
+// validatePlanTasks checks that every task has a non-empty id, summary, and
+// description, that task ids are unique within the plan, and that every
+// depends_on entry (direct or transitive) references an id declared in the
+// same plan. All violations are collected and reported together so the caller
+// can fix the whole plan in one revision. Returns nil when the plan is valid.
+func validatePlanTasks(tasks []PlanTaskInput) error {
+	var problems []string
+	// ids maps each declared non-empty id to the 1-based number of its first
+	// occurrence, both for duplicate detection and reference resolution.
+	ids := make(map[string]int, len(tasks))
+	for i, task := range tasks {
+		num := i + 1
+		if strings.TrimSpace(task.ID) == "" {
+			problems = append(problems, fmt.Sprintf("task %d: missing required field %q", num, "id"))
+		}
+		if strings.TrimSpace(task.Summary) == "" {
+			problems = append(problems, fmt.Sprintf("task %d: missing required field %q", num, "summary"))
+		}
+		if strings.TrimSpace(task.Description) == "" {
+			problems = append(problems, fmt.Sprintf("task %d: missing required field %q", num, "description"))
+		}
+		if id := strings.TrimSpace(task.ID); id != "" {
+			if first, dup := ids[id]; dup {
+				problems = append(problems, fmt.Sprintf("duplicate task id %q (tasks %d and %d)", id, first, num))
+			} else {
+				ids[id] = num
+			}
+		}
+	}
+	for i, task := range tasks {
+		num := i + 1
+		for _, dep := range task.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				problems = append(problems, fmt.Sprintf("task %d: depends_on contains an empty task id", num))
+				continue
+			}
+			if _, ok := ids[dep]; !ok {
+				problems = append(problems, fmt.Sprintf("task %d: depends_on references unknown task id %q", num, dep))
+			}
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return errors.New("validation error: invalid plan tasks. Fix these issues and call declare_plan again:\n- " + strings.Join(problems, "\n- "))
+}
+
 func (t *DeclarePlanTool) Execute(ctx context.Context, input json.RawMessage) (sdktools.ToolResult, error) {
 	var params declarePlanInput
 	if err := json.Unmarshal(input, &params); err != nil {
@@ -117,6 +167,12 @@ func (t *DeclarePlanTool) Execute(ctx context.Context, input json.RawMessage) (s
 	}
 	if mode != "present" && mode != "await_approval" {
 		return sdktools.ErrorResult("validation error: mode must be \"present\" or \"await_approval\", got %q", mode), nil
+	}
+	// Schema-level validation runs before the continuation guard and before
+	// Publish, so a malformed plan never reaches the filesystem, the
+	// blackboard, or the approval flow — even on a resumed task.
+	if err := validatePlanTasks(params.Tasks); err != nil {
+		return sdktools.ErrorResult("%s", err), nil
 	}
 
 	publisher := PlanPublisherFrom(ctx)

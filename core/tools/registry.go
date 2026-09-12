@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strings"
 	"sync"
 
 	sdktools "github.com/v0lka/sp4rk/tools"
@@ -409,7 +408,9 @@ func (r *ToolRegistry) RegisterWithSource(tool sdktools.Tool, source string) {
 // Security is resolved by the tool's capability GROUP (sdktools.ToolGroupOf), never by
 // tool name. Gate order:
 //
-//  1. required-field validation (schema "required" keys),
+//  1. structural input validation (sdktools.ValidateToolInput — required
+//     keys, JSON types, unknown keys, recursively into nested objects and
+//     array items),
 //  2. disabled tools (No Project mode) — applies to every tool, system included,
 //  3. system group → execute directly (internal orchestration tools),
 //  4. extra shell blacklist (No Project) — hard block; the reason names the
@@ -434,16 +435,19 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 		return sdktools.ToolResult{Content: "tool not found: " + name, IsError: true}, nil
 	}
 
-	// Gate 1: centralized required-field validation (ASI02-R2, defense-in-depth).
-	// Ensures every tool — including new ones whose author forgot per-tool
-	// validation — rejects inputs missing a JSON Schema "required" top-level
-	// key. Fail-safe: schema parse errors or missing "required" are skipped,
-	// so this never blocks a call that existing per-tool validation accepts.
-	if missing := validateRequiredFields(tool.InputSchema(), input); len(missing) > 0 {
-		return sdktools.ToolResult{
-			Content: "validation error: missing required parameter(s): " + strings.Join(missing, ", "),
-			IsError: true,
-		}, nil
+	// Gate 1: centralized structural input validation (ASI02-R2,
+	// defense-in-depth) via the SDK's general validator
+	// (sdktools.ValidateToolInput). Every call — including tools whose author
+	// forgot per-tool validation — is checked against the tool's InputSchema
+	// BEFORE dispatch: required keys, JSON types of declared properties, and
+	// unknown keys, RECURSIVELY into nested objects and array items, so a
+	// schema-violating payload (e.g. declare_plan tasks without ids) is
+	// rejected up front with an actionable message naming the offending path
+	// (tasks[2].id) and the valid parameters. Fail-safe: empty/unparseable
+	// schemas, $ref subtrees, and levels without a declared property set are
+	// skipped, so this never blocks a call the tool itself would accept.
+	if verr := sdktools.ValidateToolInput(name, tool.InputSchema(), input); verr != nil {
+		return sdktools.ErrorResult("%s", verr), nil
 	}
 
 	// Gate 2: disabled tools (No Project mode) — MUST precede the system-group
@@ -853,37 +857,4 @@ func (r *ToolRegistry) confirmAndExecuteWithOptions(ctx context.Context, tool sd
 	default:
 		return sdktools.ToolResult{}, fmt.Errorf("unknown confirmation response: %d", resp)
 	}
-}
-
-// validateRequiredFields extracts the top-level "required" property names from
-// a tool's JSON Schema and reports which are absent from the input object.
-// It is fail-safe: any schema/input parse error, a non-object input, or a
-// schema without a "required" array yields an empty result (no missing fields),
-// so it never blocks a call that existing per-tool validation accepts. This is
-// defense-in-depth (ASI02-R2) so a newly added tool that forgets per-tool
-// validation still rejects inputs missing a declared required parameter.
-func validateRequiredFields(schema, input json.RawMessage) []string {
-	if len(schema) == 0 || len(input) == 0 {
-		return nil
-	}
-	var s struct {
-		Required []string `json:"required"`
-	}
-	if err := json.Unmarshal(schema, &s); err != nil || len(s.Required) == 0 {
-		return nil // no schema, unparseable, or nothing required → skip
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(input, &obj); err != nil {
-		return nil // input is not a JSON object (e.g. a raw value) → skip
-	}
-	if obj == nil {
-		return nil // JSON null is a non-object → skip, matching the documented intent
-	}
-	var missing []string
-	for _, field := range s.Required {
-		if _, present := obj[field]; !present {
-			missing = append(missing, field)
-		}
-	}
-	return missing
 }

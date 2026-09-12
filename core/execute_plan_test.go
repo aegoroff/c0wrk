@@ -597,6 +597,140 @@ func TestExecute_DiamondDAG_ParallelIndependentSteps(t *testing.T) {
 	}
 }
 
+// TestExecute_MalformedPlan_EmptyStepIDsRejected verifies the well-formedness
+// preflight: a plan whose steps carry empty IDs (restored from a legacy
+// session that bypassed declare_plan validation) must be rejected BEFORE any
+// step is registered in the local registry or any wave is dispatched — with
+// an actionable error instead of the cryptic `register plan step "":
+// delegation ID already exists` that two colliding empty IDs used to produce
+// mid-registration.
+func TestExecute_MalformedPlan_EmptyStepIDsRejected(t *testing.T) {
+	rec := &waveRecorder{}
+	emitter := &mockEmitter{}
+	l := &conductorLauncher{
+		deps: conductorDeps{emitter: emitter},
+		bb: planWith(
+			step("step_1", "A"),
+			orchestration.PlanStep{Summary: "No ID", Description: "task without an id"},
+			orchestration.PlanStep{Summary: "Also no ID", Description: "another task without an id"},
+		),
+		runPlanStepWave: rec.dispatch,
+	}
+
+	results, err := l.Execute(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("expected malformed-plan error, got results %v", resultIDs(results))
+	}
+	if !strings.Contains(err.Error(), "malformed plan: step 2 has an empty id") {
+		t.Errorf("error = %q, want it to name step 2's empty id", err.Error())
+	}
+	if !strings.Contains(err.Error(), malformedPlanFix) {
+		t.Errorf("error = %q, want the re-declare instruction suffix", err.Error())
+	}
+	// Nothing registered, nothing launched.
+	if rec.calls != 0 {
+		t.Errorf("expected 0 dispatched waves, got %d (%v)", rec.calls, rec.waves)
+	}
+	if len(emitter.planStepStarts) != 0 || len(emitter.planStepCompletes) != 0 {
+		t.Errorf("expected no plan-step events, got %d starts / %d completes",
+			len(emitter.planStepStarts), len(emitter.planStepCompletes))
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no step results, got %v", resultIDs(results))
+	}
+}
+
+// TestExecute_MalformedPlan_DuplicateStepIDsRejected mirrors the empty-ID
+// case for duplicate non-empty IDs: both colliding positions are named.
+func TestExecute_MalformedPlan_DuplicateStepIDsRejected(t *testing.T) {
+	rec := &waveRecorder{}
+	l := &conductorLauncher{
+		deps: conductorDeps{emitter: &mockEmitter{}},
+		bb: planWith(
+			step("step_1", "A"),
+			step("dup", "B"),
+			step("dup", "C"),
+		),
+		runPlanStepWave: rec.dispatch,
+	}
+
+	results, err := l.Execute(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("expected duplicate-id error, got results %v", resultIDs(results))
+	}
+	if !strings.Contains(err.Error(), `malformed plan: steps 2 and 3 share id "dup"`) {
+		t.Errorf("error = %q, want it to name both colliding positions", err.Error())
+	}
+	if !strings.Contains(err.Error(), malformedPlanFix) {
+		t.Errorf("error = %q, want the re-declare instruction suffix", err.Error())
+	}
+	if rec.calls != 0 {
+		t.Errorf("expected 0 dispatched waves, got %d", rec.calls)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no step results, got %v", resultIDs(results))
+	}
+}
+
+// TestExecute_MalformedPlan_ValidPlanStillRuns pins the preflight against
+// false positives: a regular well-formed plan passes through unchanged.
+func TestExecute_MalformedPlan_ValidPlanStillRuns(t *testing.T) {
+	rec := &waveRecorder{}
+	l := &conductorLauncher{
+		deps:            conductorDeps{emitter: &mockEmitter{}},
+		bb:              planWith(step("step_1", "A"), step("step_2", "B", "step_1")),
+		runPlanStepWave: rec.dispatch,
+	}
+
+	results, err := l.Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("valid plan must execute: %v", err)
+	}
+	if got := resultIDs(results); !equalStrings(got, []string{"step_1", "step_2"}) {
+		t.Errorf("results = %v, want [step_1 step_2]", got)
+	}
+	if len(rec.waves) != 2 {
+		t.Errorf("expected 2 sequential waves, got %d (%v)", len(rec.waves), rec.waves)
+	}
+}
+
+// TestExecutePlanTool_MalformedPlan_ReachesModelAsErrorResult verifies the
+// end-to-end contract: the malformed-plan error surfaces to the model as a
+// tool-result error carrying the full "execute_plan: malformed plan: ..."
+// message (the tool wrapper prepends the prefix), never as a panic or an
+// executor-loop abort.
+func TestExecutePlanTool_MalformedPlan_ReachesModelAsErrorResult(t *testing.T) {
+	rec := &waveRecorder{}
+	l := &conductorLauncher{
+		deps: conductorDeps{emitter: &mockEmitter{}},
+		bb: planWith(
+			step("step_1", "A"),
+			orchestration.PlanStep{Summary: "No ID", Description: "task without an id"},
+		),
+		runPlanStepWave: rec.dispatch,
+	}
+	ctx := tools.WithPlanStepExecutor(context.Background(), l)
+	tool := tools.NewExecutePlanTool()
+
+	res, err := tool.Execute(ctx, nil)
+	if err != nil {
+		t.Fatalf("wrapper must return the failure as a ToolResult, not a Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("expected IsError=true ToolResult, got content %q", res.Content)
+	}
+	wantPrefix := "execute_plan: malformed plan: step 2 has an empty id"
+	if !strings.HasPrefix(res.Content, wantPrefix) {
+		t.Errorf("content = %q, want prefix %q", res.Content, wantPrefix)
+	}
+	if !strings.Contains(res.Content, malformedPlanFix) {
+		t.Errorf("content = %q, want the re-declare instruction suffix", res.Content)
+	}
+	if rec.calls != 0 {
+		t.Errorf("expected 0 dispatched waves, got %d", rec.calls)
+	}
+}
+
 // TestExecute_UpstreamFailureCascadesAndEmitsTerminalEvents verifies #1a: when
 // step_1 fails, its dependents (step_2, step_3) become unsatisfiable and MUST
 // receive a synthesized PlanStepStart+PlanStepComplete terminal pair (so they

@@ -1,4 +1,6 @@
 export interface ParsedStep {
+  /** Stable step id from the `# Step N (id):` header, when present (newer plans). */
+  id?: string
   title: string
   what: string
   where: string
@@ -10,7 +12,9 @@ export interface ParsedPlan {
   steps: ParsedStep[]
 }
 
-const STEP_HEADER_RE = /^# Step (\d+): (.+)$/gm
+// Matches both the legacy `# Step N: Summary` headers and the current Go
+// SerializePlan format `# Step N (step_id): Summary` (see core/plan_serializer.go).
+const STEP_HEADER_RE = /^# Step (\d+)(?: \(([^)]*)\))?: (.+)$/gm
 
 /**
  * Parse plan markdown into structured steps.
@@ -22,7 +26,8 @@ export function parsePlanMarkdown(content: string): ParsedPlan {
   for (let i = 0; i < matches.length; i++) {
     const match = matches[i]!
     const stepNum = parseInt(match[1]!, 10)
-    const title = `Step ${stepNum}: ${match[2]!.trim()}`
+    const stepId = match[2]?.trim() ?? ''
+    const title = `Step ${stepNum}: ${match[3]!.trim()}`
 
     // Extract block content (from end of this header to next header or end)
     const blockStart = (match.index ?? 0) + match[0].length
@@ -32,6 +37,7 @@ export function parsePlanMarkdown(content: string): ParsedPlan {
     const fields = extractFields(block)
 
     steps.push({
+      ...(stepId ? { id: stepId } : {}),
       title,
       what: fields.what ?? '',
       where: fields.where ?? '',
@@ -122,12 +128,13 @@ function normalizeFieldName(name: string): string | null {
 
 /**
  * Serialize a parsed plan back to markdown, matching the Go SerializePlan format.
+ * Preserves the step id from the `# Step N (id):` header when present.
  */
 export function serializePlanMarkdown(plan: ParsedPlan): string {
   return plan.steps
     .map(
       (s, i) =>
-        `# Step ${i + 1}: ${s.title.replace(/^Step \d+: /, '')}\n\n` +
+        `# Step ${i + 1}${s.id ? ` (${s.id})` : ''}: ${s.title.replace(/^Step \d+: /, '')}\n\n` +
         `**What**: ${s.what || '...'}\n\n` +
         `**Where**: ${s.where || '...'}\n\n` +
         `**How**: ${s.how || '...'}\n\n` +

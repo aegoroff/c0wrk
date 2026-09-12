@@ -215,8 +215,9 @@ github.com/v0lka/sp4rk/agent/executor.go: calls ToolExecutor.Execute(ctx, name, 
 core/tools/registry.go: ToolRegistry.Execute(ctx, name, input)
   │
   ├─ 1. Lookup tool by name
-  ├─ 2. Required-field validation (defense-in-depth) — reject inputs missing
-  │      a JSON Schema "required" top-level key
+  ├─ 2. Structural input validation (sdktools.ValidateToolInput, defense-in-depth) —
+  │      reject inputs violating the tool's JSON schema: required keys, declared
+  │      types, unknown keys, recursively into nested objects and array items
   ├─ 3. Disabled-tools check (No Project mode) — applies to ALL tools, including system-group
   ├─ 4. Tool's group == system? → execute immediately, bypass policy/judge (disabled check above still applies)
   ├─ 5. Register PostExecuteHook (deferred, runs on every non-early return path)
