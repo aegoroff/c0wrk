@@ -235,10 +235,12 @@ func TestApplyPatchStatusEnum(t *testing.T) {
 	}
 }
 
-// TestApplyPatchExtensionAddOnly pins the add-only rule for extension keys:
-// a fresh key is added, a second value write against it is rejected, and the
-// universal null tombstone may remove it (after which it can be re-added).
-func TestApplyPatchExtensionAddOnly(t *testing.T) {
+// TestApplyPatchExtensionMutable pins the mutable rule for extension keys:
+// a fresh key is added, a second value write against it updates it in place,
+// and the universal null tombstone may remove it (after which it can be
+// re-added). Extension keys carry no fixed type — any JSON value replaces
+// the previous one.
+func TestApplyPatchExtensionMutable(t *testing.T) {
 	state := NewE2SState("obj", testClock)
 
 	next, err := ApplyPatch(state, StatePatch{"metric": "p95=120ms"}, mergeOpts(0))
@@ -249,12 +251,24 @@ func TestApplyPatchExtensionAddOnly(t *testing.T) {
 		t.Fatalf("extension value = %v, want %q", got, "p95=120ms")
 	}
 
-	_, err = ApplyPatch(next, StatePatch{"metric": "p95=90ms"}, mergeOpts(0))
-	if !errors.Is(err, ErrExtensionKeyExists) {
-		t.Fatalf("modify extension: got %v, want ErrExtensionKeyExists", err)
+	updated, err := ApplyPatch(next, StatePatch{"metric": "p95=90ms"}, mergeOpts(0))
+	if err != nil {
+		t.Fatalf("modify extension in place: %v", err)
+	}
+	if got := updated.Sigma["metric"]; got != "p95=90ms" {
+		t.Fatalf("updated extension value = %v, want %q", got, "p95=90ms")
 	}
 
-	afterDelete, err := ApplyPatch(next, StatePatch{"metric": nil}, mergeOpts(0))
+	// Type changes are legal for extension keys (no fixed typing).
+	retyped, err := ApplyPatch(updated, StatePatch{"metric": 42}, mergeOpts(0))
+	if err != nil {
+		t.Fatalf("re-type extension: %v", err)
+	}
+	if got, ok := retyped.Sigma["metric"].(int); !ok || got != 42 {
+		t.Fatalf("re-typed extension value = %T(%v), want 42", retyped.Sigma["metric"], retyped.Sigma["metric"])
+	}
+
+	afterDelete, err := ApplyPatch(retyped, StatePatch{"metric": nil}, mergeOpts(0))
 	if err != nil {
 		t.Fatalf("delete extension via null: %v", err)
 	}

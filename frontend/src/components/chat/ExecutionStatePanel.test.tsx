@@ -54,7 +54,7 @@ describe('ExecutionStatePanel', () => {
   it('renders nothing when the snapshot is inactive', () => {
     act(() => {
       useE2SStore.setState({
-        snapshots: { [SESSION]: { state: {}, turn: 0, status: 'running', maxSteps: 5, active: false } },
+        snapshots: { [SESSION]: { state: {}, turn: 0, totalTurns: 0, status: 'running', maxSteps: 5, active: false } },
       })
     })
     const container = render(<ExecutionStatePanel sessionId={SESSION} />)

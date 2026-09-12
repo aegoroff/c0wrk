@@ -55,7 +55,7 @@ func StateStatuses() []StateStatus {
 // The fixed core Σ keys — the schema every E2S state is built around. The key
 // set and the JSON type of each key are frozen: a patch may update a core key
 // only with a value of the same JSON type, and may never delete or re-type
-// it. Keys outside this set are extensions (add-only; see StatePatch).
+// it. Keys outside this set are extensions (mutable; see StatePatch).
 const (
 	CoreKeyObjective    = "objective"     // string — the task objective
 	CoreKeyChecklist    = "checklist"     // array — mutable working checklist
@@ -123,7 +123,7 @@ func SchemaFingerprint() string {
 // encoding/json for persistence.
 type E2SState struct {
 	// Sigma is the state map Σ. Core keys follow the fixed schema above;
-	// every other key is an extension (add-only).
+	// every other key is an extension (mutable, null tombstone deletes).
 	Sigma map[string]any `json:"sigma"`
 	// Schema is the SchemaFingerprint stamped at creation. An empty value
 	// skips the fingerprint check (hand-built states); ApplyPatch rejects a
@@ -199,9 +199,8 @@ func (a StepAction) Validate() error {
 //   - a nil (JSON null) value deletes the key from Σ (no-op for absent keys);
 //   - a core-key value must match the key's fixed JSON type (updates only —
 //     deletion and re-typing of core keys are rejected);
-//   - a non-core key may only be added — extensions are add-only, so a value
-//     write against an already-present extension key is rejected (deletion
-//     via null remains the universal tombstone for extension keys).
+//   - a non-core key is added or updated in place (extensions are mutable;
+//     deletion via null remains the universal tombstone for extension keys).
 //
 // Patches are JSON-shaped: values must be encodable, and array/object values
 // must use []any / map[string]any (the shapes encoding/json produces).

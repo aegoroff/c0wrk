@@ -199,6 +199,69 @@ func TestActionFingerprint_Canonical(t *testing.T) {
 	}
 }
 
+// TestActionFingerprint_SemanticAnchors pins the anchor-based spin identity:
+// precision arguments (line ranges, limits) are ignored, the target anchor
+// (path/pattern/command/…) is not — the exact re-reading spin the analyzed
+// production session died of.
+func TestActionFingerprint_SemanticAnchors(t *testing.T) {
+	// Same file, shifting ranges → identical fingerprint (spin detectable).
+	r1 := ActionFingerprint("read_file", json.RawMessage(`{"path":"diff.txt","start_line":1,"end_line":320}`))
+	r2 := ActionFingerprint("read_file", json.RawMessage(`{"path":"diff.txt","start_line":321,"end_line":520}`))
+	if r1 != r2 {
+		t.Errorf("shifting ranges on one path must not change the fingerprint:\n%s\n%s", r1, r2)
+	}
+
+	// Different files → different fingerprints.
+	other := ActionFingerprint("read_file", json.RawMessage(`{"path":"other.txt","start_line":1,"end_line":10}`))
+	if r1 == other {
+		t.Error("different paths must produce different fingerprints")
+	}
+
+	// ripgrep: same path, different pattern → different (the pattern IS the
+	// operation); same pattern → identical.
+	p1 := ActionFingerprint("ripgrep", json.RawMessage(`{"pattern":"func Test","path":"x.go"}`))
+	p2 := ActionFingerprint("ripgrep", json.RawMessage(`{"pattern":"func Other","path":"x.go"}`))
+	if p1 == p2 {
+		t.Error("different patterns must produce different fingerprints")
+	}
+	p3 := ActionFingerprint("ripgrep", json.RawMessage(`{"pattern":"func Test","path":"x.go","context_lines":5}`))
+	if p1 != p3 {
+		t.Error("non-anchor precision args must not change the fingerprint")
+	}
+
+	// bash_exec: different commands → different; same command → identical.
+	c1 := ActionFingerprint("bash_exec", json.RawMessage(`{"command":"ls -la"}`))
+	c2 := ActionFingerprint("bash_exec", json.RawMessage(`{"command":"git status"}`))
+	if c1 == c2 {
+		t.Error("different commands must produce different fingerprints")
+	}
+
+	// tool_result_read: the hash anchor distinguishes recoveries.
+	h1 := ActionFingerprint("tool_result_read", json.RawMessage(`{"hash":"abc123","start_line":1}`))
+	h2 := ActionFingerprint("tool_result_read", json.RawMessage(`{"hash":"abc123","start_line":500}`))
+	if h1 != h2 {
+		t.Error("paging one cached result must keep a stable fingerprint")
+	}
+	h3 := ActionFingerprint("tool_result_read", json.RawMessage(`{"hash":"def456","start_line":1}`))
+	if h1 == h3 {
+		t.Error("different cache hashes must produce different fingerprints")
+	}
+}
+
+// TestActionFingerprint_BatchPerSubCall pins batch spin identity: identical
+// batch calls match; any changed sub-target breaks the match.
+func TestActionFingerprint_BatchPerSubCall(t *testing.T) {
+	b1 := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"read_file","input":{"path":"a.go"}},{"tool":"glob","input":{"pattern":"*.go"}}]}`))
+	b2 := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"read_file","input":{"path":"a.go","start_line":10}},{"tool":"glob","input":{"pattern":"*.go"}}]}`))
+	if b1 != b2 {
+		t.Errorf("identical batch targets must match:\n%s\n%s", b1, b2)
+	}
+	b3 := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"read_file","input":{"path":"b.go"}},{"tool":"glob","input":{"pattern":"*.go"}}]}`))
+	if b1 == b3 {
+		t.Error("a changed sub-call target must break the batch fingerprint")
+	}
+}
+
 func TestNormalizeArgs_RejectsInvalidJSON(t *testing.T) {
 	if _, err := normalizeArgs(json.RawMessage(`{"broken":`)); err == nil {
 		t.Error("expected error for malformed JSON")

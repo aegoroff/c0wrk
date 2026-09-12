@@ -414,14 +414,14 @@ func TestE2SDomainStatus_CanceledLeavesStateResumable(t *testing.T) {
 	if !e2sStatusResumable(got) {
 		t.Errorf("status %q must be resumable", got)
 	}
-	// The other terminals keep their mappings.
+	// The other terminals keep their mappings (step_limit is covered by
+	// TestE2SStepLimitStaysResumable — it maps to the non-terminal active).
 	for _, tc := range []struct {
 		in   e2s.RunStatus
 		want e2s.StateStatus
 	}{
 		{e2s.RunStatusFinished, e2s.StateStatusMet},
 		{e2s.RunStatusPaused, e2s.StateStatusPaused},
-		{e2s.RunStatusStepLimit, e2s.StateStatusFailed},
 		{e2s.RunStatusSpinStop, e2s.StateStatusFailed},
 		{e2s.RunStatusFailed, e2s.StateStatusFailed},
 	} {
@@ -431,6 +431,24 @@ func TestE2SDomainStatus_CanceledLeavesStateResumable(t *testing.T) {
 	}
 	if got := e2sDomainStatus(nil); got != e2s.StateStatusFailed {
 		t.Errorf("e2sDomainStatus(nil) = %q, want %q", got, e2s.StateStatusFailed)
+	}
+}
+
+// TestE2SStepLimitStaysResumable pins the budget-exhaustion resume contract:
+// a step-limit run persists a NON-terminal (active) domain status and an
+// execution status of partial — the task stays resumable, and Resume re-enters
+// the loop with the accumulated Σ plus a fresh turn budget instead of
+// silently seeding a blank state.
+func TestE2SStepLimitStaysResumable(t *testing.T) {
+	domain := e2sDomainStatus(&e2s.Result{Status: e2s.RunStatusStepLimit})
+	if domain != e2s.StateStatusActive {
+		t.Fatalf("step-limit run persisted status = %q, want %q (non-terminal, resumable)", domain, e2s.StateStatusActive)
+	}
+	if !e2sStatusResumable(domain) {
+		t.Errorf("domain status %q must be resumable", domain)
+	}
+	if got := e2sExecutionStatus(&e2s.Result{Status: e2s.RunStatusStepLimit}); got != orchestration.ExecutionStatusPartial {
+		t.Errorf("step-limit execution status = %q, want %q", got, orchestration.ExecutionStatusPartial)
 	}
 }
 
@@ -616,4 +634,18 @@ func TestRunE2SLoop_PausePersistsSigmaAndResumeContinues(t *testing.T) {
 			t.Errorf("resumed output = %q, want the finish answer", resumed.Output)
 		}
 	})
+}
+
+// TestE2SResumeNote_InformsBudgetRefresh pins the plain-resume note: without
+// a user nudge the model is still told the budget was refreshed and Σ is the
+// continuation point (a resumed run's [turn N of M] counts the NEW budget).
+func TestE2SResumeNote_InformsBudgetRefresh(t *testing.T) {
+	note := e2sResumeNote("")
+	if !strings.Contains(note, "fresh turn budget") || !strings.Contains(note, "continuation point") {
+		t.Errorf("plain-resume note must explain the budget refresh and Σ precedence: %q", note)
+	}
+	nudged := e2sResumeNote("please also check tests")
+	if !strings.Contains(nudged, "please also check tests") || !strings.Contains(nudged, "budget was also refreshed") {
+		t.Errorf("nudged resume note must carry the follow-up and the budget note: %q", nudged)
+	}
 }

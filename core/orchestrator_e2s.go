@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -297,18 +298,25 @@ func (o *Orchestrator) resumeE2SLoop(
 	return o.runE2SWithState(ctx, bb.GetOriginalRequest(), bb, availableTools, HandleOptions{}, es, e2sResumeNote(nudge))
 }
 
-// e2sResumeNote renders the turn-1 observation for a resumed E2S run carrying
-// a user follow-up message. The E2S turn exposes no separate message channel
-// (the model sees only Σ + O), so — unlike the plan/goal resume paths that
-// append the follow-up to the resumed task message — the nudge is delivered as
-// the first observation. Returns "" when there is no follow-up, leaving the
-// generic turn-1 observation in place.
+// e2sResumeNote renders the turn-1 observation for a resumed E2S run. The
+// E2S turn exposes no separate message channel (the model sees only Σ + O),
+// so — unlike the plan/goal resume paths that append the follow-up to the
+// resumed task message — the nudge is delivered as the first observation.
+//
+// With a user follow-up, the note carries it verbatim (a new directive from
+// the user, not tool output). Without one (a plain Resume), the note still
+// informs the model of the two facts a continuation must know: the budget
+// was refreshed (the [turn N of M] header counts the NEW budget while Σ's
+// recorded turns are cumulative) and Σ — not any remembered trajectory — is
+// the continuation point.
 func e2sResumeNote(nudge string) string {
 	nudge = strings.TrimSpace(nudge)
 	if nudge == "" {
-		return ""
+		return "The run was interrupted and has been resumed with a fresh turn budget (the [turn N of M] header counts the new budget). " +
+			"Your state Σ below is the continuation point — everything not recorded there is forgotten. " +
+			"Build on what Σ already holds and wrap the task up efficiently."
 	}
-	return "User follow-up on resume (a new directive from the user, not tool output):\n\n" + nudge
+	return "User follow-up on resume (a new directive from the user, not tool output; your turn budget was also refreshed):\n\n" + nudge
 }
 
 // runE2SWithState is the shared body of runE2SLoop / resumeE2SLoop: it wires
@@ -374,7 +382,13 @@ func (o *Orchestrator) runE2SWithState(
 		Emitter: emitter,
 		onState: func(data map[string]any) {
 			sigma, _ := data["state"].(map[string]any)
-			turn, _ := data["turn"].(int)
+			// Cumulative applied patches across ALL runs of the task (the
+			// persisted checkpoint's continuation point). Falls back to the
+			// run-local turn for emitters predating the total_turns field.
+			turn, _ := data["total_turns"].(int)
+			if turn == 0 {
+				turn, _ = data["turn"].(int)
+			}
 			snapshot := snapshotBase
 			snapshot.Sigma = sigma
 			snapshot.TurnCount = turn
@@ -434,8 +448,13 @@ func (o *Orchestrator) runE2SWithState(
 		DelegateDirective: e2sDelegateDirective,
 		Skills:            skillSections,
 		Trajectory:        trajStore,
-		PauseChecker:      deps.pauseChecker,
-		Logger:            o.logger,
+		// Shared tool-result cache (same instance as the Conductor's
+		// executor): E2S truncation becomes cache-on-truncate with a
+		// tool_result_read recovery nudge, and tool_result_read actions
+		// resolve through the dispatch context.
+		ToolCache:    deps.toolCache,
+		PauseChecker: deps.pauseChecker,
+		Logger:       o.logger,
 	}
 
 	loop := e2s.New(deps.llm, newE2SRegistryAdapter(deps.toolExec, e2sTools), perStep, cfg)
@@ -474,6 +493,16 @@ func (o *Orchestrator) runE2SWithState(
 			output = res.Answer
 		}
 		status = e2sExecutionStatus(res)
+		// Budget exhaustion without a delivered answer surfaces an explicit,
+		// honest outcome instead of echoing the original user message: the
+		// task stays resumable and the accumulated Σ explains where the work
+		// stopped (the Execution State panel renders it).
+		if res.Status == e2s.RunStatusStepLimit && res.Answer == "" {
+			output = fmt.Sprintf(
+				"E2S run stopped: the turn budget (%d steps) was exhausted before the task completed. "+
+					"The working state Σ was preserved with %d recorded turns — use Resume to continue with a fresh budget.",
+				e2sCfg.MaxSteps, res.Snapshot.TurnCount)
+		}
 	}
 	execResult := &orchestration.ExecutionResult{Output: output, Status: status}
 
@@ -537,7 +566,12 @@ func e2sExecutionStatus(res *e2s.Result) orchestration.ExecutionStatus {
 		return orchestration.ExecutionStatusPaused
 	case e2s.RunStatusCanceled:
 		return orchestration.ExecutionStatusCancelled
-	default: // step_limit, spin_stop, failed
+	case e2s.RunStatusStepLimit:
+		// Budget exhaustion is execution-INCOMPLETE, not failed: persistTaskOutcome
+		// keeps a partial task in_progress (resumable), and a later resume
+		// re-enters the loop with the accumulated Σ plus a fresh turn budget.
+		return orchestration.ExecutionStatusPartial
+	default: // spin_stop, failed
 		return orchestration.ExecutionStatusFailed
 	}
 }
@@ -564,7 +598,14 @@ func e2sDomainStatus(res *e2s.Result) e2s.StateStatus {
 		return e2s.StateStatusPaused
 	case e2s.RunStatusCanceled:
 		return e2s.StateStatusActive
-	default: // step_limit, spin_stop, failed
+	case e2s.RunStatusStepLimit:
+		// Budget exhaustion is a NON-terminal checkpoint (mirroring the
+		// cancel/shutdown mapping above): the accumulated Σ is the valuable
+		// artifact, and e2sStatusResumable admits active — so Resume
+		// re-enters with the full working state and a fresh turn budget
+		// instead of silently seeding a blank Σ.
+		return e2s.StateStatusActive
+	default: // spin_stop, failed
 		return e2s.StateStatusFailed
 	}
 }

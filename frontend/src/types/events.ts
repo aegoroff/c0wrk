@@ -368,6 +368,10 @@ export interface E2SSigma {
 export interface E2SStateData {
   readonly state: E2SSigma
   readonly turn: number
+  /** Cumulative applied patches across all runs of the task (present on
+   *  current emitters; a resumed run's `turn` restarts at 1 against its
+   *  fresh budget while `total_turns` continues the count). */
+  readonly total_turns?: number
   readonly max_turns?: number
   readonly status?: string
   /** True when `state` carries only the changed slice (merge over the previous

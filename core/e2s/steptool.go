@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/v0lka/sp4rk/llm"
 	sdktools "github.com/v0lka/sp4rk/tools"
@@ -68,7 +69,7 @@ const stepToolSchema = `{
 	"properties": {
 		"state_patch": {
 			"type": "object",
-			"description": "Shallow-merge patch into the working state. Core keys update in place; extension keys are add-only (delete with null, then re-add). Omit keys you want to keep. Keep the merged state compact — oversized patches are rejected.",
+			"description": "Shallow-merge patch into the working state. Core keys keep their fixed types; extension keys add or update in place (delete with an explicit null). Omit keys you want to keep. Keep the merged state compact — oversized patches are rejected.",
 			"additionalProperties": true
 		},
 		"action": {
@@ -250,9 +251,77 @@ func compactJSON(raw json.RawMessage) string {
 	return buf.String()
 }
 
-// ActionFingerprint returns a canonical string identifying the action
-// (tool name + compact args). Identical fingerprints on consecutive turns
-// feed the anti-spin detector.
+// ActionFingerprint returns a canonical string identifying the action for
+// the anti-spin detector. It is SEMANTIC, not byte-exact: the fingerprint
+// anchors on the identity of the operation's TARGET — the tool name plus the
+// "anchor" arguments that name what is acted on (path, pattern, command,
+// query, url, name, skill, hash) — and deliberately ignores precision
+// arguments such as line ranges or limits. Re-reading the same file with
+// ever-shifting start_line/end_line (the classic small-model spin) produces
+// a stable fingerprint and is caught; reading different files or searching
+// different patterns does not. A tool exposing no anchor argument falls
+// back to the full compact args (the legacy exact behavior), and a batch
+// fingerprints per sub-call so a repeated identical batch still spins.
 func ActionFingerprint(tool string, args json.RawMessage) string {
+	if tool == sdktools.ToolBatch {
+		return tool + ":" + batchAnchors(args)
+	}
+	if anchors := argAnchors(args); anchors != "" {
+		return tool + ":" + anchors
+	}
 	return tool + ":" + compactJSON(args)
+}
+
+// anchorArgKeys are the argument names treated as operation-target anchors.
+// Sorted for deterministic extraction.
+var anchorArgKeys = []string{"command", "hash", "name", "path", "pattern", "query", "skill", "url"}
+
+// argAnchors extracts the anchor key=value pairs from an args object
+// (string-valued anchors only), sorted by key. Empty string when no anchor
+// key carries a string value.
+func argAnchors(args json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return ""
+	}
+	pairs := make([]string, 0, len(anchorArgKeys))
+	for _, key := range anchorArgKeys {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var val string
+		if err := json.Unmarshal(raw, &val); err != nil {
+			continue // non-string anchor (e.g. numeric name): not an anchor
+		}
+		pairs = append(pairs, key+"="+val)
+	}
+	if len(pairs) == 0 {
+		return ""
+	}
+	return strings.Join(pairs, "\x00")
+}
+
+// batchAnchors fingerprints a batch action per sub-call: each sub-call's
+// tool + anchors (or full args fallback), joined in order. A repeated
+// identical batch matches; any changed target breaks the match.
+func batchAnchors(args json.RawMessage) string {
+	var input struct {
+		Calls []struct {
+			Tool  string          `json:"tool"`
+			Input json.RawMessage `json:"input"`
+		} `json:"calls"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil || len(input.Calls) == 0 {
+		return compactJSON(args)
+	}
+	parts := make([]string, 0, len(input.Calls))
+	for _, sub := range input.Calls {
+		if anchors := argAnchors(sub.Input); anchors != "" {
+			parts = append(parts, sub.Tool+"="+anchors)
+			continue
+		}
+		parts = append(parts, sub.Tool+"="+compactJSON(sub.Input))
+	}
+	return strings.Join(parts, "\x00")
 }

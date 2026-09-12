@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/v0lka/sp4rk/agent"
 	"github.com/v0lka/sp4rk/llm"
@@ -181,6 +183,14 @@ type Config struct {
 	// TrajectoryStore, when non-nil, is synced with the growing step
 	// trajectory after every completed step.
 	Trajectory agent.TrajectoryStore
+	// ToolCache is the shared tool-result cache (the same instance the
+	// Conductor's executor uses). When non-nil: (a) the dispatch context
+	// carries it so tool_result_read actions resolve, and (b) an
+	// observation truncated by MaxObservationChars is cached in full and the
+	// truncation nudge with the cache hash is appended — the model recovers
+	// the dropped content via tool_result_read instead of re-running the
+	// tool. Nil degrades to the legacy plain truncation (test doubles).
+	ToolCache *agent.ToolResultCache
 	// PauseChecker is a cooperative pause signal checked once per step
 	// boundary; a true return stops the loop with ErrPaused.
 	PauseChecker func(ctx context.Context) bool
@@ -252,6 +262,11 @@ type Loop struct {
 	emitter  Emitter
 	system   string
 	toolDefs []llm.ToolDefinition
+	// schemas maps tool name → raw input schema from the registry catalog,
+	// powering the pre-dispatch structural validation of action.args (see
+	// ValidateActionArgs). Built once in New from the same descriptor list
+	// the system prompt renders.
+	schemas map[string]json.RawMessage
 }
 
 // New creates an E2S loop. caller must be non-nil. A nil registry allows
@@ -270,6 +285,12 @@ func New(caller llm.Caller, registry Registry, emitter Emitter, cfg Config) *Loo
 			Description: stepTool.Description(),
 			InputSchema: stepTool.InputSchema(),
 		}},
+	}
+	if descs := l.descriptors(); descs != nil {
+		l.schemas = make(map[string]json.RawMessage, len(descs))
+		for _, d := range descs {
+			l.schemas[d.Name] = d.InputSchema
+		}
 	}
 	l.system = BuildSystemPrompt(cfg, l.descriptors())
 	return l
@@ -304,6 +325,12 @@ func (l *Loop) emit(f func(e Emitter)) {
 // distinguishes a cooperative pause, context.Canceled/DeadlineExceeded a
 // cancellation.
 func (l *Loop) Run(ctx context.Context) (*Result, error) {
+	// The shared tool-result cache rides on the dispatch context so every
+	// action (notably tool_result_read) resolves it, mirroring the
+	// executor's WithToolResultCache injection.
+	if l.cfg.ToolCache != nil {
+		ctx = agent.WithToolResultCache(ctx, l.cfg.ToolCache)
+	}
 	state := l.seedState()
 	observation := initialObservation
 	if l.cfg.ResumeNote != "" {
@@ -369,7 +396,7 @@ func (l *Loop) Run(ctx context.Context) (*Result, error) {
 		// merged state and publish the full Σ + turn snapshot.
 		state = res.state
 		if res.applied {
-			l.emitState(state)
+			l.emitState(turn, state)
 		}
 
 		// Finish: intercepted by the loop, never dispatched.
@@ -458,7 +485,7 @@ const initialObservation = "(no observation yet — this is turn 1; act accordin
 // failure. After the retries are exhausted the failure becomes the next
 // observation (Σ untouched).
 func (l *Loop) turnCall(ctx context.Context, state E2SState, observation string, turn int) stepResult {
-	user := BuildUserMessage(state.Sigma, observation, turn)
+	user := BuildUserMessage(state.Sigma, observation, turn, l.cfg.MaxSteps)
 
 	var (
 		lastResp    *llm.ChatResponse
@@ -603,19 +630,41 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 		observation = "no tool registry configured for the E2S loop"
 		isError = true
 	} else {
-		result, err := l.registry.Execute(ctx, call.Action.Tool, call.Action.Args)
-		switch {
-		case err != nil:
-			observation = fmt.Sprintf("tool execution error: %v", err)
-			isError = true
-		case result.IsError:
-			observation, isError = result.Content, true
-		default:
-			observation = result.Content
+		// Pre-dispatch structural validation: the e2s_step envelope's
+		// action.args is a free-form object the provider never schema-checks,
+		// so wrong parameter names would be silently ignored by the target
+		// tool's json.Unmarshal (defaults applied, bewildering result). A
+		// violation is an ACTION error observation — the turn's patch stays
+		// applied and no patch-retry budget is consumed; the model corrects
+		// the arguments next turn using the valid-parameter list.
+		if schema, known := l.schemas[call.Action.Tool]; known {
+			if verr := ValidateActionArgs(call.Action.Tool, schema, call.Action.Args); verr != nil {
+				observation = "action arguments rejected: " + verr.Error()
+				isError = true
+			}
+		}
+		if !isError {
+			if call.Action.Tool == sdktools.ToolBatch {
+				// The batch meta-tool is intercepted by the loop (its registry
+				// form always errors): each sub-call dispatches through the
+				// same registry path, inheriting every security gate.
+				observation, isError = l.dispatchBatch(ctx, call.Action.Args)
+			} else {
+				observation, isError = l.executeSingle(ctx, call.Action.Tool, call.Action.Args)
+			}
 		}
 	}
 
 	truncated := strutil.TruncateUTF8(observation, l.cfg.MaxObservationChars)
+	// Cache-on-truncate: the full raw result goes into the shared cache and
+	// the standard fragmentation nudge (identical format to the Conductor's
+	// executor) tells the model how to recover the dropped content via
+	// tool_result_read. Without a cache the legacy plain truncation applies.
+	if l.cfg.ToolCache != nil && utf8.RuneCountInString(observation) > l.cfg.MaxObservationChars {
+		meta := agent.ToolCacheMeta{Input: string(call.Action.Args)}
+		hash := l.cfg.ToolCache.Store(call.Action.Tool, observation, meta)
+		truncated += agent.FormatFragmentationNudge(hash, call.Action.Tool, 0)
+	}
 	// Wrapping is decided by TOOL CLASS (IsUntrusted), not by result type: an
 	// untrusted tool's error diagnostic is attacker-influenceable too and must
 	// be delivered inside the boundary exactly like successful output (see
@@ -638,23 +687,100 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 	}
 }
 
+// executeSingle runs one tool call through the registry and returns the raw
+// observation plus its error flag (registry errors and IsError results both
+// surface as error observations). Untrusted wrapping is NOT applied here —
+// the caller decides (single dispatch wraps the whole observation; batch
+// wraps each sub-result individually).
+func (l *Loop) executeSingle(ctx context.Context, tool string, args json.RawMessage) (string, bool) {
+	result, err := l.registry.Execute(ctx, tool, args)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("tool execution error: %v", err), true
+	case result.IsError:
+		return result.Content, true
+	default:
+		return result.Content, false
+	}
+}
+
+// dispatchBatch executes the batch meta-tool's sub-calls sequentially. Each
+// sub-call runs the full single-dispatch path — schema validation (against
+// the sub-tool's own schema), registry execution with every security gate,
+// and per-sub-call untrusted wrapping by tool class — and the numbered
+// results are joined into one observation. Per-call errors never abort the
+// batch (mirroring the executor's batch semantics); nested batch and the
+// E2S envelope targets (e2s_step, finish) are rejected fail-closed: finish
+// must stay a top-level action or the loop's finish interception could be
+// bypassed.
+func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (string, bool) {
+	var input struct {
+		Calls []struct {
+			Tool  string          `json:"tool"`
+			Input json.RawMessage `json:"input"`
+		} `json:"calls"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return "batch parse error: " + err.Error(), true
+	}
+	if len(input.Calls) == 0 {
+		return "batch: no calls provided (empty calls array)", true
+	}
+
+	var sb strings.Builder
+	anyError := false
+	for i, sub := range input.Calls {
+		fmt.Fprintf(&sb, "[batch result %d/%d — %s]\n", i+1, len(input.Calls), sub.Tool)
+		switch sub.Tool {
+		case sdktools.ToolBatch:
+			sb.WriteString("error: batch cannot be nested inside another batch call\n\n")
+			anyError = true
+			continue
+		case StepToolName, FinishActionName:
+			fmt.Fprintf(&sb, "error: %q cannot be used inside a batch; it must be the top-level action\n\n", sub.Tool)
+			anyError = true
+			continue
+		}
+		if schema, known := l.schemas[sub.Tool]; known {
+			if verr := ValidateActionArgs(sub.Tool, schema, sub.Input); verr != nil {
+				sb.WriteString("action arguments rejected: " + verr.Error() + "\n\n")
+				anyError = true
+				continue
+			}
+		}
+		content, subErr := l.executeSingle(ctx, sub.Tool, sub.Input)
+		if subErr {
+			anyError = true
+		}
+		if l.registry.IsToolUntrusted(sub.Tool) {
+			content = untrustedWrap(sub.Tool, content)
+		}
+		sb.WriteString(content)
+		sb.WriteString("\n\n")
+	}
+	return strings.TrimRight(sb.String(), "\n"), anyError
+}
+
 // emitState publishes the full Σ + turn snapshot via the optional
-// StateEmitter capability (skipped silently when unsupported). The turn is
-// the domain TurnCount — the number of applied patches, bumped by the merge
-// that produced this state. max_turns carries the run's turn budget (a zero
-// value means unbudgeted) and status the current domain lifecycle status, so
-// the UI can render a turn/budget counter and a status badge without
-// inferring them from Σ.
-func (l *Loop) emitState(state E2SState) {
+// StateEmitter capability (skipped silently when unsupported). `turn` is the
+// RUN-LOCAL turn (the loop's own counter, coherent with max_turns — a
+// resumed run restarts at 1 against its fresh budget); `total_turns` carries
+// the domain TurnCount (cumulative applied patches across all runs of the
+// task — the persistence continuation point). max_turns carries the run's
+// turn budget (a zero value means unbudgeted) and status the current domain
+// lifecycle status, so the UI can render a turn/budget counter and a status
+// badge without inferring them from Σ.
+func (l *Loop) emitState(turn int, state E2SState) {
 	if l.emitter == nil {
 		return
 	}
 	if se, ok := l.emitter.(StateEmitter); ok {
 		se.E2SState(map[string]any{
-			"state":     state.Sigma,
-			"turn":      state.TurnCount,
-			"max_turns": l.cfg.MaxSteps,
-			"status":    string(state.Status),
+			"state":       state.Sigma,
+			"turn":        turn,
+			"total_turns": state.TurnCount,
+			"max_turns":   l.cfg.MaxSteps,
+			"status":      string(state.Status),
 		})
 	}
 }

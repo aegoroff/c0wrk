@@ -1,6 +1,7 @@
 package e2s
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -62,7 +63,10 @@ func workspaceSection(cfg Config) string {
 
 // availableToolsSection renders the catalog of tools the action dispatch can
 // target. Descriptors are sorted by name for a stable, cache-friendly list;
-// the description is reduced to its first line to keep the section compact.
+// each entry carries its purpose line and the FULL input schema (compact
+// JSON) — the model dispatches free-form action.args objects, so without the
+// schema it cannot know parameter names and guesses wrong ones that Go's
+// json.Unmarshal then silently ignores.
 func availableToolsSection(descriptors []sdktools.ToolDescriptor) string {
 	if len(descriptors) == 0 {
 		return "\n\n## Available Tools\nNone — call " + FinishActionName + " with your best answer."
@@ -73,7 +77,7 @@ func availableToolsSection(descriptors []sdktools.ToolDescriptor) string {
 
 	var sb strings.Builder
 	sb.WriteString("\n\n## Available Tools\n")
-	fmt.Fprintf(&sb, "Actions dispatch to these tools via `%s.action.tool`. The special target %q ends the task.\n", StepToolName, FinishActionName)
+	fmt.Fprintf(&sb, "Actions dispatch to these tools via `%s.action.tool`. The special target %q ends the task. Each tool's `args` MUST use exactly the parameter names declared in its schema.\n", StepToolName, FinishActionName)
 	for _, d := range sorted {
 		sb.WriteString("- `" + d.Name + "`")
 		if desc := firstLine(d.Description); desc != "" {
@@ -82,9 +86,26 @@ func availableToolsSection(descriptors []sdktools.ToolDescriptor) string {
 		if d.SourceCategory == sdktools.SourceCategoryMCP {
 			sb.WriteString(" [MCP]")
 		}
+		if schema := compactSchema(d.InputSchema); schema != "" && schema != "{}" {
+			sb.WriteString("\n  args schema: " + schema)
+		}
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// compactSchema renders a tool's input schema as compact JSON (whitespace
+// removed via json.Compact, preserving the schema's own key order — stable
+// for a given build). An empty/unparseable schema renders as "".
+func compactSchema(schema json.RawMessage) string {
+	if strings.TrimSpace(string(schema)) == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, schema); err != nil {
+		return ""
+	}
+	return buf.String()
 }
 
 // skillsSection renders the active-skill bodies. Skill bodies are emitted
@@ -108,20 +129,62 @@ func skillsSection(skills []SkillSection) string {
 	return sb.String()
 }
 
-// BuildUserMessage renders the per-turn user message: the current turn number,
-// the full working state Σₜ as compact JSON, and the latest observation Oₜ.
-// This message (plus the system prompt) is the ENTIRE request — previous
-// turns never leak in, keeping the context bounded at O(1).
-func BuildUserMessage(state map[string]any, observation string, turn int) string {
+// BuildUserMessage renders the per-turn user message: the current turn
+// number against the run's budget, the full working state Σₜ as compact
+// JSON, and the latest observation Oₜ. This message (plus the system prompt)
+// is the ENTIRE request — previous turns never leak in, keeping the context
+// bounded at O(1).
+//
+// maxTurns > 0 renders "[turn N of M]" and, once the remaining budget
+// enters the warning window (the greater of 20% of the budget or 3 turns),
+// appends an explicit wrap-up directive — the model cannot pace itself
+// against a budget it cannot see. maxTurns <= 0 falls back to the legacy
+// bare "[turn N]" (unbudgeted runs).
+func BuildUserMessage(state map[string]any, observation string, turn, maxTurns int) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[turn %d]\n", turn)
-	sb.WriteString("<state>\n")
+	sb.WriteString(turnHeader(turn, maxTurns))
+	sb.WriteString("\n<state>\n")
 	sb.WriteString(renderStateJSON(state))
 	sb.WriteString("\n</state>\n")
 	sb.WriteString("<observation>\n")
 	sb.WriteString(observation)
 	sb.WriteString("\n</observation>\n")
 	return sb.String()
+}
+
+// budgetWarnFrom returns the first turn number at which the wrap-up warning
+// renders: the last max(3, ceil(20% of maxTurns)) turns of the run. For
+// maxTurns <= 0 (unbudgeted) the warning never renders (0 sentinel).
+func budgetWarnFrom(maxTurns int) int {
+	if maxTurns <= 0 {
+		return 0
+	}
+	warnRemaining := (maxTurns + 4) / 5 // ceil(20%)
+	if warnRemaining < 3 {
+		warnRemaining = 3
+	}
+	if warnRemaining > maxTurns {
+		warnRemaining = maxTurns
+	}
+	return maxTurns - warnRemaining + 1
+}
+
+// turnHeader renders the turn/budget line: "[turn N of M]" plus the wrap-up
+// directive inside the warning window.
+func turnHeader(turn, maxTurns int) string {
+	if maxTurns <= 0 {
+		return fmt.Sprintf("[turn %d]", turn)
+	}
+	remaining := maxTurns - turn
+	if remaining < 0 {
+		remaining = 0
+	}
+	if turn >= budgetWarnFrom(maxTurns) {
+		return fmt.Sprintf(
+			"[turn %d of %d — %d turns remain: distill what matters into your state NOW and call finish with your best answer before the budget runs out]",
+			turn, maxTurns, remaining)
+	}
+	return fmt.Sprintf("[turn %d of %d]", turn, maxTurns)
 }
 
 // BuildCorrectionSuffix renders the corrective tail appended to the user

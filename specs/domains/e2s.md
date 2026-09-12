@@ -2,12 +2,12 @@
 
 ## Purpose
 
-E2S is an alternative execution mode in which the model's only memory is an **externalized, structured state Σ** ("sigma") that it reads and patches every turn, instead of replaying a growing conversation history. Each turn is a fresh one-shot request — system prompt + `[turn N] <state>Σₜ</state> <observation>Oₜ</observation>` — so the request size stays **O(1) in the number of turns** no matter how long the task runs. The mode is selected per message (`HandleOptions.E2S`), is mutually exclusive with goal mode, and is gated behind `experimental.enabled`. Design rationale and the arXiv 2608.26263 motivation: [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md).
+E2S is an alternative execution mode in which the model's only memory is an **externalized, structured state Σ** ("sigma") that it reads and patches every turn, instead of replaying a growing conversation history. Each turn is a fresh one-shot request — system prompt + `[turn N of M] <state>Σₜ</state> <observation>Oₜ</observation>` — so the request size stays **O(1) in the number of turns** no matter how long the task runs. The mode is selected per message (`HandleOptions.E2S`), is mutually exclusive with goal mode, and is gated behind `experimental.enabled`. Design rationale and the arXiv 2608.26263 motivation: [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md); the stabilization revision (mutable extensions, observation hash recovery, working batch, budget visibility, semantic anti-spin, resumable step-limit): [decisions/040-e2s-stabilization.md](../decisions/040-e2s-stabilization.md).
 
 ## Key Files
 
 - `core/e2s/types.go` — the domain layer (pure data, no LLM/tool imports): `E2SState` (Σ + bookkeeping), `StateStatus` (domain lifecycle: `active`/`paused`/`met`/`failed`/`cancelled`), the eight fixed **core keys** (`CoreKeyObjective`, `CoreKeyChecklist`, `CoreKeyFilesTouched`, `CoreKeyFindings`, `CoreKeyDecisions`, `CoreKeyNextSteps`, `CoreKeyDoneCriteria`, `CoreKeyStatus`), `SchemaFingerprint()` (SHA-256 over the sorted key→type pairs), `NewE2SState` (canonical initial state)
-- `core/e2s/merge.go` — the merge operator `Σₜ⊕ΔΣₜ` (`ApplyPatch`): null-tombstone deletion (non-core keys only), core-key type validation (update-only — deletion/re-typing rejected), add-only extension keys, byte-limit enforcement (`ErrStateTooLarge`, `DefaultStateByteLimit` = 16 KiB), schema-fingerprint guard (`ErrSchemaMismatch`); every failure is a sentinel-wrapped error (`ErrDeleteCoreKey`, `ErrCoreKeyType`, `ErrCoreKeyElement`, `ErrInvalidStatus`, `ErrExtensionKeyExists`, `ErrEmptyKey`)
+- `core/e2s/merge.go` — the merge operator `Σₜ⊕ΔΣₜ` (`ApplyPatch`): null-tombstone deletion (non-core keys only), core-key type validation (update-only — deletion/re-typing rejected), mutable extension keys (a value write replaces in place; ADR-040), byte-limit enforcement (`ErrStateTooLarge`, `DefaultStateByteLimit` = 16 KiB), schema-fingerprint guard (`ErrSchemaMismatch`); every failure is a sentinel-wrapped error (`ErrDeleteCoreKey`, `ErrCoreKeyType`, `ErrCoreKeyElement`, `ErrInvalidStatus`, `ErrEmptyKey`)
 - `core/e2s/steptool.go` — the `e2s_step` meta-tool (`StepToolName`, **GroupSystem**): its JSON schema (`state_patch` object + `action` `{tool, args}` | `finish` `{answer}`), `ParseStepCall` (first tool call must be `e2s_step`), `ActionFingerprint` (canonical tool+args string feeding anti-spin); `Execute` is a wiring-error trap — the loop intercepts the call and never registry-dispatches it
 - `core/e2s/prompt.go` — deterministic prompt composition: `BuildSystemPrompt` (`prompts.E2SSystem` + Workspace + Available Tools + Delegation + Active Skills sections; sorted descriptors → prefix-cache-friendly), `BuildUserMessage` (turn number + Σ JSON + observation), `BuildCorrectionSuffix` (the bounded-retry corrective tail)
 - `core/e2s/loop.go` — the driver `Loop.Run`: one LLM call per turn on raw sp4rk primitives (`llm.Caller`, no `agent.Executor`/Conductor), `RunStatus` terminal dispositions (`finished`/`step_limit`/`spin_stop`/`paused`/`canceled`/`failed`), `Result` (answer + final `Snapshot E2SState` + synthesized `agent.Step` trajectory), `ErrPaused` checkpoint, anti-spin nudge/abort, `Emitter`/`StateEmitter`/`Registry` structural interfaces
@@ -33,7 +33,7 @@ E2S is an alternative execution mode in which the model's only memory is an **ex
 ```go
 // core/e2s/types.go — the externalized state (round-trips through JSON for persistence)
 type E2SState struct {
-    Sigma     map[string]any // Σ: core keys per the fixed schema + add-only extensions
+    Sigma     map[string]any // Σ: core keys per the fixed schema + mutable extensions
     Schema    string         // SchemaFingerprint() at creation; mismatch rejects patching
     TurnCount int            // number of applied patches
     Status    StateStatus    // typed copy of the core "status" key (re-synced by ApplyPatch)
@@ -93,9 +93,12 @@ HandleMessage ── E2S && Goal both set? ──► explicit error (mutually ex
      action: finish ──► terminal (answer)                     │
      action: tool ──► ToolRegistry.Execute (ALL security      │
             gates: group policy, judge, HITL, verify-on-edit) │
-            → truncated result = Oₜ₊₁                         │
-     anti-spin: nudge @ 3 identical actions, abort @ 5        │
-   step budget exhausted → step_limit                         │
+            → truncated result = Oₜ₊₁ (+ hash nudge,          │
+              cache-on-truncate via tool_result_read)         │
+     anti-spin: semantic fingerprint (tool + target anchor);  │
+            nudge @ 3, abort @ 5                              │
+   step budget exhausted → step_limit (resumable: Σ persists, │
+        resume re-enters with a fresh budget + resume note)   │
         │  (every path: final Snapshot persisted)             │
         ▼                                                     │
    Result ─► RunStatus→StateStatus→ExecutionStatus mapping ───┘
@@ -108,7 +111,7 @@ HandleMessage ── E2S && Goal both set? ──► explicit error (mutually ex
 ## Invariants
 
 - **Bounded context** — a turn's LLM request contains exactly two messages (`system`, `user`); messages from previous turns are never resent. The model's only memory is Σ.
-- **Σ is validated deterministically** — every mutation goes through `ApplyPatch`: core keys can be updated but never deleted or re-typed; extension keys are add-only (a second value write is rejected; `null` deletes); merged Σ over the byte limit is rejected; the receiver is never mutated, so a rejected patch leaves the previous Σ authoritative (rollback by construction). The core list keys also enforce their element shape — `checklist` holds `{text, checked}` objects and every other list key holds strings — so a wrong-shaped element is rejected at merge rather than persisted and then dropped by the UI guard.
+- **Σ is validated deterministically** — every mutation goes through `ApplyPatch`: core keys can be updated but never deleted or re-typed; extension keys are mutable (a value write replaces the previous value in place; `null` deletes — ADR-040); merged Σ over the byte limit is rejected; the receiver is never mutated, so a rejected patch leaves the previous Σ authoritative (rollback by construction). The core list keys also enforce their element shape — `checklist` holds `{text, checked}` objects and every other list key holds strings — so a wrong-shaped element is rejected at merge rather than persisted and then dropped by the UI guard.
 - **Schema evolution fails closed** — a persisted state whose fingerprint differs from the compiled-in schema is never patched; resume treats it as absent (fresh state).
 - **`e2s_step` never executes through a registry** — the loop intercepts it; `StepTool.Execute` is a wiring-error trap that returns an error result.
 - **All security gates apply to the target tool** — actions dispatch through the real `ToolRegistry.Execute`; the E2S adapter only filters the *catalog* and rejects stripped names (plan/goal tools) fail-closed at dispatch. `e2s_step` itself is `GroupSystem` (ADR-024): the envelope has no side effects, the dispatch carries the policy.
@@ -127,8 +130,8 @@ HandleMessage ── E2S && Goal both set? ──► explicit error (mutually ex
 | `max_steps`              | `50`    | turn budget per run (patch+action cycles) before `step_limit`       |
 | `state_byte_limit`       | `16384` | JSON-encoded Σ byte cap (mirrors `core/e2s.DefaultStateByteLimit`)  |
 | `patch_retries`          | `1`     | corrective re-requests for a rejected patch before run failure      |
-| `observation_truncate`   | `2000`  | per-turn observation character cap fed back to the model            |
-| `repeat_nudge_threshold` | `3`     | identical consecutive actions before a nudge observation            |
+| `observation_truncate`   | `2000`  | per-turn observation character cap; on truncation the full result is cached and a hash nudge (recovered via `tool_result_read`) is appended (ADR-040) |
+| `repeat_nudge_threshold` | `3`     | semantically identical consecutive actions (same tool + target anchor, e.g. same path) before a nudge observation            |
 | `repeat_abort_threshold` | `5`     | identical consecutive actions before `spin_stop` abort              |
 
 ## Security (e2s_step under ADR-024)
@@ -150,6 +153,7 @@ HandleMessage ── E2S && Goal both set? ──► explicit error (mutually ex
 ## Related Specs
 
 - [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md) — why the mode exists and its seven shaping decisions
+- [decisions/040-e2s-stabilization.md](../decisions/040-e2s-stabilization.md) — the stabilization revision: mutable extension keys, cache-on-truncate observation recovery, real batch execution, pre-dispatch schema validation, budget visibility, semantic anti-spin, resumable step-limit
 - [decisions/024-group-policies.md](../decisions/024-group-policies.md) — the group-policy model behind the Security section
 - [domains/goal-mode.md](goal-mode.md) — the sibling alternative-loop mode (early-return pattern, per-task state persistence, pause/resume semantics E2S mirrors)
 - [contracts/event-catalog.md](../contracts/event-catalog.md) — the `e2s_state` event

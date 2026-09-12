@@ -26,9 +26,6 @@ var (
 	// ErrInvalidStatus: the core status key was set to a value outside the
 	// closed status set.
 	ErrInvalidStatus = errors.New("e2s: invalid status value")
-	// ErrExtensionKeyExists: a value write against an already-present
-	// extension key (extensions are add-only).
-	ErrExtensionKeyExists = errors.New("e2s: extension key already exists (add-only)")
 	// ErrStateTooLarge: the merged Σ exceeds the configured byte limit.
 	ErrStateTooLarge = errors.New("e2s: state exceeds byte limit")
 	// ErrSchemaMismatch: the state carries a schema fingerprint from a
@@ -96,13 +93,15 @@ func ApplyPatch(state E2SState, patch StatePatch, opts MergeOptions) (E2SState, 
 			merged[key] = value
 			continue
 		}
-		// Extension keys are add-only: a value write against an existing
-		// extension is a policy violation. Existence is checked against the
-		// ORIGINAL Σ — each patch key appears once, so a key can never be
-		// both added and re-written within one patch.
-		if _, exists := state.Sigma[key]; exists {
-			return E2SState{}, fmt.Errorf("%w: %q was already added and cannot be modified", ErrExtensionKeyExists, key)
-		}
+		// Extension keys are mutable: a value write replaces the previous
+		// value in place (update semantics, same as core keys without the
+		// fixed typing). The original add-only policy made every mutable
+		// fact (cursors, next action, phase markers) require rename-churn
+		// (tombstone + re-add under a new name), which starved models of
+		// usable memory and burned correction retries — see the E2S
+		// stabilization revision of ADR-039. Destructive-overwrite protection
+		// stays where it is typed: core key typing, the byte cap, and the
+		// null tombstone for explicit deletion.
 		merged[key] = value
 	}
 

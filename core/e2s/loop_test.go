@@ -263,8 +263,9 @@ func TestRun_FreshOneShotDialogPerStep(t *testing.T) {
 	if strings.Contains(step3User, "ok result for alpha") {
 		t.Error("step 1 observation leaked into step 3 request — context is not O(1)")
 	}
-	// Turn markers advance.
-	if !strings.Contains(step2User, "[turn 2]") || !strings.Contains(step3User, "[turn 3]") {
+	// Turn markers advance (budgeted form "[turn N of M]" — testConfig
+	// defaults MaxSteps to 16).
+	if !strings.Contains(step2User, "[turn 2 of 16]") || !strings.Contains(step3User, "[turn 3 of 16]") {
 		t.Error("turn markers missing from user messages")
 	}
 	// The model's reasoning never rides along.
@@ -525,6 +526,41 @@ func TestRun_StepLimitStopsLoop(t *testing.T) {
 // Acceptance: anti-spin nudges then stops the loop with a status
 // ---------------------------------------------------------------------------
 
+// TestRun_SpinDetectsShiftingRanges pins the SEMANTIC anti-spin: re-reading
+// the same file with ever-shifting line ranges (the production-session
+// failure mode — byte-exact fingerprints never matched) is detected as a
+// spin: nudged, then aborted.
+func TestRun_SpinDetectsShiftingRanges(t *testing.T) {
+	ranges := []string{
+		`{"path":"diff.txt","start_line":1,"end_line":320}`,
+		`{"path":"diff.txt","start_line":321,"end_line":520}`,
+		`{"path":"diff.txt","start_line":521,"end_line":660}`,
+		`{"path":"diff.txt","start_line":661,"end_line":922}`,
+		`{"path":"diff.txt","start_line":1,"end_line":200}`,
+		`{"path":"diff.txt","start_line":201,"end_line":400}`,
+	}
+	responses := make([]*llm.ChatResponse, 0, len(ranges))
+	for _, r := range ranges {
+		responses = append(responses, stepResponse(`{}`, "read_file", r))
+	}
+	caller := &scriptedCaller{responses: responses}
+	reg := newSchemaRegistry()
+	em := &recordingEmitter{}
+	loop := New(caller, reg, em, testConfig())
+
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != RunStatusSpinStop {
+		t.Errorf("status = %s, want spin_stop (shifting ranges on one target)", res.Status)
+	}
+	// Only the first two reads executed; the rest were nudged/aborted.
+	if d := reg.dispatched(); len(d) != 2 {
+		t.Errorf("dispatch count = %d, want 2", len(d))
+	}
+}
+
 func TestRun_AntiSpinNudgesThenStops(t *testing.T) {
 	// Eight identical probe calls; nudge at 3, abort at 5 (defaults).
 	responses := make([]*llm.ChatResponse, 0, 8)
@@ -593,6 +629,9 @@ func TestRun_EmitsStateAfterEachAppliedPatch(t *testing.T) {
 	first := em.stateAt(0)
 	if first["turn"] != 1 {
 		t.Errorf("first snapshot turn = %v, want 1", first["turn"])
+	}
+	if first["total_turns"] != 1 {
+		t.Errorf("first snapshot total_turns = %v, want 1 (cumulative domain count)", first["total_turns"])
 	}
 	sigma, ok := first["state"].(map[string]any)
 	if !ok {
@@ -769,6 +808,229 @@ func TestRun_UntrustedErrorResultWrapped(t *testing.T) {
 	}
 }
 
+// schemaRegistry serves descriptors with closed-set schemas so the
+// pre-dispatch action-args validation can be exercised end-to-end.
+type schemaRegistry struct {
+	mockRegistry
+}
+
+func newSchemaRegistry() *schemaRegistry {
+	return &schemaRegistry{mockRegistry: mockRegistry{
+		descriptors: []sdktools.ToolDescriptor{
+			{Name: "read_file", Description: "read a file", InputSchema: json.RawMessage(readFileSchema)},
+		},
+	}}
+}
+
+// TestRun_InvalidActionArgsRejectedPreDispatch pins the pre-dispatch
+// structural validation: wrong parameter names produce an actionable error
+// observation (naming the valid parameters), the tool is NOT dispatched, and
+// no patch-retry budget is consumed (the turn's patch was already applied —
+// the next turn simply corrects the args).
+func TestRun_InvalidActionArgsRejectedPreDispatch(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{"progress":"reading diff"}`, "read_file", `{"path":"diff.txt","offset":1,"limit":100}`),
+		stepResponse(`{}`, "read_file", `{"path":"diff.txt","start_line":1,"end_line":100}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := newSchemaRegistry()
+	loop := New(caller, reg, nil, testConfig())
+
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != RunStatusFinished {
+		t.Fatalf("status = %s, want finished", res.Status)
+	}
+
+	// The invalid call must NOT reach the registry: only the corrected call
+	// plus nothing else dispatched for read_file.
+	dispatched := reg.dispatched()
+	reads := 0
+	for _, d := range dispatched {
+		if d.name == "read_file" {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("read_file dispatched %d times, want 1 (invalid args must be rejected pre-dispatch)", reads)
+	}
+
+	// The turn-2 observation carries the actionable error with valid names.
+	user := caller.request(1).Messages[1].Content
+	if !strings.Contains(user, "action arguments rejected") || !strings.Contains(user, "unknown parameter") {
+		t.Errorf("action-args error observation missing: %q", user)
+	}
+	for _, valid := range []string{"start_line", "end_line"} {
+		if !strings.Contains(user, valid) {
+			t.Errorf("error must name valid parameter %q: %q", valid, user)
+		}
+	}
+
+	// The invalid turn consumed NO extra LLM call (no correction retry for
+	// action errors — they are ordinary observations): 3 calls for 3 turns.
+	if got := caller.callCount(); got != 3 {
+		t.Errorf("llm calls = %d, want 3 (action-arg errors must not burn patch retries)", got)
+	}
+}
+
+// batchArgs builds a batch action args object from sub-calls.
+func batchArgs(subs ...string) string {
+	return `{"calls":[` + strings.Join(subs, ",") + `]}`
+}
+
+// TestRun_BatchExecutesSubCallsAndJoins pins the E2S batch meta-tool: every
+// sub-call dispatches through the registry in order and the observation
+// joins the numbered results.
+func TestRun_BatchExecutesSubCallsAndJoins(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", batchArgs(
+			`{"tool":"read_file","input":{"path":"a.go"}}`,
+			`{"tool":"glob","input":{"pattern":"*.go"}}`,
+		)),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &mockRegistry{}
+	loop := New(caller, reg, nil, testConfig())
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dispatched := reg.dispatched()
+	if len(dispatched) != 2 {
+		t.Fatalf("sub-calls dispatched = %d, want 2: %+v", len(dispatched), dispatched)
+	}
+	if dispatched[0].name != "read_file" || dispatched[1].name != "glob" {
+		t.Errorf("sub-calls out of order: %+v", dispatched)
+	}
+
+	user := caller.request(1).Messages[1].Content
+	for _, want := range []string{"[batch result 1/2 — read_file]", "ok result for read_file", "[batch result 2/2 — glob]", "ok result for glob"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("joined batch observation missing %q: %q", want, user)
+		}
+	}
+}
+
+// TestRun_BatchSubCallErrorDoesNotAbort pins the executor-mirroring
+// semantics: a failing sub-call is captured per index, later sub-calls still
+// run, and the batch observation carries the error.
+func TestRun_BatchSubCallErrorDoesNotAbort(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", batchArgs(
+			`{"tool":"bad_tool","input":{}}`,
+			`{"tool":"glob","input":{"pattern":"*.go"}}`,
+		)),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &mockRegistry{}
+	loop := New(caller, reg, nil, testConfig())
+
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if dispatched := reg.dispatched(); len(dispatched) != 2 {
+		t.Fatalf("both sub-calls must run (errors do not abort): %+v", dispatched)
+	}
+	user := caller.request(1).Messages[1].Content
+	if !strings.Contains(user, "tool failed") || !strings.Contains(user, "ok result for glob") {
+		t.Errorf("batch observation must contain the sub-error and the later success: %q", user)
+	}
+	if len(res.Steps) == 0 || !res.Steps[0].IsError {
+		t.Error("batch step with a failing sub-call must be marked IsError")
+	}
+}
+
+// TestRun_BatchRejectsNestedAndEnvelopeTargets pins the fail-closed rules:
+// nested batch and the e2s_step/finish envelope targets are rejected inside
+// calls (finish must stay a top-level action), and the legal sub-calls
+// around them still execute.
+func TestRun_BatchRejectsNestedAndEnvelopeTargets(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", batchArgs(
+			`{"tool":"batch","input":{"calls":[]}}`,
+			`{"tool":"finish","input":{"answer":"nope"}}`,
+			`{"tool":"e2s_step","input":{}}`,
+			`{"tool":"glob","input":{"pattern":"*.go"}}`,
+		)),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &mockRegistry{}
+	loop := New(caller, reg, nil, testConfig())
+
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != RunStatusFinished || res.Answer != "done" {
+		t.Fatalf("nested finish must NOT terminate the run; status=%s answer=%q", res.Status, res.Answer)
+	}
+	// Only the legal sub-call reached the registry.
+	dispatched := reg.dispatched()
+	if len(dispatched) != 1 || dispatched[0].name != "glob" {
+		t.Fatalf("only the legal sub-call may dispatch: %+v", dispatched)
+	}
+	user := caller.request(1).Messages[1].Content
+	for _, want := range []string{"batch cannot be nested", `"finish" cannot be used inside a batch`, `"e2s_step" cannot be used inside a batch`} {
+		if !strings.Contains(user, want) {
+			t.Errorf("rejection message missing %q: %q", want, user)
+		}
+	}
+}
+
+// TestRun_BatchSubCallArgValidation pins that the pre-dispatch schema
+// validation applies to each batch sub-call, not just top-level actions.
+func TestRun_BatchSubCallArgValidation(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", batchArgs(
+			`{"tool":"read_file","input":{"path":"a.txt","offset":1}}`,
+		)),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := newSchemaRegistry()
+	loop := New(caller, reg, nil, testConfig())
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if dispatched := reg.dispatched(); len(dispatched) != 0 {
+		t.Fatalf("invalid sub-call args must not dispatch: %+v", dispatched)
+	}
+	user := caller.request(1).Messages[1].Content
+	if !strings.Contains(user, "unknown parameter") || !strings.Contains(user, "start_line") {
+		t.Errorf("sub-call validation error missing: %q", user)
+	}
+}
+
+// TestRun_LongBatchResultTruncatedWithNudge pins that the joined batch
+// observation goes through the same cache-on-truncate path (the full joined
+// result is recoverable via tool_result_read).
+func TestRun_LongBatchResultTruncatedWithNudge(t *testing.T) {
+	long := strings.Repeat("chunk\n", 5_000)
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", batchArgs(`{"tool":"big","input":{}}`)),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	cache := agent.NewToolResultCache(time.Minute)
+	cfg := testConfig()
+	cfg.ToolCache = cache
+	loop := New(caller, &bigResultRegistry{long: long}, nil, cfg)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	user := caller.request(1).Messages[1].Content
+	if !strings.Contains(user, "This output was truncated") || !strings.Contains(user, "cached with hash: ") {
+		t.Errorf("long batch observation must carry the truncation nudge: %q", user)
+	}
+	if cache.Len() != 1 {
+		t.Errorf("cache entries = %d, want 1", cache.Len())
+	}
+}
+
 func TestRun_ObservationTruncated(t *testing.T) {
 	long := strings.Repeat("x", 10_000)
 	caller := &scriptedCaller{responses: []*llm.ChatResponse{
@@ -803,6 +1065,119 @@ func (r *bigResultRegistry) Execute(_ context.Context, _ string, _ json.RawMessa
 }
 
 func (r *bigResultRegistry) IsToolUntrusted(string) bool { return false }
+
+// ctxCapturingRegistry records whether the dispatch context carries the
+// tool-result cache (agent.ToolResultCacheFromContext).
+type ctxCapturingRegistry struct {
+	bigResultRegistry
+	mu       sync.Mutex
+	hasCache bool
+	called   bool
+}
+
+func (r *ctxCapturingRegistry) Execute(ctx context.Context, name string, input json.RawMessage) (sdktools.ToolResult, error) {
+	r.mu.Lock()
+	r.called = true
+	r.hasCache = agent.ToolResultCacheFromContext(ctx) != nil
+	r.mu.Unlock()
+	return r.bigResultRegistry.Execute(ctx, name, input)
+}
+
+// TestRun_TruncatedObservationCachedWithNudge pins cache-on-truncate: an
+// observation truncated by MaxObservationChars is stored in full in the
+// shared cache and the next request's observation ends with the standard
+// fragmentation nudge carrying the cache hash.
+func TestRun_TruncatedObservationCachedWithNudge(t *testing.T) {
+	long := strings.Repeat("line of content\n", 2_000) // ~30k chars > any default cap
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "big", `{}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &ctxCapturingRegistry{bigResultRegistry: bigResultRegistry{long: long}}
+	cache := agent.NewToolResultCache(time.Minute)
+	cfg := testConfig()
+	cfg.ToolCache = cache
+	loop := New(caller, reg, nil, cfg)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The dispatch context must carry the cache so tool_result_read resolves.
+	if !reg.called || !reg.hasCache {
+		t.Fatalf("dispatch ctx must carry the tool-result cache (called=%v hasCache=%v)", reg.called, reg.hasCache)
+	}
+
+	user := caller.request(1).Messages[1].Content
+	if strings.Contains(user, long) {
+		t.Error("full 30k observation leaked into the request")
+	}
+	if !strings.Contains(user, "This output was truncated") || !strings.Contains(user, "cached with hash: ") {
+		t.Errorf("truncation nudge with cache hash missing: %q", user)
+	}
+	if !strings.Contains(user, `tool_result_read(hash="`) {
+		t.Errorf("nudge must point at tool_result_read: %q", user)
+	}
+
+	// The full result must be retrievable from the cache by the hash in the
+	// nudge: extract it and Get() the entry.
+	start := strings.Index(user, "cached with hash: ")
+	if start < 0 {
+		t.Fatal("hash marker missing")
+	}
+	hashRest := user[start+len("cached with hash: "):]
+	end := strings.IndexAny(hashRest, ". ")
+	if end < 0 {
+		t.Fatal("hash terminator missing")
+	}
+	hash := hashRest[:end]
+	entry, ok := cache.Get(hash)
+	if !ok {
+		t.Fatalf("cache entry %q not found", hash)
+	}
+	if entry.Content != long {
+		t.Errorf("cached content length = %d, want %d", len(entry.Content), len(long))
+	}
+}
+
+// TestRun_TruncationWithoutCacheDegrades pins the nil-cache degradation: no
+// cache configured → plain truncation, no nudge, no panic.
+func TestRun_TruncationWithoutCacheDegrades(t *testing.T) {
+	long := strings.Repeat("y", 10_000)
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "big", `{}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	loop := New(caller, &bigResultRegistry{long: long}, nil, testConfig())
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	user := caller.request(1).Messages[1].Content
+	if strings.Contains(user, "cached with hash") {
+		t.Error("nudge must not appear without a configured cache")
+	}
+}
+
+// TestRun_SmallObservationNotCached pins that observations under the cap are
+// not stored (cache stays empty — no eager caching in E2S).
+func TestRun_SmallObservationNotCached(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "fine", `{}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	cache := agent.NewToolResultCache(time.Minute)
+	cfg := testConfig()
+	cfg.ToolCache = cache
+	loop := New(caller, &mockRegistry{}, nil, cfg)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cache.Len() != 0 {
+		t.Errorf("cache entries = %d, want 0 for a small observation", cache.Len())
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Trajectory store sync
@@ -849,8 +1224,9 @@ func TestSystemPrompt_Sections(t *testing.T) {
 	cfg.DelegateDirective = "Delegate via delegate(agent:...)."
 	cfg.Skills = []SkillSection{{Name: "explore", Description: "think first", Body: "Body of skill."}}
 	reg := &mockRegistry{descriptors: []sdktools.ToolDescriptor{
-		{Name: "read_file", Description: "Read a file.\nSecond line."},
-		{Name: "bash_exec", Description: "Run a shell command."},
+		{Name: "read_file", Description: "Read a file.\nSecond line.", InputSchema: json.RawMessage(readFileSchema)},
+		{Name: "bash_exec", Description: "Run a shell command.", InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
+		{Name: "no_schema", Description: "Schema-less tool."},
 	}}
 
 	prompt := BuildSystemPrompt(cfg, reg.List())
@@ -866,6 +1242,11 @@ func TestSystemPrompt_Sections(t *testing.T) {
 		"## Delegation",
 		"## Active Skills",
 		"Body of skill.",
+		// Full input schemas render inline so the model knows parameter names.
+		"args schema: {\"type\":\"object\",\"properties\":{\"path\"",
+		`"start_line"`,
+		"args schema: {\"type\":\"object\",\"properties\":{\"command\"",
+		"MUST use exactly the parameter names",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -875,15 +1256,49 @@ func TestSystemPrompt_Sections(t *testing.T) {
 	if strings.Contains(prompt, "Second line.") {
 		t.Error("tool description second line leaked into the catalog")
 	}
+	// A tool without a schema gets no schema line (no dangling marker).
+	if strings.Contains(prompt, "`no_schema`: Schema-less tool.\n  args schema:") {
+		t.Error("schema-less tool must not render an args-schema line")
+	}
 }
 
 func TestUserMessage_Shape(t *testing.T) {
 	state := map[string]any{"objective": "do it", "k": 1}
-	msg := BuildUserMessage(state, "obs-text", 7)
-	for _, want := range []string{"[turn 7]", "<state>", `"objective":"do it"`, "<observation>", "obs-text"} {
+
+	// Budgeted run: "[turn N of M]" renders; the warning appears only in the
+	// final window.
+	msg := BuildUserMessage(state, "obs-text", 7, 50)
+	for _, want := range []string{"[turn 7 of 50]", "<state>", `"objective":"do it"`, "<observation>", "obs-text"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("user message missing %q: %q", want, msg)
 		}
+	}
+	if strings.Contains(msg, "turns remain") {
+		t.Errorf("wrap-up warning must not render at turn 7 of 50: %q", msg)
+	}
+
+	// Inside the warning window (50 − max(3, 10) + 1 = turn 41): the
+	// directive renders with the remaining count.
+	warn := BuildUserMessage(state, "obs-text", 45, 50)
+	if !strings.Contains(warn, "[turn 45 of 50 — 5 turns remain") || !strings.Contains(warn, "call finish") {
+		t.Errorf("wrap-up warning missing at turn 45 of 50: %q", warn)
+	}
+
+	// Tiny budget: the window is the last 3 turns, so turn 1 of 5 stays
+	// clean (the format is not confused by small budgets).
+	tiny := BuildUserMessage(state, "obs-text", 1, 5)
+	if !strings.Contains(tiny, "[turn 1 of 5]") || strings.Contains(tiny, "turns remain") {
+		t.Errorf("turn 1 of 5 must be a plain header: %q", tiny)
+	}
+	tinyWarn := BuildUserMessage(state, "obs-text", 3, 5)
+	if !strings.Contains(tinyWarn, "2 turns remain") {
+		t.Errorf("turn 3 of 5 must carry the warning (2 remaining after this turn): %q", tinyWarn)
+	}
+
+	// Unbudgeted run: legacy bare header.
+	legacy := BuildUserMessage(state, "obs-text", 7, 0)
+	if !strings.Contains(legacy, "[turn 7]") || strings.Contains(legacy, "of 7") {
+		t.Errorf("unbudgeted header must stay bare: %q", legacy)
 	}
 }
 

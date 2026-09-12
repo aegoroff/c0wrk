@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (add-only extension keys, plain observation truncation, the schema-less tool catalog, and the step-limit terminal mapping are superseded by [ADR-040](./040-e2s-stabilization.md))
 
 ## Context
 

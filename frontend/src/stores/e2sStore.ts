@@ -10,8 +10,13 @@ import type { E2SSigma, E2SStateData } from '@/types/events'
 export interface E2SSnapshot {
   /** Latest accumulated execution state (patches merged over snapshots). */
   state: E2SSigma
-  /** Completed steps/turns so far. */
+  /** Completed steps/turns so far within the CURRENT run (a resumed run
+   *  restarts at 1 against its fresh budget; mirrors the event's `turn`). */
   turn: number
+  /** Cumulative applied patches across ALL runs of the task (resumes
+   *  continue the count; mirrors the event's optional `total_turns`, falling
+   *  back to `turn` for older emitters). */
+  totalTurns: number
   /** Latest session-level status string (e.g. running, done, failed). */
   status: string
   /** Turn budget cap (mirrors max_turns; 0 = unlimited). */
@@ -77,6 +82,7 @@ export const useE2SStore = create<E2SState & E2SActions>((set) => ({
           [sessionId]: {
             state,
             turn: data.turn,
+            totalTurns: data.total_turns ?? data.turn,
             // The backend emitter sends {state, turn, max_turns, status}; the
             // fallbacks keep a partial payload renderable. A missing max_turns
             // on a patch retains the previous cap (it is telemetry, not part
