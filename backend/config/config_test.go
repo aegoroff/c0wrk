@@ -447,6 +447,21 @@ func TestDefaultExecuteGroupBlacklist_CrossDialectSafe(t *testing.T) {
 		}
 	}
 
+	// Benign git read forms must stay unblocked in the unified list: both
+	// dialects compile it, so the carved-out read-only spellings of
+	// dual-mode subcommands (e.g. `git branch --show-current`, the standard
+	// scripted way to query the current branch on either shell) must flow
+	// through the group policy instead of the irreversible blacklist. The
+	// per-dialect pairing contract (read free ↔ mutating blocked) is pinned
+	// by TestApplyDefaults_GitMutatingBlacklist.
+	for _, cmd := range []string{
+		"git branch --show-current",
+	} {
+		if matches(cmd) {
+			t.Errorf("unified blacklist hard-confirms benign git read command %q", cmd)
+		}
+	}
+
 	// Destructive PowerShell deletions via the unambiguous cmdlet name must
 	// stay blocked (the rm/del/… alias spellings are the Windows platform
 	// supplement's contract, not this list's).
@@ -552,6 +567,18 @@ func TestApplyDefaults_DestructiveDevPaths(t *testing.T) {
 // is additive / non-destructive) unblocked. This guards against regressions
 // when the git patterns are edited (e.g. accidentally re-broadening to a
 // blanket \bgit\b, or dropping a mutating subcommand).
+//
+// Dual-mode subcommands (branch, tag, remote, stash, config, reflog, apply,
+// clean, add, rm, submodule, worktree, notes, reset, sparse-checkout) are
+// carved rather than blocked wholesale: their read-only spellings (--show-
+// current, -l, -v/get-url, list/show, key-only config reads, --check/--stat,
+// -n/--dry-run, bare/HEAD-path reset, ...) must stay free, while their
+// mutating spellings (--track, -a/-d, set-url/prune, push/drop/-u, --global/
+// --unset/--file writes, delete, --cached/-3/positional, -fd, ...) must stay
+// blocked — every carve-out is pinned as an explicit (read, mutating) pair in
+// carveOuts. Git mentioned as DATA (search patterns, echo payloads) must not
+// hard-confirm, while git reached indirectly (separators, command
+// substitution, interpreter wrappers) must stay blocked.
 func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 	mustBlock := []string{
 		// working tree / index / staging
@@ -602,6 +629,40 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		"git prune",
 		"git worktree add ../wt",
 		"git maintenance run",
+		// dual-mode subcommands — mutating spellings. Each pairs with a
+		// carved-out read-only spelling in mustNotBlock / carveOuts below:
+		// the read form flows through the group policy, the mutating form
+		// stays on the irreversible blacklist.
+		"git branch --track topic origin/main",
+		"git tag -a v1.0 -m msg",
+		"git tag -d v1.0",
+		"git config --global user.name x",
+		"git config --global --add alias.st status",
+		"git config --unset user.name",
+		"git config --file extra.config user.name x",
+		"git config --file=extra.config user.name x",
+		"git stash push -m wip",
+		"git stash drop",
+		"git stash -u",
+		"git reflog delete HEAD@{1}",
+		"git apply --cached fix.diff",
+		"git apply -3 fix.diff",
+		"git remote set-url origin https://example.com/repo.git",
+		"git remote prune origin",
+		"git reset HEAD~2",
+		"git reset origin/main",
+		// mutating plumbing / newer subcommands absent from the classic set
+		"git send-pack origin refs/heads/main:refs/heads/main",
+		"git update-index --add newfile.txt",
+		"git sparse-checkout set '/*'",
+		// indirect invocation — git reached via separators, command
+		// substitution, or interpreter wrappers must still be blocked
+		"cd repo && git push",
+		"xargs git rm",
+		"$(git push)",
+		"sh -c 'git push'",
+		"bash -lc \"git reset --hard\"",
+		"eval \"git push\"",
 	}
 
 	mustNotBlock := []string{
@@ -620,6 +681,37 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		// fetch is excluded by design (additive / non-destructive)
 		"git fetch origin",
 		"git fetch --all --prune",
+		// class A: git mentioned as DATA, not as an invoked command —
+		// searching for the literal text or echoing it must not hard-confirm
+		`rg "git checkout"`,
+		`git log --grep="git rebase"`,
+		`echo 'git stash'`,
+		// carved-out read-only spellings of dual-mode subcommands (each
+		// pairs with a mutating spelling in mustBlock / carveOuts below)
+		"git branch --show-current",
+		"git branch -a",
+		"git tag -l",
+		"git remote -v",
+		"git remote get-url origin",
+		"git stash list",
+		"git stash show",
+		"git config user.name", // key without a value = read
+		"git config --get user.name",
+		"git config --list",
+		"git reflog",
+		"git reflog show",
+		"git apply --check fix.diff",
+		"git apply --stat fix.diff",
+		"git clean -n",
+		"git clean --dry-run",
+		"git add -n .",
+		"git rm -n foo.txt",
+		"git submodule status",
+		"git worktree list",
+		"git notes list",
+		"git reset",
+		"git reset HEAD foo.txt",
+		"git sparse-checkout list",
 	}
 
 	// posh-only casing variants: PowerShell resolves the git executable
@@ -631,6 +723,49 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		"GIT PUSH origin main",
 		"gIt reset --hard",
 		"git CHECKOUT feature",
+		`BASH -C "GIT PUSH"`,             // (?i) must survive arbitrary casing of the wrapper line
+		`powershell -Command "git push"`, // nested interpreter wrapper
+		`cmd /c "git push"`,              // nested interpreter wrapper
+		"Git.exe push",                   // explicit executable suffix must still match
+	}
+
+	// carveOuts pins the pairing contract for every dual-mode subcommand
+	// whose read-only spelling is carved out of the wholesale block: the
+	// read form must stay free while its mutating counterpart stays blocked,
+	// in BOTH dialects. Every carve-out in mustNotBlock must appear here
+	// with its mutating witness — adding a read form without its pair (or
+	// vice versa) is a contract violation.
+	carveOuts := []struct{ read, mutating string }{
+		{"git branch --show-current", "git branch --track topic origin/main"},
+		{"git branch -a", "git branch -D topic"},
+		{"git tag -l", "git tag -a v1.0 -m msg"},
+		{"git tag -l", "git tag -d v1.0"},
+		{"git remote -v", "git remote set-url origin https://example.com/repo.git"},
+		{"git remote get-url origin", "git remote prune origin"},
+		{"git stash list", "git stash push -m wip"},
+		{"git stash show", "git stash drop"},
+		{"git stash show", "git stash -u"},
+		{"git config --list", "git config --global user.name x"},
+		{"git config --get user.name", "git config --unset user.name"},
+		{"git config user.name", "git config user.name x"},
+		{"git config user.name", "git config --file extra.config user.name x"},
+		{"git config user.name", "git config --file=extra.config user.name x"},
+		{"git reflog", "git reflog delete HEAD@{1}"},
+		{"git reflog show", "git reflog expire --all"},
+		{"git apply --check fix.diff", "git apply --cached fix.diff"},
+		{"git apply --stat fix.diff", "git apply -3 fix.diff"},
+		{"git apply --stat fix.diff", "git apply patch.diff"},
+		{"git clean -n", "git clean -fd"},
+		{"git clean --dry-run", "git clean -fd"},
+		{"git add -n .", "git add -A"},
+		{"git rm -n foo.txt", "git rm foo.txt"},
+		{"git submodule status", "git submodule update --init"},
+		{"git worktree list", "git worktree add ../wt"},
+		{"git notes list", "git notes add -m x"},
+		{"git reset", "git reset HEAD~2"},
+		{"git reset HEAD foo.txt", "git reset origin/main"},
+		{"git reset HEAD foo.txt", "git reset --hard origin/main"},
+		{"git sparse-checkout list", "git sparse-checkout set '/*'"},
 	}
 
 	tools := map[string][]string{
@@ -667,6 +802,16 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 			for _, cmd := range mustNotBlock {
 				if ok, pat := matches(cmd); ok {
 					t.Errorf("%s default blacklist must NOT block read-only git command %q (matched %q)", tool, cmd, pat)
+				}
+			}
+		})
+		t.Run(tool+"/carveouts", func(t *testing.T) {
+			for _, c := range carveOuts {
+				if ok, pat := matches(c.read); ok {
+					t.Errorf("%s default blacklist must NOT block read-only carve-out %q (matched %q)", tool, c.read, pat)
+				}
+				if ok, _ := matches(c.mutating); !ok {
+					t.Errorf("%s default blacklist should block mutating counterpart %q of carve-out %q", tool, c.mutating, c.read)
 				}
 			}
 		})

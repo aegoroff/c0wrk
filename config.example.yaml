@@ -415,25 +415,102 @@ security:
         - '\b(iptables|ufw|nft)\b[^|]*(-F\b|--flush\b|-X\b|-P\s+\w+)' # firewall flush
         # --- Privilege escalation ---
         - 'sudo\s+'
-        # --- SCM (git) — mutating subcommands only ---
-        # Blocks git operations that change the repository, its history, or the
-        # working tree/index. Read-only commands (status, log, diff, show, blame,
-        # ls-files, rev-parse, describe, fetch, ...) are intentionally NOT blocked.
-        # Dual-mode subcommands (branch, tag, config, stash, remote) are blocked
-        # wholesale: RE2 has no lookahead, so flagless mutating forms (e.g.
-        # `git branch x`, `git stash`, `git config k v`, `git tag v1`) cannot be
-        # reliably separated from read-only forms. `git fetch` is excluded — it only
-        # adds objects and updates remote-tracking refs, never the working tree,
-        # local branches, or history (additive / non-destructive).
-        # working tree / index / staging:
-        - '\bgit\s+(add|rm|mv|clean|checkout|switch|restore|stash|apply)\b'
-        # history / commits / refs (incl. history rewrites):
-        - '\bgit\s+(commit|am|merge|rebase|revert|cherry-pick|reset|notes|replace|update-ref|symbolic-ref|reflog|bisect|filter-branch|filter-repo|fast-import)\b'
-        # branch / tag / remote / submodule / network / exfil (transmit patch
-        # data or spawn a network server bound to the repo):
-        - '\bgit\s+(branch|tag|remote|submodule|clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
-        # repo lifecycle / config / maintenance:
-        - '\bgit\s+(init|config|gc|prune|worktree|maintenance)\b'
+        # --- SCM (git) — mutating forms only ---
+        # Blocks git operations that change the repository, its history, or
+        # the working tree/index; read-only commands (status, log, diff,
+        # show, blame, ls-files, rev-parse, describe, fetch, ...) flow
+        # through untouched. `git fetch` stays excluded by design: it only
+        # adds objects and updates remote-tracking refs (additive /
+        # non-destructive).
+        #
+        # RE2 has no lookahead, so the precision below comes from three
+        # techniques that replaced the old coarse `\bgit\s+(…)` wholesale
+        # patterns:
+        #
+        #  1. Command-position prefix P = (^|[\s;&|(\x60]) instead of \b.
+        #     \b also matched `git …` inside quoted strings that are DATA,
+        #     not commands (`rg "git checkout"`, `echo 'git stash'`), so the
+        #     old patterns hard-confirmed pure text. P demands genuine command
+        #     position — start of input, or right after a separator (; & |),
+        #     a `$(` command substitution, a subshell `(`, a newline, or a
+        #     backtick — so `$(git push)`, `cd repo && git push` and
+        #     `xargs git rm` still block while quoted data no longer does.
+        #     Residual FP (heredoc): a `git <mutating>` line inside a heredoc
+        #     body still hard-confirms; accepted — it over-confirms, never
+        #     under-confirms.
+        #
+        #  2. Inverted dual-mode patterns. Subcommands that also have
+        #     read-only forms (branch, tag, stash, remote, config, reflog,
+        #     apply, clean, submodule, worktree, notes, reset, add, rm,
+        #     sparse-checkout) are NOT blocked wholesale — their patterns are
+        #     inverted to enumerate the MUTATING forms: a bare non-flag token
+        #     (create target, pathspec, patch file, key+value pair), a
+        #     short-flag cluster containing a mutating letter, or the
+        #     enumerated mutating long flags/subactions. Read-only forms
+        #     (branch -a/--show-current, tag -l, stash list/show, remote
+        #     -v/get-url, config <key> reads, reflog bare/show, apply
+        #     --check/--stat, clean -n/--dry-run, add -n, rm -n, submodule
+        #     status, worktree list, notes list, reset bare / reset HEAD
+        #     <path>, sparse-checkout list) stay unblocked. Subcommands
+        #     without a read-only form (mv, checkout, switch, restore, commit,
+        #     merge, rebase, revert, cherry-pick, clone, push, pull, init,
+        #     gc, ...) remain wholesale-blocked. Residual FPs: combined short
+        #     clusters (`git clean -dn`) and quiet index-only forms
+        #     (`git reset -q`).
+        #
+        #  3. FN plugs + a compensating interpreter wrapper. Wholesale
+        #     coverage for plumbing that bypasses the porcelain (update-index/
+        #     read-tree/checkout-index mutate the index directly; send-pack/
+        #     upload-pack/receive-pack/shell/http-backend are the transport &
+        #     server faces), plus a wrapper that catches `git …` hidden behind
+        #     an interpreter (`sh -c "git push"`, `bash -lc 'git …'`,
+        #     `eval "git …"`) where the quote before `git` defeats the P
+        #     prefix.
+        # working tree / index / staging — wholesale (no read-only form):
+        - '(^|[\s;&|(\x60])git\s+(mv|checkout|switch|restore)\b'
+        # index plumbing & mergetool — wholesale FN plugs (bypass the porcelain):
+        - '(^|[\s;&|(\x60])git\s+(update-index|read-tree|checkout-index|mergetool)\b'
+        # add — inverted: -n/--dry-run reads stay free; bare `git add` blocks too:
+        - '(^|[\s;&|(\x60])git\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[A-Za-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal)\b|--\s|[^\s;&|<>()\x60-]))'
+        # rm — inverted: -n/--dry-run reads stay free; bare `git rm` blocks too:
+        - '(^|[\s;&|(\x60])git\s+rm(\s*($|[;&|)\n])|\s+(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch)\b|--\s|[^\s;&|<>()\x60-]))'
+        # clean — inverted: -n/--dry-run reads stay free:
+        - '(^|[\s;&|(\x60])git\s+clean\s+(-[^\s-]*[dDfFxX]|--(force|directory)\b)'
+        # stash — bare `git stash` (= push), any flag, and mutating subactions block:
+        - '(^|[\s;&|(\x60])git\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
+        # apply — bare/in stdin and index/3way flags block; --check/--stat stay free:
+        - '(^|[\s;&|(\x60])git\s+apply(\s*($|[;&|)\n])|\s+(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|[^\s;&|()\x60-]))'
+        # history / commits / refs (incl. history rewrites) — wholesale:
+        - '(^|[\s;&|(\x60])git\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
+        # reset — inverted: bare / HEAD <path> stay free; flags and commit-ish block:
+        - '(^|[\s;&|(\x60])git\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch)\b|\S*[~^/])'
+        # config — inverted: <key> reads stay free; key+value writes and flags block:
+        - '(^|[\s;&|(\x60])git\s+config\s+(--[^\s]+\s+)*(--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
+        # notes — mutating subactions only (list/show reads stay free):
+        - '(^|[\s;&|(\x60])git\s+notes\s+(add|append|copy|edit|prune|remove|merge)\b'
+        # reflog — mutating subactions only (bare/show reads stay free):
+        - '(^|[\s;&|(\x60])git\s+reflog\s+(expire|delete)\b'
+        # branch — inverted: listing flags stay free; bare names and create/delete block:
+        - '(^|[\s;&|(\x60])git\s+branch\s+(-[^\s-]*[dDmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|[^\s;&|<>()\x60-])'
+        # tag — inverted: -l/-n listings stay free; bare names and create/delete block:
+        - '(^|[\s;&|(\x60])git\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|[^\s;&|<>()\x60-])'
+        # remote — mutating subactions only (-v/show/get-url reads stay free):
+        - '(^|[\s;&|(\x60])git\s+remote\s+(add|remove|rm|rename|set-url|set-head|prune|update)\b'
+        # submodule — mutating subactions only (status/summary reads stay free):
+        - '(^|[\s;&|(\x60])git\s+submodule\s+(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs)\b'
+        # worktree — mutating subactions only (list reads stay free):
+        - '(^|[\s;&|(\x60])git\s+worktree\s+(add|remove|prune|move|repair|lock|unlock)\b'
+        # sparse-checkout — mutating subactions only (list reads stay free):
+        - '(^|[\s;&|(\x60])git\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
+        # network / exfil (transmit patch data or spawn a repo-bound server) — wholesale:
+        - '(^|[\s;&|(\x60])git\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        # transport / server faces — wholesale FN plugs (bypass the push/fetch porcelain):
+        - '(^|[\s;&|(\x60])git\s+(send-pack|upload-pack|receive-pack|shell|http-backend)\b'
+        # repo lifecycle / maintenance — wholesale:
+        - '(^|[\s;&|(\x60])git\s+(init|gc|prune|maintenance)\b'
+        # compensating interpreter wrapper — a shell interpreter (`sh -c "git push"`,
+        # `bash -lc 'git …'`, `eval "git …"`) hides `git` behind a quote, defeating P:
+        - '(?i)(^|[\s;&|(\x60])((sh|bash|zsh|dash|ksh|fish)(\s+-[a-z-]+)*\s+-[a-z]*c\b|\beval\b)[^;|\n]*git(\.exe)?\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|send-pack|upload-pack|receive-pack|shell|http-backend|init|gc|prune|maintenance|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)\s+-)'
         # --- PowerShell specifics (case-insensitive cmdlets/aliases) ---
         # Remove-Item matches parameters by case-insensitive prefix
         # (-r/-rec/-recurse, -f/-fo/-force); RE2 has no lookaheads, so the
@@ -460,12 +537,58 @@ security:
         - '(?i)\bSet-ItemProperty\b[^|]*HKLM' # registry tampering
         - '(?i)\b(Register-ScheduledTask|schtasks\s+/create)\b' # scheduled tasks
         - '(?i)Set-ExecutionPolicy' # execution-policy tampering
-        # PowerShell resolves the git executable case-insensitively, so the
-        # mutating git subcommand patterns above are repeated with (?i):
-        - '(?i)\bgit\s+(add|rm|mv|clean|checkout|switch|restore|stash|apply)\b'
-        - '(?i)\bgit\s+(commit|am|merge|rebase|revert|cherry-pick|reset|notes|replace|update-ref|symbolic-ref|reflog|bisect|filter-branch|filter-repo|fast-import)\b'
-        - '(?i)\bgit\s+(branch|tag|remote|submodule|clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
-        - '(?i)\bgit\s+(init|config|gc|prune|worktree|maintenance)\b'
+        # PowerShell resolves the git executable case-insensitively (and may
+        # spell it git.exe), so the git patterns above are repeated with (?i)
+        # and git(\.exe)?. The compensating wrapper here keys on BOTH
+        # interpreter families — the Windows faces (`powershell -Command
+        # "git …"`, `pwsh -c 'git …'`, `cmd /c "git …"`) and the POSIX
+        # ones (`sh -c`, `bash -lc`, `eval`) — because a PowerShell host still
+        # spawns sh-style wrappers:
+        # working tree / index / staging — wholesale:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(mv|checkout|switch|restore)\b'
+        # index plumbing & mergetool — wholesale FN plugs:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(update-index|read-tree|checkout-index|mergetool)\b'
+        # add — inverted: -n/--dry-run reads stay free; bare `git add` blocks too:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[a-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal)\b|--\s|[^\s;&|<>()\x60-]))'
+        # rm — inverted: -n/--dry-run reads stay free; bare `git rm` blocks too:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+rm(\s*($|[;&|)\n])|\s+(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch)\b|--\s|[^\s;&|<>()\x60-]))'
+        # clean — inverted: -n/--dry-run reads stay free:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+clean\s+(-[^\s-]*[dDfFxX]|--(force|directory)\b)'
+        # stash — bare `git stash` (= push), any flag, and mutating subactions block:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
+        # apply — bare/in stdin and index/3way flags block; --check/--stat stay free:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+apply(\s*($|[;&|)\n])|\s+(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|[^\s;&|()\x60-]))'
+        # history / commits / refs (incl. history rewrites) — wholesale:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
+        # reset — inverted: bare / HEAD <path> stay free; flags and commit-ish block:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch)\b|\S*[~^/])'
+        # config — inverted: <key> reads stay free; key+value writes and flags block:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+config\s+(--[^\s]+\s+)*(--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
+        # notes — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+notes\s+(add|append|copy|edit|prune|remove|merge)\b'
+        # reflog — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+reflog\s+(expire|delete)\b'
+        # branch — inverted: listing flags stay free; bare names and create/delete block:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+branch\s+(-[^\s-]*[dDmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|[^\s;&|<>()\x60-])'
+        # tag — inverted: -l/-n listings stay free; bare names and create/delete block:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|[^\s;&|<>()\x60-])'
+        # remote — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+remote\s+(add|remove|rm|rename|set-url|set-head|prune|update)\b'
+        # submodule — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+submodule\s+(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs)\b'
+        # worktree — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+worktree\s+(add|remove|prune|move|repair|lock|unlock)\b'
+        # sparse-checkout — mutating subactions only:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
+        # network / exfil — wholesale:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        # transport / server faces — wholesale FN plugs:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(send-pack|upload-pack|receive-pack|shell|http-backend)\b'
+        # repo lifecycle / maintenance — wholesale:
+        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(init|gc|prune|maintenance)\b'
+        # compensating wrapper — keys on both the Windows and the POSIX
+        # interpreter faces (a PowerShell host still spawns sh-style wrappers):
+        - '(?i)(^|[\s;&|(\x60])((sh|bash|zsh|dash|ksh|fish)(\s+-[a-z-]+)*\s+-[a-z]*c\b|(powershell|pwsh)(\.exe)?(\s+-[a-z-]+)*\s+-(command|c)\b|cmd(\.exe)?(\s+/[a-z-]+)*\s+/c\b|\beval\b)[^;|\n]*git(\.exe)?\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|send-pack|upload-pack|receive-pack|shell|http-backend|init|gc|prune|maintenance|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)\s+-)'
     local_write:
       policy: "user_confirm"
     local_mcp:
