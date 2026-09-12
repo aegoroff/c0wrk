@@ -10,16 +10,12 @@ import (
 )
 
 // TestE2SDefaultsSeeded verifies ApplyDefaults seeds the E2S section (zero →
-// default) while the master toggle stays off — mirroring the Small-LLM
-// profile: values are visible/editable while the mode itself is a no-op
-// until BOTH experimental.enabled and e2s.enabled are true.
+// default). The section has no master toggle — the mode is gated solely by
+// experimental.enabled — so only the numeric knobs are seeded.
 func TestE2SDefaultsSeeded(t *testing.T) {
 	cfg := &Config{}
 	ApplyDefaults(cfg)
 
-	if cfg.E2S.Enabled {
-		t.Error("e2s.enabled must default to false")
-	}
 	if got := cfg.E2S.MaxSteps; got != 50 {
 		t.Errorf("e2s.max_steps default = %d, want 50", got)
 	}
@@ -45,7 +41,6 @@ func TestE2SDefaultsSeeded(t *testing.T) {
 func TestE2SExplicitValuesPreserved(t *testing.T) {
 	cfg := &Config{
 		E2S: E2SConfig{
-			Enabled:              true,
 			MaxSteps:             12,
 			StateByteLimit:       4096,
 			PatchRetries:         3,
@@ -61,9 +56,6 @@ func TestE2SExplicitValuesPreserved(t *testing.T) {
 		cfg.E2S.RepeatAbortThreshold != 4 {
 		t.Errorf("explicit e2s values overwritten by ApplyDefaults: %+v", cfg.E2S)
 	}
-	if !cfg.E2S.Enabled {
-		t.Error("explicit e2s.enabled=true must be preserved by ApplyDefaults (the experimental gate is applied later, at read time)")
-	}
 }
 
 // TestE2SYAMLParsing verifies the e2s: section parses from YAML into the
@@ -71,7 +63,6 @@ func TestE2SExplicitValuesPreserved(t *testing.T) {
 func TestE2SYAMLParsing(t *testing.T) {
 	raw := `
 e2s:
-  enabled: true
   max_steps: 25
   state_byte_limit: 8192
 `
@@ -81,9 +72,6 @@ e2s:
 	}
 	ApplyDefaults(&cfg)
 
-	if !cfg.E2S.Enabled {
-		t.Error("e2s.enabled = false, want true")
-	}
 	if cfg.E2S.MaxSteps != 25 {
 		t.Errorf("e2s.max_steps = %d, want 25", cfg.E2S.MaxSteps)
 	}

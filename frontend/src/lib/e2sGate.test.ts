@@ -4,40 +4,35 @@ import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 
 // The E2S send gate is fail-closed and composes two DISTINCT booleans from two
-// stores: the config availability (experimental AND e2s.enabled) and the user's
-// armed per-message toggle. These tests lock the composition so a fail-open
-// edit (a dropped term or a swapped flag) is caught.
+// stores: the experimental availability gate and the user's armed per-message
+// toggle. These tests lock the composition so a fail-open edit (a dropped term
+// or a swapped flag) is caught.
 beforeEach(() => {
-  useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: false, loaded: false })
+  useExperimentalStore.setState({ enabled: false, loaded: false })
   useInputModeStore.setState({ e2sEnabled: false, goalEnabled: false, goalBudget: '' })
 })
 
 describe('isE2SAvailable', () => {
-  it('is false when the experimental master switch is off, even if e2s.enabled is on', () => {
-    useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: true })
+  it('is false while the experimental master switch is off', () => {
+    useExperimentalStore.setState({ enabled: false })
     expect(isE2SAvailable()).toBe(false)
   })
 
-  it('is false when e2s.enabled is off, even if experimental is on', () => {
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: false })
-    expect(isE2SAvailable()).toBe(false)
-  })
-
-  it('is true only when both the experimental switch and e2s.enabled are on', () => {
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: true })
+  it('is true when the experimental master switch is on', () => {
+    useExperimentalStore.setState({ enabled: true })
     expect(isE2SAvailable()).toBe(true)
   })
 })
 
 describe('isE2SSendEnabled', () => {
   it('is false when available but the toggle is not armed', () => {
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: true })
+    useExperimentalStore.setState({ enabled: true })
     useInputModeStore.setState({ e2sEnabled: false })
     expect(isE2SSendEnabled()).toBe(false)
   })
 
   it('is true when available and armed', () => {
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: true })
+    useExperimentalStore.setState({ enabled: true })
     useInputModeStore.setState({ e2sEnabled: true })
     expect(isE2SSendEnabled()).toBe(true)
   })
@@ -45,11 +40,8 @@ describe('isE2SSendEnabled', () => {
   it('fails closed when armed but unavailable (stale persisted toggle)', () => {
     // The critical case: a persisted arming outliving the gate must never
     // produce an E2S send the backend would reject.
-    useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: true })
+    useExperimentalStore.setState({ enabled: false })
     useInputModeStore.setState({ e2sEnabled: true })
-    expect(isE2SSendEnabled()).toBe(false)
-
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: false })
     expect(isE2SSendEnabled()).toBe(false)
   })
 })

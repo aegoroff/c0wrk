@@ -241,11 +241,11 @@ type OrchestratorConfig struct {
 	SmallLLM SmallLLMSettings
 
 	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
-	// the effective master toggle (e2s.enabled already combined with the
-	// experimental gate by the builder). When false, an E2S request is
-	// rejected fail-closed before the loop starts; the numeric fields
-	// configure the loop (turn budget, Σ byte cap, retry/observation caps,
-	// anti-spin thresholds) and fall back to the core/e2s defaults when zero.
+	// the effective availability of the mode (experimental.enabled, mapped by
+	// the builder). When false, an E2S request is rejected fail-closed before
+	// the loop starts; the numeric fields configure the loop (turn budget, Σ
+	// byte cap, retry/observation caps, anti-spin thresholds) and fall back to
+	// the core/e2s defaults when zero.
 	E2S E2SSettings
 }
 

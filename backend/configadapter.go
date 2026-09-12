@@ -29,19 +29,6 @@ func effectiveSmallLLMConfig(cfg *config.Config) config.SmallLLMConfig {
 	return profile
 }
 
-// effectiveE2SConfig returns the E2S section with the master toggle forced off
-// when experimental features are disabled — the same fail-closed gate as the
-// Small-LLM profile. It copies the section so the caller never mutates the
-// live config; the stored values are preserved so re-enabling experimental
-// features restores the prior settings.
-func effectiveE2SConfig(cfg *config.Config) config.E2SConfig {
-	section := cfg.E2S
-	if !cfg.Experimental.Enabled {
-		section.Enabled = false
-	}
-	return section
-}
-
 // ToBuilderConfig converts a *config.Config into a *core.BuilderConfig.
 // This is the single conversion point so that core never imports backend/config.
 func ToBuilderConfig(cfg *config.Config) *core.BuilderConfig {
@@ -113,12 +100,11 @@ func ToBuilderConfig(cfg *config.Config) *core.BuilderConfig {
 		}
 	}
 
-	// Effective view for the core layer: the E2S master toggle is combined
-	// with the experimental gate here (fail-closed), exactly like the
-	// Small-LLM profile. The stored values are preserved so re-enabling
-	// experimental features restores the prior settings.
-	effE2S := effectiveE2SConfig(cfg)
-
+	// Effective view for the core layer: the E2S mode has no separate master
+	// toggle — its availability is exactly the experimental gate, so
+	// BuilderE2SConfig.Enabled is mapped from cfg.Experimental.Enabled below
+	// (fail-closed). The section's numeric knobs are always seeded so tuning
+	// never requires a rebuild.
 	return &core.BuilderConfig{
 		LLM: core.BuilderLLMConfig{
 			DefaultModel:    cfg.LLM.DefaultModel,
@@ -229,13 +215,13 @@ func ToBuilderConfig(cfg *config.Config) *core.BuilderConfig {
 			Verification: cfg.GoalLoop.Verification,
 		},
 		E2S: core.BuilderE2SConfig{
-			Enabled:              effE2S.Enabled,
-			MaxSteps:             effE2S.MaxSteps,
-			StateByteLimit:       effE2S.StateByteLimit,
-			PatchRetries:         effE2S.PatchRetries,
-			MaxObservationChars:  effE2S.ObservationTruncate,
-			RepeatNudgeThreshold: effE2S.RepeatNudgeThreshold,
-			RepeatAbortThreshold: effE2S.RepeatAbortThreshold,
+			Enabled:              cfg.Experimental.Enabled,
+			MaxSteps:             cfg.E2S.MaxSteps,
+			StateByteLimit:       cfg.E2S.StateByteLimit,
+			PatchRetries:         cfg.E2S.PatchRetries,
+			MaxObservationChars:  cfg.E2S.ObservationTruncate,
+			RepeatNudgeThreshold: cfg.E2S.RepeatNudgeThreshold,
+			RepeatAbortThreshold: cfg.E2S.RepeatAbortThreshold,
 		},
 		SmallLLM: core.BuilderSmallLLMConfig{
 			Enabled: cfg.SmallLLM.Enabled && cfg.Experimental.Enabled,

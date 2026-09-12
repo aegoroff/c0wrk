@@ -559,8 +559,8 @@ func ApplyDefaults(cfg *Config) {
 
 	// E2S execution-mode defaults. Like the Small-LLM profile the section is
 	// seeded unconditionally (zero → default) so the values stay visible and
-	// editable while the mode itself stays a no-op until BOTH
-	// experimental.enabled and e2s.enabled are true. The byte limit mirrors
+	// editable while the mode itself stays a no-op until experimental.enabled
+	// is true (there is no separate e2s master toggle). The byte limit mirrors
 	// core/e2s.DefaultStateByteLimit so the domain default and the config
 	// default cannot drift apart.
 	if cfg.E2S.MaxSteps == 0 {

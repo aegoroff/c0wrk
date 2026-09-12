@@ -23,11 +23,11 @@ import (
 var ErrE2SGoalConflict = errors.New("e2s: E2S and Goal modes are mutually exclusive — set exactly one of HandleOptions.E2S / HandleOptions.Goal")
 
 // ErrE2SModeDisabled is returned by HandleMessage when HandleOptions.E2S is
-// set while the effective E2S master toggle is off (e2s.enabled AND
-// experimental.enabled — combined by the builder). It is defense in depth
+// set while the effective E2S availability is off (experimental.enabled is
+// false — the builder maps it onto the master toggle). It is defense in depth
 // behind the frontend API gate, which already rejects a gated send before any
 // side effect: a direct core caller cannot run E2S while the mode is disabled.
-var ErrE2SModeDisabled = errors.New("e2s: E2S mode is disabled — enable e2s.enabled (with experimental features on) to use it")
+var ErrE2SModeDisabled = errors.New("e2s: E2S mode is disabled — enable experimental features to use it")
 
 // e2sStrippedToolNames are the plan-workflow tools removed from the E2S
 // available-tool catalog. E2S replaces the plan/roadmap machinery with the
@@ -266,7 +266,7 @@ func (o *Orchestrator) runE2SLoop(
 // E2S state. Σ continues exactly where the pause stopped it.
 //
 // Deliberate asymmetry with the HandleMessage gate: resume does NOT re-check
-// the E2S master toggle (o.config.E2S.Enabled). The gate guards *arming* a new
+// the E2S availability (o.config.E2S.Enabled). The gate guards *arming* a new
 // E2S send; a task already checkpointed with a non-terminal Σ is existing work,
 // and refusing to resume it would strand the task with no way to continue the
 // run. Skills requested at send time are likewise not re-resolved here — the

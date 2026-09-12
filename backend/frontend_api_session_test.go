@@ -295,52 +295,17 @@ func TestSendMessage_E2SGatePassesWhenExperimentalEnabled(t *testing.T) {
 	api.configMu.Lock()
 	api.config = &config.Config{}
 	api.config.Experimental.Enabled = true
-	api.config.E2S.Enabled = true
 	api.configMu.Unlock()
 
 	err := api.SendMessage("fork-src", "do the thing", nil, nil, "", "", false, "", true, false)
 	if err == nil {
 		t.Fatal("expected the send to stop at the manager-initialized guard, not succeed")
 	}
-	if strings.Contains(err.Error(), "experimental") || strings.Contains(err.Error(), "mutually exclusive") ||
-		strings.Contains(err.Error(), "e2s.enabled") {
-		t.Errorf("gate must be open with experimental + e2s enabled, got gate rejection: %v", err)
+	if strings.Contains(err.Error(), "experimental") || strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("gate must be open with experimental features enabled, got gate rejection: %v", err)
 	}
 	if !strings.Contains(err.Error(), "session manager not initialized") {
 		t.Errorf("expected the manager-initialized rejection after the open gate, got: %v", err)
-	}
-}
-
-// TestSendMessage_E2SFailClosedWhenE2SToggleDisabled verifies the second,
-// feature-specific half of the E2S gate: even with experimental features on,
-// a send is rejected before any side effect while e2s.enabled is false.
-func TestSendMessage_E2SFailClosedWhenE2SToggleDisabled(t *testing.T) {
-	api, sessionStore, _, db := newForkTestAPI(t)
-	defer func() { _ = db.Close() }()
-	ctx := context.Background()
-
-	api.configMu.Lock()
-	api.config = &config.Config{}
-	api.config.Experimental.Enabled = true
-	api.config.E2S.Enabled = false // feature toggle off
-	api.configMu.Unlock()
-
-	err := api.SendMessage("fork-src", "do the thing", nil, nil, "", "", false, "", true, false)
-	if err == nil {
-		t.Fatal("expected an error sending an E2S message while e2s.enabled is false")
-	}
-	if !strings.Contains(err.Error(), "e2s.enabled") {
-		t.Errorf("expected the e2s.enabled gate rejection, got: %v", err)
-	}
-
-	// Fail-closed = no side effects.
-	if msgs, mErr := sessionStore.LoadMessages(ctx, "fork-src"); mErr != nil {
-		t.Fatalf("LoadMessages: %v", mErr)
-	} else if len(msgs) != 0 {
-		t.Errorf("gated send must not persist a message, got %d", len(msgs))
-	}
-	if latest, lErr := sessionStore.GetLatestTaskID(ctx, "fork-src"); lErr != nil || latest != "" {
-		t.Errorf("gated send must not start a task (latest=%q, err=%v)", latest, lErr)
 	}
 }
 

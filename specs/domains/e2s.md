@@ -2,7 +2,7 @@
 
 ## Purpose
 
-E2S is an alternative execution mode in which the model's only memory is an **externalized, structured state Σ** ("sigma") that it reads and patches every turn, instead of replaying a growing conversation history. Each turn is a fresh one-shot request — system prompt + `[turn N] <state>Σₜ</state> <observation>Oₜ</observation>` — so the request size stays **O(1) in the number of turns** no matter how long the task runs. The mode is selected per message (`HandleOptions.E2S`), is mutually exclusive with goal mode, and is gated behind `experimental.enabled` + `e2s.enabled`. Design rationale and the arXiv 2608.26263 motivation: [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md).
+E2S is an alternative execution mode in which the model's only memory is an **externalized, structured state Σ** ("sigma") that it reads and patches every turn, instead of replaying a growing conversation history. Each turn is a fresh one-shot request — system prompt + `[turn N] <state>Σₜ</state> <observation>Oₜ</observation>` — so the request size stays **O(1) in the number of turns** no matter how long the task runs. The mode is selected per message (`HandleOptions.E2S`), is mutually exclusive with goal mode, and is gated behind `experimental.enabled`. Design rationale and the arXiv 2608.26263 motivation: [decisions/039-e2s-explicit-execution-state.md](../decisions/039-e2s-explicit-execution-state.md).
 
 ## Key Files
 
@@ -21,7 +21,7 @@ E2S is an alternative execution mode in which the model's only memory is an **ex
 - `backend/session/persistence.go` — `task_e2s_state` table (`task_id` PK, `e2s_state` JSON, `updated_at`; `CREATE TABLE IF NOT EXISTS` is the migration), `SaveE2SState`/`LoadE2SState`
 - `backend/session/task_adapter.go` — `PersistE2SState`/`LoadE2SState` (the `e2sStatePersister` implementation)
 - `backend/session/persistence_fork.go` — copies `task_e2s_state` on session fork
-- `frontend/src/components/chat/E2SToggle.tsx` — per-message mode toggle (visible only when the E2S mode is available: `useExperimentalFeatures()` AND `experimentalStore.e2sConfigEnabled`, i.e. config `e2s.enabled`), mutually exclusive with the goal toggle
+- `frontend/src/components/chat/E2SToggle.tsx` — per-message mode toggle (visible only while the experimental master switch is on: `useExperimentalFeatures()`, config `experimental.enabled`), mutually exclusive with the goal toggle
 - `frontend/src/stores/inputModeStore.ts` — `e2sEnabled` (persisted; enabling E2S disables goal and vice versa)
 - `frontend/src/stores/e2sStore.ts` + `frontend/src/hooks/events/useE2SStateEvents.ts` + `e2sHandlers.ts` — per-session Σ snapshots from `e2s_state` events (patch merge owned by the store; cleared on session switch/delete)
 - `frontend/src/components/chat/ExecutionStatePanel.tsx` + `ExecutionPanels.tsx` — the Execution State panel that **replaces the plan view** for E2S sessions
@@ -124,7 +124,6 @@ HandleMessage ── E2S && Goal both set? ──► explicit error (mutually ex
 
 | Key                      | Default | Meaning                                                             |
 | ------------------------ | ------- | ------------------------------------------------------------------- |
-| `enabled`                | `false` | master toggle for the mode (with the experimental gate, both must be on) |
 | `max_steps`              | `50`    | turn budget per run (patch+action cycles) before `step_limit`       |
 | `state_byte_limit`       | `16384` | JSON-encoded Σ byte cap (mirrors `core/e2s.DefaultStateByteLimit`)  |
 | `patch_retries`          | `1`     | corrective re-requests for a rejected patch before run failure      |

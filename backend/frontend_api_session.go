@@ -271,15 +271,12 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	}
 	// E2S is experimental: fail closed BEFORE any side effect (no activity
 	// timestamp, no persisted message, no task launch) when the flag arrives
-	// while BOTH gates are not satisfied. experimentalFeaturesEnabled also
+	// while the experimental gate is off. experimentalFeaturesEnabled also
 	// returns false for a not-yet-loaded config, so an early send can never
 	// slip past the gate. Checked even before the manager-initialized guard:
 	// a gated request is rejected on principle, regardless of runtime state.
 	if e2s && !f.experimentalFeaturesEnabled() {
 		return errors.New("E2S mode is experimental and currently disabled — enable experimental features in settings to use it")
-	}
-	if e2s && !f.e2sEnabled() {
-		return errors.New("E2S mode is disabled — set e2s.enabled: true in the config file (with experimental features on) to use it")
 	}
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")

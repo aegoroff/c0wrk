@@ -1323,14 +1323,11 @@ orchestration:
 # value deletes a key (extension keys only). The domain types and the merge
 # operator live in core/e2s.
 #
-# GATED: the entire section is ineffective while experimental.enabled is
-# false — exactly like the Small-LLM profile, the master toggle below only
-# takes effect when the experimental gate is also on.
+# GATED: the entire section is ineffective, and the per-message E2S toggle is
+# hidden, while experimental.enabled is false. There is no separate e2s master
+# toggle — the experimental switch is the mode's only gate.
 #
 # e2s:
-#   # Master toggle. Effective only while experimental.enabled is true.
-#   # Default: false.
-#   enabled: false
 #   # Maximum number of E2S turns (patch+action cycles) per run before the
 #   # run fails as budget exhaustion. Default: 50.
 #   max_steps: 50

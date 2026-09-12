@@ -241,34 +241,28 @@ func TestToBuilderConfig_WebFetchTimeouts(t *testing.T) {
 	}
 }
 
-// TestEffectiveE2SConfig pins the fail-closed experimental gate for the E2S
-// execution mode, mirroring effectiveSmallLLMConfig: while
-// experimental.enabled is false the section is forced off even when
-// e2s.enabled is true, and the stored values are preserved so re-enabling
-// the gate restores them.
-func TestEffectiveE2SConfig(t *testing.T) {
+// TestE2SConfigExperimentalGate pins the fail-closed gate for the E2S
+// execution mode: core's BuilderE2SConfig.Enabled is exactly the experimental
+// master switch (there is no separate e2s toggle), while the numeric knobs
+// pass through regardless so tuning survives the gate.
+func TestE2SConfigExperimentalGate(t *testing.T) {
 	cfg := &config.Config{}
 	config.ApplyDefaults(cfg)
-	cfg.E2S.Enabled = true
 	cfg.E2S.MaxSteps = 42
 
-	// Fail-closed: the experimental gate off neutralizes the master toggle.
+	// Fail-closed: the experimental gate off disables E2S.
 	cfg.Experimental.Enabled = false
-	section := effectiveE2SConfig(cfg)
-	if section.Enabled {
-		t.Error("effective e2s.Enabled must be false while the experimental gate is off")
-	}
-	if section.MaxSteps != 42 {
-		t.Errorf("stored MaxSteps = %d, want 42 (values preserved, not zeroed)", section.MaxSteps)
-	}
-	// The live config is untouched by the gate's copy.
-	if !cfg.E2S.Enabled {
-		t.Error("effectiveE2SConfig must not mutate the stored config")
+	if ToBuilderConfig(cfg).E2S.Enabled {
+		t.Error("BuilderE2SConfig.Enabled must be false while the experimental gate is off")
 	}
 
-	// Gate on: the section passes through verbatim.
+	// Gate on: E2S is available and the stored knobs pass through verbatim.
 	cfg.Experimental.Enabled = true
-	if section = effectiveE2SConfig(cfg); !section.Enabled {
-		t.Error("effective e2s.Enabled must follow the stored toggle when the gate is on")
+	got := ToBuilderConfig(cfg).E2S
+	if !got.Enabled {
+		t.Error("BuilderE2SConfig.Enabled must follow the experimental gate")
+	}
+	if got.MaxSteps != 42 {
+		t.Errorf("BuilderE2SConfig.MaxSteps = %d, want 42 (values pass through)", got.MaxSteps)
 	}
 }

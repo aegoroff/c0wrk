@@ -5,10 +5,10 @@ import { useInputModeStore } from '@/stores/inputModeStore'
  * Single source of truth for the E2S gating rules.
  *
  * Two DISTINCT booleans govern E2S and live in different stores:
- *   - `experimentalStore.e2sConfigEnabled` — the configuration master gate
- *     (mirrors config `e2s.enabled`), combined with the experimental master
- *     switch `experimentalStore.enabled`. Named `e2sConfigEnabled`, NOT
- *     `e2sEnabled`, precisely so it can never be mistaken for the armed toggle.
+ *   - `experimentalStore.enabled` — the EXPERIMENTAL AVAILABILITY gate (config
+ *     `experimental.enabled`). E2S is one of the features behind the master
+ *     switch; there is no separate `e2s.enabled` toggle, so availability is the
+ *     switch itself.
  *   - `inputModeStore.e2sEnabled` — the user's per-message ARMED toggle.
  *
  * They are NOT interchangeable: availability is a configuration fact, arming is
@@ -21,10 +21,9 @@ import { useInputModeStore } from '@/stores/inputModeStore'
  */
 
 /** isE2SAvailable reports whether the E2S mode may be offered at all: the
- *  experimental master switch AND `e2s.enabled` must both be on. */
+ *  experimental master switch must be on. */
 export function isE2SAvailable(): boolean {
-  const s = useExperimentalStore.getState()
-  return s.enabled && s.e2sConfigEnabled
+  return useExperimentalStore.getState().enabled
 }
 
 /**

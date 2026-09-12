@@ -100,9 +100,9 @@ export function useMessageSender(): UseMessageSenderResult {
     const goalEnabled = useInputModeStore.getState().goalEnabled
     // E2S is mutually exclusive with goal (the store's setters enforce it), so
     // at most one of the two flags is armed here. `isE2SSendEnabled` is the
-    // single fail-closed gate: it composes the effective E2S availability
-    // (experimental AND e2s.enabled) with the armed toggle so a stale persisted
-    // `true` can never arm a send the backend would reject.
+    // single fail-closed gate: it composes the experimental availability gate
+    // with the armed toggle so a stale persisted `true` can never arm a send
+    // the backend would reject.
     const e2sEnabled = isE2SSendEnabled()
     const pendingAttachments =
       useAttachmentsStore.getState().attachmentsBySession[sessionId] ?? EMPTY_ATTACHMENTS

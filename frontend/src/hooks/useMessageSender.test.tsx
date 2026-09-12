@@ -105,9 +105,9 @@ beforeEach(() => {
     useSessionStore.setState({ sessions: [], activeSessionId: null })
     useChatStore.setState({ messages: {}, messageOrder: {}, paused: {}, taskActive: {} })
     useInputModeStore.setState({ goalEnabled: false, goalBudget: '', e2sEnabled: false, selectedModel: null, selectedReasoning: null })
-    // Default the effective E2S gate ON so E2S-specific tests exercise the
-    // armed path; tests that cover the gate off override these explicitly.
-    useExperimentalStore.setState({ enabled: true, e2sConfigEnabled: true })
+    // Default the experimental E2S gate ON so E2S-specific tests exercise the
+    // armed path; tests that cover the gate off override this explicitly.
+    useExperimentalStore.setState({ enabled: true })
     useE2SStore.getState().clearAll()
     useAttachmentsStore.setState({ attachmentsBySession: {}, uploadsBySession: {}, namesById: {}, imageErrorBySession: {} })
   })
@@ -191,9 +191,9 @@ describe('useMessageSender optimistic metadata', () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     act(() => {
       useInputModeStore.getState().setE2sEnabled(true)
-      // A persisted arming outlives the gate: experimental off (or e2s.enabled
-      // off) must neutralize it so the backend never sees a rejected send.
-      useExperimentalStore.setState({ enabled: false, e2sConfigEnabled: true })
+      // A persisted arming outlives the gate: experimental off must
+      // neutralize it so the backend never sees a rejected send.
+      useExperimentalStore.setState({ enabled: false })
     })
     await act(async () => {
       await capturedSend!('plain message')

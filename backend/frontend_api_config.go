@@ -47,9 +47,6 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
 		},
-		E2S: E2SConfigResponse{
-			Enabled: f.config.E2S.Enabled,
-		},
 	}
 
 	// Populate AllModels: flat list of all enabled models.
@@ -89,16 +86,6 @@ func (f *FrontendAPI) experimentalFeaturesEnabled() bool {
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
 	return f.config != nil && f.config.Experimental.Enabled
-}
-
-// e2sEnabled reports whether the E2S execution mode's own master toggle is on.
-// It returns false when the config is not yet initialized (fail-closed). The
-// effective E2S gate requires experimentalFeaturesEnabled too; callers combine
-// the two (see SendMessage).
-func (f *FrontendAPI) e2sEnabled() bool {
-	f.configMu.RLock()
-	defer f.configMu.RUnlock()
-	return f.config != nil && f.config.E2S.Enabled
 }
 
 // buildLLMResponse constructs the sanitized ConfigLLMResponse from config.

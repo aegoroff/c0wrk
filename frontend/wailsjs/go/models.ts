@@ -301,18 +301,6 @@ export namespace backend {
 		}
 	}
 	
-	export class E2SConfigResponse {
-	    enabled: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new E2SConfigResponse(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	    }
-	}
 	export class ExperimentalSettingsResponse {
 	    enabled: boolean;
 	
@@ -365,7 +353,6 @@ export namespace backend {
 	    search: ConfigSearchResp;
 	    proxy: ProxySettingsResponse;
 	    experimental: ExperimentalSettingsResponse;
-	    e2s: E2SConfigResponse;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConfigResponse(source);
@@ -380,7 +367,6 @@ export namespace backend {
 	        this.search = this.convertValues(source["search"], ConfigSearchResp);
 	        this.proxy = this.convertValues(source["proxy"], ProxySettingsResponse);
 	        this.experimental = this.convertValues(source["experimental"], ExperimentalSettingsResponse);
-	        this.e2s = this.convertValues(source["e2s"], E2SConfigResponse);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -401,7 +387,6 @@ export namespace backend {
 		    return a;
 		}
 	}
-	
 	
 	
 	export class FileIconResponse {

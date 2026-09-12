@@ -1007,16 +1007,10 @@ type SmallLLMCompactionConfig struct {
 }
 
 // E2SConfig configures the E2S (explicit-state) execution mode. The mode is
-// experimental and fail-closed gated by experimental.enabled (see
-// effectiveE2SConfig in backend/configadapter.go): when the gate is off the
-// whole section is ineffective regardless of e2s.enabled. Like the Small-LLM
-// profile, every knob is seeded with a default so tuning never requires a
-// rebuild, while the master toggle defaults to false.
+// experimental and fail-closed gated by experimental.enabled alone: when the
+// gate is off the whole section is ineffective. Like the Small-LLM profile,
+// every knob is seeded with a default so tuning never requires a rebuild.
 type E2SConfig struct {
-	// Enabled is the master toggle for the E2S execution mode. Effective only
-	// while experimental.enabled is also true. Default: false.
-	Enabled bool `yaml:"enabled"`
-
 	// MaxSteps caps the number of E2S turns (patch+action cycles) per run
 	// before the run fails as budget exhaustion. Default: 50.
 	MaxSteps int `yaml:"max_steps"`

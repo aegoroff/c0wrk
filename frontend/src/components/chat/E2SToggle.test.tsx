@@ -13,7 +13,6 @@ vi.mock('@/hooks/useExperimentalFeatures', () => ({
 
 import { E2SToggle } from './E2SToggle'
 import { useInputModeStore } from '@/stores/inputModeStore'
-import { useExperimentalStore } from '@/stores/experimentalStore'
 
 let container: HTMLDivElement
 let root: Root
@@ -21,9 +20,6 @@ let root: Root
 beforeEach(() => {
   experimentalOn = true
   useInputModeStore.setState({ goalEnabled: false, goalBudget: '', e2sEnabled: false })
-  // The E2S-specific config toggle is on by default here; tests that cover the
-  // feature toggle off override it.
-  useExperimentalStore.setState({ e2sConfigEnabled: true })
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -85,26 +81,6 @@ describe('E2SToggle', () => {
 
   it('is visible when the experimental gate is on', () => {
     expect(trigger()).toBeDefined()
-  })
-
-  it('is hidden when the E2S feature toggle (e2s.enabled) is off', () => {
-    act(() => {
-      useExperimentalStore.setState({ e2sConfigEnabled: false })
-    })
-    const withFeatureOff = document.createElement('div')
-    document.body.appendChild(withFeatureOff)
-    const offRoot = createRoot(withFeatureOff)
-    try {
-      act(() => {
-        offRoot.render(<E2SToggle />)
-      })
-      expect(withFeatureOff.querySelector('button[aria-label="Toggle E2S mode"]')).toBeNull()
-    } finally {
-      act(() => {
-        offRoot.unmount()
-      })
-      withFeatureOff.remove()
-    }
   })
 
   it('is disabled while the session is running (session-pinning lock)', () => {

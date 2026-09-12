@@ -512,13 +512,13 @@ type BuilderGoalLoopConfig struct {
 
 // BuilderE2SConfig mirrors config.E2SConfig for the subset core consumes. core
 // never imports backend/config, so the values are copied via ToBuilderConfig,
-// where Enabled is already combined with the experimental gate (fail-closed).
-// A zero value means "disabled with loop defaults" — core falls back to the
-// core/e2s Config defaults for every numeric field.
+// where Enabled is mapped from the experimental gate (fail-closed). A zero
+// value means "disabled with loop defaults" — core falls back to the core/e2s
+// Config defaults for every numeric field.
 type BuilderE2SConfig struct {
-	// Enabled is the effective master toggle (e2s.enabled AND
-	// experimental.enabled). When false the E2S execution mode is rejected
-	// fail-closed; the numeric fields below are then inert.
+	// Enabled is the effective availability of the E2S execution mode
+	// (experimental.enabled). When false the mode is rejected fail-closed; the
+	// numeric fields below are then inert.
 	Enabled bool
 	// MaxSteps caps the number of turns (patch+action cycles) per run.
 	MaxSteps int

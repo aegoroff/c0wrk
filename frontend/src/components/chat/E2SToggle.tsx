@@ -1,6 +1,5 @@
 import { Braces } from 'lucide-react'
 import { useInputModeStore } from '@/stores/inputModeStore'
-import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
 import { cn } from '@/lib/utils'
 
@@ -9,11 +8,12 @@ import { cn } from '@/lib/utils'
  * sent message. It mirrors GoalToggle's compact icon-button treatment: muted
  * when off, primary-highlighted when on.
  *
- * The toggle is gated behind the effective E2S availability: the experimental
- * master switch (useExperimentalFeatures, config `experimental.enabled`) AND
- * the E2S-specific `e2s.enabled` toggle (`experimentalStore.e2sConfigEnabled`).
- * It renders nothing while either is off, so the mode stays invisible in
- * default installs and can never be armed to a backend-rejected send.
+ * The toggle is gated behind the experimental master switch alone
+ * (useExperimentalFeatures, config `experimental.enabled`): E2S is one of the
+ * features behind that all-or-nothing gate, so flipping the switch reveals the
+ * button — there is no separate `e2s.enabled` toggle. It renders nothing while
+ * the switch is off, so the mode stays invisible in default installs and can
+ * never be armed to a backend-rejected send.
  *
  * This is the VISIBILITY gate. The authoritative SEND gate — the armed toggle
  * combined with the same availability rule — is defined once in `lib/e2sGate`
@@ -27,11 +27,10 @@ import { cn } from '@/lib/utils'
  */
 export function E2SToggle({ disabled = false }: { disabled?: boolean }) {
   const experimentalEnabled = useExperimentalFeatures()
-  const e2sConfigEnabled = useExperimentalStore((s) => s.e2sConfigEnabled)
   const e2sEnabled = useInputModeStore((s) => s.e2sEnabled)
   const setE2sEnabled = useInputModeStore((s) => s.setE2sEnabled)
 
-  if (!experimentalEnabled || !e2sConfigEnabled) return null
+  if (!experimentalEnabled) return null
 
   return (
     <button
