@@ -26,7 +26,7 @@ const metrics: AgentMetricsData = {
   steps: 3,
   output_tokens: 1200,
   invalid_tool_calls: 0,
-  small_llm: { enabled: false, variants: [] },
+  slm: { enabled: false, variants: [] },
 }
 
 const planGroup: PlanGroup = {

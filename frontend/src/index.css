@@ -472,7 +472,7 @@ body {
 }
 
 /* Markdown rendered inside a hover tooltip (e.g. the Small-LLM essential-tools
-   picker, see `lib/smallLlmTools.ts`). Tightens @tailwindcss/typography's
+   picker, see `lib/slmTools.ts`). Tightens @tailwindcss/typography's
    generous paragraph/list spacing so a multi-section, list-bearing description
    stays compact. Doubled class raises specificity above `.prose :where(...)`. */
 .prose.prose-tooltip {

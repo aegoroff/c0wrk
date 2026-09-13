@@ -8,43 +8,43 @@ import (
 	"github.com/v0lka/sp4rk/tools"
 )
 
-// This file holds the SmallLLM INTEGRATION tests. Unlike the per-variant unit
-// tests (orchestrator_smallllm_test.go, systemprompt_test.go) that drive each
+// This file holds the SLM INTEGRATION tests. Unlike the per-variant unit
+// tests (orchestrator_slm_test.go, systemprompt_test.go) that drive each
 // function in isolation with a hand-crafted context, these tests exercise the
 // full composition through the orchestrator's own prepareRequestContext →
-// buildSystemPrompt → applySmallLLMToolFilter chain, driven by a real
+// buildSystemPrompt → applySLMToolFilter chain, driven by a real
 // OrchestratorConfig. They prove the variants COMPOSE correctly when the master
 // toggle is ON (lite prompt + few-shot + injection-defense all present AND the
 // tool set reduced in one coherent scenario) and that master OFF is a complete
-// no-op (byte-identical prompt + untouched tool set vs. a zero-SmallLLM
+// no-op (byte-identical prompt + untouched tool set vs. a zero-SLM
 // baseline).
 //
 // The integration value over the unit tests is that the unit tests set ctx keys
-// directly (WithSmallLLMLite / InjectionDefenseKey), bypassing the orchestrator
+// directly (WithSLMLite / InjectionDefenseKey), bypassing the orchestrator
 // wiring. These tests let prepareRequestContext derive the ctx from config and
 // then assert the downstream prompt + tool behaviors compose — closing the gap
 // between "the config toggles are gated correctly" and "the gated toggles
 // actually reach the prompt output and the tool set together".
 
-// TestSmallLLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefenseAndReducedTools
+// TestSLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefenseAndReducedTools
 // is the end-to-end composition test for the master-ON case. With a full profile
 // (master ON + essential-tools + prompt-lite sub-toggles + injection defense),
 // the orchestrator's prepareRequestContext must set BOTH the lite key and the
 // injection-defense key, buildSystemPrompt must then assemble a prompt carrying
 // the lite directive + few-shot examples + the FULL injection-defense content
 // (strict constraint: lite never strips injection defense), and
-// applySmallLLMToolFilter must reduce the conductor's tool set.
-func TestSmallLLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefenseAndReducedTools(t *testing.T) {
+// applySLMToolFilter must reduce the conductor's tool set.
+func TestSLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefenseAndReducedTools(t *testing.T) {
 	o := &Orchestrator{
 		config: OrchestratorConfig{
 			InjectionDefenseEnabled: true,
-			SmallLLM: SmallLLMSettings{
+			SLM: SLMSettings{
 				Enabled: true,
-				EssentialTools: SmallLLMEssentialSettings{
+				EssentialTools: SLMEssentialSettings{
 					Enabled:       true,
 					AlwaysPresent: []string{"store_fact"},
 				},
-				SystemPrompt: SmallLLMSystemPromptSettings{
+				SystemPrompt: SLMSystemPromptSettings{
 					Lite:              true,
 					FewShot:           true,
 					ReasoningScaffold: true,
@@ -59,8 +59,8 @@ func TestSmallLLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefense
 	meta := llmModelMetaForTests()
 
 	// Defense-in-depth wiring: both ctx keys set from config.
-	if reqCtx.Value(SmallLLMLiteKey) == nil {
-		t.Fatal("master ON: prepareRequestContext did not set SmallLLMLiteKey")
+	if reqCtx.Value(SLMLiteKey) == nil {
+		t.Fatal("master ON: prepareRequestContext did not set SLMLiteKey")
 	}
 	if reqCtx.Value(InjectionDefenseKey) == nil {
 		t.Fatal("master ON: prepareRequestContext did not set InjectionDefenseKey")
@@ -94,8 +94,8 @@ func TestSmallLLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefense
 	}
 
 	// ── TOOLS: narrowed to the static selection (always-present + protected + MCP) ──
-	in := smallLLMTestTools()
-	got := o.applySmallLLMToolFilter(in)
+	in := slmTestTools()
+	got := o.applySLMToolFilter(in)
 	if len(got) >= len(in) {
 		t.Errorf("integration: master-ON tool set not reduced: got %d tools, input %d", len(got), len(in))
 	}
@@ -119,30 +119,30 @@ func TestSmallLLM_Integration_MasterOn_ComposesLitePromptFewShotInjectionDefense
 	}
 }
 
-// TestSmallLLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset is the
+// TestSLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset is the
 // master-OFF regression guard. With all variant sub-toggles ON but the master
 // toggle OFF, defense-in-depth must gate every variant: prepareRequestContext
 // sets NEITHER ctx key, the assembled prompt is BYTE-IDENTICAL to one built
-// from a zero-SmallLLM config, and applySmallLLMToolFilter returns the full
+// from a zero-SLM config, and applySLMToolFilter returns the full
 // tool set untouched. This proves enabling variant sub-toggles (while the
 // master is off) changes absolutely nothing about prompt output or tool set.
-func TestSmallLLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset(t *testing.T) {
+func TestSLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset(t *testing.T) {
 	// Variants ON, master OFF.
 	oOff := &Orchestrator{
 		config: OrchestratorConfig{
 			InjectionDefenseEnabled: true,
-			SmallLLM: SmallLLMSettings{
+			SLM: SLMSettings{
 				Enabled: false, // master gate OFF
-				EssentialTools: SmallLLMEssentialSettings{
+				EssentialTools: SLMEssentialSettings{
 					Enabled:       true,
 					AlwaysPresent: []string{"read_file"},
 				},
-				SystemPrompt: SmallLLMSystemPromptSettings{Lite: true},
+				SystemPrompt: SLMSystemPromptSettings{Lite: true},
 			},
 		},
 		emitter: &noopEmitter{},
 	}
-	// Pre-profile baseline: a zero-SmallLLM config.
+	// Pre-profile baseline: a zero-SLM config.
 	oBaseline := &Orchestrator{
 		config:  OrchestratorConfig{InjectionDefenseEnabled: true},
 		emitter: &noopEmitter{},
@@ -156,12 +156,12 @@ func TestSmallLLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset(t *tes
 	baselineCtx := oBaseline.prepareRequestContext(ctx, msg)
 
 	// Defense-in-depth: master OFF gates the lite key away.
-	if offCtx.Value(SmallLLMLiteKey) != nil {
-		t.Fatal("master OFF: prepareRequestContext set SmallLLMLiteKey — defense-in-depth broken")
+	if offCtx.Value(SLMLiteKey) != nil {
+		t.Fatal("master OFF: prepareRequestContext set SLMLiteKey — defense-in-depth broken")
 	}
-	// Injection defense is independent of SmallLLM, so it is set in both.
+	// Injection defense is independent of SLM, so it is set in both.
 	if offCtx.Value(InjectionDefenseKey) == nil {
-		t.Fatal("master OFF: InjectionDefenseKey should still be set (independent of SmallLLM)")
+		t.Fatal("master OFF: InjectionDefenseKey should still be set (independent of SLM)")
 	}
 
 	offPrompt := buildSystemPrompt(offCtx, msg, meta)
@@ -170,7 +170,7 @@ func TestSmallLLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset(t *tes
 	// BYTE-IDENTICAL regression guard.
 	if offPrompt != baselinePrompt {
 		t.Fatalf(
-			"master OFF prompt diverges from zero-SmallLLM baseline: "+
+			"master OFF prompt diverges from zero-SLM baseline: "+
 				"off=%d bytes, baseline=%d bytes",
 			len(offPrompt), len(baselinePrompt),
 		)
@@ -187,8 +187,8 @@ func TestSmallLLM_Integration_MasterOff_ByteIdenticalPromptAndFullToolset(t *tes
 	}
 
 	// TOOLS: full set returned untouched.
-	in := smallLLMTestTools()
-	got := oOff.applySmallLLMToolFilter(in)
+	in := slmTestTools()
+	got := oOff.applySLMToolFilter(in)
 	if len(got) != len(in) {
 		t.Errorf("master OFF: expected full tool set (%d tools untouched), got %d", len(in), len(got))
 	}

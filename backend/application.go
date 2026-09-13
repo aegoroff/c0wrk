@@ -83,6 +83,10 @@ type Application struct {
 	titleGen  *session.TitleGenerator
 	logger    *slog.Logger
 
+	// agentDir (~/.c0wrk) locates the small-LLM custom-profile store used to
+	// resolve the effective profile on every builder-config conversion.
+	agentDir string
+
 	// emitFunc is the combined session-event emitter (UI + persistence).
 	// Exposed via EmitSessionEvent so desktop-layer callbacks (e.g. plan
 	// approval) can emit events that survive app restarts.
@@ -112,6 +116,7 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 		logger:       cfg.Logger,
 		hitlHandler:  cfg.HITLHandler,
 		goalProposer: cfg.GoalProposer,
+		agentDir:     cfg.AgentDir,
 	}
 
 	// 1. Event persister (SQLite persistence, separate from UI emission).
@@ -127,7 +132,7 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 	app.emitFunc = emitFunc
 
 	// 3. OrchestratorBuilder (owns registry, gateway, router, judge).
-	builderCfg := ToBuilderConfig(cfg.Config)
+	builderCfg := ToBuilderConfig(cfg.Config, loadSLMCatalog(app.agentDir, app.log()))
 	// Managed venv interpreter (imports markitdown) enables vision-assisted
 	// document conversion. Machine-local fact, resolved LAZILY: the
 	// tool-manager installs the venv asynchronously after startup, so probing
@@ -221,7 +226,7 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 
 	// 5. Orchestrator factory closure for the session manager.
 	factory := func(emitter core.Emitter, logger *slog.Logger, workspacePath string, bbFactory core.BlackboardFactory, dumpWriter io.Writer, stepDumpTracker *orchestration.StepDumpTracker) (*core.Orchestrator, error) {
-		orchCfg := ToBuilderConfig(cfg.Config)
+		orchCfg := ToBuilderConfig(cfg.Config, loadSLMCatalog(app.agentDir, app.log()))
 		// The lazy python probe is consumed at tool registration (builder
 		// creation); propagate it here as well so any future Build-side
 		// consumer sees the closure instead of a zero value.
@@ -259,8 +264,12 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 	// cold startup on ~7 subprocess probes (~0.75s).
 	manager.StartEnvInfoCollection()
 	manager.SetMaxSummaryLen(cfg.Config.Orchestration.MaxSummaryLength)
-	// Annotate agent quality metrics with the active Small-LLM profile (if any).
-	manager.SetSmallLLMProfile(effectiveSmallLLMConfig(cfg.Config))
+	// Annotate agent quality metrics with the active Small-LLM profile (if
+	// any). Resolution warnings are already surfaced at load time by
+	// config.ResolveAndLoad, so they are dropped here.
+	slmCatalog := loadSLMCatalog(app.agentDir, app.log())
+	slmProfile, _ := effectiveSLMConfig(cfg.Config, slmCatalog)
+	manager.SetSLMProfile(slmProfile, activeSLMProfile(cfg.Config.SLM, slmCatalog))
 	manager.SetServiceLLMTimeout(time.Duration(cfg.Config.Timeouts.ServiceLLMRequestTimeout) * time.Second)
 	if cfg.SessionStore != nil {
 		manager.SetSessionStore(cfg.SessionStore)

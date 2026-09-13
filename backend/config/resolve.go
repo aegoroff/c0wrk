@@ -101,5 +101,17 @@ func ResolveAndLoad(log *slog.Logger) *ResolvedConfig {
 		}
 	}
 
+	// Surface small-LLM profile resolution problems through the same
+	// load-warnings channel the UI displays (configLoadErrors): a broken
+	// custom-profile store or a stale slm.active_profile must never fail the
+	// run, but the operator should still see the soft fallback to "generic".
+	slmCatalog, slmWarnings := LoadSLMCatalog(agentDir)
+	_, slmResolveWarnings := ResolveSLMConfig(resolved.Config.SLM, slmCatalog)
+	slmWarnings = append(slmWarnings, slmResolveWarnings...)
+	for _, w := range slmWarnings {
+		log.Warn("small-LLM profile warning", "warning", w)
+		resolved.LoadErrors = append(resolved.LoadErrors, w)
+	}
+
 	return resolved
 }

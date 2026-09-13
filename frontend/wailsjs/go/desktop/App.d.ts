@@ -59,6 +59,8 @@ export function CreateHypothesis(arg1:string,arg2:backend.NewHypothesisCard):Pro
 
 export function CreateProject(arg1:string,arg2:string):Promise<project.ProjectInfo>;
 
+export function CreateSLMProfile(arg1:string,arg2:string):Promise<string>;
+
 export function CreateSession():Promise<session.SessionInfo>;
 
 export function CreateTag(arg1:string,arg2:string):Promise<void>;
@@ -76,6 +78,8 @@ export function DeleteRemoteTag(arg1:string,arg2:string):Promise<string>;
 export function DeleteResearch(arg1:string,arg2:string):Promise<backend.ResearchStatusDTO>;
 
 export function DeleteReviewComment(arg1:string):Promise<void>;
+
+export function DeleteSLMProfile(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
@@ -165,6 +169,8 @@ export function GetReview(arg1:string):Promise<review.Review>;
 
 export function GetReviewDiff():Promise<Array<workspace.ReviewFileDiff>>;
 
+export function GetSLMProfiles():Promise<backend.SLMProfilesResponse>;
+
 export function GetSecuritySettings():Promise<backend.SecuritySettingsResponse>;
 
 export function GetSessionHistory(arg1:string):Promise<Array<session.ChatMessage>>;
@@ -174,8 +180,6 @@ export function GetSessionRuntimeStatus(arg1:string):Promise<session.SessionRunt
 export function GetSessionTokens(arg1:string):Promise<backend.SessionTokensResponse>;
 
 export function GetSessionWorkspace(arg1:string):Promise<string>;
-
-export function GetSmallLLMConfig():Promise<backend.SmallLLMConfigResponse>;
 
 export function GetStepOutput(arg1:string,arg2:string):Promise<string>;
 
@@ -293,6 +297,8 @@ export function SearchBlackboardStepOutputs(arg1:string,arg2:string):Promise<Arr
 
 export function SearchVectorStore(arg1:backend.SearchRequest):Promise<Array<backend.VectorStoreEntry>>;
 
+export function SelectSLMProfile(arg1:string):Promise<void>;
+
 export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:string,arg6:string,arg7:boolean,arg8:string,arg9:boolean,arg10:boolean):Promise<void>;
 
 export function SetActiveResearch(arg1:string,arg2:string):Promise<backend.ResearchStatusDTO>;
@@ -306,6 +312,8 @@ export function SetModelConfig(arg1:string,arg2:backend.ModelConfigRequest):Prom
 export function SetResearchPinned(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
 export function SetReviewStatus(arg1:string,arg2:string):Promise<void>;
+
+export function SetSLMEnabled(arg1:boolean):Promise<void>;
 
 export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
@@ -355,11 +363,11 @@ export function UpdateMCPServers(arg1:Record<string, config.MCPServerConfig>):Pr
 
 export function UpdateProxySettings(arg1:backend.ProxySettingsRequest):Promise<void>;
 
+export function UpdateSLMProfile(arg1:string,arg2:backend.SLMProfileUpdateRequest):Promise<void>;
+
 export function UpdateSearchSettings(arg1:backend.SearchSettingsRequest):Promise<void>;
 
 export function UpdateSecuritySettings(arg1:backend.SecuritySettingsResponse):Promise<void>;
-
-export function UpdateSmallLLMConfig(arg1:backend.SmallLLMConfigResponse):Promise<void>;
 
 export function UpdateWorkDirectoryDescription(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 

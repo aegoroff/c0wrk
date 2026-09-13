@@ -26,13 +26,13 @@ func (o *Orchestrator) prepareRequestContext(ctx context.Context, message string
 	// Small-LLM prompt profile: carry the SystemPrompt sub-toggle flags so
 	// buildSystemPromptWith can gate the lite directive, reasoning scaffold,
 	// and few-shot examples independently. Gated on BOTH the master
-	// SmallLLM.Enabled toggle and the SystemPrompt variant being active (Lite
+	// SLM.Enabled toggle and the SystemPrompt variant being active (Lite
 	// on) (defense-in-depth) — when either is off the ctx value is absent and
 	// buildSystemPromptWith uses the default verbose directive with no
 	// scaffold/few-shot additions.
-	sc := o.config.SmallLLM
+	sc := o.config.SLM
 	if sc.Enabled && sc.SystemPrompt.Lite {
-		ctx = withSmallLLMPromptProfile(ctx, smallLLMPromptProfile{
+		ctx = withSLMPromptProfile(ctx, slmPromptProfile{
 			Lite:              sc.SystemPrompt.Lite,
 			FewShot:           sc.SystemPrompt.FewShot,
 			ReasoningScaffold: sc.SystemPrompt.ReasoningScaffold,
@@ -304,8 +304,8 @@ func (o *Orchestrator) routeAndActivateSkills(
 		// active and the routing JSON is unparseable even after the router's
 		// built-in repair retry, fail safe instead of failing the task —
 		// continue with a default routing decision. The tool filter then
-		// applies its static selection (applySmallLLMToolFilter).
-		if errors.Is(err, router.ErrRoutingParse) && o.smallLLMEssentialToolsEnabled() {
+		// applies its static selection (applySLMToolFilter).
+		if errors.Is(err, router.ErrRoutingParse) && o.slmEssentialToolsEnabled() {
 			if o.logger != nil {
 				o.logger.Warn("orchestrator: routing decision unparseable after repair retry; continuing with default routing",
 					"error", err)

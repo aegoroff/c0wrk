@@ -1,4 +1,4 @@
-package smallllm
+package slm
 
 import (
 	"slices"
@@ -156,7 +156,7 @@ func TestSelectTools_UnionDedupAcrossSources(t *testing.T) {
 	}
 }
 
-// defaultAlwaysPresent mirrors backend/config.defaultSmallLLMAlwaysPresent.
+// defaultAlwaysPresent mirrors backend/config.defaultSLMAlwaysPresent.
 // Duplicated here (rather than imported) because core must not depend on the
 // backend layer; the backend tests pin the default list against the shipped
 // defaults.

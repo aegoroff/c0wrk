@@ -5,7 +5,7 @@ import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
 import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { logger } from '@/lib/logger'
-import { Toggle } from './SmallLLMControls'
+import { Toggle } from './SLMControls'
 
 /**
  * General-tab control for the master experimental-features switch. The switch

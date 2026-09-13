@@ -1,14 +1,14 @@
 import { describe, it, expect } from 'vitest'
 
-import type { SmallLLMBuiltinTool, SmallLLMToolGroup } from '@/types/models'
+import type { SLMBuiltinTool, SLMToolGroup } from '@/types/models'
 import {
   essentialToolPickerOptions,
   toolDescriptionMarkdown,
   toolGroupTooltipMarkdown,
   GROUP_VALUE_PREFIX,
-} from './smallLlmTools'
+} from './slmTools'
 
-const TOOLS: SmallLLMBuiltinTool[] = [
+const TOOLS: SLMBuiltinTool[] = [
   { name: 'declare_plan', description: 'declare a plan' },
   { name: 'execute_plan', description: 'execute a plan' },
   { name: 'declare_step_complete', description: 'mark a step' },
@@ -17,7 +17,7 @@ const TOOLS: SmallLLMBuiltinTool[] = [
   { name: 'read_file', description: 'read a file' },
 ]
 
-const GROUPS: SmallLLMToolGroup[] = [
+const GROUPS: SLMToolGroup[] = [
   {
     id: 'plan',
     title: 'Planning & steps',
@@ -109,7 +109,7 @@ describe('essentialToolPickerOptions', () => {
   })
 
   it('ignores cluster members absent from the built-in universe', () => {
-    const groups: SmallLLMToolGroup[] = [
+    const groups: SLMToolGroup[] = [
       { id: 'ghost', title: 'Ghost', description: 'n/a', tools: ['ghost_tool'] },
     ]
     const opts = essentialToolPickerOptions(TOOLS, groups, [], [])

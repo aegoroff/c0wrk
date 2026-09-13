@@ -6,17 +6,17 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/v0lka/c0wrk/core/smallllm"
+	"github.com/v0lka/c0wrk/core/slm"
 	"github.com/v0lka/sp4rk/agent/router"
 	"github.com/v0lka/sp4rk/llm"
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
 
-// smallLLMTestTools is a compact tool set exercising pinned, orchestration,
+// slmTestTools is a compact tool set exercising pinned, orchestration,
 // protected, and MCP tools. Note: search_facts / ask_user / update_checklist
 // (also protected) are intentionally ABSENT to prove the filter keeps only the
 // protected tools that actually exist in the input.
-func smallLLMTestTools() []sdktools.ToolDescriptor {
+func slmTestTools() []sdktools.ToolDescriptor {
 	return []sdktools.ToolDescriptor{
 		{Name: "read_file", SourceCategory: sdktools.SourceCategoryCore},
 		{Name: "write_file", SourceCategory: sdktools.SourceCategoryCore},
@@ -31,54 +31,54 @@ func smallLLMTestTools() []sdktools.ToolDescriptor {
 	}
 }
 
-// TestApplySmallLLMToolFilter_OffPassthrough verifies that when the profile is
+// TestApplySLMToolFilter_OffPassthrough verifies that when the profile is
 // disabled (master toggle OR essential-tools variant), the tool set is returned
 // UNTOUCHED — zero behavior change.
-func TestApplySmallLLMToolFilter_OffPassthrough(t *testing.T) {
-	in := smallLLMTestTools()
+func TestApplySLMToolFilter_OffPassthrough(t *testing.T) {
+	in := slmTestTools()
 
 	// Master toggle off.
-	o := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+	o := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: false,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file"},
 		},
 	}}}
-	got := o.applySmallLLMToolFilter(in)
+	got := o.applySLMToolFilter(in)
 	if len(got) != len(in) {
 		t.Errorf("master OFF: expected %d tools (untouched), got %d", len(in), len(got))
 	}
 
 	// Essential-tools variant off.
-	o2 := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+	o2 := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: true,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled: false,
 		},
 	}}}
-	got2 := o2.applySmallLLMToolFilter(in)
+	got2 := o2.applySLMToolFilter(in)
 	if len(got2) != len(in) {
 		t.Errorf("variant OFF: expected %d tools (untouched), got %d", len(in), len(got2))
 	}
 }
 
-// TestApplySmallLLMToolFilter_StaticSelection verifies the core SelectTools
+// TestApplySLMToolFilter_StaticSelection verifies the core SelectTools
 // contract routed through the orchestrator: the kept set is exactly the
 // user's always-present pins ∪ the protected orchestration tools ∪ every MCP
 // tool — no slot budget, no router matching — while unpinned core tools and
 // conductor-only orchestration tools are dropped.
-func TestApplySmallLLMToolFilter_StaticSelection(t *testing.T) {
-	in := smallLLMTestTools()
-	o := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+func TestApplySLMToolFilter_StaticSelection(t *testing.T) {
+	in := slmTestTools()
+	o := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: true,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled:       true,
 			AlwaysPresent: []string{"web_search"},
 		},
 	}}}
 
-	got := o.applySmallLLMToolFilter(in)
+	got := o.applySLMToolFilter(in)
 
 	// Exactly pins ∪ protected (finish, store_fact) ∪ MCP: the unpinned core
 	// tools (read_file, write_file, bash_exec) are dropped alongside the
@@ -89,15 +89,15 @@ func TestApplySmallLLMToolFilter_StaticSelection(t *testing.T) {
 	}
 }
 
-// TestApplySmallLLMToolFilter_EmitsNoToolEvents verifies the UI contract: the
+// TestApplySLMToolFilter_EmitsNoToolEvents verifies the UI contract: the
 // narrowing is a silent, deterministic background step — it must not emit any
 // service diagnostics or tool-assignment cards into the chat.
-func TestApplySmallLLMToolFilter_EmitsNoToolEvents(t *testing.T) {
+func TestApplySLMToolFilter_EmitsNoToolEvents(t *testing.T) {
 	spy := &spyEmitter{}
 	o := &Orchestrator{
-		config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+		config: OrchestratorConfig{SLM: SLMSettings{
 			Enabled: true,
-			EssentialTools: SmallLLMEssentialSettings{
+			EssentialTools: SLMEssentialSettings{
 				Enabled:       true,
 				AlwaysPresent: []string{"read_file"},
 			},
@@ -105,7 +105,7 @@ func TestApplySmallLLMToolFilter_EmitsNoToolEvents(t *testing.T) {
 		emitter: spy,
 	}
 
-	_ = o.applySmallLLMToolFilter(smallLLMTestTools())
+	_ = o.applySLMToolFilter(slmTestTools())
 
 	if len(spy.calls) != 0 {
 		t.Errorf("tool narrowing must emit no events; got %d", len(spy.calls))
@@ -121,20 +121,20 @@ func (s *stubRouterCaller) Call(_ context.Context, _ llm.ChatRequest) (*llm.Chat
 	return &llm.ChatResponse{Message: llm.Message{Role: "assistant", Content: s.content}}, nil
 }
 
-// TestRouteAndActivateSkills_RoutingParseErrorFallsBackUnderSmallLLM covers
+// TestRouteAndActivateSkills_RoutingParseErrorFallsBackUnderSLM covers
 // the exhausted routing-JSON repair cycle: with the small-LLM profile active,
 // an unparseable routing decision must degrade to default routing (general /
 // defaultResumeComplexity) instead of failing the task.
-func TestRouteAndActivateSkills_RoutingParseErrorFallsBackUnderSmallLLM(t *testing.T) {
+func TestRouteAndActivateSkills_RoutingParseErrorFallsBackUnderSLM(t *testing.T) {
 	spy := &spyEmitter{}
 	o := &Orchestrator{
 		router: router.New(&stubRouterCaller{content: "definitely not json <<<"}, router.Config{
 			SystemPrompt:  "Tools: {{AVAILABLE-TOOLS}}\nMatching: {{TOOL-MATCHING}}",
 			HistoryWindow: 5,
 		}),
-		config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+		config: OrchestratorConfig{SLM: SLMSettings{
 			Enabled: true,
-			EssentialTools: SmallLLMEssentialSettings{
+			EssentialTools: SLMEssentialSettings{
 				Enabled:       true,
 				AlwaysPresent: []string{"read_file"},
 			},
@@ -142,7 +142,7 @@ func TestRouteAndActivateSkills_RoutingParseErrorFallsBackUnderSmallLLM(t *testi
 		emitter: spy,
 	}
 	_, routing, _, _, err := o.routeAndActivateSkills(
-		context.Background(), "fix the failing test", HandleOptions{}, nil, smallLLMTestTools())
+		context.Background(), "fix the failing test", HandleOptions{}, nil, slmTestTools())
 	if err != nil {
 		t.Fatalf("routing parse error must not fail the task under the small-LLM essential-tools narrowing: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRouteAndActivateSkills_RoutingParseErrorStillFailsWhenProfileOff(t *tes
 	}
 
 	_, _, _, _, err := o.routeAndActivateSkills(
-		context.Background(), "fix the failing test", HandleOptions{}, nil, smallLLMTestTools())
+		context.Background(), "fix the failing test", HandleOptions{}, nil, slmTestTools())
 	if err == nil {
 		t.Fatal("routing parse error must still fail the task when the small-LLM profile is off")
 	}
@@ -202,28 +202,28 @@ func assertFallbackDiagnostic(t *testing.T, spy *spyEmitter, fallback string) {
 	t.Errorf("fallback must emit a ServiceWithMeta diagnostic with fallback=%s", fallback)
 }
 
-// TestApplySmallLLMToolFilter_CompactsDescriptions verifies that description
+// TestApplySLMToolFilter_CompactsDescriptions verifies that description
 // compaction applies to the static selection: known builtins carry their
 // compact one-liners while unknown (MCP) tools keep their original
 // descriptions.
-func TestApplySmallLLMToolFilter_CompactsDescriptions(t *testing.T) {
-	in := smallLLMTestTools()
-	o := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+func TestApplySLMToolFilter_CompactsDescriptions(t *testing.T) {
+	in := slmTestTools()
+	o := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: true,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled:             true,
 			AlwaysPresent:       []string{"read_file"},
 			CompactDescriptions: true,
 		},
 	}}}
 
-	got := o.applySmallLLMToolFilter(in)
+	got := o.applySLMToolFilter(in)
 
 	byName := map[string]string{}
 	for _, d := range got {
 		byName[d.Name] = d.Description
 	}
-	if want := smallllm.CompactDescription("read_file"); byName["read_file"] != want {
+	if want := slm.CompactDescription("read_file"); byName["read_file"] != want {
 		t.Errorf("known builtin must carry its compact description: got %q, want %q", byName["read_file"], want)
 	}
 	if byName["mcp_linter"] != "" {
@@ -231,7 +231,7 @@ func TestApplySmallLLMToolFilter_CompactsDescriptions(t *testing.T) {
 	}
 }
 
-// TestApplySmallLLMToolFilter_RequestedAgentsGuaranteeDelegate verifies the
+// TestApplySLMToolFilter_RequestedAgentsGuaranteeDelegate verifies the
 // turn-scoped delegate guarantee: with narrowing active and an explicit
 // #agent mention threaded into the context (enrichAgentContext →
 // WithUserAgents), the delegate tool survives the filter even though it is
@@ -239,18 +239,18 @@ func TestApplySmallLLMToolFilter_CompactsDescriptions(t *testing.T) {
 // Subagents" directive in the Conductor's prompt must never reference a tool
 // the model cannot call. The call mirrors the production wiring in
 // HandleMessage's task flow exactly.
-func TestApplySmallLLMToolFilter_RequestedAgentsGuaranteeDelegate(t *testing.T) {
-	in := smallLLMTestTools()
-	o := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+func TestApplySLMToolFilter_RequestedAgentsGuaranteeDelegate(t *testing.T) {
+	in := slmTestTools()
+	o := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: true,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file"},
 		},
 	}}}
 
 	ctx := WithUserAgents(context.Background(), []string{"x"})
-	got := o.applySmallLLMToolFilter(in, smallLLMAgentGuaranteedTools(ctx)...)
+	got := o.applySLMToolFilter(in, slmAgentGuaranteedTools(ctx)...)
 	names := sortedToolNames(got)
 
 	if !containsToolName(names, "delegate") {
@@ -265,27 +265,27 @@ func TestApplySmallLLMToolFilter_RequestedAgentsGuaranteeDelegate(t *testing.T) 
 	}
 }
 
-// TestApplySmallLLMToolFilter_NoRequestedAgentsExcludesDelegate is the
+// TestApplySLMToolFilter_NoRequestedAgentsExcludesDelegate is the
 // no-regression guard for the turn-scoped guarantee: without explicit
 // #mentions the helper yields no extra guarantees, so the filtered set is
 // identical to the extra-free call and delegate stays a conductor-only,
 // excluded tool.
-func TestApplySmallLLMToolFilter_NoRequestedAgentsExcludesDelegate(t *testing.T) {
-	in := smallLLMTestTools()
-	o := &Orchestrator{config: OrchestratorConfig{SmallLLM: SmallLLMSettings{
+func TestApplySLMToolFilter_NoRequestedAgentsExcludesDelegate(t *testing.T) {
+	in := slmTestTools()
+	o := &Orchestrator{config: OrchestratorConfig{SLM: SLMSettings{
 		Enabled: true,
-		EssentialTools: SmallLLMEssentialSettings{
+		EssentialTools: SLMEssentialSettings{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file"},
 		},
 	}}}
 
-	if got := smallLLMAgentGuaranteedTools(context.Background()); got != nil {
+	if got := slmAgentGuaranteedTools(context.Background()); got != nil {
 		t.Errorf("no requested agents must yield no extra guarantees, got %v", got)
 	}
 
-	base := o.applySmallLLMToolFilter(in)
-	withCtx := o.applySmallLLMToolFilter(in, smallLLMAgentGuaranteedTools(context.Background())...)
+	base := o.applySLMToolFilter(in)
+	withCtx := o.applySLMToolFilter(in, slmAgentGuaranteedTools(context.Background())...)
 	if !equalNames(sortedToolNames(base), sortedToolNames(withCtx)) {
 		t.Errorf("empty UserAgents must not change the filtered set: got %v, want %v",
 			sortedToolNames(withCtx), sortedToolNames(base))

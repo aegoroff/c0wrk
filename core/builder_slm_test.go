@@ -28,7 +28,7 @@ func baselineCircuitBreaker() agent.CircuitBreakerConfig {
 
 func TestApplyLoopHardening_Enabled_OverridesThresholds(t *testing.T) {
 	base := baselineCircuitBreaker()
-	profile := BuilderSmallLLMConfig{
+	profile := BuilderSLMConfig{
 		Enabled: true,
 		LoopHardening: BuilderLoopHardening{
 			Enabled:                      true,
@@ -42,7 +42,7 @@ func TestApplyLoopHardening_Enabled_OverridesThresholds(t *testing.T) {
 
 	got := applyLoopHardening(base, profile)
 
-	// The five thresholds present in the profile must reflect SmallLLM values.
+	// The five thresholds present in the profile must reflect SLM values.
 	if got.RepeatNudgeThreshold != 2 {
 		t.Errorf("RepeatNudgeThreshold = %d, want 2", got.RepeatNudgeThreshold)
 	}
@@ -75,19 +75,19 @@ func TestApplyLoopHardening_Disabled_ReturnsUnchanged(t *testing.T) {
 	base := baselineCircuitBreaker()
 
 	// Variant off but master on — no override.
-	got := applyLoopHardening(base, BuilderSmallLLMConfig{Enabled: true, LoopHardening: BuilderLoopHardening{Enabled: false}})
+	got := applyLoopHardening(base, BuilderSLMConfig{Enabled: true, LoopHardening: BuilderLoopHardening{Enabled: false}})
 	if got != base {
 		t.Errorf("variant-off: breaker changed from baseline")
 	}
 
 	// Master off but variant on — no override (master gate).
-	got = applyLoopHardening(base, BuilderSmallLLMConfig{Enabled: false, LoopHardening: BuilderLoopHardening{Enabled: true}})
+	got = applyLoopHardening(base, BuilderSLMConfig{Enabled: false, LoopHardening: BuilderLoopHardening{Enabled: true}})
 	if got != base {
 		t.Errorf("master-off: breaker changed from baseline")
 	}
 
 	// Fully off — no override.
-	got = applyLoopHardening(base, BuilderSmallLLMConfig{})
+	got = applyLoopHardening(base, BuilderSLMConfig{})
 	if got != base {
 		t.Errorf("fully-off: breaker changed from baseline")
 	}
@@ -96,16 +96,16 @@ func TestApplyLoopHardening_Disabled_ReturnsUnchanged(t *testing.T) {
 func TestResolveSamplingFunc_Enabled_ExplicitValuesOverride(t *testing.T) {
 	const want = 0.12
 	const wantTopP = 0.8
-	fn := resolveSamplingFunc(BuilderSmallLLMConfig{
+	fn := resolveSamplingFunc(BuilderSLMConfig{
 		Enabled: true,
-		Sampling: BuilderSmallLLMSampling{
+		Sampling: BuilderSLMSampling{
 			Enabled:     true,
 			Temperature: want,
 			TopP:        wantTopP,
 		},
 	})
 
-	// Explicit SmallLLM values win over the vendor matrix for every family...
+	// Explicit SLM values win over the vendor matrix for every family...
 	for _, family := range []string{"anthropic", "deepseek", "qwen", "", "unknown"} {
 		got := fn(family)
 		if got.Temperature == nil {
@@ -140,9 +140,9 @@ func TestResolveSamplingFunc_Enabled_NoExplicitValues_InheritsVendorPreset(t *te
 	// explicit values must reproduce the vendor preset exactly — in
 	// particular it must NOT fall back to a constant temperature of 0.1 (the
 	// removed ApplyDefaults seed).
-	fn := resolveSamplingFunc(BuilderSmallLLMConfig{
+	fn := resolveSamplingFunc(BuilderSLMConfig{
 		Enabled:  true,
-		Sampling: BuilderSmallLLMSampling{Enabled: true},
+		Sampling: BuilderSLMSampling{Enabled: true},
 	})
 
 	for _, family := range []string{"anthropic", "openai_flagship", "google", "deepseek", "qwen", "", "unknown"} {
@@ -181,9 +181,9 @@ func TestResolveSamplingFunc_Enabled_AllSamplingKnobsOverride(t *testing.T) {
 		wantRep  = 1.1
 		wantPP   = 1.5
 	)
-	fn := resolveSamplingFunc(BuilderSmallLLMConfig{
+	fn := resolveSamplingFunc(BuilderSLMConfig{
 		Enabled: true,
-		Sampling: BuilderSmallLLMSampling{
+		Sampling: BuilderSLMSampling{
 			Enabled:           true,
 			Temperature:       wantTemp,
 			TopP:              wantTopP,
@@ -217,9 +217,9 @@ func TestResolveSamplingFunc_Enabled_AllSamplingKnobsOverride(t *testing.T) {
 }
 
 func TestResolveSamplingFunc_Enabled_ZeroTopPInheritsVendor(t *testing.T) {
-	fn := resolveSamplingFunc(BuilderSmallLLMConfig{
+	fn := resolveSamplingFunc(BuilderSLMConfig{
 		Enabled:  true,
-		Sampling: BuilderSmallLLMSampling{Enabled: true, Temperature: 0.3},
+		Sampling: BuilderSLMSampling{Enabled: true, Temperature: 0.3},
 	})
 	got := fn("qwen")
 	if got.Temperature == nil || *got.Temperature != 0.3 {
@@ -238,9 +238,9 @@ func TestResolveSamplingFunc_Enabled_ZeroTopPInheritsVendor(t *testing.T) {
 
 func TestResolveSamplingFunc_Disabled_MatchesPerFamilyDefault(t *testing.T) {
 	// Master off — must fall back to the per-family vendor matrix.
-	fnOff := resolveSamplingFunc(BuilderSmallLLMConfig{Enabled: false, Sampling: BuilderSmallLLMSampling{Enabled: true}})
+	fnOff := resolveSamplingFunc(BuilderSLMConfig{Enabled: false, Sampling: BuilderSLMSampling{Enabled: true}})
 	// Variant off but master on — same fallback.
-	fnVariantOff := resolveSamplingFunc(BuilderSmallLLMConfig{Enabled: true, Sampling: BuilderSmallLLMSampling{Enabled: false}})
+	fnVariantOff := resolveSamplingFunc(BuilderSLMConfig{Enabled: true, Sampling: BuilderSLMSampling{Enabled: false}})
 
 	for _, family := range []string{"anthropic", "openai_flagship", "google", "deepseek", "qwen", "", "unknown"} {
 		want := prompt.DefaultSampling(family)
@@ -274,13 +274,13 @@ func TestResolveSamplingFunc_Disabled_MatchesPerFamilyDefault(t *testing.T) {
 	}
 }
 
-func TestApplySmallLLMPresets_SeedsReasoningEffortDefault(t *testing.T) {
+func TestApplySLMPresets_SeedsReasoningEffortDefault(t *testing.T) {
 	// Sampling variant active with a reasoning effort → seeds the builder default.
 	b := &OrchestratorBuilder{}
-	b.applySmallLLMPresets(&BuilderConfig{
-		SmallLLM: BuilderSmallLLMConfig{
+	b.applySLMPresets(&BuilderConfig{
+		SLM: BuilderSLMConfig{
 			Enabled: true,
-			Sampling: BuilderSmallLLMSampling{
+			Sampling: BuilderSLMSampling{
 				Enabled:         true,
 				ReasoningEffort: "low",
 			},
@@ -291,20 +291,20 @@ func TestApplySmallLLMPresets_SeedsReasoningEffortDefault(t *testing.T) {
 	}
 }
 
-func TestApplySmallLLMPresets_Disabled_LeavesReasoningEffortEmpty(t *testing.T) {
+func TestApplySLMPresets_Disabled_LeavesReasoningEffortEmpty(t *testing.T) {
 	// Sampling disabled (or master off) → reasoning effort stays empty.
 	cases := []struct {
 		name    string
-		profile BuilderSmallLLMConfig
+		profile BuilderSLMConfig
 	}{
-		{"master-off", BuilderSmallLLMConfig{Enabled: false, Sampling: BuilderSmallLLMSampling{Enabled: true, ReasoningEffort: "low"}}},
-		{"variant-off", BuilderSmallLLMConfig{Enabled: true, Sampling: BuilderSmallLLMSampling{Enabled: false, ReasoningEffort: "low"}}},
-		{"empty-effort", BuilderSmallLLMConfig{Enabled: true, Sampling: BuilderSmallLLMSampling{Enabled: true, ReasoningEffort: ""}}},
+		{"master-off", BuilderSLMConfig{Enabled: false, Sampling: BuilderSLMSampling{Enabled: true, ReasoningEffort: "low"}}},
+		{"variant-off", BuilderSLMConfig{Enabled: true, Sampling: BuilderSLMSampling{Enabled: false, ReasoningEffort: "low"}}},
+		{"empty-effort", BuilderSLMConfig{Enabled: true, Sampling: BuilderSLMSampling{Enabled: true, ReasoningEffort: ""}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &OrchestratorBuilder{}
-			b.applySmallLLMPresets(&BuilderConfig{SmallLLM: tc.profile})
+			b.applySLMPresets(&BuilderConfig{SLM: tc.profile})
 			if b.reasoningEffort != "" {
 				t.Errorf("%s: reasoningEffort = %q, want empty", tc.name, b.reasoningEffort)
 			}
@@ -335,14 +335,14 @@ func baselineExecutorConfig() BuilderExecutorConfig {
 	}
 }
 
-// smallLLMContextProfile builds a full context variant with the variant
+// slmContextProfile builds a full context variant with the variant
 // defaults (6 / 5 / 80 / 2 / 16384).
-func smallLLMContextProfile(master bool) BuilderSmallLLMConfig {
-	return BuilderSmallLLMConfig{
+func slmContextProfile(master bool) BuilderSLMConfig {
+	return BuilderSLMConfig{
 		Enabled: master,
-		Context: BuilderSmallLLMContext{
+		Context: BuilderSLMContext{
 			Enabled: true,
-			Compaction: BuilderSmallLLMCompaction{
+			Compaction: BuilderSLMCompaction{
 				KeepLast:       6,
 				BlockSize:      5,
 				TriggerPercent: 80,
@@ -354,7 +354,7 @@ func smallLLMContextProfile(master bool) BuilderSmallLLMConfig {
 }
 
 func TestApplyContextManagement_Enabled_OverridesExecutorValues(t *testing.T) {
-	got := applyContextManagement(baselineExecutorConfig(), smallLLMContextProfile(true))
+	got := applyContextManagement(baselineExecutorConfig(), slmContextProfile(true))
 
 	if got.Compaction.SlidingWindow.KeepLast != 6 {
 		t.Errorf("SlidingWindow.KeepLast = %d, want 6", got.Compaction.SlidingWindow.KeepLast)
@@ -402,12 +402,12 @@ func TestApplyContextManagement_Enabled_OverridesExecutorValues(t *testing.T) {
 func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 	cases := []struct {
 		name   string
-		knob   func(*BuilderSmallLLMContext)
+		knob   func(*BuilderSLMContext)
 		verify func(t *testing.T, got BuilderExecutorConfig)
 	}{
 		{
 			name: "keep_last only",
-			knob: func(c *BuilderSmallLLMContext) { c.Compaction.KeepLast = 4 },
+			knob: func(c *BuilderSLMContext) { c.Compaction.KeepLast = 4 },
 			verify: func(t *testing.T, got BuilderExecutorConfig) {
 				if got.Compaction.SlidingWindow.KeepLast != 4 {
 					t.Errorf("KeepLast = %d, want 4", got.Compaction.SlidingWindow.KeepLast)
@@ -416,7 +416,7 @@ func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 		},
 		{
 			name: "block_size only",
-			knob: func(c *BuilderSmallLLMContext) { c.Compaction.BlockSize = 3 },
+			knob: func(c *BuilderSLMContext) { c.Compaction.BlockSize = 3 },
 			verify: func(t *testing.T, got BuilderExecutorConfig) {
 				if got.Compaction.Summarization.BlockSize != 3 {
 					t.Errorf("BlockSize = %d, want 3", got.Compaction.Summarization.BlockSize)
@@ -425,7 +425,7 @@ func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 		},
 		{
 			name: "trigger_percent only",
-			knob: func(c *BuilderSmallLLMContext) { c.Compaction.TriggerPercent = 70 },
+			knob: func(c *BuilderSLMContext) { c.Compaction.TriggerPercent = 70 },
 			verify: func(t *testing.T, got BuilderExecutorConfig) {
 				if got.Compaction.Thresholds.PredictivePercent != 70 {
 					t.Errorf("PredictivePercent = %d, want 70", got.Compaction.Thresholds.PredictivePercent)
@@ -434,7 +434,7 @@ func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 		},
 		{
 			name: "tool_output_keep_last_n only",
-			knob: func(c *BuilderSmallLLMContext) { c.ToolOutputKeepLastN = 1 },
+			knob: func(c *BuilderSLMContext) { c.ToolOutputKeepLastN = 1 },
 			verify: func(t *testing.T, got BuilderExecutorConfig) {
 				if got.ToolOutputPruning.KeepLastN != 1 {
 					t.Errorf("KeepLastN = %d, want 1", got.ToolOutputPruning.KeepLastN)
@@ -443,7 +443,7 @@ func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 		},
 		{
 			name: "output_token_reserve only",
-			knob: func(c *BuilderSmallLLMContext) { c.OutputTokenReserve = 16384 },
+			knob: func(c *BuilderSLMContext) { c.OutputTokenReserve = 16384 },
 			verify: func(t *testing.T, got BuilderExecutorConfig) {
 				if got.OutputTokenReserve != 16384 {
 					t.Errorf("OutputTokenReserve = %d, want 16384", got.OutputTokenReserve)
@@ -453,8 +453,8 @@ func TestApplyContextManagement_EachKnobOverriddenIndependently(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			profile := smallLLMContextProfile(true)
-			profile.Context = BuilderSmallLLMContext{Enabled: true}
+			profile := slmContextProfile(true)
+			profile.Context = BuilderSLMContext{Enabled: true}
 			tc.knob(&profile.Context)
 
 			got := applyContextManagement(baselineExecutorConfig(), profile)
@@ -468,11 +468,11 @@ func TestApplyContextManagement_Disabled_ReturnsBaselineByteForByte(t *testing.T
 
 	cases := []struct {
 		name    string
-		profile BuilderSmallLLMConfig
+		profile BuilderSLMConfig
 	}{
-		{"master-off", BuilderSmallLLMConfig{Enabled: false, Context: smallLLMContextProfile(true).Context}},
-		{"variant-off", BuilderSmallLLMConfig{Enabled: true, Context: BuilderSmallLLMContext{Enabled: false, Compaction: BuilderSmallLLMCompaction{KeepLast: 6, BlockSize: 5, TriggerPercent: 80}, ToolOutputKeepLastN: 2, OutputTokenReserve: 16384}}},
-		{"fully-off", BuilderSmallLLMConfig{}},
+		{"master-off", BuilderSLMConfig{Enabled: false, Context: slmContextProfile(true).Context}},
+		{"variant-off", BuilderSLMConfig{Enabled: true, Context: BuilderSLMContext{Enabled: false, Compaction: BuilderSLMCompaction{KeepLast: 6, BlockSize: 5, TriggerPercent: 80}, ToolOutputKeepLastN: 2, OutputTokenReserve: 16384}}},
+		{"fully-off", BuilderSLMConfig{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

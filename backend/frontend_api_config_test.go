@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,11 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/proxy"
-	"github.com/v0lka/c0wrk/core/smallllm"
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agents"
 	"github.com/v0lka/sp4rk/llm"
@@ -195,6 +196,23 @@ func (m *mockBuilder) JudgeAvailable() bool {
 	return false
 }
 
+// activateCustomSLMProfile creates a writable custom SLM profile in f's
+// agent-dir store and makes it the active one, mirroring the production state
+// where knob edits target the active custom profile (predefined profiles are
+// read-only). Returns the activated profile.
+func activateCustomSLMProfile(t *testing.T, f *FrontendAPI) config.SLMProfile {
+	t.Helper()
+	profile, err := config.CreateCustomSLMProfile("Test Tuned", config.SLMProfileConfig{}, nil)
+	if err != nil {
+		t.Fatalf("CreateCustomSLMProfile: %v", err)
+	}
+	if err := config.SaveCustomSLMProfiles(config.SLMProfilesPath(f.agentDir), []config.SLMProfile{profile}); err != nil {
+		t.Fatalf("SaveCustomSLMProfiles: %v", err)
+	}
+	f.config.SLM.ActiveProfile = profile.ID
+	return profile
+}
+
 // newTestAPI creates a FrontendAPI backed by a mock builder and a temp config.
 func newTestAPI(t *testing.T) (*FrontendAPI, *mockBuilder, string) {
 	t.Helper()
@@ -213,6 +231,10 @@ func newTestAPI(t *testing.T) (*FrontendAPI, *mockBuilder, string) {
 		agentDir:        dir,
 		builderOverride: mock,
 	}
+	// Knob values live in the active profile: activate a writable custom one
+	// so SLM profile mutations have an editable target (the default "generic" active
+	// profile is predefined/read-only).
+	activateCustomSLMProfile(t, f)
 	return f, mock, cfgPath
 }
 
@@ -1496,24 +1518,23 @@ func TestGetSecuritySettings_ExecuteBlacklistDefaults(t *testing.T) {
 	}
 }
 
-// --- SmallLLMConfig ---
+// --- SLMConfig ---
 
-// validSmallLLMConfig is a profile that passes all validation rules. It is the
+// validSLMConfig is a profile that passes all validation rules. It is the
 // baseline used by the happy-path tests; individual cases mutate copies.
-func validSmallLLMConfig() SmallLLMConfigResponse {
-	return SmallLLMConfigResponse{
-		Enabled: true,
-		EssentialTools: SmallLLMEssentialToolsResp{
+func validSLMValues() SLMProfileValues {
+	return SLMProfileValues{
+		EssentialTools: SLMEssentialToolsValues{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file", "edit_file"},
 		},
-		SystemPrompt: SmallLLMSystemPromptResp{Lite: true},
-		Sampling: SmallLLMSamplingResp{
+		SystemPrompt: SLMSystemPromptResp{Lite: true},
+		Sampling: SLMSamplingResp{
 			Enabled:     true,
 			Temperature: 0.1,
 			TopP:        0.9,
 		},
-		LoopHardening: SmallLLMLoopHardeningResp{
+		LoopHardening: SLMLoopHardeningResp{
 			Enabled:                      true,
 			RepeatNudgeThreshold:         2,
 			ParseErrorAbortThreshold:     3,
@@ -1521,9 +1542,9 @@ func validSmallLLMConfig() SmallLLMConfigResponse {
 			FruitlessAbortThreshold:      5,
 			SameToolRepeatNudgeThreshold: 4,
 		},
-		Context: SmallLLMContextResp{
+		Context: SLMContextResp{
 			Enabled: true,
-			Compaction: SmallLLMCompactionResp{
+			Compaction: SLMCompactionResp{
 				KeepLast:       6,
 				BlockSize:      5,
 				TriggerPercent: 80,
@@ -1534,32 +1555,210 @@ func validSmallLLMConfig() SmallLLMConfigResponse {
 	}
 }
 
-func TestGetSmallLLMConfig_ReturnsCurrentConfig(t *testing.T) {
+// slmConfigReq wraps a copy of v into a values-only update request.
+func slmConfigReq(v SLMProfileValues) SLMProfileUpdateRequest {
+	cfg := v
+	return SLMProfileUpdateRequest{Config: &cfg}
+}
+
+// slmFindProfile locates a profile DTO by id in a GetSLMProfiles response.
+func slmFindProfile(t *testing.T, resp SLMProfilesResponse, id string) SLMProfileDTO {
+	t.Helper()
+	for _, p := range resp.Profiles {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("profile %q not found in the GetSLMProfiles response", id)
+	return SLMProfileDTO{}
+}
+
+// slmStoredProfile reads the custom store under f's agent dir.
+func slmStoredProfile(t *testing.T, f *FrontendAPI, id string) config.SLMProfile {
+	t.Helper()
+	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	for _, p := range profiles {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("custom profile %q not found in the store", id)
+	return config.SLMProfile{}
+}
+
+// --- GetSLMProfiles ---
+
+func TestGetSLMProfiles_ReturnsCatalog(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	// ApplyDefaults seeds the SmallLLM section; mutate a couple of fields and
-	// confirm they round-trip through the DTO.
-	f.config.SmallLLM.Enabled = true
-	f.config.SmallLLM.EssentialTools.Enabled = true
+	active := activateCustomSLMProfile(t, f)
 
-	got := f.GetSmallLLMConfig()
+	// Push distinctive values through the public write path.
+	want := validSLMValues()
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(want)); err != nil {
+		t.Fatalf("UpdateSLMProfile: %v", err)
+	}
 
-	if !got.Enabled {
-		t.Error("Enabled = false, want true")
+	got := f.GetSLMProfiles()
+
+	if got.ActiveID != active.ID {
+		t.Errorf("ActiveID = %q, want %q", got.ActiveID, active.ID)
 	}
-	if !got.EssentialTools.Enabled {
-		t.Error("EssentialTools.Enabled = false, want true")
+	// The full catalog: 5 predefined + the custom(s) created above.
+	nPredefined := 0
+	nCustom := 0
+	for _, p := range got.Profiles {
+		switch p.Kind {
+		case "predefined":
+			nPredefined++
+			if p.Name == "" {
+				t.Errorf("predefined profile %q has an empty name", p.ID)
+			}
+		case "custom":
+			nCustom++
+		default:
+			t.Errorf("profile %q has unexpected kind %q", p.ID, p.Kind)
+		}
 	}
-	// AlwaysPresent should be a non-nil slice (JSON [] not null).
-	if got.EssentialTools.AlwaysPresent == nil {
+	if nPredefined != len(config.PredefinedSLMProfiles()) {
+		t.Errorf("predefined profiles = %d, want %d", nPredefined, len(config.PredefinedSLMProfiles()))
+	}
+	if nCustom == 0 {
+		t.Error("no custom profiles in the catalog despite the activated store profile")
+	}
+
+	// The active profile's values round-trip through the DTO.
+	dto := slmFindProfile(t, got, active.ID)
+	if !dto.Values.EssentialTools.Enabled || len(dto.Values.EssentialTools.AlwaysPresent) != 2 {
+		t.Errorf("active profile values did not round-trip: %+v", dto.Values.EssentialTools)
+	}
+	if !dto.Values.Sampling.Enabled || dto.Values.Sampling.Temperature != 0.1 {
+		t.Errorf("sampling values did not round-trip: %+v", dto.Values.Sampling)
+	}
+	// AlwaysPresent must be a non-nil slice (JSON [] not null).
+	if dto.Values.EssentialTools.AlwaysPresent == nil {
 		t.Error("AlwaysPresent is nil, want non-nil")
 	}
 }
 
-func TestGetSmallLLMConfig_NilConfigReturnsZero(t *testing.T) {
+func TestGetSLMProfiles_NilConfigReturnsCatalogAndUniverse(t *testing.T) {
 	f := &FrontendAPI{}
-	got := f.GetSmallLLMConfig()
+	got := f.GetSLMProfiles()
+	if got.ActiveID != "" {
+		t.Errorf("ActiveID = %q, want empty for nil config", got.ActiveID)
+	}
 	if got.Enabled {
 		t.Error("Enabled = true, want false for nil config")
+	}
+	if got.SuggestedProfileID != nil {
+		t.Errorf("SuggestedProfileID = %v, want nil for nil config", *got.SuggestedProfileID)
+	}
+	if len(got.Profiles) != len(config.PredefinedSLMProfiles()) {
+		t.Errorf("profiles = %d, want the %d predefined entries (catalog is config-independent)",
+			len(got.Profiles), len(config.PredefinedSLMProfiles()))
+	}
+	if got.BuiltinTools == nil || got.ToolGroups == nil || got.Warnings == nil || got.Profiles == nil {
+		t.Error("slices must be non-nil (JSON [] not null) even without an app/config")
+	}
+}
+
+// TestGetSLMProfiles_ReportsStoredEnabled verifies the master toggle is echoed
+// verbatim from config.yaml (slm.enabled) — it is not a per-profile value.
+func TestGetSLMProfiles_ReportsStoredEnabled(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	f.config.SLM.Enabled = true
+	if got := f.GetSLMProfiles(); !got.Enabled {
+		t.Error("Enabled = false, want true when slm.enabled is true")
+	}
+
+	f.config.SLM.Enabled = false
+	if got := f.GetSLMProfiles(); got.Enabled {
+		t.Error("Enabled = true, want false when slm.enabled is false")
+	}
+}
+
+func TestGetSLMProfiles_PickerAlwaysNonNil(t *testing.T) {
+	f := &FrontendAPI{} // no app: registry unavailable
+	got := f.GetSLMProfiles()
+	if got.BuiltinTools == nil || len(got.BuiltinTools) != 0 {
+		t.Errorf("BuiltinTools = %v, want empty non-nil when the registry is unavailable", got.BuiltinTools)
+	}
+	if got.ToolGroups == nil || len(got.ToolGroups) != 0 {
+		t.Errorf("ToolGroups = %v, want empty non-nil when the registry is unavailable", got.ToolGroups)
+	}
+}
+
+func TestGetSLMProfiles_SuggestedFromDefaultModel(t *testing.T) {
+	cases := []struct {
+		defaultModel string
+		want         string // "" means nil (no suggestion)
+	}{
+		{"qwen3.8-27b", "qwen3.8-27b"},
+		{"Qwen/Qwen3.8-27B", "qwen3.8-27b"},
+		{"Qwen/Qwen3.8-27B-Instruct", "qwen3.8-27b"},
+		{"gemma-4-26b-a4b-it", "gemma-4-26b-a4b-it"},
+		{"my-custom-model", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.defaultModel, func(t *testing.T) {
+			f, _, _ := newTestAPI(t)
+			f.config.LLM.DefaultModel = tc.defaultModel
+			got := f.GetSLMProfiles()
+			if tc.want == "" {
+				if got.SuggestedProfileID != nil {
+					t.Fatalf("SuggestedProfileID = %q, want nil", *got.SuggestedProfileID)
+				}
+				return
+			}
+			if got.SuggestedProfileID == nil {
+				t.Fatalf("SuggestedProfileID = nil, want %q", tc.want)
+			}
+			if *got.SuggestedProfileID != tc.want {
+				t.Fatalf("SuggestedProfileID = %q, want %q", *got.SuggestedProfileID, tc.want)
+			}
+		})
+	}
+}
+
+// TestSuggestSLMProfileID_Normalization exercises the pure matcher: provider
+// prefixes are stripped ("Qwen/", "openrouter/qwen/", ":" keys), trailing
+// marketing suffixes collapse ("-instruct", "-it", ":free"), separators are
+// irrelevant, "generic" is never suggested, and unknown/custom names yield no
+// match.
+func TestSuggestSLMProfileID_Normalization(t *testing.T) {
+	cases := []struct{ model, want string }{
+		{"qwen3.8-27b", "qwen3.8-27b"},
+		{"Qwen/Qwen3.8-27B", "qwen3.8-27b"},
+		{"qwen3.8-27b-instruct-2507", "qwen3.8-27b"},
+		{"Qwen/Qwen3.6-35B-A3B-Instruct", "qwen3.6-35b-a3b"},
+		{"openrouter/qwen/qwen3.6-35b-a3b:free", "qwen3.6-35b-a3b"},
+		{"google/gemma-4-26b-a4b-it", "gemma-4-26b-a4b-it"},
+		{"gemma-4-31b-it", "gemma-4-31b-it"},
+		{"qwen3_8_27b", "qwen3.8-27b"},
+		// No matches.
+		{"claude-sonnet-4", ""},
+		{"my-tuned-model", ""},
+		{"Test Tuned", ""},
+		{"   ", ""},
+	}
+	for _, tc := range cases {
+		if got := suggestSLMProfileID(tc.model); got != tc.want {
+			t.Errorf("suggestSLMProfileID(%q) = %q, want %q", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestGetSLMProfiles_DanglingActiveWarns(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	f.config.SLM.ActiveProfile = "ghost-profile"
+
+	got := f.GetSLMProfiles()
+	if got.ActiveID != "ghost-profile" {
+		t.Errorf("ActiveID = %q, want the stored (dangling) id", got.ActiveID)
+	}
+	if len(got.Warnings) == 0 {
+		t.Fatal("expected a resolver warning for the dangling active id")
 	}
 }
 
@@ -1603,22 +1802,22 @@ func TestBuiltinToolInfos_ExcludesNonNarrowable(t *testing.T) {
 	}
 }
 
-// TestSmallLLMToolGroups_FilteredToRegistered verifies the cluster projection:
+// TestSLMToolGroups_FilteredToRegistered verifies the cluster projection:
 // member names absent from the picker universe are dropped, a cluster left with
 // no surviving member is omitted, and the surviving members keep catalog order.
-func TestSmallLLMToolGroups_FilteredToRegistered(t *testing.T) {
+func TestSLMToolGroups_FilteredToRegistered(t *testing.T) {
 	// A subset of the plan cluster plus a delegate tool is in the universe, so
 	// the subagents cluster keeps only delegate and the plan cluster only its two
 	// present members.
-	universe := []SmallLLMBuiltinTool{
+	universe := []SLMBuiltinTool{
 		{Name: "declare_plan"},
 		{Name: "update_checklist"},
 		{Name: "delegate"},
 		{Name: "unrelated_tool"},
 	}
 
-	got := smallLLMToolGroups(universe)
-	byID := make(map[string]SmallLLMToolGroup, len(got))
+	got := slmToolGroups(universe)
+	byID := make(map[string]SLMToolGroup, len(got))
 	for _, g := range got {
 		byID[g.ID] = g
 	}
@@ -1648,38 +1847,96 @@ func TestSmallLLMToolGroups_FilteredToRegistered(t *testing.T) {
 
 	// A cluster whose members are all absent from the universe is dropped: with
 	// only a plan member present, the subagents cluster has no surviving member.
-	onlyPlan := smallLLMToolGroups([]SmallLLMBuiltinTool{{Name: "execute_plan"}})
+	onlyPlan := slmToolGroups([]SLMBuiltinTool{{Name: "execute_plan"}})
 	if len(onlyPlan) != 1 || onlyPlan[0].ID != "plan" {
 		t.Errorf("clusters = %v, want just plan (subagents has no present member)", onlyPlan)
 	}
 }
 
-// TestGetSmallLLMConfig_BuiltinToolsAlwaysNonNil verifies the JSON contract: the
-// read-only builtin_tools and tool_groups fields are always non-nil slices
-// ([] not null), even when the application — and therefore the tool registry —
-// is unavailable.
-func TestGetSmallLLMConfig_BuiltinToolsAlwaysNonNil(t *testing.T) {
-	f := &FrontendAPI{} // no app: registry unavailable
-	got := f.GetSmallLLMConfig()
-	if got.EssentialTools.BuiltinTools == nil {
-		t.Error("BuiltinTools is nil, want non-nil (normalized to [])")
+// --- CreateSLMProfile ---
+
+func TestCreateSLMProfile_FromPredefinedBase(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	id, err := f.CreateSLMProfile("qwen3.8-27b", "My Qwen")
+	if err != nil {
+		t.Fatalf("CreateSLMProfile: %v", err)
 	}
-	if len(got.EssentialTools.BuiltinTools) != 0 {
-		t.Errorf("BuiltinTools = %v, want empty when the registry is unavailable", got.EssentialTools.BuiltinTools)
+	if id != "my-qwen" {
+		t.Errorf("generated id = %q, want my-qwen", id)
 	}
-	if got.EssentialTools.ToolGroups == nil {
-		t.Error("ToolGroups is nil, want non-nil (normalized to [])")
+
+	// Values copied from the base, kind custom, active unchanged.
+	created := slmStoredProfile(t, f, id)
+	base, _ := config.FindPredefinedSLMProfile("qwen3.8-27b")
+	if !reflect.DeepEqual(created.Config, base.Config) {
+		t.Errorf("created values differ from the base profile")
 	}
-	if len(got.EssentialTools.ToolGroups) != 0 {
-		t.Errorf("ToolGroups = %v, want empty when the registry is unavailable", got.EssentialTools.ToolGroups)
+	if f.config.SLM.ActiveProfile != active.ID {
+		t.Errorf("active profile changed to %q, create must not select", f.config.SLM.ActiveProfile)
+	}
+	if mock.rebuildRouterCalls != 1 {
+		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 }
 
-func TestUpdateSmallLLMConfig_PersistsAndRebuilds(t *testing.T) {
-	f, mock, cfgPath := newTestAPI(t)
+func TestCreateSLMProfile_EmptyBaseMeansGeneric(t *testing.T) {
+	f, _, _ := newTestAPI(t)
 
-	err := f.UpdateSmallLLMConfig(validSmallLLMConfig())
+	id, err := f.CreateSLMProfile("", "From Generic")
 	if err != nil {
+		t.Fatalf("CreateSLMProfile: %v", err)
+	}
+	created := slmStoredProfile(t, f, id)
+	generic, _ := config.FindPredefinedSLMProfile(config.SLMGenericProfileID)
+	if !reflect.DeepEqual(created.Config, generic.Config) {
+		t.Error("created values differ from the generic base")
+	}
+}
+
+func TestCreateSLMProfile_UnknownBaseRejected(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+
+	if _, err := f.CreateSLMProfile("no-such-profile", "X"); err == nil {
+		t.Fatal("expected error for an unknown base id")
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
+
+func TestCreateSLMProfile_NameCollisionsRejected(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	predefined := config.PredefinedSLMProfiles()[0]
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{predefined.Name, "collides with a predefined profile name"},
+		{"Test Tuned", "collides with an existing custom profile name"},
+		{"   ", "empty after trim"},
+	}
+	for _, tc := range cases {
+		if _, err := f.CreateSLMProfile("generic", tc.name); err == nil {
+			t.Errorf("expected error for a name that %s, got nil", tc.reason)
+		}
+	}
+	// The store is untouched by the rejected creates.
+	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	if len(profiles) != 1 {
+		t.Errorf("custom store = %d profiles, want 1 (untouched)", len(profiles))
+	}
+}
+
+// --- UpdateSLMProfile ---
+
+func TestUpdateSLMProfile_PersistsAndRebuilds(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1687,156 +1944,182 @@ func TestUpdateSmallLLMConfig_PersistsAndRebuilds(t *testing.T) {
 	if mock.rebuildRouterCalls != 1 {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
-
-	// Config file persisted.
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		t.Fatal("config file not persisted")
-	}
-
-	// In-memory config reflects the update.
-	if !f.config.SmallLLM.Enabled {
-		t.Error("SmallLLM.Enabled not applied")
+	// Values persisted in the store.
+	stored := slmStoredProfile(t, f, active.ID)
+	if !stored.Config.EssentialTools.Enabled {
+		t.Error("stored values were not applied")
 	}
 }
 
-func TestUpdateSmallLLMConfig_NilConfig(t *testing.T) {
+func TestUpdateSLMProfile_NilConfig(t *testing.T) {
 	f := &FrontendAPI{}
-	err := f.UpdateSmallLLMConfig(validSmallLLMConfig())
+	err := f.UpdateSLMProfile("any", slmConfigReq(validSLMValues()))
 	if err == nil {
 		t.Fatal("expected error when config is nil")
 	}
 }
 
-// TestUpdateSmallLLMConfig_PersistFailureRestoresInMemory verifies that when
-// persistConfig fails, the in-memory config is restored to its previous value.
-// Without this, the UI's revert-on-failure path (GetSmallLLMConfig) would read
-// back the rejected value, silently keeping the failed change.
-func TestUpdateSmallLLMConfig_PersistFailureRestoresInMemory(t *testing.T) {
+// TestUpdateSLMProfile_PredefinedRejected verifies the read-only semantics:
+// predefined profiles are hard-coded, so an update is rejected before any
+// mutation of config.yaml or the profile store.
+func TestUpdateSLMProfile_PredefinedRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
 
-	// Establish a known baseline.
-	baseline := validSmallLLMConfig()
-	baseline.EssentialTools.AlwaysPresent = []string{"read_file"}
-	if err := f.UpdateSmallLLMConfig(baseline); err != nil {
-		t.Fatalf("baseline setup failed: %v", err)
-	}
-	baselineCalls := mock.rebuildRouterCalls
-
-	// Force persistConfig to fail by clearing the path.
-	f.configPath = ""
-
-	change := validSmallLLMConfig()
-	// Must stay valid under validateSmallLLMConfig so the persist step itself
-	// is what fails, not validation.
-	change.EssentialTools.AlwaysPresent = []string{"read_file", "edit_file"}
-	err := f.UpdateSmallLLMConfig(change)
+	err := f.UpdateSLMProfile(config.SLMGenericProfileID, slmConfigReq(validSLMValues()))
 	if err == nil {
-		t.Fatal("expected error when persist fails")
+		t.Fatal("expected error for a predefined profile id")
 	}
-
-	// In-memory config must be restored to the baseline, not the rejected change.
-	if got := f.config.SmallLLM.EssentialTools.AlwaysPresent; len(got) != 1 || got[0] != "read_file" {
-		t.Errorf("in-memory AlwaysPresent = %v, want [read_file] (baseline restored on persist failure)", got)
+	if !strings.Contains(err.Error(), "predefined") {
+		t.Errorf("error must explain the read-only predefined profile, got: %v", err)
 	}
-	// RebuildRouter must not have been called for the failed update.
-	if mock.rebuildRouterCalls != baselineCalls {
-		t.Errorf("RebuildRouter called after persist failure: %d, want %d",
-			mock.rebuildRouterCalls, baselineCalls)
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0 (nothing was applied)", mock.rebuildRouterCalls)
 	}
+	// The custom store must be untouched.
+	if err := f.UpdateSLMProfile("unknown-id", slmConfigReq(validSLMValues())); err == nil {
+		t.Fatal("expected error for an unknown profile id")
+	}
+	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	if len(profiles) == 0 {
+		t.Fatal("custom store lost its profiles from rejected updates")
+	}
+	_ = active
 }
 
-func TestUpdateSmallLLMConfig_EmptyAlwaysPresentAllowed(t *testing.T) {
-	f, mock, cfgPath := newTestAPI(t)
-
-	// An empty always_present list is valid: protected orchestration tools
-	// (finish, fact memory, ask_user) and every MCP tool are always kept
-	// implicitly by SelectTools, so the user need not pin anything.
-	cfg := validSmallLLMConfig()
-	cfg.EssentialTools.AlwaysPresent = nil
-
-	err := f.UpdateSmallLLMConfig(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error for empty always_present when essential enabled: %v", err)
-	}
-
-	// Successful update: config mutated, router rebuilt, file persisted.
-	if !f.config.SmallLLM.Enabled {
-		t.Error("config was not applied despite a valid (empty always_present) payload")
-	}
-	if mock.rebuildRouterCalls != 1 {
-		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
-	}
-	if _, statErr := os.Stat(cfgPath); statErr != nil {
-		t.Error("config file should have been written on success")
-	}
-}
-
-func TestUpdateSmallLLMConfig_NegativeThresholds(t *testing.T) {
+func TestUpdateSLMProfile_UnknownIDRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 
-	cfg := validSmallLLMConfig()
-	cfg.LoopHardening.FruitlessAbortThreshold = -5
-
-	err := f.UpdateSmallLLMConfig(cfg)
-	if err == nil {
-		t.Fatal("expected error for negative loop-hardening threshold")
-	}
-	if f.config.SmallLLM.Enabled {
-		t.Error("config was mutated despite validation error")
+	if err := f.UpdateSLMProfile("ghost", slmConfigReq(validSLMValues())); err == nil {
+		t.Fatal("expected error for an unknown profile id")
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
 	}
 }
 
-func TestUpdateSmallLLMConfig_InvalidContextRanges(t *testing.T) {
-	// Each case mutates one knob of an otherwise-valid enabled context
-	// variant and expects rejection.
+func TestUpdateSLMProfile_Rename(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	newName := "Renamed Tuned"
+	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{Name: &newName}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	stored := slmStoredProfile(t, f, active.ID)
+	if stored.Name != newName {
+		t.Errorf("stored name = %q, want %q", stored.Name, newName)
+	}
+	if !stored.Config.EssentialTools.Enabled && stored.ID != active.ID {
+		t.Error("rename must keep id and values stable")
+	}
+}
+
+// TestUpdateSLMProfile_RenameCollisionRejected: a rename that lands on a
+// predefined name or another custom profile's name is rejected without a
+// write; renaming to the profile's own name is a no-op and allowed.
+func TestUpdateSLMProfile_RenameCollisionRejected(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	first := activateCustomSLMProfile(t, f) // "Test Tuned"
+	secondID, err := f.CreateSLMProfile("generic", "Second Profile")
+	if err != nil {
+		t.Fatalf("CreateSLMProfile: %v", err)
+	}
+
+	predefinedName := config.PredefinedSLMProfiles()[0].Name
+	for _, tc := range []struct{ name, why string }{
+		{predefinedName, "predefined name"},
+		{first.Name, "another custom profile's name"},
+		{"  ", "empty after trim"},
+	} {
+		name := tc.name
+		if err := f.UpdateSLMProfile(secondID, SLMProfileUpdateRequest{Name: &name}); err == nil {
+			t.Errorf("rename to %s (%q) must be rejected", tc.why, tc.name)
+		}
+	}
+	// Store unchanged: both profiles keep their names.
+	if got := slmStoredProfile(t, f, secondID).Name; got != "Second Profile" {
+		t.Errorf("rejected rename leaked: second profile name = %q, want Second Profile", got)
+	}
+	// Renaming to the own name is allowed (no-op).
+	own := "Second Profile"
+	if err := f.UpdateSLMProfile(secondID, SLMProfileUpdateRequest{Name: &own}); err != nil {
+		t.Fatalf("rename to the own name must be allowed, got: %v", err)
+	}
+}
+
+func TestUpdateSLMProfile_PartialFields(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	// Baseline values.
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	// Name-only update keeps the values.
+	newName := "Only Renamed"
+	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{Name: &newName}); err != nil {
+		t.Fatalf("name-only update: %v", err)
+	}
+	stored := slmStoredProfile(t, f, active.ID)
+	if stored.Name != newName || !stored.Config.EssentialTools.Enabled {
+		t.Errorf("name-only update must keep values: name=%q essential=%v", stored.Name, stored.Config.EssentialTools.Enabled)
+	}
+	// Values-only update keeps the name.
+	other := validSLMValues()
+	other.Sampling.Temperature = 0.3
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(other)); err != nil {
+		t.Fatalf("values-only update: %v", err)
+	}
+	stored = slmStoredProfile(t, f, active.ID)
+	if stored.Name != newName || stored.Config.Sampling.Temperature != 0.3 {
+		t.Errorf("values-only update must keep the name: name=%q temp=%v", stored.Name, stored.Config.Sampling.Temperature)
+	}
+	// Empty request is a no-op.
+	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{}); err != nil {
+		t.Fatalf("empty request must be a no-op, got: %v", err)
+	}
+}
+
+// TestUpdateSLMProfile_InvalidValuesRejectedWithoutWrite: every invalid value
+// is rejected before any mutation — the store keeps its previous content and
+// no router rebuild happens.
+func TestUpdateSLMProfile_InvalidValuesRejectedWithoutWrite(t *testing.T) {
 	cases := []struct {
 		name   string
-		mutate func(*SmallLLMConfigResponse)
+		mutate func(*SLMProfileValues)
 	}{
-		{
-			name:   "keep_last below 2 rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.Compaction.KeepLast = 1 },
-		},
-		{
-			name:   "trigger_percent 100 rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.Compaction.TriggerPercent = 100 },
-		},
-		{
-			name:   "trigger_percent zero rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.Compaction.TriggerPercent = 0 },
-		},
-		{
-			name:   "block_size below 2 rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.Compaction.BlockSize = 1 },
-		},
-		{
-			name:   "tool_output_keep_last_n zero rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.ToolOutputKeepLastN = 0 },
-		},
-		{
-			name:   "output_token_reserve zero rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.OutputTokenReserve = 0 },
-		},
-		{
-			name:   "negative keep_last rejected",
-			mutate: func(c *SmallLLMConfigResponse) { c.Context.Compaction.KeepLast = -3 },
-		},
+		{"negative loop threshold", func(v *SLMProfileValues) { v.LoopHardening.FruitlessAbortThreshold = -5 }},
+		{"zero loop threshold while enabled", func(v *SLMProfileValues) { v.LoopHardening.RepeatNudgeThreshold = 0 }},
+		{"keep_last below 2", func(v *SLMProfileValues) { v.Context.Compaction.KeepLast = 1 }},
+		{"trigger_percent 100", func(v *SLMProfileValues) { v.Context.Compaction.TriggerPercent = 100 }},
+		{"trigger_percent zero", func(v *SLMProfileValues) { v.Context.Compaction.TriggerPercent = 0 }},
+		{"block_size below 2", func(v *SLMProfileValues) { v.Context.Compaction.BlockSize = 1 }},
+		{"tool_output_keep_last_n zero", func(v *SLMProfileValues) { v.Context.ToolOutputKeepLastN = 0 }},
+		{"output_token_reserve zero", func(v *SLMProfileValues) { v.Context.OutputTokenReserve = 0 }},
+		{"negative temperature", func(v *SLMProfileValues) { v.Sampling.Temperature = -0.5 }},
+		{"top_p above 1", func(v *SLMProfileValues) { v.Sampling.TopP = 1.5 }},
+		{"top_k negative", func(v *SLMProfileValues) { v.Sampling.TopK = -3 }},
+		{"repetition_penalty below 1", func(v *SLMProfileValues) { v.Sampling.RepetitionPenalty = 0.5 }},
+		{"presence_penalty above 2", func(v *SLMProfileValues) { v.Sampling.PresencePenalty = 2.5 }},
+		{"invalid reasoning effort", func(v *SLMProfileValues) { v.Sampling.ReasoningEffort = "ultra" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, mock, _ := newTestAPI(t)
+			active := activateCustomSLMProfile(t, f)
 
-			cfg := validSmallLLMConfig()
-			tc.mutate(&cfg)
+			values := validSLMValues()
+			tc.mutate(&values)
 
-			if err := f.UpdateSmallLLMConfig(cfg); err == nil {
+			if err := f.UpdateSLMProfile(active.ID, slmConfigReq(values)); err == nil {
 				t.Fatal("expected validation error")
 			}
-			if f.config.SmallLLM.Enabled {
-				t.Error("config was mutated despite validation error")
+			// Rejected without a write: the store keeps the zero-valued
+			// profile created by the helper.
+			stored := slmStoredProfile(t, f, active.ID)
+			if stored.Config.EssentialTools.Enabled {
+				t.Error("rejected update leaked into the profile store")
 			}
 			if mock.rebuildRouterCalls != 0 {
 				t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
@@ -1845,172 +2128,443 @@ func TestUpdateSmallLLMConfig_InvalidContextRanges(t *testing.T) {
 	}
 }
 
-func TestUpdateSmallLLMConfig_DisabledContextAllowsZeroValues(t *testing.T) {
+func TestUpdateSLMProfile_ZeroSentinelsAndDisabledVariants(t *testing.T) {
 	f, _, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
 
-	// Variant off → zero values are accepted (they mean "do not override").
-	cfg := validSmallLLMConfig()
-	cfg.Context = SmallLLMContextResp{}
-
-	if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-		t.Fatalf("disabled context variant with zero values must be accepted, got: %v", err)
+	// Zero sampling numerics mean "inherit the vendor preset" — valid.
+	values := validSLMValues()
+	values.Sampling.Temperature = 0
+	values.Sampling.TopP = 0
+	values.Sampling.TopK = 0
+	values.Sampling.RepetitionPenalty = 0
+	values.Sampling.PresencePenalty = 0
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(values)); err != nil {
+		t.Fatalf("zero sampling sentinels must be accepted, got: %v", err)
+	}
+	// All variants disabled: zero values are acceptable (variant logic inert).
+	empty := SLMProfileValues{}
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(empty)); err != nil {
+		t.Fatalf("all-variants-off payload must be accepted, got: %v", err)
+	}
+	// Empty always_present is valid: protected/MCP tools are kept implicitly.
+	noPins := SLMProfileValues{EssentialTools: SLMEssentialToolsValues{Enabled: true}}
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(noPins)); err != nil {
+		t.Fatalf("empty always_present must be accepted, got: %v", err)
 	}
 }
 
-func TestUpdateSmallLLMConfig_InvalidSampling(t *testing.T) {
-	f, _, _ := newTestAPI(t)
+// TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched forces the store
+// write to fail and verifies nothing changed. The store persists with an
+// atomic temp-file-then-rename (see config.SaveCustomSLMProfiles), so
+// occupying that temp sibling with a directory makes os.WriteFile fail on
+// every platform. Making the agent dir read-only via os.Chmod cannot: on
+// Windows the read-only attribute does not block creating files inside a
+// directory, so the write would silently succeed.
+func TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+	before := slmStoredProfile(t, f, active.ID)
 
-	t.Run("negative temperature rejected, zero inherits", func(t *testing.T) {
-		// Temperature 0 is the "inherit the vendor preset" sentinel: it must
-		// be accepted so enabling the variant without explicit values keeps
-		// vendor presets intact. Only explicitly negative values are invalid.
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.Temperature = 0
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("zero temperature means inherit and must be accepted, got: %v", err)
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.Temperature = -0.5
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for negative temperature")
-		}
-	})
-	t.Run("top_p out of range", func(t *testing.T) {
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.TopP = 1.5
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for top_p > 1")
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.TopP = -0.1
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for negative top_p")
-		}
-	})
-	t.Run("top_k out of range", func(t *testing.T) {
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.TopK = -3
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for negative top_k")
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.TopK = 0 // zero means inherit, valid
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("zero top_k means inherit and must be accepted, got: %v", err)
-		}
-	})
-	t.Run("repetition_penalty out of range", func(t *testing.T) {
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.RepetitionPenalty = 0.5
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for repetition_penalty < 1")
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.RepetitionPenalty = 2.5
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for repetition_penalty > 2")
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.RepetitionPenalty = 0 // zero means inherit, valid
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("zero repetition_penalty means inherit and must be accepted, got: %v", err)
-		}
-	})
-	t.Run("presence_penalty out of range", func(t *testing.T) {
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.PresencePenalty = 2.5
-		err := f.UpdateSmallLLMConfig(cfg)
-		if err == nil {
-			t.Fatal("expected error for presence_penalty > 2")
-		}
-		if !strings.Contains(err.Error(), "presence_penalty") || !strings.Contains(err.Error(), "[0, 2]") {
-			t.Errorf("error must name the field and its range, got: %v", err)
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.PresencePenalty = -0.5
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for negative presence_penalty")
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.PresencePenalty = 0 // zero means inherit, valid
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("zero presence_penalty means inherit and must be accepted, got: %v", err)
-		}
-		cfg = validSmallLLMConfig()
-		cfg.Sampling.PresencePenalty = 1.5 // Qwen instruct default, valid
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("presence_penalty 1.5 (Qwen instruct default) must be accepted, got: %v", err)
-		}
-	})
-	t.Run("invalid reasoning effort", func(t *testing.T) {
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.ReasoningEffort = "ultra"
-		if err := f.UpdateSmallLLMConfig(cfg); err == nil {
-			t.Fatal("expected error for invalid reasoning_effort")
-		}
-	})
-	t.Run("seeded default reasoning effort", func(t *testing.T) {
-		// On a freshly defaulted config (ApplyDefaults runs inside
-		// newTestAPI), GetSmallLLMConfig reports the seeded default
-		// "medium" (docs/small-llm-defaults-research.md, R3): an unset
-		// value would inherit the model's own default — xhigh on qwen
-		// thinking models — which measured as overthinking on trivial
-		// tasks. A fresh API is used because sibling subtests above
-		// persist fixtures whose effort is "".
-		fresh, _, _ := newTestAPI(t)
-		if got := fresh.GetSmallLLMConfig().Sampling.ReasoningEffort; got != "medium" {
-			t.Fatalf("GetSmallLLMConfig().Sampling.ReasoningEffort = %q on a fresh config, want the seeded default %q", got, "medium")
-		}
-		// The seeded default must validate and persist like any explicit
-		// value.
-		cfg := validSmallLLMConfig()
-		cfg.Sampling.ReasoningEffort = "medium"
-		if err := f.UpdateSmallLLMConfig(cfg); err != nil {
-			t.Fatalf("seeded default reasoning_effort %q must be accepted, got: %v", "medium", err)
-		}
-	})
+	// Block the atomic write: a directory at the temp path makes the
+	// temp-file creation fail before it can be renamed into place.
+	tmpPath := config.SLMProfilesPath(f.agentDir) + ".tmp"
+	if err := os.Mkdir(tmpPath, 0o755); err != nil {
+		t.Fatalf("cannot occupy the store temp path %q: %v", tmpPath, err)
+	}
+
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err == nil {
+		t.Fatal("expected error when the store write fails")
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0 (nothing was applied)", mock.rebuildRouterCalls)
+	}
+	after := slmStoredProfile(t, f, active.ID)
+	if diff := cmp.Diff(before, after); diff != "" {
+		t.Errorf("failed store write changed the persisted profile (-before +after):\n%s", diff)
+	}
 }
 
-func TestUpdateSmallLLMConfig_DisabledVariantsAllowZeroValues(t *testing.T) {
+// --- DeleteSLMProfile ---
+
+func TestDeleteSLMProfile_NonActiveCustom(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+	victim, err := f.CreateSLMProfile("generic", "Doomed Copy")
+	if err != nil {
+		t.Fatalf("CreateSLMProfile: %v", err)
+	}
+
+	if err := f.DeleteSLMProfile(victim); err != nil {
+		t.Fatalf("DeleteSLMProfile: %v", err)
+	}
+	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	for _, p := range profiles {
+		if p.ID == victim {
+			t.Fatal("deleted profile still in the store")
+		}
+	}
+	if f.config.SLM.ActiveProfile != active.ID {
+		t.Errorf("active profile changed to %q; deleting a non-active profile must not touch it", f.config.SLM.ActiveProfile)
+	}
+	if mock.rebuildRouterCalls != 2 { // 1 create + 1 delete
+		t.Errorf("RebuildRouter called %d times, want 2", mock.rebuildRouterCalls)
+	}
+}
+
+func TestDeleteSLMProfile_PredefinedRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 
-	// When all variants are off (only master enabled), empty/zero values are
-	// acceptable because the variant logic is inert. Master toggle itself
-	// imposes no constraints on sub-fields.
-	cfg := SmallLLMConfigResponse{Enabled: true}
+	for _, p := range config.PredefinedSLMProfiles() {
+		if err := f.DeleteSLMProfile(p.ID); err == nil {
+			t.Fatalf("expected error deleting the predefined profile %q", p.ID)
+		}
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
 
-	err := f.UpdateSmallLLMConfig(cfg)
+func TestDeleteSLMProfile_UnknownIDRejected(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	if err := f.DeleteSLMProfile("ghost"); err == nil {
+		t.Fatal("expected error for an unknown profile id")
+	}
+}
+
+// TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric is the acceptance
+// scenario: deleting the ACTIVE custom profile switches the active id to
+// generic in memory AND in config.yaml, and the NEXT GetSLMProfiles reports
+// the generic active id plus a one-shot warning explaining the switch (the
+// second Get no longer carries the notice).
+func TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t)
+	// Make the store hold exactly one active custom profile.
+	f.config.SLM.ActiveProfile = ""
+	active := activateCustomSLMProfile(t, f)
+
+	if err := f.DeleteSLMProfile(active.ID); err != nil {
+		t.Fatalf("DeleteSLMProfile(active): %v", err)
+	}
+
+	// In-memory and persisted active id is generic.
+	if f.config.SLM.ActiveProfile != config.SLMGenericProfileID {
+		t.Errorf("in-memory active = %q, want generic", f.config.SLM.ActiveProfile)
+	}
+	persisted, err := config.Load(cfgPath)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("config.Load: %v", err)
+	}
+	if persisted.SLM.ActiveProfile != config.SLMGenericProfileID {
+		t.Errorf("persisted active = %q, want generic", persisted.SLM.ActiveProfile)
+	}
+	// The profile is gone from the store.
+	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	for _, p := range profiles {
+		if p.ID == active.ID {
+			t.Fatal("deleted profile still in the store")
+		}
 	}
 	if mock.rebuildRouterCalls != 1 {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
+
+	// The next Get reports generic as active plus the one-shot warning.
+	got := f.GetSLMProfiles()
+	if got.ActiveID != config.SLMGenericProfileID {
+		t.Errorf("GetSLMProfiles active = %q, want generic", got.ActiveID)
+	}
+	found := false
+	for _, w := range got.Warnings {
+		if strings.Contains(w, "was deleted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("next Get must carry the delete notice, got warnings: %v", got.Warnings)
+	}
+	// The notice is one-shot.
+	again := f.GetSLMProfiles()
+	for _, w := range again.Warnings {
+		if strings.Contains(w, "was deleted") {
+			t.Errorf("the delete notice must not repeat, got warnings: %v", again.Warnings)
+		}
+	}
 }
 
-// TestSmallLLMConfig_RoundTrip_FullProfileLossless is the config round-trip
-// integration test: a fully-populated profile written via UpdateSmallLLMConfig
-// and read back via GetSmallLLMConfig must survive losslessly. This exercises
-// the converter pair (smallLLMToResponse / responseToSmallLLM) end-to-end
-// through the public API surface and the config.yaml persist path, covering
-// EVERY field — including the ones the happy-path test omits (FewShot,
-// ReasoningScaffold, ReasoningEffort, and all five loop-hardening thresholds) —
-// so a future converter change that drops a field is caught.
-func TestSmallLLMConfig_RoundTrip_FullProfileLossless(t *testing.T) {
+// TestDeleteSLMProfile_ActiveConfigPersistFailureRollsBack: when config.yaml
+// cannot be written, the delete aborts — the profile stays in the store and
+// the active id keeps pointing at it.
+func TestDeleteSLMProfile_ActiveConfigPersistFailureRollsBack(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
+	f.config.SLM.ActiveProfile = ""
+	active := activateCustomSLMProfile(t, f)
 
-	want := SmallLLMConfigResponse{
-		Enabled: true,
-		EssentialTools: SmallLLMEssentialToolsResp{
+	f.configPath = "" // force the config.yaml persist to fail
+
+	if err := f.DeleteSLMProfile(active.ID); err == nil {
+		t.Fatal("expected error when the config persist fails")
+	}
+	if f.config.SLM.ActiveProfile != active.ID {
+		t.Errorf("active id = %q, want %q (rolled back)", f.config.SLM.ActiveProfile, active.ID)
+	}
+	slmStoredProfile(t, f, active.ID) // still in the store
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
+
+// --- SelectSLMProfile ---
+
+func TestSelectSLMProfile_PersistsActiveID(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	if err := f.SelectSLMProfile("qwen3.8-27b"); err != nil {
+		t.Fatalf("SelectSLMProfile: %v", err)
+	}
+	if f.config.SLM.ActiveProfile != "qwen3.8-27b" {
+		t.Errorf("in-memory active = %q, want qwen3.8-27b", f.config.SLM.ActiveProfile)
+	}
+	persisted, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if persisted.SLM.ActiveProfile != "qwen3.8-27b" {
+		t.Errorf("persisted active = %q, want qwen3.8-27b", persisted.SLM.ActiveProfile)
+	}
+	if mock.rebuildRouterCalls != 1 {
+		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
+	}
+
+	// Selecting a custom profile works the same way.
+	if err := f.SelectSLMProfile(active.ID); err != nil {
+		t.Fatalf("SelectSLMProfile(custom): %v", err)
+	}
+	if f.config.SLM.ActiveProfile != active.ID {
+		t.Errorf("active = %q, want %q", f.config.SLM.ActiveProfile, active.ID)
+	}
+}
+
+func TestSelectSLMProfile_AlreadyActiveNoop(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	if err := f.SelectSLMProfile(active.ID); err != nil {
+		t.Fatalf("SelectSLMProfile: %v", err)
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0 (no-op)", mock.rebuildRouterCalls)
+	}
+}
+
+func TestSelectSLMProfile_UnknownAndEmptyRejected(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	for _, id := range []string{"ghost", ""} {
+		if err := f.SelectSLMProfile(id); err == nil {
+			t.Errorf("expected error for profile id %q", id)
+		}
+	}
+	if f.config.SLM.ActiveProfile == "ghost" {
+		t.Error("rejected selection must not change the active id")
+	}
+}
+
+// TestSelectSLMProfile_PersistFailureRollsBack: a failed config.yaml write
+// restores the previous active id so the rejected selection is
+// indistinguishable from a rejected request.
+func TestSelectSLMProfile_PersistFailureRollsBack(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	prev := f.config.SLM.ActiveProfile
+
+	f.configPath = ""
+	if err := f.SelectSLMProfile("qwen3.8-27b"); err == nil {
+		t.Fatal("expected error when the config persist fails")
+	}
+	if f.config.SLM.ActiveProfile != prev {
+		t.Errorf("active id = %q, want %q (rolled back)", f.config.SLM.ActiveProfile, prev)
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
+
+// --- SetSLMEnabled ---
+
+// TestSetSLMEnabled_PersistsAndApplies verifies the master toggle is written to
+// config.yaml, flips the in-memory value, and runs the shared SLM
+// post-mutation tail (router rebuild) so the change takes effect for new
+// sessions without a restart — in both directions.
+func TestSetSLMEnabled_PersistsAndApplies(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t)
+	f.config.Experimental.Enabled = true
+
+	if err := f.SetSLMEnabled(true); err != nil {
+		t.Fatalf("SetSLMEnabled(true): %v", err)
+	}
+	if !f.config.SLM.Enabled {
+		t.Error("in-memory SLM.Enabled = false, want true")
+	}
+	persisted, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if !persisted.SLM.Enabled {
+		t.Error("persisted SLM.Enabled = false, want true")
+	}
+	if mock.rebuildRouterCalls != 1 {
+		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
+	}
+
+	// Disabling persists false and rebuilds again (allowed regardless of gate).
+	if err := f.SetSLMEnabled(false); err != nil {
+		t.Fatalf("SetSLMEnabled(false): %v", err)
+	}
+	if f.config.SLM.Enabled {
+		t.Error("in-memory SLM.Enabled = true, want false")
+	}
+	persisted, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if persisted.SLM.Enabled {
+		t.Error("persisted SLM.Enabled = true, want false")
+	}
+	if mock.rebuildRouterCalls != 2 {
+		t.Errorf("RebuildRouter called %d times, want 2", mock.rebuildRouterCalls)
+	}
+}
+
+// TestSetSLMEnabled_EnableRequiresExperimental verifies enabling fails closed
+// while the experimental gate is off: an error, no in-memory change, no router
+// rebuild.
+func TestSetSLMEnabled_EnableRequiresExperimental(t *testing.T) {
+	f, mock, _ := newTestAPI(t) // experimental defaults to false
+
+	err := f.SetSLMEnabled(true)
+	if err == nil {
+		t.Fatal("expected an error enabling the small-LLM profile while experimental features are disabled")
+	}
+	if !strings.Contains(err.Error(), "experimental") {
+		t.Errorf("error = %q, want it to mention experimental", err)
+	}
+	if f.config.SLM.Enabled {
+		t.Error("SLM.Enabled must not change when the gate rejects the enable")
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
+
+// TestSetSLMEnabled_NoopWhenUnchanged verifies a request matching the stored
+// value is a true no-op: no persist, no router rebuild.
+func TestSetSLMEnabled_NoopWhenUnchanged(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	f.config.Experimental.Enabled = true
+	f.config.SLM.Enabled = true
+
+	if err := f.SetSLMEnabled(true); err != nil {
+		t.Fatalf("SetSLMEnabled(true): %v", err)
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0 (no-op)", mock.rebuildRouterCalls)
+	}
+}
+
+// TestSetSLMEnabled_PersistFailureRollsBack verifies a failed config.yaml write
+// restores the previous value so the rejected toggle is indistinguishable from
+// a rejected request.
+func TestSetSLMEnabled_PersistFailureRollsBack(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t)
+	f.config.Experimental.Enabled = true
+	f.configPath = filepath.Join(filepath.Dir(cfgPath), "missing", "config.yaml")
+
+	if err := f.SetSLMEnabled(true); err == nil {
+		t.Fatal("expected an error when the config persist fails")
+	}
+	if f.config.SLM.Enabled {
+		t.Error("SLM.Enabled = true, want false (rolled back)")
+	}
+	if mock.rebuildRouterCalls != 0 {
+		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	}
+}
+
+// TestSetSLMEnabled_EmptyPathRejected verifies the config-path guard precedes
+// any mutation.
+func TestSetSLMEnabled_EmptyPathRejected(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	f.config.Experimental.Enabled = true
+	f.configPath = ""
+
+	if err := f.SetSLMEnabled(true); err == nil {
+		t.Fatal("expected an error when the config path is not set")
+	}
+	if f.config.SLM.Enabled {
+		t.Error("SLM.Enabled must not change when the path is missing")
+	}
+}
+
+// TestSetSLMEnabled_EmitsConfigUpdated verifies the (asynchronous)
+// config:updated announcement so frontend consumers re-read the config without
+// an app restart.
+func TestSetSLMEnabled_EmitsConfigUpdated(t *testing.T) {
+	f, _, rec, db := newUpdateLLMConfigProjectHarness(t)
+	defer func() { _ = db.Close() }()
+	f.config.Experimental.Enabled = true
+
+	if err := f.SetSLMEnabled(true); err != nil {
+		t.Fatalf("SetSLMEnabled(true): %v", err)
+	}
+	rec.waitFor(t, EventConfigUpdated)
+}
+
+// TestSLMNilConfigRejected verifies the nil-config guard on every mutation.
+func TestSLMNilConfigRejected(t *testing.T) {
+	f := &FrontendAPI{}
+	name := "X"
+	if _, err := f.CreateSLMProfile("generic", "X"); err == nil {
+		t.Error("CreateSLMProfile must fail on nil config")
+	}
+	if err := f.UpdateSLMProfile("any", SLMProfileUpdateRequest{Name: &name}); err == nil {
+		t.Error("UpdateSLMProfile must fail on nil config")
+	}
+	if err := f.DeleteSLMProfile("any"); err == nil {
+		t.Error("DeleteSLMProfile must fail on nil config")
+	}
+	if err := f.SelectSLMProfile("any"); err == nil {
+		t.Error("SelectSLMProfile must fail on nil config")
+	}
+	if err := f.SetSLMEnabled(true); err == nil {
+		t.Error("SetSLMEnabled must fail on nil config")
+	}
+}
+
+// TestSLMProfileValues_RoundTrip_FullProfileLossless is the round-trip
+// integration test: a fully-populated values payload written via
+// UpdateSLMProfile and read back via GetSLMProfiles must survive losslessly.
+// This exercises the converter pair (slmProfileConfigToValues /
+// slmValuesToProfileConfig) end-to-end through the public API surface and the
+// store persist path, covering EVERY field — including the ones the
+// happy-path test omits (FewShot, ReasoningScaffold, ReasoningEffort, and all
+// five loop-hardening thresholds) — so a future converter change that drops a
+// field is caught.
+func TestSLMProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	active := activateCustomSLMProfile(t, f)
+
+	want := SLMProfileValues{
+		EssentialTools: SLMEssentialToolsValues{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file", "edit_file", "bash_exec", "semantic_search"},
 		},
-		SystemPrompt: SmallLLMSystemPromptResp{
+		SystemPrompt: SLMSystemPromptResp{
 			Lite:              true,
 			FewShot:           true,
 			ReasoningScaffold: true,
 		},
-		Sampling: SmallLLMSamplingResp{
+		Sampling: SLMSamplingResp{
 			Enabled:           true,
 			Temperature:       0.15,
 			TopP:              0.85,
@@ -2019,7 +2573,7 @@ func TestSmallLLMConfig_RoundTrip_FullProfileLossless(t *testing.T) {
 			PresencePenalty:   1.5,
 			ReasoningEffort:   "low",
 		},
-		LoopHardening: SmallLLMLoopHardeningResp{
+		LoopHardening: SLMLoopHardeningResp{
 			Enabled:                      true,
 			RepeatNudgeThreshold:         2,
 			ParseErrorAbortThreshold:     3,
@@ -2027,9 +2581,9 @@ func TestSmallLLMConfig_RoundTrip_FullProfileLossless(t *testing.T) {
 			FruitlessAbortThreshold:      6,
 			SameToolRepeatNudgeThreshold: 5,
 		},
-		Context: SmallLLMContextResp{
+		Context: SLMContextResp{
 			Enabled: true,
-			Compaction: SmallLLMCompactionResp{
+			Compaction: SLMCompactionResp{
 				KeepLast:       6,
 				BlockSize:      5,
 				TriggerPercent: 80,
@@ -2039,123 +2593,31 @@ func TestSmallLLMConfig_RoundTrip_FullProfileLossless(t *testing.T) {
 		},
 	}
 
-	if err := f.UpdateSmallLLMConfig(want); err != nil {
-		t.Fatalf("UpdateSmallLLMConfig failed: %v", err)
-	}
-	if mock.rebuildRouterCalls != 1 {
-		t.Errorf("RebuildRouter called %d times, want 1 (change must apply without restart)", mock.rebuildRouterCalls)
+	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(want)); err != nil {
+		t.Fatalf("UpdateSLMProfile failed: %v", err)
 	}
 
-	// Read back through the public getter and assert every field survived.
-	got := f.GetSmallLLMConfig()
+	got := slmFindProfile(t, f.GetSLMProfiles(), active.ID).Values
 
-	if got.Enabled != want.Enabled {
-		t.Errorf("Enabled = %v, want %v", got.Enabled, want.Enabled)
-	}
-
-	// Essential tools.
-	if got.EssentialTools.Enabled != want.EssentialTools.Enabled {
-		t.Errorf("EssentialTools.Enabled = %v, want %v", got.EssentialTools.Enabled, want.EssentialTools.Enabled)
-	}
-	// always_present round-trips the user-chosen tools losslessly AND carries
-	// the protected orchestration tools unioned in by smallLLMToResponse (so
-	// the UI can render them as locked). The want list contains no protected
-	// tools, so the read-back is exactly the user list ∪ the protected set.
-	gotSet := make(map[string]struct{}, len(got.EssentialTools.AlwaysPresent))
-	for _, n := range got.EssentialTools.AlwaysPresent {
-		gotSet[n] = struct{}{}
-	}
-	for _, n := range want.EssentialTools.AlwaysPresent {
-		if _, ok := gotSet[n]; !ok {
-			t.Errorf("EssentialTools.AlwaysPresent lost user tool %q; got %v", n, got.EssentialTools.AlwaysPresent)
-		}
-	}
-	for _, n := range smallllm.ProtectedToolNames() {
-		if _, ok := gotSet[n]; !ok {
-			t.Errorf("EssentialTools.AlwaysPresent missing protected tool %q; got %v", n, got.EssentialTools.AlwaysPresent)
-		}
-	}
-	wantLen := len(want.EssentialTools.AlwaysPresent) + len(smallllm.ProtectedToolNames())
-	if len(got.EssentialTools.AlwaysPresent) != wantLen {
-		t.Errorf("EssentialTools.AlwaysPresent len = %d, want %d (user ∪ protected); got %v",
-			len(got.EssentialTools.AlwaysPresent), wantLen, got.EssentialTools.AlwaysPresent)
+	if !reflect.DeepEqual(got.EssentialTools.Enabled, want.EssentialTools.Enabled) ||
+		!slices.Equal(got.EssentialTools.AlwaysPresent, want.EssentialTools.AlwaysPresent) ||
+		got.EssentialTools.CompactDescriptions != want.EssentialTools.CompactDescriptions {
+		t.Errorf("EssentialTools round-trip mismatch:\n got %+v\nwant %+v", got.EssentialTools, want.EssentialTools)
 	}
 	if got.EssentialTools.AlwaysPresent == nil {
-		t.Error("EssentialTools.AlwaysPresent is nil, want non-nil (normalized to [])")
+		t.Error("AlwaysPresent is nil, want non-nil (normalized to [])")
 	}
-
-	// System prompt.
-	if got.SystemPrompt.Lite != want.SystemPrompt.Lite {
-		t.Errorf("SystemPrompt.Lite = %v, want %v", got.SystemPrompt.Lite, want.SystemPrompt.Lite)
+	if got.SystemPrompt != want.SystemPrompt {
+		t.Errorf("SystemPrompt round-trip mismatch:\n got %+v\nwant %+v", got.SystemPrompt, want.SystemPrompt)
 	}
-	if got.SystemPrompt.FewShot != want.SystemPrompt.FewShot {
-		t.Errorf("SystemPrompt.FewShot = %v, want %v", got.SystemPrompt.FewShot, want.SystemPrompt.FewShot)
+	if got.Sampling != want.Sampling {
+		t.Errorf("Sampling round-trip mismatch:\n got %+v\nwant %+v", got.Sampling, want.Sampling)
 	}
-	if got.SystemPrompt.ReasoningScaffold != want.SystemPrompt.ReasoningScaffold {
-		t.Errorf("SystemPrompt.ReasoningScaffold = %v, want %v", got.SystemPrompt.ReasoningScaffold, want.SystemPrompt.ReasoningScaffold)
+	if got.LoopHardening != want.LoopHardening {
+		t.Errorf("LoopHardening round-trip mismatch:\n got %+v\nwant %+v", got.LoopHardening, want.LoopHardening)
 	}
-
-	// Sampling.
-	if got.Sampling.Enabled != want.Sampling.Enabled {
-		t.Errorf("Sampling.Enabled = %v, want %v", got.Sampling.Enabled, want.Sampling.Enabled)
-	}
-	if got.Sampling.Temperature != want.Sampling.Temperature {
-		t.Errorf("Sampling.Temperature = %v, want %v", got.Sampling.Temperature, want.Sampling.Temperature)
-	}
-	if got.Sampling.TopP != want.Sampling.TopP {
-		t.Errorf("Sampling.TopP = %v, want %v", got.Sampling.TopP, want.Sampling.TopP)
-	}
-	if got.Sampling.TopK != want.Sampling.TopK {
-		t.Errorf("Sampling.TopK = %d, want %d", got.Sampling.TopK, want.Sampling.TopK)
-	}
-	if got.Sampling.RepetitionPenalty != want.Sampling.RepetitionPenalty {
-		t.Errorf("Sampling.RepetitionPenalty = %v, want %v", got.Sampling.RepetitionPenalty, want.Sampling.RepetitionPenalty)
-	}
-	if got.Sampling.PresencePenalty != want.Sampling.PresencePenalty {
-		t.Errorf("Sampling.PresencePenalty = %v, want %v", got.Sampling.PresencePenalty, want.Sampling.PresencePenalty)
-	}
-	if got.Sampling.ReasoningEffort != want.Sampling.ReasoningEffort {
-		t.Errorf("Sampling.ReasoningEffort = %q, want %q", got.Sampling.ReasoningEffort, want.Sampling.ReasoningEffort)
-	}
-
-	// Loop hardening.
-	if got.LoopHardening.Enabled != want.LoopHardening.Enabled {
-		t.Errorf("LoopHardening.Enabled = %v, want %v", got.LoopHardening.Enabled, want.LoopHardening.Enabled)
-	}
-	if got.LoopHardening.RepeatNudgeThreshold != want.LoopHardening.RepeatNudgeThreshold {
-		t.Errorf("LoopHardening.RepeatNudgeThreshold = %d, want %d", got.LoopHardening.RepeatNudgeThreshold, want.LoopHardening.RepeatNudgeThreshold)
-	}
-	if got.LoopHardening.ParseErrorAbortThreshold != want.LoopHardening.ParseErrorAbortThreshold {
-		t.Errorf("LoopHardening.ParseErrorAbortThreshold = %d, want %d", got.LoopHardening.ParseErrorAbortThreshold, want.LoopHardening.ParseErrorAbortThreshold)
-	}
-	if got.LoopHardening.FruitlessNudgeThreshold != want.LoopHardening.FruitlessNudgeThreshold {
-		t.Errorf("LoopHardening.FruitlessNudgeThreshold = %d, want %d", got.LoopHardening.FruitlessNudgeThreshold, want.LoopHardening.FruitlessNudgeThreshold)
-	}
-	if got.LoopHardening.FruitlessAbortThreshold != want.LoopHardening.FruitlessAbortThreshold {
-		t.Errorf("LoopHardening.FruitlessAbortThreshold = %d, want %d", got.LoopHardening.FruitlessAbortThreshold, want.LoopHardening.FruitlessAbortThreshold)
-	}
-	if got.LoopHardening.SameToolRepeatNudgeThreshold != want.LoopHardening.SameToolRepeatNudgeThreshold {
-		t.Errorf("LoopHardening.SameToolRepeatNudgeThreshold = %d, want %d", got.LoopHardening.SameToolRepeatNudgeThreshold, want.LoopHardening.SameToolRepeatNudgeThreshold)
-	}
-
-	// Context management.
-	if got.Context.Enabled != want.Context.Enabled {
-		t.Errorf("Context.Enabled = %v, want %v", got.Context.Enabled, want.Context.Enabled)
-	}
-	if got.Context.Compaction.KeepLast != want.Context.Compaction.KeepLast {
-		t.Errorf("Context.Compaction.KeepLast = %d, want %d", got.Context.Compaction.KeepLast, want.Context.Compaction.KeepLast)
-	}
-	if got.Context.Compaction.BlockSize != want.Context.Compaction.BlockSize {
-		t.Errorf("Context.Compaction.BlockSize = %d, want %d", got.Context.Compaction.BlockSize, want.Context.Compaction.BlockSize)
-	}
-	if got.Context.Compaction.TriggerPercent != want.Context.Compaction.TriggerPercent {
-		t.Errorf("Context.Compaction.TriggerPercent = %d, want %d", got.Context.Compaction.TriggerPercent, want.Context.Compaction.TriggerPercent)
-	}
-	if got.Context.ToolOutputKeepLastN != want.Context.ToolOutputKeepLastN {
-		t.Errorf("Context.ToolOutputKeepLastN = %d, want %d", got.Context.ToolOutputKeepLastN, want.Context.ToolOutputKeepLastN)
-	}
-	if got.Context.OutputTokenReserve != want.Context.OutputTokenReserve {
-		t.Errorf("Context.OutputTokenReserve = %d, want %d", got.Context.OutputTokenReserve, want.Context.OutputTokenReserve)
+	if got.Context != want.Context {
+		t.Errorf("Context round-trip mismatch:\n got %+v\nwant %+v", got.Context, want.Context)
 	}
 }
 
@@ -2543,6 +3005,49 @@ func TestUpdateExperimentalFeatures_EmitsConfigUpdated(t *testing.T) {
 	}
 }
 
+// TestUpdateExperimentalFeatures_DisableClearsSLMEnabled verifies that turning
+// the experimental gate off also clears the persisted Small-LLM master toggle
+// (config.SLM.Enabled) in the same write, and that re-enabling the gate does
+// not silently resurrect it — the operator must opt back in explicitly.
+func TestUpdateExperimentalFeatures_DisableClearsSLMEnabled(t *testing.T) {
+	f, _, cfgPath := newTestAPI(t)
+
+	// Start from the "both on" state reached by enabling the SLM master toggle
+	// while experimental features are on.
+	f.config.Experimental.Enabled = true
+	f.config.SLM.Enabled = true
+
+	if err := f.UpdateExperimentalFeatures(false); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
+	}
+	if f.config.SLM.Enabled {
+		t.Error("in-memory SLM.Enabled = true, want false after disabling experimental features")
+	}
+	persisted, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if persisted.SLM.Enabled {
+		t.Error("persisted SLM.Enabled = true, want false (reload must not resurrect it)")
+	}
+
+	// Re-enabling the gate must NOT reactivate the small-LLM master: the
+	// cleared value was persisted, so it stays off until an explicit opt-in.
+	if err := f.UpdateExperimentalFeatures(true); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
+	}
+	if f.config.SLM.Enabled {
+		t.Error("in-memory SLM.Enabled = true after re-enabling experimental features, want false")
+	}
+	persisted, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if persisted.SLM.Enabled {
+		t.Error("persisted SLM.Enabled = true after re-enabling experimental features, want false")
+	}
+}
+
 // activeProjectIDOf reads f.activeProjectID under its lock.
 func activeProjectIDOf(f *FrontendAPI) string {
 	f.activeProjectMu.RLock()
@@ -2788,22 +3293,26 @@ func TestUpdateLLMConfig_DeferredSavesSerializedInOrder(t *testing.T) {
 // TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter verifies that
 // the router rebuild in UpdateLLMConfig cannot roll back changes made by a
 // config writer that mutates and rebuilds under configMu.Lock
-// (UpdateSmallLLMConfig, SetModelConfig). The rebuild must re-snapshot the
+// (SelectSLMProfile, SetModelConfig). The rebuild must re-snapshot the
 // config and hold configMu.RLock across snapshot + rebuild, so a concurrent
 // writer's mutate+rebuild can never interleave between them and leave the
 // router on a snapshot that predates its changes.
 //
 // The hook parks the FIRST RebuildRouter call (UpdateLLMConfig's) and records
-// SmallLLM.Enabled of each rebuild in application (completion) order:
-// with the fix the order is [false (LLM save), true (small-LLM save)] — the
-// small-LLM rebuild lands last and wins; without it the stale LLM-save rebuild
-// completes after the small-LLM one and the router is left on [.., false].
+// the essential-tools variant of each rebuild snapshot in application
+// (completion) order: the active profile starts as a zero-valued custom one
+// (variant off) and the concurrent SelectSLMProfile(generic) switches to the
+// generic profile (variant on). With the fix the order is [false (LLM save),
+// true (profile switch)] — the switch's rebuild lands last and wins; without
+// it the stale LLM-save rebuild completes after it and the router is left on
+// [.., false].
 func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 
-	// Experimental features gate the Small-LLM mapping in ToBuilderConfig;
-	// enable them so the small-LLM save's rebuild snapshot reflects
-	// SmallLLM.Enabled=true, which is what this test asserts about ordering.
+	// Experimental features gate the Small-LLM master toggle in
+	// ToBuilderConfig; enable them so the rebuild snapshots mirror the
+	// production mapping (the variant values asserted below are unaffected by
+	// the gate either way).
 	f.configMu.Lock()
 	f.config.Experimental.Enabled = true
 	f.configMu.Unlock()
@@ -2823,7 +3332,7 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 			<-releaseFirst // hold the LLM save's rebuild open
 		}
 		orderMu.Lock()
-		applied = append(applied, cfg.SmallLLM.Enabled)
+		applied = append(applied, cfg.SLM.EssentialTools.Enabled)
 		orderMu.Unlock()
 	}
 
@@ -2846,12 +3355,12 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 	// fix it must block on configMu until the LLM save's rebuild completes.
 	bDone := make(chan error, 1)
 	go func() {
-		bDone <- f.UpdateSmallLLMConfig(SmallLLMConfigResponse{Enabled: true})
+		bDone <- f.SelectSLMProfile(config.SLMGenericProfileID)
 	}()
 	select {
 	case err := <-bDone:
 		close(releaseFirst)
-		t.Fatalf("UpdateSmallLLMConfig completed while UpdateLLMConfig was inside its rebuild phase — the rebuild snapshot can be stale (err=%v)", err)
+		t.Fatalf("SelectSLMProfile completed while UpdateLLMConfig was inside its rebuild phase — the rebuild snapshot can be stale (err=%v)", err)
 	case <-time.After(100 * time.Millisecond):
 		// Still blocked: expected under the fix.
 	}
@@ -2861,7 +3370,7 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 		t.Fatalf("unexpected error from UpdateLLMConfig: %v", err)
 	}
 	if err := <-bDone; err != nil {
-		t.Fatalf("unexpected error from UpdateSmallLLMConfig: %v", err)
+		t.Fatalf("unexpected error from SelectSLMProfile: %v", err)
 	}
 
 	orderMu.Lock()
@@ -2871,19 +3380,19 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 		t.Fatalf("router rebuild application order = %v, want [false true]: the router was left on a snapshot predating the concurrent small-LLM update", got)
 	}
 
-	// Sanity: the small-LLM change survived in memory and on disk.
+	// Sanity: the profile switch survived in memory and on disk.
 	f.configMu.RLock()
-	inMemory := f.config.SmallLLM.Enabled
+	inMemory := f.config.SLM.ActiveProfile
 	f.configMu.RUnlock()
-	if !inMemory {
-		t.Fatal("in-memory config lost the small-LLM master toggle")
+	if inMemory != config.SLMGenericProfileID {
+		t.Fatalf("in-memory active profile = %q, want generic", inMemory)
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("failed to load persisted config: %v", err)
 	}
-	if !persisted.SmallLLM.Enabled {
-		t.Fatal("persisted config lost the small-LLM master toggle")
+	if persisted.SLM.ActiveProfile != config.SLMGenericProfileID {
+		t.Fatal("persisted config lost the selected small-LLM profile")
 	}
 }
 

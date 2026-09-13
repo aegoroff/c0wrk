@@ -1,4 +1,4 @@
-// Package smallllm implements tool-set selection for running the conductor
+// Package slm implements tool-set selection for running the conductor
 // against a "small" LLM. Small models are disproportionately penalized by
 // large tool schemas (every prompt carries the full JSON schema of every
 // advertised tool), so narrowing the visible tool set reduces both token
@@ -6,11 +6,12 @@
 //
 // Selection is purely static: SelectTools unions the user's always-present
 // list, the protected orchestration tools (the completion channel, fact
-// memory, and the human-interaction channel), every MCP-sourced tool, and any
-// turn-scoped extra-guaranteed names the caller passes (e.g. delegate when
-// the user explicitly requested subagents). There is no quantitative budget,
-// no router matching, and no domain-specific allow-listing — the user decides
-// which tools are essential; this function only assembles their selection.
+// memory, the human-interaction channel, and the step checklist), every
+// MCP-sourced tool, and any turn-scoped extra-guaranteed names the caller
+// passes (e.g. delegate when the user explicitly requested subagents). There
+// is no quantitative budget, no router matching, and no domain-specific
+// allow-listing — the user decides which tools are essential; this function
+// only assembles their selection.
 //
 // Every tool in the selection is guaranteed and never trimmed: the pins are
 // explicit user choices, MCP tools are user-installed integrations, and the
@@ -23,7 +24,7 @@
 // or network calls. They are factored out so they can be unit-tested in
 // isolation and applied at a single, well-defined point in the orchestration
 // lifecycle (once per task, before the ReAct loop).
-package smallllm
+package slm
 
 import (
 	"sort"
@@ -37,9 +38,9 @@ import (
 const finishToolName = "finish"
 
 // protectedToolNames are retained regardless of the always-present list: the
-// completion channel, the fact memory (store/search), and the
-// human-interaction channel. MCP-sourced tools are likewise always kept (they
-// are user-installed and not part of the orchestration-noise problem).
+// completion channel, the fact memory (store/search), the human-interaction
+// channel, and the step checklist. MCP-sourced tools are likewise always kept
+// (they are user-installed and not part of the orchestration-noise problem).
 var protectedToolNames = map[string]struct{}{
 	finishToolName:     {},
 	"store_fact":       {},

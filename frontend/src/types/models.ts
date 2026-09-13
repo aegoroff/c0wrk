@@ -518,33 +518,35 @@ export interface SecuritySettingsResponse {
   execute_blacklist_defaults?: string[]
 }
 
-// --- Small LLM profile config ---
-// Mirrors the Wails-generated backend.SmallLLMConfigResponse classes
-// (frontend/wailsjs/go/models.ts). Used by the "Small LLM" settings tab for
-// both reading (GetSmallLLMConfig) and writing (UpdateSmallLLMConfig).
+// --- Small LLM profiles ---
+// Wire types for the profile CRUD API (GetSLMProfiles / CreateSLMProfile /
+// UpdateSLMProfile / DeleteSLMProfile / SelectSLMProfile). The SLMEssentialTools /
+// SLMSystemPrompt / SLMSampling / SLMLoopHardening / SLMContext interfaces below
+// double as the form views used by the settings sections.
 
 /** One pin-able built-in tool with its registry description (tooltip text). */
-export interface SmallLLMBuiltinTool {
+export interface SLMBuiltinTool {
   name: string
   description: string
 }
 
 /** A workflow cluster of built-in tools pinned together as one atomic entry. */
-export interface SmallLLMToolGroup {
+export interface SLMToolGroup {
   id: string
   title: string
   description: string
   tools: string[]
 }
 
-export interface SmallLLMEssentialTools {
+export interface SLMEssentialTools {
   enabled: boolean
   always_present: string[]
   /** Replace builtin tool descriptions with one-line compact variants. */
   compact_descriptions: boolean
   /**
    * Read-only: protected orchestration tools the backend always keeps
-   * (unioned into always_present). Rendered as locked chips; ignored on write.
+   * regardless of any selection. The UI unions them into the displayed
+   * always-present list and renders them as locked chips; ignored on write.
    */
   protected_tools: string[]
   /**
@@ -557,22 +559,22 @@ export interface SmallLLMEssentialTools {
    * which the backend unions the protected set) before offering an entry.
    * Ignored on write.
    */
-  builtin_tools: SmallLLMBuiltinTool[]
+  builtin_tools: SLMBuiltinTool[]
   /**
    * Read-only: workflow clusters (plan, subagents) whose members are pinned
    * together. The picker offers each as one atomic entry and renders the
    * cluster description + member list in its hover tooltip; ignored on write.
    */
-  tool_groups: SmallLLMToolGroup[]
+  tool_groups: SLMToolGroup[]
 }
 
-export interface SmallLLMSystemPrompt {
+export interface SLMSystemPrompt {
   lite: boolean
   few_shot: boolean
   reasoning_scaffold: boolean
 }
 
-export interface SmallLLMSampling {
+export interface SLMSampling {
   enabled: boolean
   temperature: number
   top_p: number
@@ -583,7 +585,7 @@ export interface SmallLLMSampling {
   reasoning_effort: string
 }
 
-export interface SmallLLMLoopHardening {
+export interface SLMLoopHardening {
   enabled: boolean
   repeat_nudge_threshold: number
   parse_error_abort_threshold: number
@@ -593,7 +595,7 @@ export interface SmallLLMLoopHardening {
 }
 
 /** Context-management variant: aggressive compaction/pruning/reserve tuning. */
-export interface SmallLLMContext {
+export interface SLMContext {
   enabled: boolean
   compaction: {
     keep_last: number
@@ -604,13 +606,57 @@ export interface SmallLLMContext {
   output_token_reserve: number
 }
 
-export interface SmallLLMConfigResponse {
+/** Profile origin: shipped catalog entries are read-only, custom ones are user-created. */
+export type SLMProfileKind = 'predefined' | 'custom'
+
+/** One catalog profile: stable id, display name, kind, and the 25 knob values. */
+export interface SLMProfile {
+  id: string
+  name: string
+  kind: SLMProfileKind
+  values: SLMProfileValues
+}
+
+/** The 25 knob values of one profile (the master enabled toggle is config.yaml's slm.enabled, not a profile value). */
+export interface SLMProfileValues {
+  essential_tools: SLMEssentialToolsValues
+  system_prompt: SLMSystemPrompt
+  sampling: SLMSampling
+  loop_hardening: SLMLoopHardening
+  context: SLMContext
+}
+
+/** Value part of the always-present variant (the picker universe lives on SLMProfilesResponse). */
+export interface SLMEssentialToolsValues {
   enabled: boolean
-  essential_tools: SmallLLMEssentialTools
-  system_prompt: SmallLLMSystemPrompt
-  sampling: SmallLLMSampling
-  loop_hardening: SmallLLMLoopHardening
-  context: SmallLLMContext
+  always_present: string[]
+  compact_descriptions: boolean
+}
+
+/** Partial update for updateSLMProfile: absent fields keep their stored value. */
+export interface SLMProfileUpdateRequest {
+  name?: string
+  config?: SLMProfileValues
+}
+
+/** The profile catalog view returned by GetSLMProfiles. */
+export interface SLMProfilesResponse {
+  /** Master Small-LLM toggle (config.yaml slm.enabled) reported verbatim — it
+   *  is NOT a value of any profile. False when config is not yet initialized. */
+  enabled: boolean
+  profiles: SLMProfile[]
+  /** Stored active profile id (verbatim, may dangle; warnings explain the fallback). */
+  active_id: string
+  /** Normalized default-model match against the predefined slugs; null when nothing matches. */
+  suggested_profile_id: string | null
+  /** Read-only picker universe (every registered built-in that is neither MCP-sourced nor goal-mode-only), sorted by name. */
+  builtin_tools: SLMBuiltinTool[]
+  /** Workflow clusters offered as atomic picker entries. */
+  tool_groups: SLMToolGroup[]
+  /** Orchestration tools the backend always keeps (rendered as locked chips). */
+  protected_tools: string[]
+  /** Store/resolver warnings plus one-shot notices. */
+  warnings: string[]
 }
 
 export interface ToolInfo {

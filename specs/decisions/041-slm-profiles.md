@@ -1,0 +1,46 @@
+# ADR-041: SLM Profile Catalog
+
+## Status
+
+Accepted → Partially supersedes [ADR-022](./022-small-llm-profile.md) (the inline `small_llm.*` config storage; the variant-and-master-toggle architecture itself stands unchanged)
+
+## Context
+
+ADR-022 introduced the Small-LLM profile as a master toggle plus five independently sub-toggled variants, with all 25 knob values stored inline in `config.yaml` under `small_llm.*`. Research ([docs/development/slm-defaults-research.md](../../docs/development/slm-defaults-research.md), including the 2026-09-13 generic addendum) produced a four-model matrix of evidence-backed value sets (qwen3.8-27b minimal / qwen3.6-35b-a3b medium / gemma-4-26b-a4b-it maximal / gemma-4-31b-it moderate) plus a model-agnostic `generic` maximum-support preset. The inline model had three problems:
+
+1. **No way to ship the research.** The whole point of the study was "run c0wrk well on model X" — a named bundle of 25 values — but inline config forced every operator to transcribe values by hand, with no provenance and no way to switch presets when the model changes.
+2. **One global value set for every model.** Swapping models meant re-editing up to 25 keys; nothing recorded which set was active or why.
+3. **Naming drift.** Code identifiers (`SmallLLM*`), the research doc, and the package (`core/smallllm`) predated any catalog concept; the feature needed one nomenclature.
+
+Additionally, the runtime-editable surface (`GetSmallLLMConfig`/`UpdateSmallLLMConfig`) mutated the single inline set directly, so a "tuned for Qwen" edit silently became "tuned for whatever model comes next".
+
+## Decision
+
+Replace the inline 25-knob section with a **profile catalog**:
+
+- **Two durable choices only.** `config.yaml` persists exactly `slm.enabled` (manual-only master toggle) and `slm.active_profile` (catalog id, default `generic`). The 25 knob values are never stored in `config.yaml`.
+- **Predefined profiles are compiled into the app** — five read-only entries (`qwen3.8-27b`, `qwen3.6-35b-a3b`, `gemma-4-26b-a4b-it`, `gemma-4-31b-it`, `generic`) built through the constructor-validator `NewSLMProfile`; values fixed by golden tests; every default's provenance lives in `docs/development/slm-defaults-research.md`. Predefined profiles are read-only at every boundary (store save, RPC update/delete) — to tune one, duplicate it and edit the copy.
+- **Custom profiles live in a separate file** — `~/.c0wrk/slm-profiles.yaml` (`{version: 1, profiles: [...]}`), created lazily on first write, rewritten atomically, loaded fail-soft (broken entries dropped with warnings surfaced through `configLoadErrors`) and saved fail-closed. Ids are deterministic name slugs, stable across saves; renaming touches only the display name. A custom profile is always born as a duplicate of a catalog profile, so no hand-tuning starts from a blank slate.
+- **Resolution with soft fallback.** `ResolveSLMConfig(persist, catalog)` turns the persisted pair into the effective runtime `SLMConfig`: a known id → that profile's values; empty or dangling id → `generic` plus exactly one warning. Deleting the active custom profile persists the fallback to `generic` first and reports it as a one-shot notice. The experimental gate (`experimental.enabled`) still forces the feature off at the `ToBuilderConfig` boundary as defense-in-depth, and closing the gate additionally clears the persisted `slm.enabled` (see *One-way gate, persistent reset*).
+- **One-way gate, persistent reset.** The experimental gate and the SLM master toggle are coupled one-way. Closing the gate (`UpdateExperimentalFeatures(false)`) also persists `slm.enabled = false` in the same write, so re-enabling the gate never silently reactivates the profile — the operator must opt in again explicitly. The reverse direction does not exist: the SLM settings tab owns the master toggle but can never touch the experimental gate (which lives on the General tab), so turning the profile on can never expose a feature the operator has not gated. The `ToBuilderConfig` adapter gate stays in place as extra defense-in-depth against hand edits of `config.yaml`.
+- **Reset migration, not value migration.** A legacy inline `small_llm:` section is ignored at load (non-strict decoding) and silently dropped by the next save. Old knob values do NOT carry over — migrating them would resurrect hand-tuned sets with no catalog entry, no validation and no provenance, exactly the state the catalog exists to eliminate. The sanction is deliberate: `slm.active_profile` (default `generic`) takes over from the first load.
+- **New RPC surface.** `GetSmallLLMConfig`/`UpdateSmallLLMConfig` are replaced by six RPCs — five profile-scoped (`GetSLMProfiles` (catalog + `enabled` + `active_id` + `suggested_profile_id` + picker universe + warnings/one-shot notices), `CreateSLMProfile` (duplicate, active unchanged), `UpdateSLMProfile` (custom-only partial), `DeleteSLMProfile` (custom-only; active → persist `generic`), `SelectSLMProfile` (persist active id)) plus `SetSLMEnabled` for the master toggle. `SLMProfilesResponse` gains an `enabled` field reporting the persisted `slm.enabled` verbatim. `SetSLMEnabled` is gate-checked: turning the profile ON fails closed while `experimental.enabled` is off, while turning it OFF is always allowed (so the stored toggle can be cleared even after the gate closes); it persists to `config.yaml` and funnels through the same `applySLMChange` tail as every other mutation, so no single control silently exposes the feature (see *One-way gate, persistent reset*).
+- **Suggestion, never auto-application.** `GetSLMProfiles` suggests a predefined profile by matching the normalized default-model id against predefined slugs (longest match wins, `generic` never suggested). The UI renders an Apply/Hide banner; nothing applies without an explicit click.
+- **Metrics carry identity.** Every session's `agent_metrics` payload gains `slm.profile` (id slug — the stable grouping key, so renames never fragment metric series) and `slm.profile_kind` (`predefined`|`custom`), annotated even when the master toggle is off; both are `omitempty`, keeping legacy payloads byte-compatible.
+- **SLM nomenclature.** Identifiers are `SLM*`/`slm*` across Go and the frontend, the package is `core/slm`, files are `slm_profiles*.go`, `slm_test.go`, `SLM*.tsx`, `slmTools.ts`, the config key is `slm:`, the domain spec is `specs/domains/slm.md`. The user-facing tab stays "Small LLM" and historical ADRs (022, 035) keep their names and prose — they are records, not living docs.
+
+## Consequences
+
+- Positive: research ships in-product as one-click presets; switching models is one selector action; custom tuning is additive (duplicate → edit) and never fights the compiled catalog; dangling ids degrade to `generic` instead of breaking runs; metrics gain a stable per-profile grouping key; `config.example.yaml` shrinks to two documented keys.
+- Positive: validation is centralized in `config.ValidateSLMProfileConfig`/`NewSLMProfile` and runs at every write boundary regardless of toggles (the old split between load-time and save-time validation is gone).
+- Negative: upgrading from the inline model resets effective knob values to the selected profile's (sanctioned; documented in `config.example.yaml` and the release notes path).
+- Negative: one more runtime file (`slm-profiles.yaml`) with its own format version; a corrupt file degrades to an empty custom list (with visible warnings) rather than failing the app.
+- Negative: closing the experimental gate now writes a second key (the persistent `slm.enabled` reset) alongside the gate itself — an intentional cross-section coupling that must stay consistent with the `ToBuilderConfig` adapter gate that independently forces the feature off.
+
+## Alternatives Considered
+
+- **Migrate inline values into a synthetic custom profile at first load.** Rejected: it would silently launder unvalidated, provenance-free hand edits into a named "profile", defeating the catalog's guarantees and complicating the failure mode (half-migrated sets).
+- **Keep values inline and add named presets as copyable templates.** Rejected: no durable record of which preset is active; the dangling-preset and drift problems remain; config.yaml stays a 30-key wall.
+- **Store custom profiles inside `config.yaml`** (a `slm.profiles:` list). Rejected: config.yaml is a hand-edited, example-documented file — embedding a machine-managed array there invites hand edits the store would have to tolerate, and blows up the example file again.
+- **Auto-apply the suggested profile on model switch.** Rejected: the master toggle is deliberately manual-only (ADR-022); silent behavior changes on model switch would violate that contract. The suggestion is a hint with an explicit Apply.
+- **Full SmallLLM→SLM rename of historical ADRs.** Rejected: ADRs are immutable records; renaming files would break inbound links and falsify history. The nomenclature switch is recorded here and applied to living documents only.

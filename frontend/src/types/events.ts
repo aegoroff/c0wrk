@@ -160,8 +160,13 @@ export interface AgentMetricsCounters {
   readonly truncation: number
 }
 
-export interface AgentMetricsSmallLLM {
+export interface AgentMetricsSLM {
   readonly enabled: boolean
+  /** Id (slug) of the active SLM profile; optional — absent in payloads from
+   *  sessions that never recorded a profile (and in legacy persisted rows). */
+  readonly profile?: string
+  /** Kind of the active profile; present iff `profile` is present. */
+  readonly profile_kind?: 'predefined' | 'custom'
   readonly variants: readonly string[]
 }
 
@@ -173,7 +178,7 @@ export interface AgentMetricsData {
   readonly steps: number
   readonly output_tokens: number
   readonly invalid_tool_calls: number
-  readonly small_llm: AgentMetricsSmallLLM
+  readonly slm: AgentMetricsSLM
 }
 export interface BlackboardUpdatedData { change_type: string }
 
@@ -756,28 +761,45 @@ function isAgentMetricsCounters(v: unknown): v is AgentMetricsCounters {
   )
 }
 
-/** Guard for the `agent_metrics` payload; validates shape, not semantics. */
+/** Guard for the `agent_metrics` payload; validates shape, not semantics.
+ *  The slm profile fields are optional (omitempty on the Go side): payloads
+ *  without them — legacy persisted rows, sessions without a recorded
+ *  profile — stay valid, but a present field must be well-formed.
+ *
+ *  The block's container key was renamed `small_llm` → `slm`; both are
+ *  accepted so rows persisted before the rename keep validating. */
 export function isAgentMetricsData(d: unknown): d is AgentMetricsData {
   if (!isObj(d)) return false
+  const slmBlock = d.slm ?? d.small_llm
+  if (
+    typeof d.finish !== 'string' ||
+    typeof d.parse_errors !== 'number' ||
+    typeof d.steps !== 'number' ||
+    typeof d.output_tokens !== 'number' ||
+    typeof d.invalid_tool_calls !== 'number' ||
+    !isAgentMetricsCounters(d.nudges) ||
+    !isAgentMetricsCounters(d.aborts) ||
+    !isObj(slmBlock) ||
+    typeof (slmBlock as { enabled?: unknown }).enabled !== 'boolean' ||
+    !Array.isArray((slmBlock as { variants?: unknown }).variants)
+  ) {
+    return false
+  }
+  const slm = slmBlock as { profile?: unknown; profile_kind?: unknown }
   return (
-    typeof d.finish === 'string' &&
-    typeof d.parse_errors === 'number' &&
-    typeof d.steps === 'number' &&
-    typeof d.output_tokens === 'number' &&
-    typeof d.invalid_tool_calls === 'number' &&
-    isAgentMetricsCounters(d.nudges) &&
-    isAgentMetricsCounters(d.aborts) &&
-    isObj(d.small_llm) &&
-    typeof (d.small_llm as { enabled?: unknown }).enabled === 'boolean' &&
-    Array.isArray((d.small_llm as { variants?: unknown }).variants)
+    (slm.profile === undefined || typeof slm.profile === 'string') &&
+    (slm.profile_kind === undefined || slm.profile_kind === 'predefined' || slm.profile_kind === 'custom')
   )
 }
 
 /**
  * Normalize a persisted `agent_metrics` payload for history-load, tolerating
  * fields added after the row was saved. Older rows predate
- * `invalid_tool_calls` and the `truncation` abort counter; both are defaulted
- * to 0 here. The live `agent_metrics` event handler keeps using the strict
+ * `invalid_tool_calls`, the `truncation` abort counter, and the slm
+ * `profile`/`profile_kind` identity fields; the counters are defaulted to 0
+ * and the profile fields are omitted when absent or malformed. They may also
+ * predate the `small_llm` → `slm` container-key rename, so either key is
+ * accepted. The live `agent_metrics` event handler keeps using the strict
  * `isAgentMetricsData` guard (Go always serializes the full shape for fresh
  * events). Returns undefined when the payload is not an agent_metrics row.
  */
@@ -812,10 +834,18 @@ export function normalizeAgentMetricsData(d: unknown): AgentMetricsData | undefi
   const nudges = counters(d.nudges)
   const aborts = counters(d.aborts)
   if (!nudges || !aborts) return undefined
-  const small = d.small_llm
+  // Accept the current `slm` key and the pre-rename `small_llm` key, so
+  // persisted rows from builds older than the rename still normalize.
+  const small = d.slm ?? d.small_llm
   if (!isObj(small) || typeof small.enabled !== 'boolean' || !Array.isArray(small.variants)) {
     return undefined
   }
+  // Profile identity fields are optional (omitempty on the Go side): carried
+  // through when well-formed, dropped when absent or malformed — legacy rows
+  // normalize to the pre-profile shape unchanged.
+  const profile = typeof small.profile === 'string' ? small.profile : undefined
+  const profileKind =
+    small.profile_kind === 'predefined' || small.profile_kind === 'custom' ? small.profile_kind : undefined
   return {
     finish: d.finish,
     parse_errors: d.parse_errors,
@@ -824,9 +854,11 @@ export function normalizeAgentMetricsData(d: unknown): AgentMetricsData | undefi
     invalid_tool_calls: typeof d.invalid_tool_calls === 'number' ? d.invalid_tool_calls : 0,
     nudges,
     aborts,
-    small_llm: {
+    slm: {
       enabled: small.enabled,
       variants: small.variants,
+      ...(profile !== undefined ? { profile } : {}),
+      ...(profileKind !== undefined ? { profile_kind: profileKind } : {}),
     },
   }
 }

@@ -13,7 +13,12 @@ import type {
     MCPServerStatus,
     SecuritySettingsResponse,
     BlackboardState,
-    SmallLLMConfigResponse,
+    SLMProfile,
+    SLMProfileKind,
+    SLMProfileValues,
+    SLMProfilesResponse,
+    SLMBuiltinTool,
+    SLMToolGroup,
 } from './models'
 
 export function isObj(v: unknown): v is Record<string, unknown> {
@@ -97,7 +102,89 @@ export function isSessionRenamed(v: unknown): v is { id: string; name: string } 
     return isObj(v) && typeof v.id === 'string' && typeof v.name === 'string'
 }
 
-export function isSmallLLMConfigResponse(v: unknown): v is SmallLLMConfigResponse {
+function isString(v: unknown): v is string {
+    return typeof v === 'string'
+}
+
+function isSLMBuiltinTool(v: unknown): v is SLMBuiltinTool {
+    return isObj(v) && typeof v.name === 'string' && typeof v.description === 'string'
+}
+
+function isSLMToolGroup(v: unknown): v is SLMToolGroup {
     return isObj(v)
-        && has(v, 'enabled', 'essential_tools', 'system_prompt', 'sampling', 'loop_hardening', 'context')
+        && typeof v.id === 'string'
+        && typeof v.title === 'string'
+        && typeof v.description === 'string'
+        && isArrayOf(v.tools, isString)
+}
+
+export function isSLMProfileKind(v: unknown): v is SLMProfileKind {
+    return v === 'predefined' || v === 'custom'
+}
+
+/**
+ * Validates the 25 knob values of one profile. The backend always serializes
+ * every field (zero values included), so a missing key is schema drift and
+ * must be rejected — the settings form writes whole sections back and would
+ * otherwise corrupt the profile with undefined fields.
+ */
+export function isSLMProfileValues(v: unknown): v is SLMProfileValues {
+    if (!isObj(v)) return false
+    const et = v.essential_tools
+    const sp = v.system_prompt
+    const sampling = v.sampling
+    const lh = v.loop_hardening
+    const ctx = v.context
+    if (!isObj(et) || !isObj(sp) || !isObj(sampling) || !isObj(lh) || !isObj(ctx)) return false
+    if (!isObj(ctx.compaction)) return false
+    return typeof et.enabled === 'boolean'
+        && isArrayOf(et.always_present, isString)
+        && typeof et.compact_descriptions === 'boolean'
+        && typeof sp.lite === 'boolean'
+        && typeof sp.few_shot === 'boolean'
+        && typeof sp.reasoning_scaffold === 'boolean'
+        && typeof sampling.enabled === 'boolean'
+        && typeof sampling.temperature === 'number'
+        && typeof sampling.top_p === 'number'
+        && typeof sampling.top_k === 'number'
+        && typeof sampling.repetition_penalty === 'number'
+        && typeof sampling.presence_penalty === 'number'
+        && typeof sampling.reasoning_effort === 'string'
+        && typeof lh.enabled === 'boolean'
+        && typeof lh.repeat_nudge_threshold === 'number'
+        && typeof lh.parse_error_abort_threshold === 'number'
+        && typeof lh.fruitless_nudge_threshold === 'number'
+        && typeof lh.fruitless_abort_threshold === 'number'
+        && typeof lh.same_tool_repeat_nudge_threshold === 'number'
+        && typeof ctx.enabled === 'boolean'
+        && typeof ctx.compaction.keep_last === 'number'
+        && typeof ctx.compaction.block_size === 'number'
+        && typeof ctx.compaction.trigger_percent === 'number'
+        && typeof ctx.tool_output_keep_last_n === 'number'
+        && typeof ctx.output_token_reserve === 'number'
+}
+
+export function isSLMProfile(v: unknown): v is SLMProfile {
+    return isObj(v)
+        && typeof v.id === 'string'
+        && typeof v.name === 'string'
+        && isSLMProfileKind(v.kind)
+        && isSLMProfileValues(v.values)
+}
+
+/**
+ * Validates the GetSLMProfiles response. The backend guarantees non-nil
+ * slices (JSON [], never null) for every list field and always emits
+ * suggested_profile_id (string or JSON null), so strict checks are safe.
+ */
+export function isSLMProfilesResponse(v: unknown): v is SLMProfilesResponse {
+    if (!isObj(v)) return false
+    return isArrayOf(v.profiles, isSLMProfile)
+        && typeof v.enabled === 'boolean'
+        && typeof v.active_id === 'string'
+        && (v.suggested_profile_id === null || typeof v.suggested_profile_id === 'string')
+        && isArrayOf(v.builtin_tools, isSLMBuiltinTool)
+        && isArrayOf(v.tool_groups, isSLMToolGroup)
+        && isArrayOf(v.protected_tools, isString)
+        && isArrayOf(v.warnings, isString)
 }

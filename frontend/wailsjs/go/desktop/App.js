@@ -102,6 +102,10 @@ export function CreateProject(arg1, arg2) {
   return window['go']['desktop']['App']['CreateProject'](arg1, arg2);
 }
 
+export function CreateSLMProfile(arg1, arg2) {
+  return window['go']['desktop']['App']['CreateSLMProfile'](arg1, arg2);
+}
+
 export function CreateSession() {
   return window['go']['desktop']['App']['CreateSession']();
 }
@@ -136,6 +140,10 @@ export function DeleteResearch(arg1, arg2) {
 
 export function DeleteReviewComment(arg1) {
   return window['go']['desktop']['App']['DeleteReviewComment'](arg1);
+}
+
+export function DeleteSLMProfile(arg1) {
+  return window['go']['desktop']['App']['DeleteSLMProfile'](arg1);
 }
 
 export function DeleteSession(arg1) {
@@ -314,6 +322,10 @@ export function GetReviewDiff() {
   return window['go']['desktop']['App']['GetReviewDiff']();
 }
 
+export function GetSLMProfiles() {
+  return window['go']['desktop']['App']['GetSLMProfiles']();
+}
+
 export function GetSecuritySettings() {
   return window['go']['desktop']['App']['GetSecuritySettings']();
 }
@@ -332,10 +344,6 @@ export function GetSessionTokens(arg1) {
 
 export function GetSessionWorkspace(arg1) {
   return window['go']['desktop']['App']['GetSessionWorkspace'](arg1);
-}
-
-export function GetSmallLLMConfig() {
-  return window['go']['desktop']['App']['GetSmallLLMConfig']();
 }
 
 export function GetStepOutput(arg1, arg2) {
@@ -570,6 +578,10 @@ export function SearchVectorStore(arg1) {
   return window['go']['desktop']['App']['SearchVectorStore'](arg1);
 }
 
+export function SelectSLMProfile(arg1) {
+  return window['go']['desktop']['App']['SelectSLMProfile'](arg1);
+}
+
 export function SendMessage(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10) {
   return window['go']['desktop']['App']['SendMessage'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10);
 }
@@ -596,6 +608,10 @@ export function SetResearchPinned(arg1, arg2, arg3) {
 
 export function SetReviewStatus(arg1, arg2) {
   return window['go']['desktop']['App']['SetReviewStatus'](arg1, arg2);
+}
+
+export function SetSLMEnabled(arg1) {
+  return window['go']['desktop']['App']['SetSLMEnabled'](arg1);
 }
 
 export function SetUpdateSettings(arg1) {
@@ -694,16 +710,16 @@ export function UpdateProxySettings(arg1) {
   return window['go']['desktop']['App']['UpdateProxySettings'](arg1);
 }
 
+export function UpdateSLMProfile(arg1, arg2) {
+  return window['go']['desktop']['App']['UpdateSLMProfile'](arg1, arg2);
+}
+
 export function UpdateSearchSettings(arg1) {
   return window['go']['desktop']['App']['UpdateSearchSettings'](arg1);
 }
 
 export function UpdateSecuritySettings(arg1) {
   return window['go']['desktop']['App']['UpdateSecuritySettings'](arg1);
-}
-
-export function UpdateSmallLLMConfig(arg1) {
-  return window['go']['desktop']['App']['UpdateSmallLLMConfig'](arg1);
 }
 
 export function UpdateWorkDirectoryDescription(arg1, arg2, arg3, arg4) {
