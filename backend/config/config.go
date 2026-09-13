@@ -821,7 +821,7 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 // behind a single master switch. It is all-or-nothing by design: there is no
 // per-feature toggle, so enabling it exposes every gated feature and
 // disabling it treats each as off. Currently gated: the Small-LLM profile
-// (small_llm.*) and the E2S execution mode (e2s.*).
+// (slm.*) and the E2S execution mode (e2s.*).
 type ExperimentalConfig struct {
 	// Enabled is the master switch for the gated experimental features (the
 	// Small-LLM profile, the E2S execution mode). When false, every gated
@@ -988,7 +988,7 @@ type SystemPromptConfig struct {
 // inherits the per-family vendor preset (prompt.DefaultSampling) instead of
 // clobbering it, so enabling the sampling variant with no explicit values is
 // a behavioral no-op. Out-of-range values are rejected by validation
-// (frontend_api_config.go) whenever they are set.
+// (config/slm_profiles.go, ValidateSLMProfileConfig) whenever they are set.
 type SLMSamplingConfig struct {
 	// Enabled gates this variant.
 	Enabled bool `yaml:"enabled"`
@@ -1017,10 +1017,10 @@ type SLMSamplingConfig struct {
 	// in [0, 2].
 	PresencePenalty float64 `yaml:"presence_penalty"`
 
-	// ReasoningEffort controls reasoning depth: "" (unset → default
-	// "medium", see defaults.go) | "off" | "low" | "medium". Smaller models
-	// generally benefit from reduced reasoning effort; explicit values are
-	// never overwritten by the seeded default.
+	// ReasoningEffort controls reasoning depth: "" (unset → inherit the
+	// model default; the shipped "generic" profile pins "medium") | "off" |
+	// "low" | "medium". Smaller models generally benefit from reduced
+	// reasoning effort; an explicit value is never overwritten.
 	ReasoningEffort string `yaml:"reasoning_effort"`
 }
 
@@ -1093,8 +1093,8 @@ type SLMCompactionConfig struct {
 
 // E2SConfig configures the E2S (explicit-state) execution mode. The mode is
 // experimental and fail-closed gated by experimental.enabled alone: when the
-// gate is off the whole section is ineffective. Like the Small-LLM profile,
-// every knob is seeded with a default so tuning never requires a rebuild.
+// gate is off the whole section is ineffective. Every knob is seeded with a
+// default so tuning never requires a rebuild.
 type E2SConfig struct {
 	// MaxSteps caps the number of E2S turns (patch+action cycles) per run.
 	// Exhaustion is NOT a failure: the run stops at a resumable step-limit

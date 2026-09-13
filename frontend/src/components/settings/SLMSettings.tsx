@@ -87,6 +87,25 @@ export function SLMSettings() {
     active ?? (resp ? (resp.profiles.find((p) => p.id === GENERIC_PROFILE_ID) ?? null) : null)
   const readOnly = !active || active.kind === 'predefined'
 
+  // The backend reports a dangling active id BOTH through the dedicated fallback
+  // banner below AND a `warnings` entry (the resolver's "not found … falling
+  // back" message). While the banner is shown, suppress that matching entry so
+  // the one condition is not rendered twice. Every other warning still renders
+  // — store errors, one-shot notices, and the empty-active-profile notice the
+  // banner does not cover.
+  const fallbackBannerVisible = !active && resp !== null && resp.active_id !== ''
+  const visibleWarnings =
+    resp === null
+      ? []
+      : resp.warnings.filter(
+          (w) =>
+            !(
+              fallbackBannerVisible &&
+              w.includes(`"${resp.active_id}"`) &&
+              w.includes('not found in the profile catalog')
+            ),
+        )
+
   const suggestedId = resp?.suggested_profile_id ?? null
   const suggestedName = suggestedId
     ? (resp?.profiles.find((p) => p.id === suggestedId)?.name ?? suggestedId)
@@ -378,7 +397,7 @@ export function SLMSettings() {
             </div>
           </div>
         )}
-        {!active && resp.active_id !== '' && (
+        {fallbackBannerVisible && (
           <div
             data-testid="slm-fallback-warning"
             className="flex items-start gap-2 p-2 rounded-md bg-warning/10 border border-warning/20 text-xs"
@@ -390,9 +409,9 @@ export function SLMSettings() {
             </span>
           </div>
         )}
-        {resp.warnings.length > 0 && (
+        {visibleWarnings.length > 0 && (
           <div className="flex flex-col gap-1">
-            {resp.warnings.map((w) => (
+            {visibleWarnings.map((w) => (
               <div
                 key={w}
                 className="flex items-start gap-2 p-2 rounded-md bg-warning/10 border border-warning/20 text-xs"

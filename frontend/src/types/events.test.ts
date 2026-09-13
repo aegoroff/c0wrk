@@ -115,6 +115,16 @@ describe('isAgentMetricsData', () => {
         expect(isAgentMetricsData({ ...valid, slm: { enabled: 'yes' } })).toBe(false)
         expect(isAgentMetricsData({ ...valid, slm: undefined })).toBe(false)
     })
+
+    it('accepts the pre-rename small_llm container key (legacy persisted rows)', () => {
+        const { slm, ...rest } = valid
+        expect(isAgentMetricsData({ ...rest, small_llm: slm })).toBe(true)
+    })
+
+    it('prefers the current slm key when both keys are present', () => {
+        const { slm, ...rest } = valid
+        expect(isAgentMetricsData({ ...rest, slm, small_llm: { enabled: 'yes' } })).toBe(true)
+    })
 })
 
 describe('normalizeAgentMetricsData', () => {
@@ -173,6 +183,15 @@ describe('normalizeAgentMetricsData', () => {
         expect(normalizeAgentMetricsData(undefined)).toBeUndefined()
         expect(normalizeAgentMetricsData({ skills: ['x'] })).toBeUndefined()
         expect(normalizeAgentMetricsData({ ...full, steps: true })).toBeUndefined()
+    })
+
+    it('normalizes a legacy row that still uses the small_llm container key', () => {
+        const { slm, ...rest } = full
+        const legacy = { ...rest, small_llm: slm }
+        const got = normalizeAgentMetricsData(legacy)
+        expect(got).toBeDefined()
+        expect(got?.slm).toEqual({ enabled: true, variants: full.slm.variants })
+        expect(got?.steps).toBe(full.steps)
     })
 })
 

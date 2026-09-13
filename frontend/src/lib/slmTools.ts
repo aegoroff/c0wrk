@@ -137,8 +137,9 @@ export function toolGroupTooltipMarkdown(
  *
  *   - explicitly — the user's pins in `alwaysPresent`;
  *   - implicitly — the protected orchestration tools (`protectedTools`, which
- *     the backend also unions into `alwaysPresent`) and every MCP tool, which
- *     is never a built-in and therefore never appears in `builtinTools`.
+ *     `SelectTools` always keeps and the UI renders as locked chips) and every
+ *     MCP tool, which is never a built-in and therefore never appears in
+ *     `builtinTools`.
  *
  * Clusters come first, each offering only its still-selectable members (and
  * hidden entirely when none remain); their markdown tooltip lists ALL cluster

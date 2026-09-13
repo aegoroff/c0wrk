@@ -251,6 +251,15 @@ describe('SLMSettings — sampling inherit semantics', () => {
     expect(pp.value).toBe('1.5')
     expect(updateSLMProfileMock.mock.calls.length).toBe(before)
   })
+
+  it('represents the empty reasoning_effort as an explicit "Inherit" option', async () => {
+    // baseValues.sampling.reasoning_effort = '' — the combobox must render a
+    // label (not a blank trigger) so the stored value is visible/selectable.
+    await render()
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Reasoning effort"]')
+    expect(trigger).not.toBeNull()
+    expect(trigger?.textContent).toContain('Inherit (model default)')
+  })
 })
 
 describe('SLMSettings — context section', () => {
@@ -279,6 +288,47 @@ describe('SLMSettings — context section', () => {
     await blur(field('Keep last')!)
     const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.context.compaction.keep_last).toBe(4)
+  })
+
+  it('caps Trigger percent below 100 (backend requires < 100 when enabled)', async () => {
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({
+        context: { ...baseValues.context, enabled: true, compaction: { keep_last: 6, block_size: 5, trigger_percent: 80 } },
+      }),
+    )
+    await render()
+    const tp = field('Trigger percent')!
+    expect(tp.max).toBe('99')
+    await setField(tp, '100')
+    await blur(tp)
+    // 100 is out of range: the field reverts and nothing is persisted.
+    expect(tp.value).toBe('80')
+    expect(updateSLMProfileMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('SLMSettings — loop hardening bounds', () => {
+  it('floors threshold inputs at 1 (backend requires >= 1 when enabled)', async () => {
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({
+        loop_hardening: {
+          enabled: true,
+          repeat_nudge_threshold: 2,
+          parse_error_abort_threshold: 3,
+          fruitless_nudge_threshold: 3,
+          fruitless_abort_threshold: 4,
+          same_tool_repeat_nudge_threshold: 5,
+        },
+      }),
+    )
+    await render()
+    const rf = field('Repeat nudge')!
+    expect(rf.min).toBe('1')
+    await setField(rf, '0')
+    await blur(rf)
+    // 0 is below the floor: the field reverts and nothing is persisted.
+    expect(rf.value).toBe('2')
+    expect(updateSLMProfileMock).not.toHaveBeenCalled()
   })
 })
 

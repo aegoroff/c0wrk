@@ -49,6 +49,7 @@ export function ContextSection({ slice, patch, open, onOpenChange, disabled }: {
               value={compaction.trigger_percent}
               onChange={(trigger_percent) => patch({ compaction: { ...compaction, trigger_percent } })}
               min={1}
+              max={99}
               disabled={disabled}
             />
             <NumberField

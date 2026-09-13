@@ -347,7 +347,7 @@ func (f *FrontendAPI) UpdateLLMConfig(req LLMFullConfigRequest) error {
 	// use the updated provider immediately. The snapshot is taken fresh here
 	// rather than carried over from the mutation phase, and configMu.RLock is
 	// held across snapshot + rebuild: config writers that mutate and rebuild
-	// under configMu.Lock (UpdateSLMConfig, SetModelConfig) cannot run
+	// under configMu.Lock (UpdateSLMProfile, SetModelConfig) cannot run
 	// in between, so this rebuild can never apply a snapshot that predates
 	// their changes and roll the router back. RLock stays shared with
 	// readers, so GetConfig is still never convoyed behind the rebuild, and
@@ -967,12 +967,16 @@ func (f *FrontendAPI) slmStore() (custom []config.SLMProfile, storePath string) 
 }
 
 // applySLMChange is the uniform post-mutation tail shared by the profile
-// CRUD/select methods: announce the change (config:updated), rebuild the LLM
-// router so the effective profile applies to new sessions without a restart,
-// and refresh the session manager's Small-LLM snapshot so later
-// agent_metrics events are annotated with the new profile. Callers must hold
-// configMu.
+// CRUD/select methods. Callers must hold configMu and call it only after a
+// successful write; it (1) clears the config load-warnings channel so a stale
+// "damaged store"/"dangling active id" warning stops being served by GetConfig
+// once the mutation fixed the condition, (2) announces the change
+// (config:updated), (3) rebuilds the LLM router so the effective profile
+// applies to new sessions without a restart, and (4) refreshes the session
+// manager's Small-LLM snapshot so later agent_metrics events are annotated
+// with the new profile.
 func (f *FrontendAPI) applySLMChange() {
+	f.configLoadErrors = nil
 	f.emitConfigUpdated()
 	if b := f.builder(); b != nil {
 		if err := b.RebuildRouter(ToBuilderConfig(f.config, f.slmCatalog())); err != nil {
@@ -1023,9 +1027,12 @@ func (f *FrontendAPI) CreateSLMProfile(baseID, name string) (string, error) {
 	return created.ID, nil
 }
 
-// UpdateSLMProfile partially updates the CUSTOM profile id — name and/or the
-// 25 knob values; nil fields keep their stored value. Predefined profiles
-// are read-only (duplicate one to customize it) and unknown ids are
+// UpdateSLMProfile updates the CUSTOM profile id. Only the two request-level
+// fields are optional: a nil Name keeps the stored display name, a nil Config
+// keeps the stored 25 knob values. A supplied Config is a WHOLE-VALUE
+// replacement — all 25 knobs are overwritten by the request (the values DTO
+// carries no per-leaf pointers, so there is no per-section merge). Predefined
+// profiles are read-only (duplicate one to customize it) and unknown ids are
 // rejected. Validation runs before any mutation, and the store save is an
 // atomic full rewrite, so an invalid payload or a failed write leaves the
 // stored state untouched.
@@ -1126,7 +1133,6 @@ func (f *FrontendAPI) DeleteSLMProfile(id string) error {
 			f.config.SLM.ActiveProfile = prev
 			return fmt.Errorf("failed to persist small-LLM config: %w", err)
 		}
-		f.configLoadErrors = nil
 	}
 
 	if _, err := config.DeleteCustomSLMProfile(storePath, id); err != nil {
@@ -1171,7 +1177,6 @@ func (f *FrontendAPI) SelectSLMProfile(id string) error {
 		f.config.SLM.ActiveProfile = prev
 		return fmt.Errorf("failed to persist small-LLM config: %w", err)
 	}
-	f.configLoadErrors = nil
 	f.applySLMChange()
 	return nil
 }
@@ -1206,7 +1211,6 @@ func (f *FrontendAPI) SetSLMEnabled(enabled bool) error {
 		f.config.SLM.Enabled = prev
 		return fmt.Errorf("failed to persist small-LLM config: %w", err)
 	}
-	f.configLoadErrors = nil
 	f.applySLMChange()
 	return nil
 }

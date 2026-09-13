@@ -545,7 +545,8 @@ export interface SLMEssentialTools {
   compact_descriptions: boolean
   /**
    * Read-only: protected orchestration tools the backend always keeps
-   * (unioned into always_present). Rendered as locked chips; ignored on write.
+   * regardless of any selection. The UI unions them into the displayed
+   * always-present list and renders them as locked chips; ignored on write.
    */
   protected_tools: string[]
   /**

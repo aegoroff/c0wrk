@@ -277,8 +277,10 @@ type SLMEssentialToolsValues struct {
 	CompactDescriptions bool     `json:"compact_descriptions"`
 }
 
-// SLMProfileUpdateRequest is the partial-update payload for
-// UpdateSLMProfile: nil fields keep their stored value.
+// SLMProfileUpdateRequest is the update payload for UpdateSLMProfile. Only
+// the two request-level fields are optional: nil Name keeps the stored display
+// name and nil Config keeps the stored values. A non-nil Config replaces the
+// WHOLE 25-knob value set (no per-section merge).
 type SLMProfileUpdateRequest struct {
 	Name   *string           `json:"name"`
 	Config *SLMProfileValues `json:"config"`

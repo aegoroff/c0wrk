@@ -432,7 +432,7 @@ func (o *Orchestrator) runE2SWithState(
 	// orchestration tools + MCP tools + the turn-scoped delegate guarantee)
 	// narrows the E2S catalog exactly once here, before stripping.
 	e2sTools := stripE2SUnavailableTools(tools.StripGoalModeTools(
-		o.applySmallLLMToolFilter(availableTools, smallLLMAgentGuaranteedTools(ctx)...)))
+		o.applySLMToolFilter(availableTools, slmAgentGuaranteedTools(ctx)...)))
 
 	// Trajectory: same composite store as a Conductor run (in-memory for
 	// synchronous reads + best-effort DB persistence), synced by the loop
@@ -505,7 +505,7 @@ func (o *Orchestrator) runE2SWithState(
 	// abort threshold keeps its fail-safe strictly-greater ordering via
 	// Config.withDefaults).
 	spinNudge := e2sCfg.RepeatNudgeThreshold
-	if sc := o.config.SmallLLM; sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
+	if sc := o.config.SLM; sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
 		// The profile override must stay strictly below the configured abort
 		// threshold: at or above it Config.withDefaults would silently raise
 		// abort to nudge+1, reintroducing the divergence the e2s config
@@ -663,7 +663,7 @@ func (o *Orchestrator) runE2SWithState(
 // same request context), the compiled-in full directive otherwise ("" lets
 // the e2s package apply its own default).
 func e2sCoreDirective(ctx context.Context) string {
-	if smallLLMLiteFromCtx(ctx) {
+	if slmLiteFromCtx(ctx) {
 		return prompts.E2SSystemLite
 	}
 	return ""

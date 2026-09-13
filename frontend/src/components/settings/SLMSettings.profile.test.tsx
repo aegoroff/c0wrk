@@ -486,6 +486,62 @@ describe('SLMSettings — dangling active profile fallback', () => {
     expect(selectorTrigger()?.textContent).toContain('Unknown profile (ghost-profile)')
     expect(buttonByLabel('Duplicate profile')).not.toBeNull()
   })
+
+  it('suppresses the resolver warning that merely restates the fallback banner', async () => {
+    getSLMProfilesMock.mockResolvedValue(
+      resp({
+        active_id: 'ghost-profile',
+        warnings: [
+          'slm.active_profile "ghost-profile" not found in the profile catalog; falling back to the "generic" profile',
+        ],
+      }),
+    )
+    await render()
+    expect(container.querySelector('[data-testid="slm-fallback-warning"]')).not.toBeNull()
+    expect(container.textContent ?? '').not.toContain('not found in the profile catalog')
+  })
+
+  it('still renders unrelated warnings alongside the fallback banner', async () => {
+    getSLMProfilesMock.mockResolvedValue(
+      resp({
+        active_id: 'ghost-profile',
+        warnings: ['slm profiles: entry 1 skipped: boom'],
+      }),
+    )
+    await render()
+    expect(container.textContent ?? '').toContain('entry 1 skipped: boom')
+  })
+})
+
+describe('SLMSettings — always-present chips render protected tools', () => {
+  // Fixture: always_present = ['finish', 'read_file']; protected = ['ask_user',
+  // 'finish']. `ask_user` is protected but NOT pinned, so it is exactly the
+  // case the display-only union must surface as a locked chip.
+  it('renders a protected tool absent from always_present as a locked chip', async () => {
+    await render()
+    const chips = Array.from(container.querySelectorAll('code.font-mono')).map((c) => c.textContent)
+    expect(chips).toContain('finish')
+    expect(chips).toContain('read_file')
+    expect(chips).toContain('ask_user')
+    // Locked chips (protected) expose no remove button; a plain pin still does.
+    expect(container.querySelector('button[aria-label="Remove ask_user"]')).toBeNull()
+    expect(container.querySelector('button[aria-label="Remove finish"]')).toBeNull()
+    expect(container.querySelector('button[aria-label="Remove read_file"]')).not.toBeNull()
+  })
+
+  it('never persists the display-only protected tools into always_present', async () => {
+    await render()
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Remove read_file"]')!.click()
+    })
+    expect(updateSLMProfileMock).toHaveBeenCalledTimes(1)
+    const payload = updateSLMProfileMock.mock.calls[0]![1] as {
+      config: { essential_tools: { always_present: string[] } }
+    }
+    // `finish` was pinned; `ask_user` was only unioned for display — neither the
+    // removed pin nor the unioned protected tool may leak into the saved value.
+    expect(payload.config.essential_tools.always_present).toEqual(['finish'])
+  })
 })
 
 describe('SLMSettings — master toggle (slm.enabled)', () => {

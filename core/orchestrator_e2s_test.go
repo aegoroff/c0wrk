@@ -810,14 +810,14 @@ func TestRunE2SLoop_SpinStopOutputNotUserEcho(t *testing.T) {
 	}
 }
 
-// TestRunE2SLoop_SmallLLMNudgeOverrideCannotBypassOrdering pins the guard on
+// TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering pins the guard on
 // the profile path: a Small-LLM loop-hardening repeat-nudge override at or
 // above the configured E2S abort threshold is ignored, falling back to the
 // validated nudge. Without the guard the override (9 >= abort 5) would make
 // Config.withDefaults silently raise the effective abort to nudge+1 (10),
 // diverging from the configured repeat_abort_threshold — the same silent
 // divergence the e2s config validation rejects up front.
-func TestRunE2SLoop_SmallLLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
+func TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
 	spinArgs := `{"path":"same.txt"}`
 	mockLLM := &mockLLMCaller{
 		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
@@ -830,9 +830,9 @@ func TestRunE2SLoop_SmallLLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
 	o.config.E2S.RepeatAbortThreshold = 5
 	// A misconfigured profile override: request a nudge at 9, at/above the
 	// abort threshold — it must be ignored rather than diverge.
-	o.config.SmallLLM = SmallLLMSettings{
+	o.config.SLM = SLMSettings{
 		Enabled:       true,
-		LoopHardening: SmallLLMLoopHardeningSettings{Enabled: true, RepeatNudgeThreshold: 9},
+		LoopHardening: SLMLoopHardeningSettings{Enabled: true, RepeatNudgeThreshold: 9},
 	}
 
 	result, err := o.HandleMessage(context.Background(), "read same.txt forever", "session-e2s-sl", HandleOptions{E2S: true})

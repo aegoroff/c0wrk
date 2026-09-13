@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -428,5 +429,96 @@ func TestDeleteCustomSLMProfile(t *testing.T) {
 	loaded, warnings = LoadCustomSLMProfiles(path)
 	if len(loaded) != 0 || len(warnings) != 0 {
 		t.Fatalf("empty store after last delete: profiles=%v warnings=%v", loaded, warnings)
+	}
+}
+
+// TestSaveCustomSLMProfilesRefusesUnreadableExistingStore pins the pre-write
+// guard: a full-set rewrite must never silently destroy content the fail-soft
+// load cannot represent (foreign format version, unparseable YAML, or an entry
+// the current validator rejects). Each refusal must leave the file byte-for-byte
+// untouched.
+func TestSaveCustomSLMProfilesRefusesUnreadableExistingStore(t *testing.T) {
+	valid, err := CreateCustomSLMProfile("Keep Me", storeTestConfigB(), nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	t.Run("foreign format version", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "slm-profiles.yaml")
+		writeRawSLMProfilesFile(t, path, 2, []SLMProfile{{ID: "future", Name: "Future", Kind: SLMProfileKindCustom}})
+		before, _ := os.ReadFile(path)
+		err := SaveCustomSLMProfiles(path, []SLMProfile{valid})
+		if err == nil || !strings.Contains(err.Error(), "unsupported format version") {
+			t.Fatalf("save over a foreign-version file must fail closed, got %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if !bytes.Equal(before, after) {
+			t.Fatal("a refused save must leave the foreign-version file untouched")
+		}
+	})
+
+	t.Run("unparseable YAML", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "slm-profiles.yaml")
+		if err := os.WriteFile(path, []byte("version: 1\nprofiles:\n  - id: [unclosed\n"), 0o644); err != nil {
+			t.Fatalf("write broken file: %v", err)
+		}
+		before, _ := os.ReadFile(path)
+		err := SaveCustomSLMProfiles(path, []SLMProfile{valid})
+		if err == nil || !strings.Contains(err.Error(), "not valid YAML") {
+			t.Fatalf("save over unparseable YAML must fail closed, got %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if !bytes.Equal(before, after) {
+			t.Fatal("a refused save must leave the unparseable file untouched")
+		}
+	})
+
+	t.Run("invalid existing entry is not silently pruned", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "slm-profiles.yaml")
+		good, err := NewSLMProfile("good-one", "Good One", SLMProfileKindCustom, storeTestConfigA())
+		if err != nil {
+			t.Fatalf("build good: %v", err)
+		}
+		bad := good
+		bad.ID = "bad-value"
+		bad.Name = "Bad Value"
+		bad.Config.Sampling.TopP = 5 // out of (0, 1]
+		writeRawSLMProfilesFile(t, path, slmProfilesFormatVersion, []SLMProfile{good, bad})
+		before, _ := os.ReadFile(path)
+		err = SaveCustomSLMProfiles(path, []SLMProfile{valid})
+		if err == nil || !strings.Contains(err.Error(), "entry 2 is invalid") {
+			t.Fatalf("save over a file with an invalid entry must fail closed, got %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if !bytes.Equal(before, after) {
+			t.Fatal("a refused save must leave the partially-invalid file untouched")
+		}
+	})
+
+	t.Run("empty file is treated as pristine", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "slm-profiles.yaml")
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatalf("write empty file: %v", err)
+		}
+		if err := SaveCustomSLMProfiles(path, []SLMProfile{valid}); err != nil {
+			t.Fatalf("an empty file must not block saving, got %v", err)
+		}
+		loaded, _ := LoadCustomSLMProfiles(path)
+		if len(loaded) != 1 || loaded[0].ID != valid.ID {
+			t.Fatalf("saved set not persisted: %+v", loaded)
+		}
+	})
+}
+
+// TestCustomSLMProfileNameLimitCountsRunes pins the rune-based (not byte-based)
+// name-length bound: a name of exactly slmProfileNameMaxLength multibyte runes
+// is accepted, one rune more is rejected.
+func TestCustomSLMProfileNameLimitCountsRunes(t *testing.T) {
+	name := strings.Repeat("ф", slmProfileNameMaxLength) // 64 runes, 128 bytes
+	if _, err := CreateCustomSLMProfile(name, storeTestConfigB(), nil); err != nil {
+		t.Fatalf("a %d-rune name must be accepted, got %v", slmProfileNameMaxLength, err)
+	}
+	if _, err := CreateCustomSLMProfile(name+"ф", storeTestConfigB(), nil); err == nil {
+		t.Fatal("a name one rune over the limit must be rejected")
 	}
 }

@@ -5,12 +5,12 @@ import (
 )
 
 // compactDescriptions maps builtin tool names to one-line descriptions used
-// when small_llm.essential_tools.compact_descriptions is enabled. Full rubric
-// descriptions (purpose/when-to-use/inputs/outputs/example/anti-example,
-// 480-1100 chars) are ideal for large models but cost real prompt budget on
-// small local ones; these one-liners keep the disambiguation (the "vs
-// neighbor" hint) while dropping the long form. Unknown tools (e.g. MCP) keep
-// their original description.
+// when the active profile's essential_tools.compact_descriptions knob is
+// enabled. Full rubric descriptions (purpose/when-to-use/inputs/outputs/
+// example/anti-example, 480-1100 chars) are ideal for large models but cost
+// real prompt budget on small local ones; these one-liners keep the
+// disambiguation (the "vs neighbor" hint) while dropping the long form.
+// Unknown tools (e.g. MCP) keep their original description.
 var compactDescriptions = map[string]string{
 	// sp4rk builtins — files
 	"read_file":        "Read a file by path (paginated; pdf/docx/html convert to markdown). Use once the exact path is known — find paths with glob/list_directory first.",

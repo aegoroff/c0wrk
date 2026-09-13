@@ -42,18 +42,21 @@ export function Toggle({ checked, onChange, label, description, disabled }: Togg
 
 /**
  * NumberField — integer input for thresholds / counts. Persists on blur to
- * avoid a save storm while typing.
+ * avoid a save storm while typing. `min`/`max` are the inclusive bounds;
+ * an out-of-range entry on blur is rejected (the field reverts) so the value
+ * committed here always matches the backend's accepted range.
  */
 interface NumberFieldProps {
   label: string
   value: number
   onChange: (value: number) => void
   min?: number
+  max?: number
   step?: number
   disabled?: boolean
 }
 
-export function NumberField({ label, value, onChange, min, step, disabled }: NumberFieldProps) {
+export function NumberField({ label, value, onChange, min, max, step, disabled }: NumberFieldProps) {
   const [draft, setDraft] = useState(String(value))
   const [focused, setFocused] = useState(false)
 
@@ -62,7 +65,11 @@ export function NumberField({ label, value, onChange, min, step, disabled }: Num
   const commit = () => {
     setFocused(false)
     const parsed = Number(draft)
-    if (Number.isFinite(parsed) && (min === undefined || parsed >= min)) {
+    if (
+      Number.isFinite(parsed) &&
+      (min === undefined || parsed >= min) &&
+      (max === undefined || parsed <= max)
+    ) {
       onChange(parsed)
     } else {
       setDraft(String(value))
@@ -78,6 +85,7 @@ export function NumberField({ label, value, onChange, min, step, disabled }: Num
         value={display}
         disabled={disabled}
         min={min}
+        max={max}
         step={step}
         onFocus={() => {
           setFocused(true)

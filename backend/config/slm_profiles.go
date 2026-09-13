@@ -12,7 +12,7 @@ import (
 //
 // A profile carries the complete value set of the five small-LLM variants
 // (essential_tools, system_prompt, sampling, loop_hardening, context) but
-// NOT the master `small_llm.enabled` toggle — that switch stays in
+// NOT the master `slm.enabled` toggle — that switch stays in
 // config.yaml outside any profile, so selecting a profile can never
 // silently flip the whole mode on or off (docs/development/slm-defaults-research.md,
 // verdict #1 and the 2026-09-13 addendum).
@@ -70,9 +70,10 @@ type SLMProfile struct {
 // "qwen3.8-27b", "gemma-4-26b-a4b-it", or the bare "generic").
 var slmProfileIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:[.-][a-z0-9]+)*$`)
 
-// validSLMProfileReasoningEfforts mirrors backend.validSLMReasoningEfforts:
-// empty means "inherit the model default" (seeded to "medium" by
-// ApplyDefaults when the sampling variant is active) and is always allowed.
+// validSLMProfileReasoningEfforts is the allowed set for the sampling
+// variant's reasoning_effort: empty means "inherit the model default" (the
+// "medium" fallback now lives in the compiled-in "generic" profile's sampling
+// values, not in ApplyDefaults) and is always allowed.
 var validSLMProfileReasoningEfforts = map[string]struct{}{
 	"":       {},
 	"off":    {},
@@ -107,14 +108,13 @@ func NewSLMProfile(id, name string, kind SLMProfileKind, cfg SLMProfileConfig) (
 }
 
 // ValidateSLMProfileConfig is the pure value validator for the 25 profile
-// knobs. It mirrors the platform validation semantics of the inline
-// small_llm.* config (backend.validateSLMConfig): every sampling parameter
-// uses 0 as the "inherit the vendor preset" sentinel and is range-checked
-// regardless of whether its variant is enabled, so a stored out-of-range
-// value cannot go live the moment a toggle flips on; loop-hardening and
-// context values must be non-negative always and fall under tighter
-// positive/window constraints when their variant is enabled. It is reused
-// for custom profiles.
+// knobs. It mirrors the platform's sampling/loop/context validation
+// semantics: every sampling parameter uses 0 as the "inherit the vendor
+// preset" sentinel and is range-checked regardless of whether its variant is
+// enabled, so a stored out-of-range value cannot go live the moment a toggle
+// flips on; loop-hardening and context values must be non-negative always and
+// fall under tighter positive/window constraints when their variant is
+// enabled. It is reused for custom profiles.
 func ValidateSLMProfileConfig(cfg SLMProfileConfig) error {
 	// Essential tools: always_present may be empty — protected orchestration
 	// tools (finish, fact memory, ask_user) and every MCP tool are always
@@ -123,24 +123,24 @@ func ValidateSLMProfileConfig(cfg SLMProfileConfig) error {
 	// Sampling.
 	s := cfg.Sampling
 	if s.Temperature < 0 {
-		return fmt.Errorf("small_llm.sampling.temperature must be > 0 when set, got %v (0 inherits the vendor preset)", s.Temperature)
+		return fmt.Errorf("sampling.temperature must be > 0 when set, got %v (0 inherits the vendor preset)", s.Temperature)
 	}
 	if s.TopP < 0 || s.TopP > 1 {
-		return fmt.Errorf("small_llm.sampling.top_p must be in the range (0, 1] when set, got %v (0 inherits the vendor preset)", s.TopP)
+		return fmt.Errorf("sampling.top_p must be in the range (0, 1] when set, got %v (0 inherits the vendor preset)", s.TopP)
 	}
 	if s.TopK < 0 {
-		return fmt.Errorf("small_llm.sampling.top_k must be >= 1 when set, got %d (0 inherits the vendor preset)", s.TopK)
+		return fmt.Errorf("sampling.top_k must be >= 1 when set, got %d (0 inherits the vendor preset)", s.TopK)
 	}
 	if rp := s.RepetitionPenalty; rp != 0 && (rp < 1 || rp > 2) {
-		return fmt.Errorf("small_llm.sampling.repetition_penalty must be in the range [1, 2] when set, got %v (0 inherits the vendor preset)", rp)
+		return fmt.Errorf("sampling.repetition_penalty must be in the range [1, 2] when set, got %v (0 inherits the vendor preset)", rp)
 	}
 	// Qwen card: presence_penalty 0–2 is the sanctioned anti-repetition
 	// lever (instruct default 1.5); values above 2 increase language mixing.
 	if pp := s.PresencePenalty; pp != 0 && (pp < 0 || pp > 2) {
-		return fmt.Errorf("small_llm.sampling.presence_penalty must be in the range [0, 2] when set, got %v (0 inherits the vendor preset)", pp)
+		return fmt.Errorf("sampling.presence_penalty must be in the range [0, 2] when set, got %v (0 inherits the vendor preset)", pp)
 	}
 	if _, ok := validSLMProfileReasoningEfforts[s.ReasoningEffort]; !ok {
-		return fmt.Errorf("small_llm.sampling.reasoning_effort %q is invalid (allowed: off, low, medium; empty inherits the model default)", s.ReasoningEffort)
+		return fmt.Errorf("sampling.reasoning_effort %q is invalid (allowed: off, low, medium; empty inherits the model default)", s.ReasoningEffort)
 	}
 
 	// Loop hardening.
@@ -154,13 +154,13 @@ func ValidateSLMProfileConfig(cfg SLMProfileConfig) error {
 	}
 	for _, threshold := range thresholds {
 		if threshold < 0 {
-			return errors.New("small_llm.loop_hardening thresholds must be non-negative")
+			return errors.New("loop_hardening thresholds must be non-negative")
 		}
 	}
 	if lh.Enabled {
 		for _, threshold := range thresholds {
 			if threshold < 1 {
-				return errors.New("small_llm.loop_hardening thresholds must be positive when loop_hardening is enabled")
+				return errors.New("loop_hardening thresholds must be positive when loop_hardening is enabled")
 			}
 		}
 	}
@@ -176,24 +176,24 @@ func ValidateSLMProfileConfig(cfg SLMProfileConfig) error {
 	}
 	for _, v := range contextInts {
 		if v < 0 {
-			return errors.New("small_llm.context values must be non-negative")
+			return errors.New("context values must be non-negative")
 		}
 	}
 	if ctx.Enabled {
 		if ctx.Compaction.KeepLast < 2 {
-			return fmt.Errorf("small_llm.context.compaction.keep_last must be >= 2 when context is enabled, got %d", ctx.Compaction.KeepLast)
+			return fmt.Errorf("context.compaction.keep_last must be >= 2 when context is enabled, got %d", ctx.Compaction.KeepLast)
 		}
 		if ctx.Compaction.BlockSize < 2 {
-			return fmt.Errorf("small_llm.context.compaction.block_size must be >= 2 when context is enabled, got %d", ctx.Compaction.BlockSize)
+			return fmt.Errorf("context.compaction.block_size must be >= 2 when context is enabled, got %d", ctx.Compaction.BlockSize)
 		}
 		if ctx.Compaction.TriggerPercent < 1 || ctx.Compaction.TriggerPercent >= 100 {
-			return fmt.Errorf("small_llm.context.compaction.trigger_percent must be in [1, 100) when context is enabled, got %d", ctx.Compaction.TriggerPercent)
+			return fmt.Errorf("context.compaction.trigger_percent must be in [1, 100) when context is enabled, got %d", ctx.Compaction.TriggerPercent)
 		}
 		if ctx.ToolOutputKeepLastN < 1 {
-			return fmt.Errorf("small_llm.context.tool_output_keep_last_n must be >= 1 when context is enabled, got %d", ctx.ToolOutputKeepLastN)
+			return fmt.Errorf("context.tool_output_keep_last_n must be >= 1 when context is enabled, got %d", ctx.ToolOutputKeepLastN)
 		}
 		if ctx.OutputTokenReserve < 1 {
-			return fmt.Errorf("small_llm.context.output_token_reserve must be >= 1 when context is enabled, got %d", ctx.OutputTokenReserve)
+			return fmt.Errorf("context.output_token_reserve must be >= 1 when context is enabled, got %d", ctx.OutputTokenReserve)
 		}
 	}
 

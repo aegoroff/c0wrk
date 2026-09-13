@@ -109,7 +109,7 @@ The experimental-features master switch (`experimental.enabled`) gates the whole
 
 ### Suggested profile
 
-`GetSLMProfiles` returns `suggested_profile_id` (`*string`, null when nothing matches): the **default model's** id is normalized (lowercase → last `/`-segment → strip `:`-decorations like `:free` → strip `-instruct`/`-it`/`-latest`/`-free` suffixes → drop non-alphanumerics) and matched as a substring of each predefined slug; the longest matching slug wins; `generic` is never suggested. The suggestion is a **hint only** — the UI shows an Apply/Hide banner when the suggestion differs from the active profile, and nothing is ever auto-applied.
+`GetSLMProfiles` returns `suggested_profile_id` (`*string`, null when nothing matches): the **default model's** id is normalized (lowercase → last `/`-segment → strip `:`-decorations like `:free` → strip `-instruct`/`-it`/`-latest`/`-free` suffixes → drop non-alphanumerics) and matched by containment against each predefined slug (the slug is a SUBSTRING OF the normalized id, so a decorated id like `qwen3.8-27b-instruct-2507` still matches `qwen3.8-27b`); the longest matching slug wins; `generic` is never suggested. The suggestion is a **hint only** — the UI shows an Apply/Hide banner when the suggestion differs from the active profile, and nothing is ever auto-applied.
 
 ### Metrics
 
@@ -117,7 +117,7 @@ Every session's `agent_metrics` payload carries the `slm` block with the master 
 
 ## Variants
 
-Every variant is gated by BOTH the master `slm.enabled` toggle AND its own sub-toggle **inside the active profile's values** (defense-in-depth). When the master toggle is off, the whole feature is inert — behavior is identical to the un-profiled baseline.
+Every variant is gated by BOTH the master `slm.enabled` toggle AND its own sub-toggle **inside the active profile's values** (defense-in-depth) — with one exception: the `system_prompt` variant has no `Enabled` field of its own and engages through its content toggles (`lite`, further gated by `few_shot`/`reasoning_scaffold`). When the master toggle is off, the whole feature is inert — behavior is identical to the un-profiled baseline.
 
 ### Essential Tools (narrowing)
 
@@ -211,7 +211,7 @@ core/builder.go: NewOrchestratorBuilder
   ├─ applySLMPresets       → builder reasoning-effort default
   ├─ buildRouter           → resolveSamplingFunc (sampling override)
   │                        + applyContextManagement (router fallback executor)
-  ├─ buildCoreAgents       → applyContextManagement (subagent context factory)
+  ├─ buildContextFactory   → applyContextManagement (subagent context factory)
   └─ Build                 → applyLoopHardening (circuit-breaker thresholds)
                            + applyContextManagement (orchestrator executor)
                            + OrchestratorConfig.SLM (SLMSettings)
@@ -231,7 +231,7 @@ backend/session: Manager.SetSLMProfile(effective cfg, active profile)
 
 - The master `slm.enabled` toggle (managed from the SLM settings UI via `SetSLMEnabled`, persisted to `config.yaml`) gates every variant; when it is off, behavior is identical to the un-profiled baseline (zero behavior change at every variant's call site).
 - The experimental-features master switch (`experimental.enabled`) gates the whole feature at the `ToBuilderConfig` boundary: when off, the builder sees `Enabled = false` regardless of the stored `slm.enabled`, so the feature is inert for every session. The gate couples one-way with the master toggle: closing the gate also persists `slm.enabled = false` (no silent reactivation on re-enable), while the SLM UI can never touch the gate.
-- Each variant is independently gated by BOTH the master toggle and its own sub-toggle **in the active profile's values** (defense-in-depth).
+- Each variant is independently gated by BOTH the master toggle and its own sub-toggle **in the active profile's values** (defense-in-depth) — except `system_prompt`, whose sole profile-side gate is `lite` (it carries no separate `Enabled` field).
 - `config.yaml` persists exactly two SLM fields — `slm.enabled` and `slm.active_profile`; the 25 knob values always come from a catalog profile. A legacy inline `small_llm:` section is ignored at load and dropped by the next save (sanctioned reset migration — knob values do not carry over).
 - Predefined profiles are read-only everywhere (catalog construction, store save, RPC mutations); a custom profile is always born as a duplicate of a catalog profile.
 - An empty or dangling `slm.active_profile` resolves to `generic` with exactly one warning — never an error; the effective run is unaffected.

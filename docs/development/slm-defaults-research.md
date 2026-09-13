@@ -1,11 +1,13 @@
 # Small-LLM Profile Defaults: External Evidence Review (Qwen3.8-27B-MTP)
 
 - **Date:** 2026-08-29
-- **Scope:** every default value of the `small_llm.*` profile in `config.example.yaml` / `backend/config/defaults.go` (27 values, not only the ones proposed for change), plus the executor/sp4rk baselines they override.
+- **Scope:** every default value of the pre-catalog inline `small_llm.*` profile then stored in `config.example.yaml` / `backend/config/defaults.go` (the knobs now live in the profile catalog — see the 2026-09-13 addendum) — 27 values, not only the ones proposed for change — plus the executor/sp4rk baselines they override.
 - **Target model:** Qwen3.8-27B-MTP (27B dense, hybrid attention, vision, native MTP head; thinking ON by default, `reasoning_effort` xhigh/medium/low).
 - **Method:** each default is checked against (a) the official Qwen3.8-27B model card and vendor docs, (b) independent measurements and industry practice (vLLM, Unsloth, WorkOS, Pydantic, LangChain, Anthropic, peer-reviewed arXiv), and (c) c0wrk/sp4rk source code. Verdicts: ✅ confirmed · ⚠️ partially refuted · ❌ refuted · ➕ gap (missing parameter).
 
-> **Note (2026-09-09):** `essential_tools.max_tools`, router tool matching, and the over-budget diagnostic were **removed** by [ADR-035](../specs/decisions/035-remove-small-llm-tool-budget.md). The `max_tools` table row, its detailed analysis, and the R6 entries below are retained for provenance but are now moot by construction; the 10–20-tool selection-accuracy evidence survives as operator-side guidance in `specs/domains/slm.md`.
+> **Note (2026-09-09):** `essential_tools.max_tools`, router tool matching, and the over-budget diagnostic were **removed** by [ADR-035](../../specs/decisions/035-remove-small-llm-tool-budget.md). The `max_tools` table row, its detailed analysis, and the R6 entries below are retained for provenance but are now moot by construction; the 10–20-tool selection-accuracy evidence survives as operator-side guidance in `specs/domains/slm.md`.
+>
+> **Note (2026-09-13):** this review was authored against the pre-catalog inline model and originally named its keys `small_llm.*`. That namespace was renamed to `slm.*` (`small_llm.enabled` → `slm.enabled`) and the 25 knob values now live in the profile catalog rather than `config.yaml` — see the 2026-09-13 addendum below and [ADR-041](../../specs/decisions/041-slm-profiles.md). References below use the current `slm.*` keys.
 
 ## Executive Summary
 
@@ -15,7 +17,7 @@ Of the 27 defaults, **23 are confirmed** by external sources (including all mast
 
 | # | Parameter | Default | Baseline | Verdict | Key evidence |
 |---|---|---|---|---|---|
-| 1 | `small_llm.enabled` | `false` | — | ✅ | manual-only by design; model is AA ~52, not a 7B [1][6] |
+| 1 | `slm.enabled` | `false` | — | ✅ | manual-only by design; model is AA ~52, not a 7B [1][6] |
 | 2 | `essential_tools.enabled` | `false` | — | ✅ | opt-in per variant; dual-gate design |
 | 3 | `essential_tools.always_present` | 12 tools | all | ✅ | routing subset ideal 5–15 [15]; guaranteed set = 13 unique |
 | 4 | `essential_tools.max_tools` | ~~`16`~~ | — | ➖ removed | budget removed in ADR-035 (static tool selection, no slot count); the 10–20-tool selection-accuracy evidence [15][16][17] survives as operator-side guidance |
@@ -47,7 +49,7 @@ Of the 27 defaults, **23 are confirmed** by external sources (including all mast
 
 ### Master toggle (1 value)
 
-**`small_llm.enabled: false` — ✅ confirmed.** The profile is manual-only: no auto-detection, operator opts in explicitly; each variant additionally requires its own sub-toggle (double gate). Externally justified: Qwen3.8-27B is an "agentic executor" scoring on par with markedly larger models on agentic benchmarks (SWE-bench Pro 61.7, Terminal-Bench 2.1 73.0 per the official card [1]; independent guides rank it with the strongest local coding agents and note it spends ~2× tokens vs its predecessor precisely because of deep reasoning [6]). A model of this class does not warrant auto-enabled "small model" crutches — but the opt-in variant remains useful for constrained local setups (quantized inference, small context, limited VRAM). No source recommends force-enabling such optimizations for a 27B agentic model.
+**`slm.enabled: false` — ✅ confirmed.** The profile is manual-only: no auto-detection, operator opts in explicitly; each variant additionally requires its own sub-toggle (double gate). Externally justified: Qwen3.8-27B is an "agentic executor" scoring on par with markedly larger models on agentic benchmarks (SWE-bench Pro 61.7, Terminal-Bench 2.1 73.0 per the official card [1]; independent guides rank it with the strongest local coding agents and note it spends ~2× tokens vs its predecessor precisely because of deep reasoning [6]). A model of this class does not warrant auto-enabled "small model" crutches — but the opt-in variant remains useful for constrained local setups (quantized inference, small context, limited VRAM). No source recommends force-enabling such optimizations for a 27B agentic model.
 
 ### Essential tools (4 values) — `backend/config/defaults.go:411–432`
 
@@ -132,9 +134,9 @@ Qwen's sanctioned anti-repetition parameter (range 0–2; instruct-mode default 
 |---|---|---|---|
 | **R1** (P0) | Map qwen `reasoning_effort` natively: `low`/`medium`/`xhigh` → per-request parameter (vLLM/OpenAI-compatible: `reasoning_effort`, non-standard via extra fields), not binary `enable_thinking`. Keep `"off"` → `enable_thinking:false`, `"On"` unchanged. | sp4rk `llm/reasoning.go` (qwen options), `llm/provider_openai.go:283`; precedent `applyGLMReasoning` | vLLM serves Qwen3.8-27B with per-request `reasoning_effort` xhigh/medium/low [7]; extra-fields pattern for non-standard params [8]; effort-injection mechanics (xhigh injects "think carefully", medium = native, nothing injected) [6] |
 | **R2** (P0) | Update sp4rk qwen sampling preset: thinking temperature **0.6 → 1.0** (ideally mode-aware: thinking 1.0/0.95, instruct 0.7/0.80). | sp4rk `prompt/sampling.go` (qwen preset) | Official card: thinking temp 1.0, top_p 0.95; instruct 0.7/0.80/1.5 [1]; Unsloth: per-mode defaults differ [2]; 0.6 documented as the Qwen3-2507-generation value [9]; corroboration [22] |
-| **R3** (P1, after R1) | Default `small_llm.sampling.reasoning_effort` = `"medium"` (when sampling variant enabled). | c0wrk `backend/config/defaults.go` + `config.example.yaml` | Unsloth: adjust effort down from default xhigh for shorter traces [2]; measured 22,276 tok / 21 min at xhigh vs 3,715 tok / 137 s off [4]; 60–90% thinking-token cut at low/medium [5]; medium = native regime [6]; Qwen's own caveat against `low` in agentic multi-turn (retries) → medium [1] |
-| **R4** (P1) | `small_llm.context.output_token_reserve`: **8192 → 16384** (thinking-aware router-validation fallback). The generation ceiling is a separate lever — `llm.models.<model>.output_limit` / per-provider `llm.<provider>.output_token_reserve`; raise those for thinking models whose catalog ceiling (e.g. 8192) truncates reasoning + answer. | c0wrk `backend/config/defaults.go:471` | Reasoning burns the ceiling first [13][14]; traces 3.7K–22.3K [3][4]; Qwen harness 32768 [1]; 16384 = pi default reserve [10][11] |
-| **R5** (P2) | Add `presence_penalty` to `small_llm.sampling` (default unset/inherit). | c0wrk config struct/validator/UI; sp4rk field exists | Qwen card: presence_penalty 0–2, instruct default 1.5, repetition_penalty stays 1.0 [1]; quickstart: adjust 0–2 to reduce repetitions [9] |
+| **R3** (P1, after R1) | Default `slm.sampling.reasoning_effort` = `"medium"` (when sampling variant enabled). | c0wrk `generic` catalog profile (`backend/config/slm_profiles.go`) | Unsloth: adjust effort down from default xhigh for shorter traces [2]; measured 22,276 tok / 21 min at xhigh vs 3,715 tok / 137 s off [4]; 60–90% thinking-token cut at low/medium [5]; medium = native regime [6]; Qwen's own caveat against `low` in agentic multi-turn (retries) → medium [1] |
+| **R4** (P1) | `slm.context.output_token_reserve`: **8192 → 16384** (thinking-aware router-validation fallback). The generation ceiling is a separate lever — `llm.models.<model>.output_limit` / per-provider `llm.<provider>.output_token_reserve`; raise those for thinking models whose catalog ceiling (e.g. 8192) truncates reasoning + answer. | c0wrk `backend/config/defaults.go:471` | Reasoning burns the ceiling first [13][14]; traces 3.7K–22.3K [3][4]; Qwen harness 32768 [1]; 16384 = pi default reserve [10][11] |
+| **R5** (P2) | Add `presence_penalty` to `slm.sampling` (default unset/inherit). | c0wrk config struct/validator/UI; sp4rk field exists | Qwen card: presence_penalty 0–2, instruct default 1.5, repetition_penalty stays 1.0 [1]; quickstart: adjust 0–2 to reduce repetitions [9] |
 | **R6** (P2) | Document/metricize the guaranteed-set risk: always-present ∪ protected (13) ∪ MCP is never trimmed; several MCP servers breach the 20-tool safe zone. | c0wrk docs (`specs/domains/slm.md`), config comments, optional runtime warning | Safe zone 10–20/context, unreliability at 40–50 [15]; 13.62%→43.13% with subset routing [16]; ~13% near-random at 100+ tools [17] |
 
 ## Explored and Pruned Branches
@@ -206,17 +208,17 @@ Code references: `backend/config/defaults.go:411–472` (profile defaults), `:88
 
 ## Addendum (2026-09-08): code-level verification follow-up
 
-A follow-up verification pass against the actual code (`backend/config/defaults.go`, `config.example.yaml`, `core/prompts/*`, `core/systemprompt.go`, `core/smallllm/tools_filter.go`, sp4rk `prompt/sampling.go`, `llm/provider_openai.go`, `llm/modelregistry.go`) confirmed **all 27 defaults unchanged** and closed the open items of this review.
+A follow-up verification pass against the actual code (`backend/config/defaults.go`, `config.example.yaml`, `core/prompts/*`, `core/systemprompt.go`, `core/slm/tools_filter.go`, sp4rk `prompt/sampling.go`, `llm/provider_openai.go`, `llm/modelregistry.go`) confirmed **all 27 defaults unchanged** and closed the open items of this review.
 
 **Recommendation ledger (R1–R6):**
 
 | ID | Status | Verified at |
 |---|---|---|
 | R1 | ✅ closed in sp4rk — qwen `reasoning_effort` is native per-request for Qwen 3.8+ (`applyQwenReasoning` + `IsQwen38OrLater`); `off` → `enable_thinking: false` | `sp4rk/llm/provider_openai.go:364` |
-| R2 | ✅ closed in sp4rk — qwen preset is 1.0 / 0.95 / 20 (official thinking recipe). The preset is family-keyed with no mode signal, so instruct-mode values (0.7 / 0.80 / top_k 20 + presence_penalty 1.5) must be set explicitly when thinking is off — now documented by the mode-mismatch note in `config.example.yaml` (`small_llm.sampling`) | `sp4rk/prompt/sampling.go:53–68` |
-| R3 | ✅ closed — `ApplyDefaults` seeds an unset `reasoning_effort` to `medium` | `backend/config/defaults.go` |
+| R2 | ✅ closed in sp4rk — qwen preset is 1.0 / 0.95 / 20 (official thinking recipe). The preset is family-keyed with no mode signal, so instruct-mode values (0.7 / 0.80 / top_k 20 + presence_penalty 1.5) must be set explicitly when thinking is off (a per-profile concern in the catalog now) | `sp4rk/prompt/sampling.go:53–68` |
+| R3 | ✅ closed — the `generic` profile seeds `reasoning_effort: medium` (the former unconditional `ApplyDefaults` seeding is gone) | `backend/config/slm_profiles.go` |
 | R4 | ✅ reformulated — the reserve is a fallback-tier knob, not the generation ceiling; the catalog-check below (gap #5) removes the residual "catalog truncates the answer" concern for the target model | — |
-| R5 | ✅ closed — `presence_penalty` added to `small_llm.sampling` (range [0, 2]; unset = field not sent) | `backend/config`, `config.example.yaml` |
+| R5 | ✅ closed — `presence_penalty` added to `slm.sampling` (range [0, 2]; unset = field not sent) | `backend/config`, `config.example.yaml` |
 | R6 | ➖ moot by construction — the `max_tools` budget was removed in ADR-035; there is no over-budget condition to signal | — |
 
 **Follow-up gap ledger (lite-prompt / integration verification, gaps #1–#6):**
@@ -224,13 +226,13 @@ A follow-up verification pass against the actual code (`backend/config/defaults.
 1. **Git Policy lost in lite** — closed: compact Git Policy restored in `core/prompts/orchestrator_lite.md`.
 2. **Micro-hints missing in lite** (truncated-output mechanics, fact-memory discipline, MCP priority) — closed: added in `orchestrator_lite.md`.
 3. **Edit→Verify Cycle asymmetry** (duplicated ×3 across lite/scaffold/few-shot, absent from the full directive) — closed: deduplicated to exactly one occurrence per directive and added to `orchestrator_system.md`; the few-shot structural defect fixed.
-4. **`delegate` not guaranteed under tool narrowing** — closed: `smallllm.SelectTools` accepts turn-scoped `extraGuaranteed` names and the orchestrator passes `["delegate"]` whenever the task context carries requested subagents (`core/smallllm/tools_filter.go`, `core/orchestrator.go`).
+4. **`delegate` not guaranteed under tool narrowing** — closed: `slm.SelectTools` accepts turn-scoped `extraGuaranteed` names and the orchestrator passes `["delegate"]` whenever the task context carries requested subagents (`core/slm/tools_filter.go`, `core/orchestrator.go`).
 5. **Catalog ceiling for the target model** — **closed by catalog inspection, no code change**: sp4rk `llm/modelregistry.go:1912` carries `qwen/qwen3.8-27b` with `ContextWindow: 262144` / `OutputLimit: 65536` (plus Reasoning/Attachment/Temperature/ToolCall capabilities). The ceiling comfortably covers the measured 3.7K–22.3K reasoning traces, so `output_token_reserve` stays the fallback-tier knob it was reformulated to be (R4).
 6. **Guaranteed-set over-budget silence (R6)** — moot by construction: the `max_tools` budget and its over-budget diagnostic were removed in ADR-035, so there is no over-budget condition to signal.
 
 ## Addendum (2026-09-13): the `generic` profile — model-agnostic maximum support
 
-The named-profiles redesign introduces 5 predefined profiles: 4 model-specific ones from the completed four-model study (Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma-4-26B-A4B-it, Gemma-4-31B-it) plus **`generic`** — the universal "maximum support" preset for *any* small model, the fallback when the active profile id is missing, and the duplication base for new custom profiles. A profile carries the **25 knobs of the 5 variants** (with their sub-toggles); the master `small_llm.enabled` stays in `config.yaml` outside the profiles — switching a profile must never silently flip the whole mode on or off.
+The named-profiles redesign introduces 5 predefined profiles: 4 model-specific ones from the completed four-model study (Qwen3.8-27B, Qwen3.6-35B-A3B, Gemma-4-26B-A4B-it, Gemma-4-31B-it) plus **`generic`** — the universal "maximum support" preset for *any* small model, the fallback when the active profile id is missing, and the duplication base for new custom profiles. A profile carries the **25 knobs of the 5 variants** (with their sub-toggles); the master `slm.enabled` stays in `config.yaml` outside the profiles — switching a profile must never silently flip the whole mode on or off.
 
 Two design rules fix the value set:
 
@@ -246,7 +248,7 @@ Note: the `system_prompt` variant has no `enabled` gate of its own — it engage
 | 1 | `essential_tools.enabled` | `true` | An unreduced tool surface is the steepest *measured* tax on the weak class: selection accuracy triples (13.62% → 43.13%) and prompt tokens drop >50% when the visible set is cut to a subset | [15][16][30] |
 | 2 | `essential_tools.always_present` | built-in `defaultSLMAlwaysPresent` (13 tools incl. `posh_exec`; 12 at study time) | Lands inside the ideal routed subset 5–15 / safe zone 10–20; one capability per workflow stage (read → edit → search → run → persist → interact → finish); the ±1 tool drift since the study does not move it out of the zone | [15][30] |
 | 3 | `essential_tools.compact_descriptions` | `true` | Differs from the conservative platform default **on purpose**: verdict #5 governs a harness-post-trained 27B, where full schemas (150–400 tokens each) buy selection accuracy; generic targets the weakest class, where the per-step schema tax dominates. The four-model study turns compaction ON for its two weakest profiles; the documented trade is losing negative-guidance nuances | [15][16][21] + four-model study |
-| 4 | `system_prompt.lite` | `true` | Verdict #6 ("lite off") was scoped to a model post-trained against large harness prompts; generic's class drowns in long directives — context quality degrades with volume for every model, sooner for weaker ones. The lite directive keeps the behavioral guard-rails (Git Policy, anti-injection — see the gap ledger above) | [19][30] + four-model study; exact wording: internal A/B |
+| 4 | `system_prompt.lite` | `true` | Verdict #6 ("lite off") was scoped to a model post-trained against large harness prompts; generic's class drowns in long directives — context quality degrades with volume for every model, sooner for weaker ones. The lite directive keeps the behavioral guard-rails (Git Policy — see the gap ledger above; the injection-defense section is injected separately and left unchanged by the Lite swap) | [19][30] + four-model study; exact wording: internal A/B |
 | 5 | `system_prompt.few_shot` | `false` | Few-shot is the best-documented tool-calling booster for weak models, but every example costs context every turn and the effect is unmeasured on the researched class; all four study profiles keep it off; verdict #7 (off-default, A/B first) stands | [20] |
 | 6 | `system_prompt.reasoning_scaffold` | `false` | A fixed scaffold duplicates/contradicts a thinking model's adaptive trace; generic covers thinking models (Qwen3.8/3.6), so the scaffold stays off; operators on pure instruct models may enable it (requires `lite`) | [1][2] (verdict #8) |
 | 7 | `sampling.enabled` | `true` | Variant gate; safe to enable because the variant is inherit-only + the seeded effort — it cannot clobber vendor presets (the recorded "27–30B regression" failure mode). **Internal design property** (§Sampling architecture note); the gate itself needs no external standard | — (internal) |
@@ -277,7 +279,7 @@ No verdict flips; every divergence is a documented scope change, not a contradic
 - **`few_shot` (#7) and `reasoning_scaffold` (#8):** kept OFF — the verdicts stand as-is. Their OFF state is what makes "all 5 variants on" coherent rather than self-defeating: the variants are ON, their unvalidated content toggles are not.
 - **Sampling (#10–#13, R2/R5):** generic inherits everywhere — precisely the architecture the review confirms; the preset-level qwen fix (R2, thinking 1.0/0.95/20) lives in sp4rk and flows to generic automatically. `reasoning_effort: medium` (R3) and `presence_penalty` unset (R5) match the closed recommendations exactly.
 - **Loop-hardening (#16–#20) and context (#22–#26):** identical to the reviewed values; the reserve moves 8192 → 16384 exactly as R4 recommended (it is already the platform default).
-- **`small_llm.enabled`** stays outside the profile set (25 knobs only) — the manual-only doctrine of verdict #1 is untouched.
+- **`slm.enabled`** stays outside the profile set (25 knobs only) — the manual-only doctrine of verdict #1 is untouched.
 
 ### Model-agnostic open points (internal telemetry)
 

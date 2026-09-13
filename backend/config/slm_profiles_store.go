@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,14 +35,23 @@ import (
 // warnings. Saving is fail-closed: the whole set is validated before any
 // byte is written, and the write itself is an atomic tmp+rename full
 // rewrite (mirroring Save), so a half-written file can never exist.
+//
+// A full rewrite re-emits only the set it is handed, so — to avoid
+// destroying content a fail-soft load would have hidden — the writer first
+// refuses to overwrite a file it cannot fully interpret (foreign format
+// version, unparseable YAML, or an entry the current validator rejects);
+// see ensureStoreWritable. Real save errors leave the on-disk file
+// untouched.
 
 // slmProfilesFormatVersion is the only file format version this build
 // understands. A file with any other version value is treated as
-// uninterpretable: load degrades to an empty list with a warning (the
-// file content is left untouched for a newer build to read).
+// uninterpretable: load degrades to an empty list with a warning, and save
+// refuses to overwrite it (see ensureStoreWritable) so the file content is
+// left untouched for a newer build to read.
 const slmProfilesFormatVersion = 1
 
-// slmProfileNameMaxLength bounds a custom profile display name. The limit
+// slmProfileNameMaxLength bounds a custom profile display name, measured in
+// runes (not bytes) so a multibyte name gets the full budget. The limit
 // keeps generated ids sane and UI lists readable; predefined names are all
 // far below it.
 const slmProfileNameMaxLength = 64
@@ -97,14 +108,71 @@ func LoadCustomSLMProfiles(path string) (profiles []SLMProfile, warnings []strin
 	return profiles, warnings
 }
 
+// ensureStoreWritable is the pre-write guard for SaveCustomSLMProfiles. A
+// save is a full-set rewrite, so writing over a file this build cannot fully
+// interpret would silently destroy the bytes it cannot represent. The guard
+// reads the existing file and refuses (before any temp file is created) when:
+//
+//   - the file is not valid YAML — uninterpretable, do not clobber;
+//   - the file carries a format version other than the current one — a newer
+//     build's document (forward-compat data loss; the version note above);
+//   - the file holds an entry the current validator rejects — a fail-soft load
+//     would drop it, and a full rewrite would then erase it (the pruning
+//     hazard).
+//
+// A missing file is the pristine "nothing to preserve" state and passes. The
+// check reads only the on-disk file; it never inspects the set being saved.
+func ensureStoreWritable(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("slm profiles: cannot read %s before save: %w", path, err)
+	}
+	var file slmProfilesFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return fmt.Errorf("slm profiles: %s is not valid YAML; refusing to overwrite it (fix or remove it first): %w", path, err)
+	}
+	// An empty (or whitespace-only) file holds no data to preserve: treat it as
+	// pristine so an externally-created empty file cannot wedge saves.
+	if file.Version == 0 && len(file.Profiles) == 0 && len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	if file.Version != slmProfilesFormatVersion {
+		return fmt.Errorf("slm profiles: %s has unsupported format version %d (expected %d); refusing to overwrite it", path, file.Version, slmProfilesFormatVersion)
+	}
+	// Re-validate the existing entries against a fresh namespace so an entry a
+	// fail-soft load would have skipped blocks the write instead of being
+	// silently pruned by it.
+	predefined := PredefinedSLMProfiles()
+	seenIDs := make(map[string]struct{}, len(predefined)+len(file.Profiles))
+	seenNames := make(map[string]struct{}, len(predefined)+len(file.Profiles))
+	for _, p := range predefined {
+		seenIDs[p.ID] = struct{}{}
+		seenNames[p.Name] = struct{}{}
+	}
+	for i, raw := range file.Profiles {
+		if _, err := validateCustomSLMProfile(raw, seenIDs, seenNames); err != nil {
+			return fmt.Errorf("slm profiles: %s entry %d is invalid (fix or back up the file before saving): %w", path, i+1, err)
+		}
+	}
+	return nil
+}
+
 // SaveCustomSLMProfiles validates the entire set and writes it to path as
 // an atomic full rewrite (write to a .tmp sibling, then rename — mirroring
 // Save for config.yaml). Unlike loading, saving is fail-closed: any
 // invalid entry or id/name collision (with the predefined catalog or
 // within the set) aborts the save with an error and leaves the file
-// untouched. Saving an empty set is legal and writes a version marker with
-// an empty list; the file is created lazily here if it does not exist yet.
+// untouched, and a pre-existing file this build cannot fully interpret is
+// refused outright (see ensureStoreWritable) rather than silently pruned by
+// the full rewrite. Saving an empty set is legal and writes a version marker
+// with an empty list; the file is created lazily here if it does not exist yet.
 func SaveCustomSLMProfiles(path string, profiles []SLMProfile) error {
+	if err := ensureStoreWritable(path); err != nil {
+		return err
+	}
 	predefined := PredefinedSLMProfiles()
 	seenIDs := make(map[string]struct{}, len(predefined)+len(profiles))
 	seenNames := make(map[string]struct{}, len(predefined)+len(profiles))
@@ -156,8 +224,8 @@ func CreateCustomSLMProfile(name string, cfg SLMProfileConfig, existing []SLMPro
 	if name == "" {
 		return SLMProfile{}, errors.New("slm profile name must not be empty")
 	}
-	if len(name) > slmProfileNameMaxLength {
-		return SLMProfile{}, fmt.Errorf("slm profile name must be at most %d characters, got %d", slmProfileNameMaxLength, len(name))
+	if n := utf8.RuneCountInString(name); n > slmProfileNameMaxLength {
+		return SLMProfile{}, fmt.Errorf("slm profile name must be at most %d characters, got %d", slmProfileNameMaxLength, n)
 	}
 	for _, p := range PredefinedSLMProfiles() {
 		if p.Name == name {
@@ -221,8 +289,8 @@ func validateCustomSLMProfile(raw SLMProfile, seenIDs, seenNames map[string]stru
 		return SLMProfile{}, fmt.Errorf("profile %q has kind %q but the profile file only stores custom profiles", raw.ID, raw.Kind)
 	}
 	name := strings.TrimSpace(raw.Name)
-	if len(name) > slmProfileNameMaxLength {
-		return SLMProfile{}, fmt.Errorf("profile %q: name must be at most %d characters, got %d", raw.ID, slmProfileNameMaxLength, len(name))
+	if n := utf8.RuneCountInString(name); n > slmProfileNameMaxLength {
+		return SLMProfile{}, fmt.Errorf("profile %q: name must be at most %d characters, got %d", raw.ID, slmProfileNameMaxLength, n)
 	}
 	validated, err := NewSLMProfile(raw.ID, raw.Name, raw.Kind, raw.Config)
 	if err != nil {

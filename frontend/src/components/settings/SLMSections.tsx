@@ -11,13 +11,13 @@ import { essentialToolPickerOptions } from '@/lib/slmTools'
 import { Toggle, NumberField, TagList } from './SLMControls'
 import { OptionalNumberField } from './SLMOptionalNumberField'
 
-// No "unset" option: the backend seeds an unset/"" reasoning_effort to the
-// profile default "medium" (docs/development/slm-defaults-research.md, R3), so the
-// default is an ordinary choice — "Medium" — rather than a distinct sentinel
-// that would transiently mean vendor-xhigh-inherit until the next config load.
-// Consequence: the vendor inherit (e.g. qwen xhigh) is not expressible while
-// the variant is on — disabling the variant is the documented escape hatch.
+// `""` is a first-class stored value meaning "inherit the model default": the
+// backend accepts it and the shipped gemma-* profiles leave it empty, so it is
+// offered as an explicit option — otherwise those profiles would render a blank
+// trigger with no way to read or re-select the stored value. "Medium" is the
+// value the shipped "generic" profile pins.
 const REASONING_EFFORTS: { value: string; label: string }[] = [
+  { value: '', label: 'Inherit (model default)' },
   { value: 'off', label: 'Off' },
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
@@ -58,19 +58,26 @@ export function EssentialToolsSection({ slice, patch, open, onOpenChange, disabl
   slice: SLMEssentialTools
   patch: (p: Partial<SLMEssentialTools>) => void
 }) {
-  // Read-only list from the backend (core/slm.ProtectedToolNames()).
-  // The backend unions these into always_present and SelectTools always keeps
-  // them, so they are rendered as locked (non-removable) chips.
+  // Read-only protected list from the backend (core/slm.ProtectedToolNames()).
+  // SelectTools always keeps them regardless of always_present, so they render
+  // as locked (non-removable) chips. They are UNIONED into the displayed list
+  // (a custom profile's always_present may not pin them) but STRIPPED from the
+  // value patched back, so the stored always_present stays exactly the
+  // operator's own pins — the union is display-only.
   const locked = new Set(slice.protected_tools)
+  const displayValues = [...slice.always_present]
+  for (const t of slice.protected_tools) {
+    if (!displayValues.includes(t)) displayValues.push(t)
+  }
   // Picker entries: workflow clusters (offered atomically) plus ungrouped
-  // built-ins, minus everything already allowed — always_present already
-  // carries the protected tools (the backend unions them in) and MCP tools are
+  // built-ins, minus everything already allowed — the display list (pins ∪
+  // protected) and the protected set are both subtracted, and MCP tools are
   // never in builtin_tools. Cluster entries add the whole cluster at once and
   // carry a hover tooltip describing the workflow plus its member list.
   const options = essentialToolPickerOptions(
     slice.builtin_tools ?? [],
     slice.tool_groups ?? [],
-    slice.always_present,
+    displayValues,
     slice.protected_tools ?? [],
   )
   return (
@@ -86,8 +93,16 @@ export function EssentialToolsSection({ slice, patch, open, onOpenChange, disabl
         <>
           <TagList
             label="Always-present tools"
-            values={slice.always_present}
-            onChange={(always_present) => patch({ always_present })}
+            values={displayValues}
+            onChange={(v) =>
+              // Recover the operator's own pins: drop the unioned protected
+              // tools, but keep a protected tool that was already pinned (a
+              // locked chip can be neither added nor removed, so its presence
+              // reflects the stored list).
+              patch({
+                always_present: v.filter((n) => !locked.has(n) || slice.always_present.includes(n)),
+              })
+            }
             options={options}
             lockedValues={locked}
             disabled={disabled}
@@ -146,10 +161,9 @@ export function SamplingSection({ slice, patch, open, onOpenChange, disabled }: 
       {slice.enabled && (
         <>
           <p className="text-xs text-muted-foreground">
-            Empty fields inherit the vendor preset for the selected model.
-            Reasoning effort is always set while this variant is on — the
-            vendor default (e.g. qwen xhigh) is reachable only by disabling
-            the variant.
+            Empty fields inherit the vendor preset for the selected model —
+            including "Inherit (model default)" for reasoning effort, which
+            keeps the vendor's own level (e.g. qwen xhigh).
           </p>
           <div className="grid grid-cols-2 gap-3">
             <OptionalNumberField
@@ -232,11 +246,13 @@ export function LoopHardeningSection({ slice, patch, open, onOpenChange, disable
       />
       {slice.enabled && (
         <div className="grid grid-cols-2 gap-3">
-          <NumberField label="Repeat nudge" value={slice.repeat_nudge_threshold} onChange={(v) => patch({ repeat_nudge_threshold: v })} min={0} disabled={disabled} />
-          <NumberField label="Parse-error abort" value={slice.parse_error_abort_threshold} onChange={(v) => patch({ parse_error_abort_threshold: v })} min={0} disabled={disabled} />
-          <NumberField label="Fruitless nudge" value={slice.fruitless_nudge_threshold} onChange={(v) => patch({ fruitless_nudge_threshold: v })} min={0} disabled={disabled} />
-          <NumberField label="Fruitless abort" value={slice.fruitless_abort_threshold} onChange={(v) => patch({ fruitless_abort_threshold: v })} min={0} disabled={disabled} />
-          <NumberField label="Same-tool repeat nudge" value={slice.same_tool_repeat_nudge_threshold} onChange={(v) => patch({ same_tool_repeat_nudge_threshold: v })} min={0} disabled={disabled} />
+          {/* These fields render only while the variant is enabled, the exact
+              state in which the backend requires every threshold >= 1. */}
+          <NumberField label="Repeat nudge" value={slice.repeat_nudge_threshold} onChange={(v) => patch({ repeat_nudge_threshold: v })} min={1} disabled={disabled} />
+          <NumberField label="Parse-error abort" value={slice.parse_error_abort_threshold} onChange={(v) => patch({ parse_error_abort_threshold: v })} min={1} disabled={disabled} />
+          <NumberField label="Fruitless nudge" value={slice.fruitless_nudge_threshold} onChange={(v) => patch({ fruitless_nudge_threshold: v })} min={1} disabled={disabled} />
+          <NumberField label="Fruitless abort" value={slice.fruitless_abort_threshold} onChange={(v) => patch({ fruitless_abort_threshold: v })} min={1} disabled={disabled} />
+          <NumberField label="Same-tool repeat nudge" value={slice.same_tool_repeat_nudge_threshold} onChange={(v) => patch({ same_tool_repeat_nudge_threshold: v })} min={1} disabled={disabled} />
         </div>
       )}
     </VariantSection>
