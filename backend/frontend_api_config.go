@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/v0lka/c0wrk/backend/config"
+	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/proxy"
 	"github.com/v0lka/c0wrk/core/smallllm"
 	coretools "github.com/v0lka/c0wrk/core/tools"
@@ -1122,7 +1123,16 @@ func (f *FrontendAPI) SetLogLevel(level string) error {
 // ListProviderModels returns available model names for a given provider.
 // For Anthropic: returns hardcoded list from model registry.
 // For ChatGPT/OpenAI Compatible: fetches from the provider's API.
-func (f *FrontendAPI) ListProviderModels(provider string) ([]string, error) {
+//
+// Draft credentials on req (api_key, base_url, type) are merged into a
+// throwaway BuilderConfig copy so the settings UI can list models for a
+// compatible provider that is not yet persisted — e.g. first-run setup
+// where saves are blocked until a default_model is chosen.
+func (f *FrontendAPI) ListProviderModels(req ListProviderModelsRequest) ([]string, error) {
+	if req.Provider == "" {
+		return nil, errors.New("provider is required")
+	}
+
 	f.configMu.RLock()
 	if f.config == nil {
 		f.configMu.RUnlock()
@@ -1136,7 +1146,58 @@ func (f *FrontendAPI) ListProviderModels(provider string) ([]string, error) {
 	cfg := ToBuilderConfig(f.config)
 	f.configMu.RUnlock()
 
-	return b.ListProviderModels(context.Background(), provider, cfg)
+	if err := applyListProviderModelsOverrides(cfg, req); err != nil {
+		return nil, err
+	}
+	return b.ListProviderModels(context.Background(), req.Provider, cfg)
+}
+
+// applyListProviderModelsOverrides merges draft credentials from the settings
+// UI into cfg so ListProviderModels can resolve providers that exist only in
+// the frontend draft (not yet written to config.yaml). cfg must be a
+// throwaway ToBuilderConfig result — this mutates its ProviderConfigs map.
+func applyListProviderModelsOverrides(cfg *core.BuilderConfig, req ListProviderModelsRequest) error {
+	existing, exists := cfg.LLM.ProviderConfigs[req.Provider]
+
+	apiKey := req.APIKey
+	if (apiKey == "" || apiKey == maskedAPIKey) && exists {
+		apiKey = existing.APIKey
+	}
+
+	baseURL := req.BaseURL
+	if baseURL == "" && exists {
+		baseURL = existing.BaseURL
+	}
+
+	providerType := req.Type
+	switch providerType {
+	case "openai", "anthropic":
+		// explicit draft transport
+	case "":
+		if exists {
+			providerType = existing.ProviderType
+		} else {
+			// Unsaved compatible providers default to OpenAI Chat Completions.
+			providerType = "openai"
+		}
+	default:
+		return fmt.Errorf("unsupported provider type %q", providerType)
+	}
+
+	if !exists && baseURL == "" {
+		// Fixed providers are always present in ToBuilderConfig; reaching here
+		// means a named compatible provider that has not been saved yet.
+		return fmt.Errorf("unknown provider: %s (set a base URL to fetch models before saving)", req.Provider)
+	}
+
+	cfg.LLM.ProviderConfigs[req.Provider] = core.BuilderProviderConfig{
+		ProviderType:       providerType,
+		APIKey:             apiKey,
+		BaseURL:            baseURL,
+		Models:             existing.Models,
+		OutputTokenReserve: existing.OutputTokenReserve,
+	}
+	return nil
 }
 
 // validTokenizerTypes enumerates the TokenizerType values the Configure dialog

@@ -511,6 +511,24 @@ export namespace backend {
 		    return a;
 		}
 	}
+	export class ListProviderModelsRequest {
+	    provider: string;
+	    api_key?: string;
+	    base_url?: string;
+	    type?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ListProviderModelsRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.provider = source["provider"];
+	        this.api_key = source["api_key"];
+	        this.base_url = source["base_url"];
+	        this.type = source["type"];
+	    }
+	}
 	export class ModelConfigRequest {
 	    context_window: number;
 	    output_limit: number;

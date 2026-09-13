@@ -10,6 +10,8 @@ export interface ProviderConfig {
   api_key: string
   base_url: string
   models: string[]
+  /** Transport for compatible providers: "openai" | "anthropic". */
+  type?: 'openai' | 'anthropic'
 }
 
 interface ProviderAccordionProps {

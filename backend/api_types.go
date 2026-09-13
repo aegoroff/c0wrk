@@ -95,6 +95,22 @@ type ProviderConfigRequest struct {
 	Models  []string `json:"models,omitempty"`
 }
 
+// ListProviderModelsRequest is the payload for ListProviderModels.
+//
+// Provider is required. APIKey / BaseURL / Type are optional draft overrides
+// from the settings UI so a compatible provider that has not been persisted
+// yet (first-run, or no default_model selected so saves are held back) can
+// still fetch its model list. Empty / masked APIKey falls back to the saved
+// key when the provider already exists in config.
+type ListProviderModelsRequest struct {
+	Provider string `json:"provider"`
+	APIKey   string `json:"api_key,omitempty"`
+	BaseURL  string `json:"base_url,omitempty"`
+	// Type is the transport: "openai" or "anthropic". Empty means derive from
+	// the saved provider, or default to "openai" for an unknown provider.
+	Type string `json:"type,omitempty"`
+}
+
 // ModelConfigResponse returns a single model's configurable parameters: the
 // currently-effective values (override value when set, otherwise the built-in
 // default) plus the built-in factory defaults so the UI can show what would

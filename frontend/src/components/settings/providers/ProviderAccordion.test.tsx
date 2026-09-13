@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 
 // Spies created via vi.hoisted so they exist before vi.mock factories run.
 const spies = vi.hoisted(() => ({
-  listProviderModels: vi.fn<(provider: string) => Promise<string[]>>(),
+  listProviderModels: vi.fn<(req: { provider: string; api_key?: string; base_url?: string; type?: string }) => Promise<string[]>>(),
 }))
 
 // Mock the backend API wrapper so no real Wails round-trip happens.
@@ -125,6 +125,13 @@ describe('ProviderAccordion model list', () => {
     spies.listProviderModels.mockResolvedValue(['new-a', 'new-b', 'new-a'])
 
     await clickFetchModels()
+
+    expect(spies.listProviderModels).toHaveBeenCalledWith({
+      provider: 'local',
+      api_key: 'key',
+      base_url: 'http://localhost:1234',
+      type: undefined,
+    })
 
     const rows = modelRows()
     expect(rows.map((r) => r.name)).toEqual(['new-a', 'new-b', 'old-model'])

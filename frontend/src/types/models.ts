@@ -410,6 +410,16 @@ export interface ProviderConfigRequest {
   models?: string[]
 }
 
+/** Draft credentials for ListProviderModels — lets Fetch Models work for a
+ *  compatible provider that has not been persisted yet. */
+export interface ListProviderModelsRequest {
+  provider: string
+  api_key?: string
+  base_url?: string
+  /** Transport: "openai" | "anthropic". Empty → derive / default openai. */
+  type?: string
+}
+
 export interface LLMFullConfigRequest {
   default_model?: string
   anthropic?: ProviderConfigRequest
