@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Tests for useE2SStateEvents — the e2s_state subscription. Valid payloads
-// reach the e2s store (full snapshot or patch merge); malformed payloads are
+// reach the e2s store (a full Σ snapshot); malformed payloads are
 // dropped at the boundary via reportDroppedEvent; switching the session away
 // unsubscribes AND clears the outgoing session's snapshot (live-only stream).
 //
@@ -94,7 +94,10 @@ describe('useE2SStateEvents', () => {
     expect(reportDroppedEventMock).not.toHaveBeenCalled()
   })
 
-  it('applies a valid patch over the previous snapshot', () => {
+  it('replaces the Σ outright on every snapshot (the backend owns the merge)', () => {
+    // The backend emitter always sends the FULL Σ (core/e2s emitState);
+    // the store keeps only the latest — a second snapshot replaces the
+    // first instead of being merged over it.
     emit('e2s_state', {
       state: { objective: 'original', findings: ['f1'] },
       turn: 1,
@@ -102,11 +105,10 @@ describe('useE2SStateEvents', () => {
       status: 'running',
     })
     emit('e2s_state', {
-      state: { findings: ['f1', 'f2'] },
+      state: { objective: 'original', findings: ['f1', 'f2'] },
       turn: 2,
       max_turns: 6,
       status: 'running',
-      patch: true,
     })
     const snap = useE2SStore.getState().snapshots[SESSION]
     expect(snap?.state.objective).toBe('original')

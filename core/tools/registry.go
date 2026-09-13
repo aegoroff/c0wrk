@@ -443,9 +443,13 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 	// unknown keys, RECURSIVELY into nested objects and array items, so a
 	// schema-violating payload (e.g. declare_plan tasks without ids) is
 	// rejected up front with an actionable message naming the offending path
-	// (tasks[2].id) and the valid parameters. Fail-safe: empty/unparseable
-	// schemas, $ref subtrees, and levels without a declared property set are
-	// skipped, so this never blocks a call the tool itself would accept.
+	// (tasks[2].id) and the valid parameters. Fail-open ONLY on unmodeled
+	// constructs: empty/unparseable schemas, $ref subtrees, and levels
+	// without a declared property set are skipped — but a level WITH a
+	// declared property set is closed (unknown keys rejected) and declared
+	// types are enforced, so a call carrying extra keys or off-type values
+	// is rejected here even when the tool body would have tolerated it
+	// (json.Unmarshal ignores unknown fields and coerces nulls).
 	if verr := sdktools.ValidateToolInput(name, tool.InputSchema(), input); verr != nil {
 		return sdktools.ErrorResult("%s", verr), nil
 	}

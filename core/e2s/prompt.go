@@ -25,21 +25,34 @@ type SkillSection struct {
 }
 
 // BuildSystemPrompt assembles the E2S system prompt P: the compact core
-// directive from core/prompts/e2s.md (role + E2S protocol), followed by the
-// workspace sections, the Available Tools catalog (from the registry
-// descriptors), the optional delegation directive, and the active-skill
-// sections. The composition is deterministic and session-stable: the same
-// config and descriptor set always produce the same prompt, so provider-side
-// prefix caching applies across the loop's fresh one-shot dialogs.
+// directive from core/prompts/e2s.md (role + E2S protocol; cfg.SystemPrompt
+// overrides it — the Small-LLM Lite swap), followed by the security
+// directives (the unconditional VerificationMandate and the config-gated
+// InjectionDefense, mirroring the Conductor's prefix — SECURITY.md mandates
+// them for every model-facing loop), the workspace sections, the Available
+// Tools catalog (from the registry descriptors), the optional delegation
+// directive and subagent sections, and the active-skill sections. The
+// composition is deterministic and session-stable: the same config and
+// descriptor set always produce the same prompt, so provider-side prefix
+// caching applies across the loop's fresh one-shot dialogs.
 func BuildSystemPrompt(cfg Config, descriptors []sdktools.ToolDescriptor) string {
+	core := cfg.SystemPrompt
+	if core == "" {
+		core = prompts.E2SSystem
+	}
 	var sb strings.Builder
-	sb.WriteString(strings.TrimSpace(prompts.E2SSystem))
+	sb.WriteString(strings.TrimSpace(core))
+	sb.WriteString("\n\n" + strings.TrimSpace(prompts.VerificationMandate))
+	if cfg.InjectionDefense {
+		sb.WriteString("\n\n" + strings.TrimSpace(prompts.InjectionDefense))
+	}
 	sb.WriteString(workspaceSection(cfg))
 	sb.WriteString(availableToolsSection(descriptors))
 	if cfg.DelegateDirective != "" {
 		sb.WriteString("\n\n## Delegation\n")
 		sb.WriteString(cfg.DelegateDirective)
 	}
+	sb.WriteString(cfg.AgentSections)
 	sb.WriteString(skillsSection(cfg.Skills))
 	return sb.String()
 }

@@ -54,64 +54,14 @@ describe('e2sStore', () => {
     expect(snap?.state.checklist?.[0]?.checked).toBe(true)
   })
 
-  it('merges a patch over the previous Σ (absent fields keep their value)', () => {
-    useE2SStore.getState().applySnapshot('s1', makeEvent({
-      state: {
-        objective: 'original objective',
-        files_touched: ['a.ts'],
-        checklist: [{ text: 'step 1', checked: false }, { text: 'step 2', checked: false }],
-      },
-    }))
+  it('falls back to turn for totalTurns only on a full snapshot (older emitters)', () => {
+    useE2SStore.getState().applySnapshot('s1', makeEvent({ turn: 6, total_turns: 9 }))
     useE2SStore.getState().applySnapshot('s1', makeEvent({
       turn: 2,
-      patch: true,
-      state: { checklist: [{ text: 'step 1', checked: true }, { text: 'step 2', checked: true }] },
+      total_turns: undefined,
+      state: { objective: 'full replacement' },
     }))
-    const snap = useE2SStore.getState().snapshots['s1']
-    // Patched slice replaced…
-    expect(snap?.state.checklist?.every((i) => i.checked)).toBe(true)
-    // …unmentioned fields retained.
-    expect(snap?.state.objective).toBe('original objective')
-    expect(snap?.state.files_touched).toEqual(['a.ts'])
-    // Telemetry always replaced.
-    expect(snap?.turn).toBe(2)
-  })
-
-  it('treats a patch with no previous snapshot as a full state', () => {
-    useE2SStore.getState().applySnapshot('s1', makeEvent({ patch: true, state: { objective: 'solo' } }))
-    const snap = useE2SStore.getState().snapshots['s1']
-    expect(snap?.state.objective).toBe('solo')
-    expect(snap?.active).toBe(true)
-  })
-
-  it('retains the turn cap when a patch omits max_turns (telemetry, not Σ)', () => {
-    useE2SStore.getState().applySnapshot('s1', makeEvent({ max_turns: 12 }))
-    useE2SStore.getState().applySnapshot('s1', makeEvent({
-      patch: true,
-      max_turns: undefined,
-      state: { status: 'active' },
-    }))
-    expect(useE2SStore.getState().snapshots['s1']?.maxSteps).toBe(12)
-  })
-
-  it('preserves extension keys and applies null tombstones on a patch merge', () => {
-    // A patch slice must not silently drop extension keys the model added, and
-    // a JSON null tombstone must delete an extension key — mirroring the
-    // domain merge operator (core/e2s/merge.go).
-    useE2SStore.getState().applySnapshot('s1', {
-      state: { objective: 'o', scratch_note: 'keep me', scratch_dead: 'delete me' },
-      turn: 1,
-    })
-    useE2SStore.getState().applySnapshot('s1', {
-      patch: true,
-      state: { scratch_note: 'updated', scratch_dead: null },
-      turn: 2,
-    })
-    const state = useE2SStore.getState().snapshots['s1']?.state
-    expect(state?.scratch_note).toBe('updated')
-    expect(state !== undefined && 'scratch_dead' in state).toBe(false)
-    // Untouched fields survive.
-    expect(state?.objective).toBe('o')
+    expect(useE2SStore.getState().snapshots['s1']?.totalTurns).toBe(2)
   })
 
   it('falls back to Σ.status and unbudgeted maxSteps for a minimal payload', () => {

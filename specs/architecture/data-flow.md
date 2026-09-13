@@ -15,7 +15,7 @@ User types message in frontend
 Frontend: chatStore.sendMessage(text)
          │
          ▼
-RPC: window.go.desktop.App.SendMessage(id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, reviewMode)
+RPC: window.go.desktop.App.SendMessage(id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
          │
          ▼
 backend/frontend_api_session.go: FrontendAPI.SendMessage()
@@ -36,6 +36,13 @@ core/orchestrator.go: Orchestrator.HandleMessage(ctx, msg, sessionID, opts)
   │      │   wraps MapBlackboard + SQLite store); set original request; flush attachments
   │      └─ Continuation (opts.TaskID set): restore Blackboard from persistence,
   │          emit MemoryRead for restored facts, reactivate task
+  │
+  ├─ 0b. ALTERNATIVE LOOPS (early returns, before routing):
+  │      ├─ opts.E2S → runE2SLoop — the explicit-execution-state loop
+  │      │   (externalized state Σ patched every turn via the e2s_step
+  │      │   meta-tool, fresh one-shot [system, user] per turn; see
+  │      │   specs/domains/e2s.md). Mutually exclusive with Goal.
+  │      └─ opts.Goal → runGoalLoop (see specs/domains/goal-mode.md)
   │
   ├─ 1. ROUTE (routeOrContinue):
   │      ├─ Continuation fast-path: restored plan + routing → router is skipped,

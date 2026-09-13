@@ -242,7 +242,21 @@ func (l *loggingEmitter) GoalProgress(data map[string]any) {
 }
 
 func (l *loggingEmitter) E2SState(data map[string]any) {
-	l.logger.Debug("e2s_state", "data", data)
+	// Log METADATA only, never the Σ payload: Σ is model-authored working
+	// memory that regularly carries distilled file contents, absolute paths,
+	// and findings (possible secrets/PII), and it is re-logged after every
+	// applied patch — the neighboring handlers deliberately log sizes and
+	// previews for the same reason ("no secrets in logs").
+	turn, _ := data["turn"].(int)
+	totalTurns, _ := data["total_turns"].(int)
+	maxTurns, _ := data["max_turns"].(int)
+	status, _ := data["status"].(string)
+	var keys int
+	if state, ok := data["state"].(map[string]any); ok {
+		keys = len(state)
+	}
+	l.logger.Debug("e2s_state", "turn", turn, "total_turns", totalTurns,
+		"max_turns", maxTurns, "status", status, "state_keys", keys)
 	l.inner.E2SState(data)
 }
 

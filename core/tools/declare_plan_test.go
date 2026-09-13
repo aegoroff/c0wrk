@@ -309,3 +309,50 @@ func TestValidatePlanTasks_ValidPlanPasses(t *testing.T) {
 		t.Fatalf("valid plan must pass validation, got: %v", err)
 	}
 }
+
+// TestValidatePlanTasks_CyclesRejected pins the DAG check: cyclic and
+// self-referencing depends_on graphs pass reference resolution but can never
+// be satisfied — they must be rejected at declaration with the offending
+// ids named, not surface later as phantom "upstream failures".
+func TestValidatePlanTasks_CyclesRejected(t *testing.T) {
+	cycle := []PlanTaskInput{
+		{ID: "a", Summary: "s", Description: "d", DependsOn: []string{"b"}},
+		{ID: "b", Summary: "s", Description: "d", DependsOn: []string{"a"}},
+	}
+	err := validatePlanTasks(cycle)
+	if err == nil {
+		t.Fatal("2-cycle accepted")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "cycle") {
+		t.Errorf("error should name the cycle: %v", err)
+	}
+	for _, id := range []string{"a", "b"} {
+		if !strings.Contains(msg, id) {
+			t.Errorf("error should name the participating id %q: %v", id, err)
+		}
+	}
+
+	self := []PlanTaskInput{{ID: "solo", Summary: "s", Description: "d", DependsOn: []string{"solo"}}}
+	if err := validatePlanTasks(self); err == nil || !strings.Contains(err.Error(), "depends on itself") {
+		t.Errorf("self-dependency rejected incorrectly: %v", err)
+	}
+
+	// Longer cycle with an innocent downstream node: all stuck ids named.
+	three := []PlanTaskInput{
+		{ID: "x", Summary: "s", Description: "d", DependsOn: []string{"z"}},
+		{ID: "y", Summary: "s", Description: "d", DependsOn: []string{"x"}},
+		{ID: "z", Summary: "s", Description: "d", DependsOn: []string{"y"}},
+	}
+	if err := validatePlanTasks(three); err == nil {
+		t.Fatal("3-cycle accepted")
+	}
+
+	valid := []PlanTaskInput{
+		{ID: "p", Summary: "s", Description: "d"},
+		{ID: "q", Summary: "s", Description: "d", DependsOn: []string{"p"}},
+	}
+	if err := validatePlanTasks(valid); err != nil {
+		t.Errorf("valid DAG rejected: %v", err)
+	}
+}

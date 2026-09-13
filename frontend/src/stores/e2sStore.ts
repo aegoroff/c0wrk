@@ -8,14 +8,14 @@ import type { E2SSigma, E2SStateData } from '@/types/events'
 
 /** Per-session E2S snapshot — the latest Σ plus loop telemetry. */
 export interface E2SSnapshot {
-  /** Latest accumulated execution state (patches merged over snapshots). */
+  /** Latest full execution-state snapshot Σ (the backend owns the merge). */
   state: E2SSigma
   /** Completed steps/turns so far within the CURRENT run (a resumed run
    *  restarts at 1 against its fresh budget; mirrors the event's `turn`). */
   turn: number
-  /** Cumulative applied patches across ALL runs of the task (resumes
-   *  continue the count; mirrors the event's optional `total_turns`, falling
-   *  back to `turn` for older emitters). */
+  /** Cumulative applied patches across ALL runs of the task (resumes continue
+   *  the count; mirrors the event's optional `total_turns`, falling back to
+   *  the run-local `turn` for older emitters that omit it). */
   totalTurns: number
   /** Latest session-level status string (e.g. running, done, failed). */
   status: string
@@ -35,7 +35,7 @@ interface E2SState {
 }
 
 interface E2SActions {
-  /** Apply an e2s_state event (full snapshot or patch) to a session's entry. */
+  /** Apply an e2s_state event (full Σ snapshot) to a session's entry. */
   applySnapshot: (sessionId: string, data: E2SStateData) => void
   /** Clear a session's snapshot (switch away / session delete). */
   clearSession: (sessionId: string) => void
@@ -70,26 +70,24 @@ export const useE2SStore = create<E2SState & E2SActions>((set) => ({
 
   applySnapshot: (sessionId, data) =>
     set((s) => {
-      const prev = s.snapshots[sessionId]
-      // A patch event carries only the changed slice — merge it over the
-      // previously accumulated Σ. A full snapshot (or a patch with no
-      // previous state) replaces the Σ outright. Arrival of any e2s_state
-      // event marks the session E2S-active (gates the panel swap).
-      const state = data.patch && prev ? mergeSigma(prev.state, data.state) : data.state
+      // The backend owns the merge and always emits the FULL Σ snapshot
+      // (core/e2s emitState); the store keeps only the latest. Arrival of
+      // any e2s_state event marks the session E2S-active (gates the panel
+      // swap).
+      const state = data.state
       return {
         snapshots: {
           ...s.snapshots,
           [sessionId]: {
             state,
             turn: data.turn,
-            totalTurns: data.total_turns ?? data.turn,
-            // The backend emitter sends {state, turn, max_turns, status}; the
-            // fallbacks keep a partial payload renderable. A missing max_turns
-            // on a patch retains the previous cap (it is telemetry, not part
-            // of Σ, so it is not merged); on a full snapshot it means an
-            // unbudgeted run → 0 = "turn N" without a cap.
+            // Telemetry, not part of Σ, is taken from the event rather than
+            // retained: total_turns falls back to the run-local turn for older
+            // emitters that omit it, and a missing max_turns means an
+            // unbudgeted run → 0 renders "turn N" with no cap.
             status: data.status ?? state.status ?? '',
-            maxSteps: data.max_turns ?? (data.patch && prev ? prev.maxSteps : 0),
+            totalTurns: data.total_turns ?? data.turn,
+            maxSteps: data.max_turns ?? 0,
             active: true,
           },
         },
@@ -117,35 +115,3 @@ export const useE2SStore = create<E2SState & E2SActions>((set) => ({
 
   clearAll: () => set({ snapshots: {} }),
 }))
-
-/** The eight fixed core Σ keys (core/e2s). A `null` tombstone may delete an
- *  extension key but never a core key. */
-const CORE_SIGMA_KEYS = new Set<string>([
-  'objective',
-  'status',
-  'files_touched',
-  'findings',
-  'decisions',
-  'next_steps',
-  'done_criteria',
-  'checklist',
-])
-
-/**
- * Shallow-merge a patch slice over the previous Σ, honoring the domain patch
- * contract (core/e2s/merge.go): a key present in the patch replaces its
- * counterpart, a JSON `null` tombstone deletes it (core keys excepted — they
- * can never be deleted), and keys absent from the patch (including extension
- * keys) survive untouched.
- */
-function mergeSigma(prev: E2SSigma, patch: E2SSigma): E2SSigma {
-  const merged: Record<string, unknown> = { ...prev }
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null || value === undefined) {
-      if (!CORE_SIGMA_KEYS.has(key)) delete merged[key]
-      continue
-    }
-    merged[key] = value
-  }
-  return merged as E2SSigma
-}

@@ -270,6 +270,19 @@ type SmallLLMSettings struct {
 	Enabled        bool
 	EssentialTools SmallLLMEssentialSettings
 	SystemPrompt   SmallLLMSystemPromptSettings
+	// LoopHardening carries the circuit-breaker tightening overrides. The
+	// executor applies them to its circuit breaker at builder level; the E2S
+	// loop (which has no executor) applies the RepeatNudgeThreshold override
+	// to its anti-spin nudge — the same concept under the same profile gate.
+	LoopHardening SmallLLMLoopHardeningSettings
+}
+
+// SmallLLMLoopHardeningSettings is the orchestrator-level projection of the
+// loop-hardening thresholds the E2S path consumes. Zero values mean "keep
+// the configured/baseline threshold" (mirroring applyLoopHardening).
+type SmallLLMLoopHardeningSettings struct {
+	Enabled              bool
+	RepeatNudgeThreshold int
 }
 
 // SmallLLMEssentialSettings holds the always-present tool-set narrowing settings.
@@ -2693,7 +2706,11 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		// Commit point for an E2S continuation (mirrors the goal branch):
 		// reactivation happens only now, after blackboard restore succeeded.
 		o.reactivateContinuationTask(bb, opts.TaskID)
-		return o.runE2SLoop(ctx, message, opts, bb, availableTools)
+		// taskMessage (resolveTaskMessage) — not the raw message: skill-ref
+		// preprocessing can leave the raw text empty ("/skill"-only sends),
+		// and the E2S objective seeds Σ from it, so it must match what the
+		// Conductor path and the blackboard record.
+		return o.runE2SLoop(ctx, taskMessage, opts, bb, availableTools)
 	}
 
 	// GOAL MODE: a goal request enters the multi-turn goal loop instead of the
@@ -2758,11 +2775,13 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 
 	// Small-LLM essential-tools filter: when enabled, narrow the conductor's
 	// tool set ONCE here (before the ReAct loop starts) to reduce per-prompt
-	// schema overhead. This is the NON-GOAL path only: goal mode returns
+	// schema overhead. Goal mode is the only documented exception: it returns
 	// early above (runGoalLoop), before this point, so the goal-mode tool set
 	// — including the verifier-required goal-mode-only tools
 	// (declare_verification etc.) that SelectTools would otherwise drop — is
-	// never narrowed. Runs exactly once per task, never inside the step loop.
+	// never narrowed. E2S also returns earlier, but applies the SAME filter
+	// inside its own branch (runE2SWithState) for full profile parity. Runs
+	// exactly once per task, never inside the step loop.
 	// When the profile is OFF (default) this is a no-op passthrough.
 	// Turn-scoped agent guarantee: when the user explicitly requested
 	// subagents (#mentions threaded into ctx by enrichAgentContext earlier in
@@ -2858,9 +2877,9 @@ func smallLLMAgentGuaranteedTools(ctx context.Context) []string {
 // unions the user's always-present list, the protected orchestration tools
 // (finish + memory + ask_user), and every MCP-sourced tool — a static
 // selection with no quantitative budget and no router matching. It runs
-// exactly once per task, before the non-goal ReAct loop starts (HandleMessage
-// applies it after the goal-mode early return, so goal mode is intentionally
-// never narrowed).
+// exactly once per task on the Conductor path (before the ReAct loop) and
+// once inside the E2S branch (runE2SWithState); goal mode is intentionally
+// never narrowed (HandleMessage returns before either call site).
 //
 // The optional extraGuaranteed names are turn-scoped guaranteed tools passed
 // by the caller (see smallLLMAgentGuaranteedTools): currently the delegate

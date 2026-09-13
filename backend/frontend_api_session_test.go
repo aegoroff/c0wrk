@@ -355,3 +355,31 @@ func TestSendMessage_E2SRejectsGoalCommandPrefix(t *testing.T) {
 		t.Errorf("gated send must not start a task (latest=%q, err=%v)", latest, lErr)
 	}
 }
+
+// TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing pins the
+// post-preprocessing guard: PreprocessMessageText strips leading /skill (and
+// #agent) refs, which can EXPOSE a "/goal" prefix hidden behind them — the
+// manager arms goal mode from the processed text, so the raw-text guard alone
+// misses this form and core would reject the run only after side effects.
+func TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing(t *testing.T) {
+	api, _, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+
+	// "/realskill" is a known active skill, so preprocessing strips it and
+	// leaves "/goal do x" as the leading command.
+	err := api.SendMessage("fork-src", "/realskill /goal refactor the auth module", []string{"realskill"}, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error: the stripped /skill ref exposes a /goal prefix on an E2S send")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusivity rejection, got: %v", err)
+	}
+
+	// A non-goal skill message under E2S must be unaffected by the PREFIX
+	// guard: it proceeds past the exclusivity check (this harness has no
+	// experimental config, so the send stops at the gate — which is exactly
+	// the proof wanted: the rejection names the gate, not exclusivity).
+	if err := api.SendMessage("fork-src", "/realskill please proceed", []string{"realskill"}, nil, "", "", false, "", true, false); err == nil || strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("a plain skill-ref E2S send must pass the prefix guard, got: %v", err)
+	}
+}

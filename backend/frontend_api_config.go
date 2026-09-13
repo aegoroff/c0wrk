@@ -439,7 +439,8 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 
 // UpdateExperimentalFeatures toggles the master experimental-features switch
 // at runtime. It persists the change and rebuilds the LLM router so the
-// Small-LLM profile (the gated feature) takes effect for new sessions without
+// gated features (the Small-LLM profile and the E2S execution mode) take
+// effect for new sessions without
 // an app restart.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.configMu.Lock()

@@ -81,6 +81,17 @@ describe('ExecutionStatePanel', () => {
     expect(container.querySelector('[data-status="active"]')).not.toBeNull()
   })
 
+  it('falls back to an "active" badge when the payload carries no status at all', () => {
+    // Neither the top-level status nor the Σ status key: the visible label
+    // AND the data-status hook must both report the 'active' fallback (they
+    // share one effective-status source and can never disagree).
+    applyEvent({ state: { objective: 'obj' }, turn: 1, max_turns: 3 })
+    const container = render(<ExecutionStatePanel sessionId={SESSION} />)
+    const badge = container.querySelector('[data-status="active"]')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toContain('active')
+  })
+
   it('renders the Σ checklist with checked and unchecked items', () => {
     applyEvent({
       state: {

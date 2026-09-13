@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/v0lka/c0wrk/core/e2s"
+	"github.com/v0lka/c0wrk/core/prompts"
 	"github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
 	"github.com/v0lka/sp4rk/agent/router"
@@ -113,6 +114,17 @@ func (a *e2sRegistryAdapter) IsToolUntrusted(name string) bool {
 		return false
 	}
 	return a.inner.IsToolUntrusted(name)
+}
+
+// ToolSource mirrors agent.ToolExecutor.GetToolSource ("core" for builtins,
+// the MCP source tag mcp:<server> otherwise) so the loop emits the real
+// tool-call source — the UI renders genuine MCP tools as MCP and everything
+// else as built-in instead of badge-stamping every E2S action.
+func (a *e2sRegistryAdapter) ToolSource(name string) string {
+	if a.inner == nil {
+		return "core"
+	}
+	return a.inner.GetToolSource(name)
 }
 
 // e2sStatePersistingEmitter forwards every event to the wrapped core Emitter
@@ -272,13 +284,19 @@ func (o *Orchestrator) runE2SLoop(
 // and refusing to resume it would strand the task with no way to continue the
 // run. Skills requested at send time are likewise not re-resolved here — the
 // E2S session's Σ is the continuation point, and (unlike the plan/goal resume
-// paths) there is no restored message to re-parse skill refs from.
+// paths) there is no restored message to re-parse skill refs from, and the
+// fresh send's HandleOptions.UserAgents ("#agent" → "## Requested Subagents")
+// is not persisted, so only the Available Subagents roster rebuilt from the
+// live agent catalog carries over.
 //
 // A user follow-up (nudge), when present, is delivered as the turn-1
 // observation (e2sResumeNote) so the resumed run reacts to it rather than
-// silently continuing the old objective. The restored trajectory (resumeSteps)
-// is intentionally NOT consumed: in E2S the Σ — not a replayed trajectory — is
-// the model's memory, so replaying prior steps would add nothing.
+// silently continuing the old objective. Staged image attachments ARE
+// restored (mirroring the Conductor resume path: imageBlocksForRequest over
+// the history, re-attached to every turn). The restored trajectory
+// (resumeSteps) is intentionally NOT consumed: in E2S the Σ — not a replayed
+// trajectory — is the model's memory, so replaying prior steps would add
+// nothing.
 func (o *Orchestrator) resumeE2SLoop(
 	ctx context.Context,
 	bb orchestration.Blackboard,
@@ -295,7 +313,23 @@ func (o *Orchestrator) resumeE2SLoop(
 	}
 	_ = routing // routing is preserved by Resume's caller; E2S runs unrouted
 	o.logInfo("e2s_loop: resuming from checkpoint", "turn", es.TurnCount, "status", es.Status, "nudge", nudge != "")
-	return o.runE2SWithState(ctx, bb.GetOriginalRequest(), bb, availableTools, HandleOptions{}, es, e2sResumeNote(nudge))
+	// Restore staged image content blocks for the resumed run (mirrors the
+	// Conductor resume path): the fresh HandleOptions below carries no
+	// PendingImages, so an image-bearing task resumed into E2S would
+	// otherwise lose its images entirely. The blocks must be IMAGE-ONLY:
+	// E2S sends Σ + the observation as the user message's Content, and a
+	// provider renders ContentBlocks INSTEAD of Content whenever they carry a
+	// text block (llm.NormalizeContentBlocks) — so wrapping the images with a
+	// text block here would silently drop the model's entire memory. With an
+	// image-only list the provider prepends Content as the text block, so both
+	// the images and Σ reach the model.
+	resumeOpts := HandleOptions{}
+	if origReq := bb.GetOriginalRequest(); origReq != "" {
+		if imageBlocks := imageBlocksForRequest(o.historySnapshot(), origReq); len(imageBlocks) > 0 {
+			resumeOpts.PendingImages = imageBlocks
+		}
+	}
+	return o.runE2SWithState(ctx, bb.GetOriginalRequest(), bb, availableTools, resumeOpts, es, e2sResumeNote(nudge))
 }
 
 // e2sResumeNote renders the turn-1 observation for a resumed E2S run. The
@@ -353,12 +387,52 @@ func (o *Orchestrator) runE2SWithState(
 	}
 	ctx = tools.WithDelegationRegistry(ctx, registry)
 	ctx = tools.WithDelegationLauncher(ctx, launcher)
+	// Also inject the registry under the sp4rk orchestration context key so
+	// subagent executors launched from E2S inherit a working finish guard
+	// (their SetFinishGuard resolves the registry via this key — the same
+	// reason RunConductor sets it before building the launcher).
+	ctx = orchestration.WithDelegationRegistry(ctx, registry)
+
+	// Context parity with RunConductor (the E2S loop replaces the executor,
+	// so every ctx value the engine — or its tools — set must be mirrored
+	// here):
+	//   - the subagent profile resolver (delegate's `agent` field resolves
+	//     profiles; without it profile-targeted delegation fails closed);
+	//   - the agent roster + explicit #mentions (the prompt sections below
+	//     and the delegate tool both read them);
+	//   - routing seeds: a fresh E2S handle never passes routeOrContinue, so
+	//     domain/complexity would be unset and buildSubAgentTask's default
+	//     budget (complexity × steps-per-complexity) would collapse to 0 —
+	//     seed the same neutral pair the synthesized RoutingDecision below
+	//     carries. The seed is authoritative: an E2S run is unrouted, so any
+	//     routing restored by a resume is intentionally overwritten here;
+	//   - the blackboard-backed stores so read_step_output / list_step_outputs
+	//     / read_final_result / store_fact / search_facts / read_attachment
+	//     work in E2S exactly as in a Conductor run (the catalog advertises
+	//     them; without the stores every call errors "store not available");
+	//   - the task context so the strict judge sees the actual task rather
+	//     than an empty string on user-confirm escalations.
+	ctx = tools.WithAgentResolver(ctx, deps.agentResolver)
+	ctx = o.enrichAgentContext(ctx, opts.UserAgents)
+	ctx = WithDomain(ctx, "general")
+	ctx = WithComplexity(ctx, defaultResumeComplexity)
+	ctx = agent.WithStepOutputStore(ctx, orchestration.NewStepOutputStore(bb))
+	ctx = agent.WithFactStore(ctx, orchestration.NewFactStore(bb))
+	ctx = agent.WithAttachmentStore(ctx, orchestration.NewAttachmentStore(bb))
+	ctx = agent.WithFinalResultStore(ctx, orchestration.NewFinalResultStore(bb))
+	ctx = sdktools.WithTaskContext(ctx, message)
 
 	// Filtered catalog: goal-only tools (propose_goal, declare_goal_status,
 	// declare_verification) and plan-workflow tools never reach the model;
 	// Execute stays on the real registry (all security gates intact) and
 	// rejects stripped names fail-closed.
-	e2sTools := stripE2SUnavailableTools(tools.StripGoalModeTools(availableTools))
+	// Small-LLM essential-tools narrowing applies to E2S too — full parity
+	// with the Conductor path (goal mode is the only documented exception):
+	// the same static selection (always-present list + protected
+	// orchestration tools + MCP tools + the turn-scoped delegate guarantee)
+	// narrows the E2S catalog exactly once here, before stripping.
+	e2sTools := stripE2SUnavailableTools(tools.StripGoalModeTools(
+		o.applySmallLLMToolFilter(availableTools, smallLLMAgentGuaranteedTools(ctx)...)))
 
 	// Trajectory: same composite store as a Conductor run (in-memory for
 	// synchronous reads + best-effort DB persistence), synced by the loop
@@ -367,6 +441,13 @@ func (o *Orchestrator) runE2SWithState(
 	taskID := ""
 	if pbb, ok := bb.(PersistableBlackboard); ok {
 		taskID = pbb.TaskID()
+	}
+	// Delegation spec sink (mirrors RunConductor's wiring): persist every
+	// delegation registered in this run as a full spec so the auto-resume
+	// wave can rebuild in-flight delegations after a pause or shutdown.
+	// Without the sink a resumed E2S run silently drops its delegated work.
+	if taskID != "" && deps.taskStore != nil {
+		wireDelegationSpecSink(registry, "", taskID, deps.taskStore, deps.logger)
 	}
 	trajStore := newCompositeTrajectoryStore(trajHolder, taskID, deps.taskStore, deps.logger)
 	defer trajStore.Flush()
@@ -418,6 +499,27 @@ func (o *Orchestrator) runE2SWithState(
 	}
 
 	e2sCfg := o.e2sSettings()
+	// Small-LLM loop-hardening parity: the executor's circuit breaker gets a
+	// tighter repeat-nudge threshold under the profile; the E2S anti-spin
+	// nudge is the same concept, so the override applies here too (the
+	// abort threshold keeps its fail-safe strictly-greater ordering via
+	// Config.withDefaults).
+	spinNudge := e2sCfg.RepeatNudgeThreshold
+	if sc := o.config.SmallLLM; sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
+		// The profile override must stay strictly below the configured abort
+		// threshold: at or above it Config.withDefaults would silently raise
+		// abort to nudge+1, reintroducing the divergence the e2s config
+		// validation rejects up front. Fall back to the configured nudge
+		// (which the config guarantees is < abort) rather than diverge.
+		if sc.LoopHardening.RepeatNudgeThreshold < e2sCfg.RepeatAbortThreshold {
+			spinNudge = sc.LoopHardening.RepeatNudgeThreshold
+		} else {
+			o.logWarn("e2s_loop: ignoring Small-LLM repeat-nudge override — not strictly below the configured abort threshold",
+				"override", sc.LoopHardening.RepeatNudgeThreshold,
+				"abort_threshold", e2sCfg.RepeatAbortThreshold,
+				"using_nudge", e2sCfg.RepeatNudgeThreshold)
+		}
+	}
 	cfg := e2s.Config{
 		Model:               deps.model,
 		MaxTokens:           maxTokens,
@@ -430,7 +532,7 @@ func (o *Orchestrator) runE2SWithState(
 		StateByteLimit:      e2sCfg.StateByteLimit,
 		PatchRetries:        e2sCfg.PatchRetries,
 		MaxObservationChars: e2sCfg.MaxObservationChars,
-		SpinNudgeThreshold:  e2sCfg.RepeatNudgeThreshold,
+		SpinNudgeThreshold:  spinNudge,
 		SpinAbortThreshold:  e2sCfg.RepeatAbortThreshold,
 		// ResumeState seeds the ENTIRE state (fresh runs pass the canonically
 		// seeded NewE2SState; resumed runs pass the persisted checkpoint), so
@@ -454,7 +556,20 @@ func (o *Orchestrator) runE2SWithState(
 		// resolve through the dispatch context.
 		ToolCache:    deps.toolCache,
 		PauseChecker: deps.pauseChecker,
-		Logger:       o.logger,
+		// Conductor-parity knobs (review fix cycle): the resolved reasoning
+		// effort (per-message override / Small-LLM sampling), the
+		// config-gated injection-defense directive, the subagent prompt
+		// sections (roster + explicit #mentions), the Small-LLM Lite prompt
+		// swap, the verify-on-edit hook, and the finish-join guard over
+		// pending async delegations.
+		ReasoningEffort:    deps.reasoningEffort,
+		InjectionDefense:   o.config.InjectionDefenseEnabled,
+		AgentSections:      formatAvailableAgents(ctx) + formatRequestedAgents(ctx),
+		SystemPrompt:       e2sCoreDirective(ctx),
+		EditVerify:         deps.verifyOnEdit,
+		EditVerifyMaxChars: deps.verifyOnEditMaxOutputChars,
+		FinishGuard:        e2sFinishGuard(registry),
+		Logger:             o.logger,
 	}
 
 	loop := e2s.New(deps.llm, newE2SRegistryAdapter(deps.toolExec, e2sTools), perStep, cfg)
@@ -493,15 +608,32 @@ func (o *Orchestrator) runE2SWithState(
 			output = res.Answer
 		}
 		status = e2sExecutionStatus(res)
-		// Budget exhaustion without a delivered answer surfaces an explicit,
-		// honest outcome instead of echoing the original user message: the
-		// task stays resumable and the accumulated Σ explains where the work
-		// stopped (the Execution State panel renders it).
-		if res.Status == e2s.RunStatusStepLimit && res.Answer == "" {
-			output = fmt.Sprintf(
-				"E2S run stopped: the turn budget (%d steps) was exhausted before the task completed. "+
-					"The working state Σ was preserved with %d recorded turns — use Resume to continue with a fresh budget.",
-				e2sCfg.MaxSteps, res.Snapshot.TurnCount)
+		// Empty-answer terminations surface an explicit, honest outcome
+		// instead of echoing the original user message: the frontend renders
+		// a non-empty output as the assistant's final message, so a finished
+		// run that produced no answer (step_limit / spin_stop, the two
+		// statuses rewritten below) must not return the user's own words as
+		// its answer. Paused/failed runs keep `output = message`, but the UI
+		// surfaces their Resume/error affordance rather than a final message.
+		// Both rewritten statuses persist the Σ checkpoint, but only
+		// step_limit is resumable: it maps to the
+		// non-terminal active status, whereas spin_stop maps to failed
+		// (terminal — e2sStatusResumable excludes it), so the spin_stop
+		// message must not promise a Resume that re-enters the E2S loop.
+		if res.Answer == "" {
+			switch res.Status {
+			case e2s.RunStatusStepLimit:
+				output = fmt.Sprintf(
+					"E2S run stopped: the turn budget (%d steps) was exhausted before the task completed. "+
+						"The working state Σ was preserved with %d recorded turns — use Resume to continue with a fresh budget.",
+					e2s.EffectiveMaxSteps(e2s.Config{MaxSteps: e2sCfg.MaxSteps}), res.Snapshot.TurnCount)
+			case e2s.RunStatusSpinStop:
+				output = fmt.Sprintf(
+					"E2S run aborted: the same action was repeated past the anti-spin limit without progress. "+
+						"This abort is terminal and cannot be resumed — the %d-turn Σ snapshot is kept on the task "+
+						"for the record only. Restart the task with a different approach.",
+					res.Snapshot.TurnCount)
+			}
 		}
 	}
 	execResult := &orchestration.ExecutionResult{Output: output, Status: status}
@@ -523,6 +655,31 @@ func (o *Orchestrator) runE2SWithState(
 		return result, runErr
 	}
 	return result, nil
+}
+
+// e2sCoreDirective selects the E2S core system directive: the Lite variant
+// when the Small-LLM prompt profile is active on the context (set by
+// prepareRequestContext before the E2S branch — the profile keys ride the
+// same request context), the compiled-in full directive otherwise ("" lets
+// the e2s package apply its own default).
+func e2sCoreDirective(ctx context.Context) string {
+	if smallLLMLiteFromCtx(ctx) {
+		return prompts.E2SSystemLite
+	}
+	return ""
+}
+
+// e2sFinishGuard mirrors the sp4rk Conductor's finish-join guard for the
+// E2S loop: finish is vetoed while async delegations are still pending, so
+// the run cannot silently abandon background subagents (the model must
+// cancel or await them, then finish).
+func e2sFinishGuard(registry *tools.DelegationRegistry) func(context.Context) error {
+	return func(context.Context) error {
+		if pending := registry.ListPending(); len(pending) > 0 {
+			return fmt.Errorf("you have %d pending async delegation(s): %s. Call cancel_delegation for each if you no longer need them, or wait for them to complete via read_step_output before calling finish", len(pending), strings.Join(pending, ", "))
+		}
+		return nil
+	}
 }
 
 // resolveE2SSkills resolves explicitly requested skill names into prompt

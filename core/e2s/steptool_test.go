@@ -274,3 +274,55 @@ func TestNormalizeArgs_RejectsInvalidJSON(t *testing.T) {
 		t.Errorf("normalized = %s, want compact {\"a\":1}", got)
 	}
 }
+
+// TestActionFingerprint_ContentArgsDistinct pins the content-bearing half of
+// the fingerprint: for mutating tools the payload IS
+// part of the operation's identity — successive edits of the SAME path with
+// different content are distinct actions (no false spin), while re-writing
+// identical content is a true repeat.
+func TestActionFingerprint_ContentArgsDistinct(t *testing.T) {
+	e1 := ActionFingerprint("edit_file", json.RawMessage(`{"path":"a.go","old_string":"x","new_string":"y"}`))
+	e2 := ActionFingerprint("edit_file", json.RawMessage(`{"path":"a.go","old_string":"x","new_string":"z"}`))
+	if e1 == e2 {
+		t.Error("edits of the same path with different payloads must NOT collide — the third consecutive edit would be silently dropped at the nudge threshold")
+	}
+	e1Again := ActionFingerprint("edit_file", json.RawMessage(`{"old_string":"x","path":"a.go","new_string":"y"}`))
+	if e1 != e1Again {
+		t.Error("key order must not change the fingerprint (canonical args)")
+	}
+	w1 := ActionFingerprint("write_file", json.RawMessage(`{"path":"a.txt","content":"one"}`))
+	w2 := ActionFingerprint("write_file", json.RawMessage(`{"path":"a.txt","content":"two"}`))
+	if w1 == w2 {
+		t.Error("writes of the same path with different content must not collide")
+	}
+	w1b := ActionFingerprint("write_file", json.RawMessage(`{"path":"a.txt","content":"one"}`))
+	if w1 != w1b {
+		t.Error("identical write_file actions must share the fingerprint (true spin detectable)")
+	}
+}
+
+// TestActionFingerprint_BatchContentSensitive extends the batch identity:
+// per-sub-call content payloads participate, so a repeated identical batch
+// still spins while a batch whose sub-call payload changed does not.
+func TestActionFingerprint_BatchContentSensitive(t *testing.T) {
+	b1 := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"write_file","input":{"path":"a.txt","content":"one"}}]}`))
+	b2 := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"write_file","input":{"path":"a.txt","content":"two"}}]}`))
+	if b1 == b2 {
+		t.Error("batches differing only in sub-call content must not collide")
+	}
+	b1b := ActionFingerprint("batch", json.RawMessage(`{"calls":[{"tool":"write_file","input":{"content":"one","path":"a.txt"}}]}`))
+	if b1 != b1b {
+		t.Error("sub-call key order must not change the fingerprint")
+	}
+}
+
+// TestCanonicalArgs_KeyOrderIndependence pins the canonical (key-sorted)
+// fallback for anchor-less tools: argument objects differing only in key
+// order are the same action.
+func TestCanonicalArgs_KeyOrderIndependence(t *testing.T) {
+	a := ActionFingerprint("probe", json.RawMessage(`{"a":1,"b":[2,3]}`))
+	b := ActionFingerprint("probe", json.RawMessage(`{"b":[2,3],"a":1}`))
+	if a != b {
+		t.Errorf("key order must not defeat the fingerprint:\n%s\n%s", a, b)
+	}
+}

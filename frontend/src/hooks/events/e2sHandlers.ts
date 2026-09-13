@@ -6,7 +6,7 @@
 import { useE2SStore } from '@/stores/e2sStore'
 import type { E2SStateData } from '@/types/events'
 
-/** Apply an e2s_state snapshot (full or patch) to a session's store entry. */
+/** Apply a full e2s_state Σ snapshot to a session's store entry. */
 export function handleE2SStateEvent(sessionId: string, data: E2SStateData): void {
   useE2SStore.getState().applySnapshot(sessionId, data)
 }

@@ -73,7 +73,7 @@ The assigned set is exactly this union — nothing more, nothing less — emitte
 
 **No chat surfaced events.** The narrowing is a silent, deterministic background step: it emits no `tools_assigned` card and no budget diagnostics into the chat (the former `tools_assigned` event and `small_llm_tool_budget_overflow` diagnostic were removed alongside the `max_tools` budget — see [../decisions/035-remove-small-llm-tool-budget.md](../decisions/035-remove-small-llm-tool-budget.md)).
 
-**Goal mode is never narrowed.** The only filter call site is `HandleMessage`'s non-goal path, which runs AFTER the goal-mode early return. Goal mode deliberately keeps the full tool set (the goal-loop tools, including the verifier-required `declare_verification`, would otherwise be dropped by `SelectTools`).
+**Goal mode is never narrowed.** The filter runs on `HandleMessage`'s Conductor path and inside the E2S branch (`runE2SWithState`) — both AFTER the goal-mode early return. Goal mode deliberately keeps the full tool set (the goal-loop tools, including the verifier-required `declare_verification`, would otherwise be dropped by `SelectTools`).
 
 ### System Prompt Simplification
 
@@ -144,7 +144,7 @@ core/builder.go: NewOrchestratorBuilder
                               + OrchestratorConfig.SmallLLMSettings
        │
        ▼
-per-session Orchestrator.HandleMessage (non-goal path):
+per-session Orchestrator.HandleMessage (Conductor path; the E2S branch applies the same filter):
   ├─ applySmallLLMToolFilter (ONCE) → smallllm.SelectTools (static union,
   │     silent — no events emitted)
   └─ prepareRequestContext → withSmallLLMPromptProfile (ctx flags)
@@ -156,7 +156,7 @@ per-session Orchestrator.HandleMessage (non-goal path):
 - The master `SmallLLM.Enabled` toggle gates every variant; when it is off, behavior is identical to the un-profiled baseline (zero behavior change at every variant's call site).
 - The experimental-features master switch (`experimental.enabled`) gates the whole profile at the `ToBuilderConfig` boundary: when off, the builder sees `SmallLLM.Enabled = false` regardless of the stored `small_llm.enabled`, so the profile is inert for every session. The stored value is preserved so re-enabling experimental features restores the prior profile.
 - Each variant is independently gated by BOTH the master toggle and its own sub-toggle (defense-in-depth).
-- The essential-tools filter runs exactly once per task, before the non-goal ReAct loop starts; it is never applied in goal mode.
+- The essential-tools filter runs exactly once per task on the Conductor path (before the ReAct loop) and once in the E2S branch; it is never applied in goal mode.
 - **The assigned set is exactly always-present ∪ protected ∪ MCP ∪ turn-scoped guarantees, in registry order.** There is no slot budget and no router matching: nothing in the assigned set is ever trimmed, and the filter emits no events.
 - A task whose context carries requested subagents (an explicit `#agent` mention) always has `delegate` in its curated tool set, even though it is neither pinned nor MCP-sourced.
 - The lite directive retains the compact Git Policy and the Efficiency Hints micro-hints (truncated-output mechanics, fact-memory discipline, MCP priority); the `Edit → Verify Cycle` section appears exactly once in each of the lite and full directives.

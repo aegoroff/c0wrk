@@ -265,7 +265,14 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	// was skipped. Reject it here, before any side effect, exactly like the
 	// explicit-flag case.
 	if e2s {
-		if _, isGoalPrefix := core.DetectAndStripGoalMode(text); isGoalPrefix {
+		// Run the check on the POST-preprocessing text: PreprocessMessageText
+		// strips leading /skill and #agent refs, which can expose a /goal
+		// prefix hidden behind them ("/myskill /goal …"), and the manager
+		// arms goal mode from the processed text — the raw check alone misses
+		// that form. Preprocessing is pure, so this still rejects before any
+		// side effect; the workspace path is irrelevant to prefix stripping.
+		processed := core.PreprocessMessageText(text, activeSkills, activeAgents, "")
+		if _, isGoalPrefix := core.DetectAndStripGoalMode(processed); isGoalPrefix {
 			return errors.New("E2S mode and goal mode are mutually exclusive — an E2S message cannot carry a /goal command")
 		}
 	}

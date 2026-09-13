@@ -354,16 +354,19 @@ export interface E2SSigma {
 /**
  * Payload of the dedicated `e2s_state` session event — the execution-state
  * snapshot for an E2S session, emitted after every applied state patch.
- * `state` is the FULL Σ snapshot (the backend owns the merge; the store keeps
- * only the latest). `turn` is the current turn number.
+ * `state` is the FULL Σ snapshot by default (the current backend emitter
+ * always sends the merged Σ; the store keeps only the latest). `turn` is the
+ * current turn number.
  *
- * `max_turns` (the run's turn budget; 0 = unbudgeted), `status` (the domain
- * lifecycle status) and `patch` are validated when present but OPTIONAL for
- * backward compatibility with older emitters: the store falls back to
- * Σ.status for the badge and treats a missing max_turns as an unbudgeted run
- * (panel shows "turn N" without a cap). `patch: true` marks `state` as a
- * partial slice the FRONTEND merges over the previously seen Σ
- * (absent/false = full replacement).
+ * `total_turns` (cumulative applied patches), `max_turns` (the run's turn
+ * budget; 0 = unbudgeted) and `status` (the domain lifecycle status) are
+ * validated when present but OPTIONAL for backward compatibility with
+ * older emitters: the store falls back to Σ.status for the badge and
+ * treats a missing max_turns as an unbudgeted run (panel shows "turn N"
+ * without a cap). `patch` is a tolerated reserved flag — the current
+ * backend emitter never sets it and always sends the full Σ; if a future
+ * partial emitter appears it must also ship the merge (the store replaces
+ * the Σ outright and does not merge).
  */
 export interface E2SStateData {
   readonly state: E2SSigma
@@ -374,8 +377,8 @@ export interface E2SStateData {
   readonly total_turns?: number
   readonly max_turns?: number
   readonly status?: string
-  /** True when `state` carries only the changed slice (merge over the previous
-   *  Σ); absent/false means a full replacement. */
+  /** Reserved: true would mark `state` as a partial slice. No current
+   *  emitter sets it; the store keeps only the latest full snapshot. */
   readonly patch?: boolean
 }
 
@@ -967,17 +970,19 @@ export function isE2SSigma(v: unknown): v is E2SSigma {
 }
 
 /**
- * Guard for an `e2s_state` payload. `state` must be a valid Σ (full snapshot
- * or patch slice) and `turn` a number — both are always present. The forward
- * fields (`max_turns`, `status`, `patch`) are OPTIONAL: validated when
- * present, tolerated when absent. An invalid payload is dropped at the
- * boundary (reportDroppedEvent) — it must never reach the e2s store's merge
- * logic.
+ * Guard for an `e2s_state` payload. `state` must be a valid Σ (the current
+ * backend always sends the full Σ; a partial patch slice is a reserved
+ * forward form) and `turn` a number — both are always present. The forward
+ * fields (`total_turns`, `max_turns`, `status`, `patch`) are OPTIONAL:
+ * validated when present, tolerated when absent. An invalid payload is
+ * dropped at the boundary (reportDroppedEvent) — it must never reach the e2s
+ * store's snapshot application logic.
  */
 export function isE2SStateData(d: unknown): d is E2SStateData {
   if (!isObj(d)) return false
   if (!isE2SSigma(d.state)) return false
   if (typeof d.turn !== 'number') return false
+  if (d.total_turns !== undefined && typeof d.total_turns !== 'number') return false
   if (d.max_turns !== undefined && typeof d.max_turns !== 'number') return false
   if (d.status !== undefined && typeof d.status !== 'string') return false
   if (d.patch !== undefined && typeof d.patch !== 'boolean') return false

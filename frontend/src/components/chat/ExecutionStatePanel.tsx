@@ -113,6 +113,11 @@ export function ExecutionStatePanel({ sessionId }: { sessionId: string }) {
 
   if (!snapshot || !snapshot.active) return null
 
+  // The badge's effective status — same value for the visible label, the
+  // data-status test hook, and the color class, so the three can never
+  // disagree when the payload carries no status at all.
+  const badgeStatus = snapshot.status || 'active'
+
   return (
     <div className="group">
       <button
@@ -133,10 +138,10 @@ export function ExecutionStatePanel({ sessionId }: { sessionId: string }) {
           {snapshot.maxSteps > 0 ? `turn ${snapshot.turn}/${snapshot.maxSteps}` : `turn ${snapshot.turn}`}
         </span>
         <span
-          className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${statusBadgeClass(snapshot.status)}`}
-          data-status={snapshot.status}
+          className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${statusBadgeClass(badgeStatus)}`}
+          data-status={badgeStatus}
         >
-          {snapshot.status || 'active'}
+          {badgeStatus}
         </span>
       </button>
       {open && <ExecutionStateBody snapshot={snapshot} />}

@@ -147,10 +147,76 @@ func validatePlanTasks(tasks []PlanTaskInput) error {
 			}
 		}
 	}
-	if len(problems) == 0 {
-		return nil
+	if len(problems) > 0 {
+		return errors.New("validation error: invalid plan tasks. Fix these issues and call declare_plan again:\n- " + strings.Join(problems, "\n- "))
 	}
-	return errors.New("validation error: invalid plan tasks. Fix these issues and call declare_plan again:\n- " + strings.Join(problems, "\n- "))
+	// Acyclicity: depends_on must form a DAG. A cycle or self-dependency
+	// passes reference resolution but can never be satisfied — execute_plan
+	// would report it as an "upstream failure" instead of a malformed plan,
+	// hiding the real fix (re-declare without the cycle).
+	if cycle := planDependencyCycle(tasks); cycle != "" {
+		return errors.New("validation error: invalid plan tasks. Fix these issues and call declare_plan again:\n- " + cycle)
+	}
+	return nil
+}
+
+// planDependencyCycle detects dependency cycles (including
+// self-dependencies) via Kahn's algorithm and renders the offending ids; ""
+// when the graph is a DAG. Ids are matched trimmed, exactly as the reference
+// resolution in validatePlanTasks matches them.
+func planDependencyCycle(tasks []PlanTaskInput) string {
+	const selfDep = "task %q depends on itself — remove the self-referencing depends_on entry"
+	ids := make([]string, len(tasks))
+	degree := make(map[string]int, len(tasks))
+	adj := make(map[string][]string, len(tasks))
+	for i, t := range tasks {
+		id := strings.TrimSpace(t.ID)
+		ids[i] = id
+		for _, dep := range t.DependsOn {
+			d := strings.TrimSpace(dep)
+			if d == "" {
+				continue
+			}
+			if d == id {
+				return fmt.Sprintf(selfDep, id)
+			}
+			adj[d] = append(adj[d], id)
+			degree[id]++
+		}
+	}
+	queue := make([]string, 0, len(tasks))
+	for _, id := range ids {
+		if degree[id] == 0 {
+			queue = append(queue, id)
+		}
+	}
+	processed := 0
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		processed++
+		for _, next := range adj[cur] {
+			degree[next]--
+			if degree[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+	if processed == len(ids) {
+		return ""
+	}
+	// Every id with residual in-degree sits on (or depends on) a cycle.
+	stuck := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for _, id := range ids {
+		if degree[id] > 0 {
+			if _, dup := seen[id]; !dup {
+				seen[id] = struct{}{}
+				stuck = append(stuck, id)
+			}
+		}
+	}
+	return fmt.Sprintf("depends_on contains a dependency cycle involving: %s — a plan must be a DAG (reorder or remove the cyclic depends_on entries)", strings.Join(stuck, ", "))
 }
 
 func (t *DeclarePlanTool) Execute(ctx context.Context, input json.RawMessage) (sdktools.ToolResult, error) {

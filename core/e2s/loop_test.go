@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,8 @@ func (r *mockRegistry) Execute(_ context.Context, name string, input json.RawMes
 
 func (r *mockRegistry) IsToolUntrusted(name string) bool { return r.untrusted[name] }
 
+func (r *mockRegistry) ToolSource(string) string { return "core" }
+
 func (r *mockRegistry) dispatched() []dispatchRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -118,10 +121,11 @@ func (r *mockRegistry) dispatched() []dispatchRecord {
 // recordingEmitter captures every emitted event, including the optional
 // e2s_state capability.
 type recordingEmitter struct {
-	mu       sync.Mutex
-	events   []string
-	states   []map[string]any
-	thoughts []string
+	mu           sync.Mutex
+	events       []string
+	states       []map[string]any
+	thoughts     []string
+	toolPreviews []string
 }
 
 func (e *recordingEmitter) record(kind string) {
@@ -139,10 +143,15 @@ func (e *recordingEmitter) Thought(_ int, content, _ string) {
 func (e *recordingEmitter) ToolCall(_, _ int, toolName, _, _ string) {
 	e.record("ToolCall:" + toolName)
 }
-func (e *recordingEmitter) ToolResult(_, _, _ int, _ string, _ bool) { e.record("ToolResult") }
-func (e *recordingEmitter) StepComplete(int, time.Duration)          { e.record("StepComplete") }
-func (e *recordingEmitter) AssistantChunk(string)                    { e.record("AssistantChunk") }
-func (e *recordingEmitter) AssistantDone(string, int, int)           { e.record("AssistantDone") }
+func (e *recordingEmitter) ToolResult(_, _, _ int, preview string, _ bool) {
+	e.mu.Lock()
+	e.toolPreviews = append(e.toolPreviews, preview)
+	e.mu.Unlock()
+	e.record("ToolResult")
+}
+func (e *recordingEmitter) StepComplete(int, time.Duration) { e.record("StepComplete") }
+func (e *recordingEmitter) AssistantChunk(string)           { e.record("AssistantChunk") }
+func (e *recordingEmitter) AssistantDone(string, int, int)  { e.record("AssistantDone") }
 func (e *recordingEmitter) ContextFill(float64, int, int, string, string) {
 	e.record("ContextFill")
 }
@@ -1066,6 +1075,8 @@ func (r *bigResultRegistry) Execute(_ context.Context, _ string, _ json.RawMessa
 
 func (r *bigResultRegistry) IsToolUntrusted(string) bool { return false }
 
+func (r *bigResultRegistry) ToolSource(string) string { return "core" }
+
 // ctxCapturingRegistry records whether the dispatch context carries the
 // tool-result cache (agent.ToolResultCacheFromContext).
 type ctxCapturingRegistry struct {
@@ -1331,4 +1342,144 @@ func TestSeedState_ObjectiveAndExtensions(t *testing.T) {
 // slogDiscard returns a logger that drops output.
 func slogDiscard() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// ---------------------------------------------------------------------------
+// Review-fix regressions: seed limit, finish guard, verify-on-edit, batch
+// raw preview, tool-call source
+// ---------------------------------------------------------------------------
+
+// TestRun_SeedStateOverLimitFailsFast pins the seed-limit guard: an initial
+// Σ larger than the byte limit fails fast with an actionable error instead
+// of wedging every turn on ErrStateTooLarge until the budget runs out.
+func TestRun_SeedStateOverLimitFailsFast(t *testing.T) {
+	huge := strings.Repeat("x", 40*1024)
+	loop := New(&scriptedCaller{responses: []*llm.ChatResponse{}}, nil, nil,
+		Config{Model: "m", Task: huge, Logger: slogDiscard()})
+	res, err := loop.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected a fast failure error")
+	}
+	if !strings.Contains(err.Error(), "byte limit") {
+		t.Errorf("error should name the byte limit: %v", err)
+	}
+	if res == nil || res.Status != RunStatusFailed {
+		t.Fatalf("Status = %v, want failed", mustStatus(res))
+	}
+	if res.Turns != 0 {
+		t.Errorf("Turns = %d, want 0 (no LLM call may run)", res.Turns)
+	}
+}
+
+func mustStatus(res *Result) RunStatus {
+	if res == nil {
+		return ""
+	}
+	return res.Status
+}
+
+// TestRun_FinishGuardVetoContinues pins the finish-join guard: a finish
+// while async delegations are pending is vetoed (the reason becomes the next
+// observation, no answer is emitted), and a later finish after the blocker
+// clears is accepted.
+func TestRun_FinishGuardVetoContinues(t *testing.T) {
+	pending := atomic.Bool{}
+	pending.Store(true)
+	vetoes := atomic.Int32{}
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "finish", `{"answer":"too early"}`),
+		stepResponse(`{}`, "finish", `{"answer":"all clear"}`),
+	}}
+	em := &recordingEmitter{}
+	loop := New(caller, nil, em, Config{
+		Model: "m", Task: "t", Logger: slogDiscard(),
+		FinishGuard: func(context.Context) error {
+			// Veto exactly once — the second finish models the model having
+			// resolved the blocker (delegation completed/cancelled).
+			if pending.Load() {
+				pending.Store(false)
+				vetoes.Add(1)
+				return errors.New("1 pending async delegation(s): del_1")
+			}
+			return nil
+		},
+	})
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != RunStatusFinished || res.Answer != "all clear" {
+		t.Fatalf("Status=%s Answer=%q, want finished with the second answer", res.Status, res.Answer)
+	}
+	// The vetoed finish must not surface as an assistant message: exactly
+	// ONE answer emission is allowed — the accepted finish's. (The event
+	// list interleaves both turns, so count rather than scan.)
+	if cnt := strings.Count(strings.Join(em.eventList(), ","), "AssistantChunk"); cnt != 1 {
+		t.Errorf("AssistantChunk count = %d, want 1 (only the accepted finish): %v", cnt, em.eventList())
+	}
+	if cnt := strings.Count(strings.Join(em.eventList(), ","), "AssistantDone"); cnt != 1 {
+		t.Errorf("AssistantDone count = %d, want 1", cnt)
+	}
+	if !strings.Contains(res.Steps[0].Observation, "finish rejected") {
+		t.Errorf("first step observation should carry the veto: %q", res.Steps[0].Observation)
+	}
+}
+
+// TestRun_EditVerifyAppendedToObservation pins the verify-on-edit hook: a
+// successful write_file arms the run, the note is appended to the
+// observation, and a read-only action never arms it.
+func TestRun_EditVerifyAppendedToObservation(t *testing.T) {
+	var verifyRuns int32
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "write_file", `{"path":"a.txt","content":"hello"}`),
+		stepResponse(`{}`, "read_file", `{"path":"a.txt"}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &mockRegistry{}
+	loop := New(caller, reg, nil, Config{
+		Model: "m", Task: "t", Logger: slogDiscard(),
+		EditVerify: func(context.Context) agent.EditVerifyResult {
+			atomic.AddInt32(&verifyRuns, 1)
+			return agent.EditVerifyResult{Output: "tests passed", ExitCode: 0}
+		},
+	})
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := atomic.LoadInt32(&verifyRuns); n != 1 {
+		t.Fatalf("verify runs = %d, want exactly 1 (only after the edit)", n)
+	}
+	if !strings.Contains(res.Steps[0].Observation, "[verify_on_edit]") {
+		t.Errorf("edit observation should carry the verify note: %q", res.Steps[0].Observation)
+	}
+	if strings.Contains(res.Steps[1].Observation, "[verify_on_edit]") {
+		t.Errorf("read-only action must not trigger verification: %q", res.Steps[1].Observation)
+	}
+}
+
+// TestRun_BatchPreviewStaysRaw pins the UI-preview contract for batch
+// actions with untrusted tools: the MODEL observation wraps each sub-result
+// in untrusted-content tags, the ToolResult event preview stays raw.
+func TestRun_BatchPreviewStaysRaw(t *testing.T) {
+	caller := &scriptedCaller{responses: []*llm.ChatResponse{
+		stepResponse(`{}`, "batch", `{"calls":[{"tool":"fetch_doc","input":{"url":"https://x"}}]}`),
+		stepResponse(`{}`, "finish", `{"answer":"done"}`),
+	}}
+	reg := &mockRegistry{
+		descriptors: []sdktools.ToolDescriptor{{Name: "fetch_doc"}},
+		untrusted:   map[string]bool{"fetch_doc": true},
+	}
+	em := &recordingEmitter{}
+	loop := New(caller, reg, em, Config{Model: "m", Task: "t", Logger: slogDiscard()})
+	res, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(em.toolPreviews[0], "<untrusted-content") {
+		t.Errorf("batch UI preview leaked boundary tags: %q", em.toolPreviews[0])
+	}
+	if !strings.Contains(res.Steps[0].Observation, "<untrusted-content") {
+		t.Errorf("model observation must wrap untrusted sub-results: %q", res.Steps[0].Observation)
+	}
 }

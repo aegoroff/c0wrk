@@ -152,6 +152,17 @@ var InjectionDefense string
 //go:embed e2s.md
 var E2SSystem string
 
+// E2S system directive, Lite variant — the Small-LLM prompt-swap
+// counterpart of E2SSystem (mirrors the OrchestratorSystemLite trade the
+// verbose orchestrator directive for a compact one). The orchestrator's E2S
+// integration selects it when the Small-LLM profile's SystemPrompt variant
+// is active; the surrounding sections (verification/injection directives,
+// workspace, tools, delegation, skills) are appended unchanged by the same
+// prompt builder.
+
+//go:embed e2s-lite.md
+var E2SSystemLite string
+
 // Code review mode — injected into the system prompt when the user submitted
 // review feedback (ReviewModeKey). Directs the agent to treat the user's
 // message as actionable review comments and edit code to address them, so the

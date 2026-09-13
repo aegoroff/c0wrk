@@ -1,12 +1,15 @@
-// Package e2s implements the domain layer of the E2S (explicit-state)
-// execution mode: the externalized state Σ ("sigma"), its fixed core schema,
-// the per-step action contract, and the merge operator Σₜ⊕ΔΣₜ (ApplyPatch,
-// see merge.go) that folds a model-emitted state patch into the state under
-// strict validation.
+// Package e2s implements the E2S (explicit-state) execution mode: the
+// externalized state Σ ("sigma"), its fixed core schema, the per-step action
+// contract, and the merge operator Σₜ⊕ΔΣₜ (ApplyPatch, see merge.go) that
+// folds a model-emitted state patch into the state under strict validation —
+// plus the driver loop (loop.go) that runs the protocol on raw sp4rk
+// primitives.
 //
-// The package is deliberately free of LLM, tool, and transport dependencies:
-// everything here is pure data and pure logic, so it can be unit-tested,
-// persisted (encoding/json round-trips), and reused by any driver loop.
+// The domain layer in this file and merge.go is deliberately free of LLM,
+// tool, and transport dependencies: everything there is pure data and pure
+// logic, so it can be unit-tested, persisted (encoding/json round-trips),
+// and reused by any driver loop. The loop/driver files (loop.go, prompt.go,
+// steptool.go) do import sp4rk's llm/tools/agent packages by design.
 package e2s
 
 import (

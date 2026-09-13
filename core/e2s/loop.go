@@ -99,13 +99,18 @@ type StateEmitter interface {
 // Registry is the tool surface the E2S loop requires: the dispatch target
 // for actions (inheriting every security gate the registry applies — group
 // policies, judge, HITL confirmation, verify-on-edit) and the descriptor
-// catalog for the Available Tools section. Satisfied by
-// *core/tools.ToolRegistry (which embeds sp4rk's ToolRegistry) and by test
-// doubles.
+// catalog for the Available Tools section. ToolSource mirrors
+// agent.ToolExecutor.GetToolSource: "core" for built-ins, the MCP source
+// tag (mcp:<server>) otherwise — the loop emits it as the tool-call event
+// source so the UI renders real MCP tools as MCP and everything else as
+// built-in.
+// Satisfied by *core/tools.ToolRegistry (which embeds sp4rk's ToolRegistry)
+// and by test doubles.
 type Registry interface {
 	List() []sdktools.ToolDescriptor
 	Execute(ctx context.Context, name string, input json.RawMessage) (sdktools.ToolResult, error)
 	IsToolUntrusted(name string) bool
+	ToolSource(name string) string
 }
 
 // Config configures an E2S loop run. Zero values fall back to defaults
@@ -140,6 +145,43 @@ type Config struct {
 	// observation. Default 1 (a single corrective retry); values <= 0 fall
 	// back to the default.
 	PatchRetries int
+	// ReasoningEffort, when non-empty, is passed through to every
+	// ChatRequest (the per-message override / Small-LLM sampling profile
+	// value the host resolved) — mirroring the executor's per-run
+	// SetReasoningEffort. Empty = the provider default.
+	ReasoningEffort string
+	// SystemPrompt, when non-empty, replaces the compiled-in
+	// prompts.E2SSystem core directive (the Small-LLM Lite swap: the host
+	// passes prompts.E2SSystemLite when the profile's prompt variant is
+	// active). Empty = prompts.E2SSystem.
+	SystemPrompt string
+	// InjectionDefense appends the config-gated prompts.InjectionDefense
+	// directive (plus the unconditional prompts.VerificationMandate) to the
+	// system prompt, mirroring the Conductor's security prefix — SECURITY.md
+	// mandates the directive for every model-facing loop, not just the
+	// Conductor.
+	InjectionDefense bool
+	// AgentSections carries pre-rendered "## Available Subagents" /
+	// "## Requested Subagents" prompt sections (the host renders them from
+	// the discovered profile catalog and any explicit #agent mentions).
+	// Appended after the delegation directive so explicit user requests keep
+	// their mandatory-delegation force in E2S mode.
+	AgentSections string
+	// FinishGuard, when non-nil, is consulted before a finish action is
+	// accepted. A non-nil error vetoes the finish for that turn: the error
+	// becomes the next observation and the run continues (the model must
+	// resolve the blocker — e.g. pending async delegations — or finish
+	// later). Mirrors the executor's finish-join guard.
+	FinishGuard func(ctx context.Context) error
+	// EditVerify, when non-nil, is the config-authored verify-on-edit
+	// runner: after any turn whose action (or batch sub-call) contains a
+	// successful write_file/edit_file, the runner executes once and its
+	// formatted note is appended to the observation — the same hook the
+	// executor installs via SetVerifyOnEdit.
+	EditVerify agent.EditVerifyRunner
+	// EditVerifyMaxChars caps the injected verification output;
+	// <= 0 selects agent.DefaultVerifyOnEditCap.
+	EditVerifyMaxChars int
 	// ContextWindowTokens, when > 0, enables the flat per-request
 	// ContextFill emission (last request input tokens vs the window). Zero
 	// disables the emission.
@@ -223,6 +265,14 @@ func (c Config) withDefaults() Config {
 		c.SpinAbortThreshold = c.SpinNudgeThreshold + 1
 	}
 	return c
+}
+
+// EffectiveMaxSteps reports the turn budget a run with this config would
+// use (withDefaults applied). Hosts that render the budget to the user
+// (e.g. the step-limit wrap-up message) must use this, not the raw config
+// value — a zero MaxSteps means "compiled-in default", not "zero turns".
+func EffectiveMaxSteps(cfg Config) int {
+	return cfg.withDefaults().MaxSteps
 }
 
 // stepResult is the outcome of one turn's LLM interaction: either a valid
@@ -332,6 +382,16 @@ func (l *Loop) Run(ctx context.Context) (*Result, error) {
 		ctx = agent.WithToolResultCache(ctx, l.cfg.ToolCache)
 	}
 	state := l.seedState()
+	// Seed-limit guard: an oversized initial Σ (a huge objective, or a
+	// resume checkpoint created under a larger byte limit) can never accept
+	// even an empty patch — every merge exceeds the cap, every turn fails
+	// validation, and the run burns its whole budget wedging on
+	// ErrStateTooLarge. Fail fast instead, with an actionable error.
+	if seedBytes := SigmaBytes(state.Sigma); seedBytes > l.cfg.StateByteLimit {
+		err := fmt.Errorf("%w: the initial state Σ is %d bytes, over the %d-byte limit — shorten the task/objective (or attach the oversized content as a file and reference it) before re-running",
+			ErrStateTooLarge, seedBytes, l.cfg.StateByteLimit)
+		return l.checkpoint(RunStatusFailed, state, 0, nil), err
+	}
 	observation := initialObservation
 	if l.cfg.ResumeNote != "" {
 		// A resumed run carrying a user follow-up delivers it as the turn-1
@@ -373,7 +433,14 @@ func (l *Loop) Run(ctx context.Context) (*Result, error) {
 			}
 			return l.checkpoint(RunStatusFailed, state, turn-1, steps), res.fatal
 		}
-		l.reportResponse(turn, res)
+		// Finish-guard veto is computed BEFORE reportResponse so a rejected
+		// finish never emits its answer as an assistant message (the UI must
+		// not show a delivered answer for a run that continues).
+		var finishVeto error
+		if res.invalid == nil && res.call.Action.IsFinish() && l.cfg.FinishGuard != nil {
+			finishVeto = l.cfg.FinishGuard(ctx)
+		}
+		l.reportResponse(turn, res, finishVeto == nil)
 
 		// Invalid turn (both attempts failed): the error becomes the next
 		// observation; Σ is untouched (ApplyPatch never mutated it), nothing
@@ -399,8 +466,27 @@ func (l *Loop) Run(ctx context.Context) (*Result, error) {
 			l.emitState(turn, state)
 		}
 
-		// Finish: intercepted by the loop, never dispatched.
+		// Finish: intercepted by the loop, never dispatched. The finish
+		// guard (when configured) vets the finish first — e.g. pending
+		// async delegations must not be silently abandoned. A veto is NOT a
+		// validation error (no retry budget consumed): the reason becomes
+		// the next observation and the run continues.
 		if res.call.Action.IsFinish() {
+			if finishVeto != nil {
+				steps = append(steps, agent.Step{
+					Thought:     res.thought,
+					Action:      llm.ToolCall{ID: res.call.ID, Name: FinishActionName},
+					Observation: "finish rejected: " + finishVeto.Error(),
+					IsError:     true,
+				})
+				l.syncTrajectory(steps)
+				observation = "finish rejected: " + finishVeto.Error()
+				l.emit(func(e Emitter) {
+					e.ExecutorDiagnostic(turn, "finish_vetoed", map[string]any{"error": finishVeto.Error()})
+				})
+				l.emit(func(e Emitter) { e.StepComplete(turn, time.Since(started)) })
+				continue
+			}
 			steps = append(steps, agent.Step{
 				Thought: res.thought,
 				Action: llm.ToolCall{
@@ -576,11 +662,12 @@ func (l *Loop) callLLM(ctx context.Context, user string) (*llm.ChatResponse, err
 		userMsg.ContentBlocks = l.cfg.ContentBlocks
 	}
 	req := llm.ChatRequest{
-		Model:       l.cfg.Model,
-		Messages:    []llm.Message{{Role: "system", Content: l.system}, userMsg},
-		Tools:       l.toolDefs,
-		MaxTokens:   l.cfg.MaxTokens,
-		CallPurpose: llm.CallPurposeExecutor,
+		Model:           l.cfg.Model,
+		Messages:        []llm.Message{{Role: "system", Content: l.system}, userMsg},
+		Tools:           l.toolDefs,
+		MaxTokens:       l.cfg.MaxTokens,
+		ReasoningEffort: l.cfg.ReasoningEffort,
+		CallPurpose:     llm.CallPurposeExecutor,
 	}
 	resp, err := l.caller.Call(ctx, req)
 	if err != nil {
@@ -603,9 +690,11 @@ func mustMarshalString(s string) string {
 }
 
 // reportResponse emits the per-response events: the finish answer as
-// assistant chunk/done, the turn thought, and the flat context fill.
-func (l *Loop) reportResponse(turn int, res stepResult) {
-	if res.call.Action.IsFinish() && res.call.Action.Answer != "" {
+// assistant chunk/done (only when the finish is actually accepted — a
+// guard-vetoed finish must not render as a delivered answer), the turn
+// thought, and the flat context fill.
+func (l *Loop) reportResponse(turn int, res stepResult, emitAnswer bool) {
+	if emitAnswer && res.call.Action.IsFinish() && res.call.Action.Answer != "" {
 		answer := res.call.Action.Answer
 		l.emit(func(e Emitter) { e.AssistantChunk(answer) })
 		l.emit(func(e Emitter) { e.AssistantDone(answer, res.usage.InputTokens, res.usage.OutputTokens) })
@@ -619,13 +708,24 @@ func (l *Loop) reportResponse(turn int, res stepResult) {
 
 // dispatch executes the validated action via the registry and synthesizes
 // the trajectory step. The observation is the truncated result, wrapped in
-// untrusted-content tags when the source tool is untrusted.
+// untrusted-content tags when the source tool is untrusted. When the action
+// (or a batch sub-call) contains a successful file edit and the host
+// configured a verify-on-edit runner, the verification note is appended to
+// the observation exactly as the executor appends it to the group's last
+// observation.
 func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call StepCall) agent.Step {
 	argsPreview := strutil.TruncateUTF8(compactJSON(call.Action.Args), 200)
-	l.emit(func(e Emitter) { e.ToolCall(turn, 0, call.Action.Tool, argsPreview, "e2s") })
+	l.emit(func(e Emitter) { e.ToolCall(turn, 0, call.Action.Tool, argsPreview, l.toolSource(call.Action.Tool)) })
 
 	observation := ""
 	isError := false
+	// rawPreview mirrors the pre-wrap result for the UI ToolResult event —
+	// untrusted-content tags belong to the model context, not the preview.
+	rawPreview := ""
+	// editSucceeded reports whether a content-changing file edit succeeded
+	// in this action (single, or any batch sub-call), arming the debounced
+	// verify-on-edit run below.
+	editSucceeded := false
 	if l.registry == nil {
 		observation = "no tool registry configured for the E2S loop"
 		isError = true
@@ -648,9 +748,27 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 				// The batch meta-tool is intercepted by the loop (its registry
 				// form always errors): each sub-call dispatches through the
 				// same registry path, inheriting every security gate.
-				observation, isError = l.dispatchBatch(ctx, call.Action.Args)
+				var rawJoined string
+				observation, isError, rawJoined, editSucceeded = l.dispatchBatch(ctx, call.Action.Args)
+				rawPreview = rawJoined
 			} else {
 				observation, isError = l.executeSingle(ctx, call.Action.Tool, call.Action.Args)
+				rawPreview = observation
+				editSucceeded = !isError && agent.IsFileEditTool(call.Action.Tool)
+			}
+		}
+	}
+
+	// Verify-on-edit (debounced per action, mirroring the executor's
+	// per-response-group debounce): run once after any successful edit in
+	// this action and append the formatted note to the observation.
+	if editSucceeded && l.cfg.EditVerify != nil {
+		if note := agent.FormatVerifyNote(l.cfg.EditVerify(ctx), l.cfg.EditVerifyMaxChars); note != "" {
+			observation += "\n\n" + note
+			if rawPreview != "" {
+				rawPreview += "\n\n" + note
+			} else {
+				rawPreview = note
 			}
 		}
 	}
@@ -675,8 +793,12 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 
 	// The event preview mirrors the raw (pre-wrap) result, matching the
 	// Conductor: the <untrusted-content> boundary belongs to the model context,
-	// not the UI preview.
-	preview := strutil.TruncateUTF8(observation, 200)
+	// not the UI preview — including the batch path, whose per-sub-call
+	// wrappers are model-context boundaries, not UI text.
+	if rawPreview == "" {
+		rawPreview = observation
+	}
+	preview := strutil.TruncateUTF8(rawPreview, 200)
 	l.emit(func(e Emitter) { e.ToolResult(turn, 0, len(observation), preview, isError) })
 
 	return agent.Step{
@@ -685,6 +807,21 @@ func (l *Loop) dispatch(ctx context.Context, turn int, thought string, call Step
 		Observation: truncated,
 		IsError:     isError,
 	}
+}
+
+// toolSource resolves the tool-call event source: "core" for built-ins, the
+// MCP source tag (mcp:<server>) otherwise (an empty lookup falls back to
+// "core" so the UI renders builtin tools as builtins — the previous
+// hardcoded literal made every E2S tool render as an MCP card with an MCP
+// badge).
+func (l *Loop) toolSource(name string) string {
+	if l.registry == nil {
+		return "core"
+	}
+	if src := l.registry.ToolSource(name); src != "" {
+		return src
+	}
+	return "core"
 }
 
 // executeSingle runs one tool call through the registry and returns the raw
@@ -712,8 +849,9 @@ func (l *Loop) executeSingle(ctx context.Context, tool string, args json.RawMess
 // batch (mirroring the executor's batch semantics); nested batch and the
 // E2S envelope targets (e2s_step, finish) are rejected fail-closed: finish
 // must stay a top-level action or the loop's finish interception could be
-// bypassed.
-func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (string, bool) {
+// bypassed. Returns the wrapped observation, its error flag, the raw
+// pre-wrap join (UI preview), and whether any file edit succeeded.
+func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (observation string, anyError bool, rawJoined string, editSucceeded bool) {
 	var input struct {
 		Calls []struct {
 			Tool  string          `json:"tool"`
@@ -721,29 +859,39 @@ func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (string,
 		} `json:"calls"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
-		return "batch parse error: " + err.Error(), true
+		return "batch parse error: " + err.Error(), true, "", false
 	}
 	if len(input.Calls) == 0 {
-		return "batch: no calls provided (empty calls array)", true
+		return "batch: no calls provided (empty calls array)", true, "", false
 	}
 
+	// sb carries the model-facing join (each untrusted sub-result wrapped);
+	// raw carries the same join pre-wrap for the UI preview — the
+	// untrusted-content boundaries are model-context markers, not UI text.
 	var sb strings.Builder
-	anyError := false
+	var raw strings.Builder
+	anyError = false
 	for i, sub := range input.Calls {
 		fmt.Fprintf(&sb, "[batch result %d/%d — %s]\n", i+1, len(input.Calls), sub.Tool)
+		fmt.Fprintf(&raw, "[batch result %d/%d — %s]\n", i+1, len(input.Calls), sub.Tool)
 		switch sub.Tool {
 		case sdktools.ToolBatch:
 			sb.WriteString("error: batch cannot be nested inside another batch call\n\n")
+			raw.WriteString("error: batch cannot be nested inside another batch call\n\n")
 			anyError = true
 			continue
 		case StepToolName, FinishActionName:
-			fmt.Fprintf(&sb, "error: %q cannot be used inside a batch; it must be the top-level action\n\n", sub.Tool)
+			msg := fmt.Sprintf("error: %q cannot be used inside a batch; it must be the top-level action\n\n", sub.Tool)
+			sb.WriteString(msg)
+			raw.WriteString(msg)
 			anyError = true
 			continue
 		}
 		if schema, known := l.schemas[sub.Tool]; known {
 			if verr := sdktools.ValidateToolInput(sub.Tool, schema, sub.Input); verr != nil {
-				sb.WriteString("action arguments rejected: " + verr.Error() + "\n\n")
+				msg := "action arguments rejected: " + verr.Error() + "\n\n"
+				sb.WriteString(msg)
+				raw.WriteString(msg)
 				anyError = true
 				continue
 			}
@@ -751,14 +899,19 @@ func (l *Loop) dispatchBatch(ctx context.Context, args json.RawMessage) (string,
 		content, subErr := l.executeSingle(ctx, sub.Tool, sub.Input)
 		if subErr {
 			anyError = true
+		} else if agent.IsFileEditTool(sub.Tool) {
+			editSucceeded = true
 		}
+		rawContent := content
 		if l.registry.IsToolUntrusted(sub.Tool) {
 			content = untrustedWrap(sub.Tool, content)
 		}
 		sb.WriteString(content)
 		sb.WriteString("\n\n")
+		raw.WriteString(rawContent)
+		raw.WriteString("\n\n")
 	}
-	return strings.TrimRight(sb.String(), "\n"), anyError
+	return strings.TrimRight(sb.String(), "\n"), anyError, strings.TrimRight(raw.String(), "\n"), editSucceeded
 }
 
 // emitState publishes the full Σ + turn snapshot via the optional

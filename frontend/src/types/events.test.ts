@@ -357,6 +357,9 @@ describe('isE2SStateData', () => {
         expect(isE2SStateData({ ...valid, state: { ...valid.state, objective: 7 } })).toBe(false)
         expect(isE2SStateData({ ...valid, state: { ...valid.state, status: true } })).toBe(false)
         expect(isE2SStateData({ ...valid, state: { ...valid.state, files_touched: 'a.go' } })).toBe(false)
+        // A JSON null against a CORE key is a wrong-typed field, not a
+        // tombstone — the whole payload is dropped at the boundary.
+        expect(isE2SStateData({ ...valid, state: { ...valid.state, files_touched: null } })).toBe(false)
         expect(isE2SStateData({ ...valid, state: { ...valid.state, findings: [1, 2] } })).toBe(false)
         expect(isE2SStateData({ ...valid, state: { ...valid.state, decisions: null } })).toBe(false)
     })
@@ -390,6 +393,13 @@ describe('isE2SStateData', () => {
         expect(isE2SStateData({ ...minimal, max_turns, status })).toBe(true)
         expect(isE2SStateData({ ...valid, max_turns: '10' })).toBe(false)
         expect(isE2SStateData({ ...valid, status: 3 })).toBe(false)
+    })
+
+    it('accepts a numeric total_turns (present or absent) and rejects wrong types', () => {
+        expect(isE2SStateData({ ...valid, total_turns: 7 })).toBe(true)
+        expect(isE2SStateData({ ...valid, total_turns: undefined })).toBe(true)
+        expect(isE2SStateData({ ...valid, total_turns: '7' })).toBe(false)
+        expect(isE2SStateData({ ...valid, total_turns: null })).toBe(false)
     })
 
     it('rejects a wrong-typed patch flag', () => {

@@ -54,7 +54,7 @@ type Config struct {
 	// a growing transcript. The domain types and the validated merge operator
 	// live in core/e2s. The section is gated by experimental.enabled exactly
 	// like the Small-LLM profile: while the gate is off the section is
-	// ineffective (treated as disabled) regardless of its own master toggle.
+	// ineffective (treated as disabled).
 	E2S E2SConfig `yaml:"e2s"`
 
 	// Experimental gates features that are still under active development
@@ -1011,19 +1011,25 @@ type SmallLLMCompactionConfig struct {
 // gate is off the whole section is ineffective. Like the Small-LLM profile,
 // every knob is seeded with a default so tuning never requires a rebuild.
 type E2SConfig struct {
-	// MaxSteps caps the number of E2S turns (patch+action cycles) per run
-	// before the run fails as budget exhaustion. Default: 50.
+	// MaxSteps caps the number of E2S turns (patch+action cycles) per run.
+	// Exhaustion is NOT a failure: the run stops at a resumable step-limit
+	// checkpoint (Σ preserved; Resume continues with a fresh budget).
+	// Default: 50.
 	MaxSteps int `yaml:"max_steps"`
 
 	// StateByteLimit caps the JSON-encoded size of the working state Σ, in
 	// bytes. A patch whose merged Σ exceeds the limit is rejected as a
-	// validation error (bounded retry, then run failure). Default: 16384
-	// (mirrors core/e2s.DefaultStateByteLimit).
+	// validation error (bounded retry, then the error becomes the next
+	// observation and the run CONTINUES — Σ unchanged); the initial Σ
+	// itself is checked up front, so an oversized objective fails fast
+	// instead of wedging the run. Default: 16384 (mirrors
+	// core/e2s.DefaultStateByteLimit).
 	StateByteLimit int `yaml:"state_byte_limit"`
 
 	// PatchRetries is how many times a rejected state patch (validation
 	// error or over-limit Σ) may be re-requested from the model before the
-	// run fails. Default: 1.
+	// failure becomes an error observation (the run continues; Σ
+	// unchanged). Default: 1.
 	PatchRetries int `yaml:"patch_retries"`
 
 	// ObservationTruncate caps the tool observation fed back to the model per
@@ -1031,9 +1037,11 @@ type E2SConfig struct {
 	ObservationTruncate int `yaml:"observation_truncate"`
 
 	// RepeatNudgeThreshold is the number of consecutive identical step
-	// actions (same tool + same args) before a corrective nudge observation
-	// is injected instead of dispatching the redundant action again.
-	// Default: 3.
+	// actions (same tool + target anchor — the semantic fingerprint of
+	// ADR-040 §6: precision args like line ranges are ignored, while the
+	// content payloads of write_file/edit_file are part of the identity)
+	// before a corrective nudge observation is injected instead of
+	// dispatching the redundant action again. Default: 3.
 	RepeatNudgeThreshold int `yaml:"repeat_nudge_threshold"`
 
 	// RepeatAbortThreshold is the number of consecutive identical step

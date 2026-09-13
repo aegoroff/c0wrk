@@ -1,6 +1,6 @@
-// Package e2s implements the Environment-to-State (E2S) execution loop: a
-// self-contained alternative to agent.Executor that runs on raw sp4rk
-// primitives (llm.Caller + a tool registry + an event emitter).
+// The e2s_step meta-tool: the model's per-turn output envelope (the ONLY
+// tool it may call). See loop.go for the driver and types.go/merge.go for
+// the domain layer.
 //
 // Unlike the ReAct executor, which replays a growing message history, the E2S
 // loop keeps the model's context bounded at O(1): every step is a FRESH
@@ -11,6 +11,7 @@
 // validates and applies the patch, dispatches the action through the tool
 // registry (inheriting every security gate: group policies, judge, HITL
 // confirmation, verify-on-edit), and feeds the truncated result back as Oₜ₊₁.
+
 package e2s
 
 import (
@@ -21,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/v0lka/sp4rk/llm"
+	"github.com/v0lka/sp4rk/strutil"
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
 
@@ -232,23 +234,49 @@ func parseFinishAnswer(args json.RawMessage) (string, error) {
 }
 
 // truncateForError renders a short preview of raw JSON for error messages.
+// Rune-safe: byte slicing could split a multi-byte character (CJK, emoji,
+// typographic quotes are common in pasted arguments) and inject invalid
+// UTF-8 into the model-facing error text.
 func truncateForError(raw json.RawMessage) string {
-	const maxPreviewBytes = 120
-	if len(raw) <= maxPreviewBytes {
-		return string(raw)
-	}
-	return string(raw[:maxPreviewBytes]) + "…"
+	return strutil.TruncateUTF8(string(raw), 120)
 }
 
-// compactJSON removes insignificant whitespace so semantically identical
-// argument objects produce byte-identical strings (used by the anti-spin
-// fingerprint). Falls back to the raw string for malformed JSON.
+// compactJSON removes insignificant whitespace — a byte-level
+// normalization only: it does NOT reorder keys, so argument objects that
+// differ solely in key order render differently (and therefore fingerprint
+// differently on the no-anchor fallback path; canonicalArgs exists for
+// that). Falls back to the raw string for malformed JSON. Also used for the
+// args preview (cosmetic).
 func compactJSON(raw json.RawMessage) string {
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, raw); err != nil {
 		return string(raw)
 	}
 	return buf.String()
+}
+
+// canonicalArgs renders args as key-sorted JSON so semantically identical
+// argument objects produce byte-identical strings regardless of key order
+// (used by the anti-spin fingerprint's full-args fallback, making
+// {"a":1,"b":2} and {"b":2,"a":1} the same action).
+// Falls back to whitespace normalization for values the round-trip cannot
+// represent (it never fails for valid JSON).
+func canonicalArgs(raw json.RawMessage) string {
+	// UseNumber decodes numbers as json.Number, so a large integer literal is
+	// re-marshaled verbatim instead of through float64 (which would collapse
+	// two distinct integers beyond 2^53 into the same fingerprint). Marshaling
+	// a map sorts keys, giving the canonical order.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var obj any
+	if err := dec.Decode(&obj); err != nil {
+		return compactJSON(raw)
+	}
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return compactJSON(raw)
+	}
+	return string(data)
 }
 
 // ActionFingerprint returns a canonical string identifying the action for
@@ -259,22 +287,48 @@ func compactJSON(raw json.RawMessage) string {
 // arguments such as line ranges or limits. Re-reading the same file with
 // ever-shifting start_line/end_line (the classic small-model spin) produces
 // a stable fingerprint and is caught; reading different files or searching
-// different patterns does not. A tool exposing no anchor argument falls
-// back to the full compact args (the legacy exact behavior), and a batch
-// fingerprints per sub-call so a repeated identical batch still spins.
+// different patterns does not.
+//
+// Content-bearing arguments (content, old_string, new_string — the payloads
+// of write_file/edit_file) are folded into the fingerprint whenever present:
+// for a mutating tool the payload IS part of the operation's identity, so
+// three successive edits of the same file with different content are three
+// DISTINCT actions (no spin), while re-writing the same content to the same
+// path is a true repeat (spin). Without this, an anchor-only fingerprint
+// would count every consecutive edit of one file as an identical action and
+// silently drop the third edit at the nudge threshold (ADR-040 anti-spin
+// semantics). A tool exposing no anchor argument falls back to the full
+// canonical args (the legacy exact behavior), and a batch fingerprints per
+// sub-call so a repeated identical batch still spins.
 func ActionFingerprint(tool string, args json.RawMessage) string {
 	if tool == sdktools.ToolBatch {
 		return tool + ":" + batchAnchors(args)
 	}
+	return tool + ":" + actionAnchors(args)
+}
+
+// actionAnchors renders the per-action identity: the anchor key=value pairs
+// when any anchor key carries a string value, plus the content-bearing
+// arguments when present; the full canonical args otherwise.
+func actionAnchors(args json.RawMessage) string {
 	if anchors := argAnchors(args); anchors != "" {
-		return tool + ":" + anchors
+		if content := contentArgs(args); content != "" {
+			return anchors + "\x01" + content
+		}
+		return anchors
 	}
-	return tool + ":" + compactJSON(args)
+	return canonicalArgs(args)
 }
 
 // anchorArgKeys are the argument names treated as operation-target anchors.
 // Sorted for deterministic extraction.
 var anchorArgKeys = []string{"command", "hash", "name", "path", "pattern", "query", "skill", "url"}
+
+// contentArgKeys are the argument names whose values ARE the operation's
+// payload (what gets written), not just its target. They join the
+// fingerprint so that two mutating calls on the same target with different
+// payloads are distinct actions. Sorted for deterministic extraction.
+var contentArgKeys = []string{"content", "new_string", "old_string"}
 
 // argAnchors extracts the anchor key=value pairs from an args object
 // (string-valued anchors only), sorted by key. Empty string when no anchor
@@ -302,9 +356,36 @@ func argAnchors(args json.RawMessage) string {
 	return strings.Join(pairs, "\x00")
 }
 
+// contentArgs extracts the content-bearing key=value pairs from an args
+// object (string-valued only), sorted by key. Empty string when none of the
+// content keys is present with a string value.
+func contentArgs(args json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return ""
+	}
+	pairs := make([]string, 0, len(contentArgKeys))
+	for _, key := range contentArgKeys {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var val string
+		if err := json.Unmarshal(raw, &val); err != nil {
+			continue
+		}
+		pairs = append(pairs, key+"="+val)
+	}
+	if len(pairs) == 0 {
+		return ""
+	}
+	return strings.Join(pairs, "\x00")
+}
+
 // batchAnchors fingerprints a batch action per sub-call: each sub-call's
-// tool + anchors (or full args fallback), joined in order. A repeated
-// identical batch matches; any changed target breaks the match.
+// tool + anchors (plus content args, or the canonical-args fallback), joined
+// in order. A repeated identical batch matches; any changed target or
+// payload breaks the match.
 func batchAnchors(args json.RawMessage) string {
 	var input struct {
 		Calls []struct {
@@ -313,15 +394,11 @@ func batchAnchors(args json.RawMessage) string {
 		} `json:"calls"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil || len(input.Calls) == 0 {
-		return compactJSON(args)
+		return canonicalArgs(args)
 	}
 	parts := make([]string, 0, len(input.Calls))
 	for _, sub := range input.Calls {
-		if anchors := argAnchors(sub.Input); anchors != "" {
-			parts = append(parts, sub.Tool+"="+anchors)
-			continue
-		}
-		parts = append(parts, sub.Tool+"="+compactJSON(sub.Input))
+		parts = append(parts, sub.Tool+"="+actionAnchors(sub.Input))
 	}
 	return strings.Join(parts, "\x00")
 }

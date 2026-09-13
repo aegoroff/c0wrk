@@ -211,10 +211,13 @@ ONLY through this persisted restore — never by the fallback.
 
 ```
 User sends message
-  → Frontend: SendMessage(sessionId, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, reviewMode)
+  → Frontend: SendMessage(sessionId, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
   → Backend: FrontendAPI.SendMessage()
-      ├─ Live-send gate: validate pause window / goal / skill-agent refs
+      ├─ Live-send gate: validate pause window / goal / E2S / skill-agent refs
       │   BEFORE persisting (a rejected send never reaches the store)
+      ├─ E2S checks (before any side effect): e2s+goal rejected as mutually
+      │   exclusive (incl. a leading /goal command); e2s rejected fail-closed
+      │   while experimental.enabled is false
       ├─ Preprocess text for orchestrator:
       │   ├─ Strip /skill references from text
       │   └─ Convert @file references to fileref:// URIs (relative paths resolved to absolute against the session workspace)
@@ -224,7 +227,7 @@ User sends message
       │   ├─ WithWorkspacePath (project workspace)
       │   ├─ WithTempDir (session-specific temp directory)
       │   └─ WithCoherence (FileCoherenceTracker for cross-session conflict detection)
-      ├─ Determine opts: {TaskID, UserSkills, UserAgents, ModelOverride, ReasoningEffort, Goal, GoalBudgetOverride, ReviewMode}
+      ├─ Determine opts: {TaskID, UserSkills, UserAgents, ModelOverride, ReasoningEffort, Goal, GoalBudgetOverride, E2S, ReviewMode}
       │   ├─ First message: TaskID=""
       │   └─ Continuation: TaskID=lastCompletedTaskID
       ├─ Call orchestrator.HandleMessage(ctx, preprocessedText, sessionId, opts)
@@ -569,6 +572,8 @@ User types a message while a task runs → Send
   → Manager.SendMessage — live branch under session.mu (session.active):
       ├─ session.pausing → ErrPausePending (the pausing window)
       ├─ goal flag → reject (goal supersedes running work; needs idle)
+      ├─ e2s flag → reject (E2S mirrors goal: its Σ is seeded only at task
+      │   start, so it can never join a running task as an interjection)
       ├─ skills/agents refs → reject (they reshape task context at start)
       └─ otherwise → orchestrator.QueueLiveUserMessage(text);
           emit message_received; return nil (no task started)

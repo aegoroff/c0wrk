@@ -563,6 +563,10 @@ func (b *OrchestratorBuilder) Build(
 				FewShot:           cfg.SmallLLM.SystemPrompt.FewShot,
 				ReasoningScaffold: cfg.SmallLLM.SystemPrompt.ReasoningScaffold,
 			},
+			LoopHardening: SmallLLMLoopHardeningSettings{
+				Enabled:              cfg.SmallLLM.LoopHardening.Enabled,
+				RepeatNudgeThreshold: cfg.SmallLLM.LoopHardening.RepeatNudgeThreshold,
+			},
 		},
 	}
 

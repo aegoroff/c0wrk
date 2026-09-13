@@ -12,7 +12,7 @@
 | `Orchestrator`        | core           | core → backend | Per-session orchestration engine      |
 | `BuilderConfig`       | core           | backend → core | Configuration transfer object         |
 | `HandleResult`        | core           | core → backend | Orchestration output                  |
-| `HandleOptions`       | core           | backend → core | Model override, reasoning effort, user skill overrides, user agent refs (`#agent`), session plans dir, pending attachments (docs), pending images, review-mode flag, goal flag + budget override, task ID (continuation) |
+| `HandleOptions`       | core           | backend → core | Model override, reasoning effort, user skill overrides, user agent refs (`#agent`), session plans dir, pending attachments (docs), pending images, review-mode flag, goal flag + budget override, E2S flag, task ID (continuation) |
 | `Emitter`             | core           | backend → core | Event emission interface              |
 | `Blackboard`          | github.com/v0lka/sp4rk/orchestration (direct) | core → backend | Task state (for persistence)          |
 | `RoutingDecision`     | github.com/v0lka/sp4rk/agent/router | core → backend | Routing classification                |
@@ -119,6 +119,7 @@ The emitter implementation lives in `backend/session/` (not in core).
 | Review mode            | backend → core | `HandleOptions.ReviewMode` (renders Code Review prompt section) |
 | Goal mode              | backend → core | `HandleOptions.Goal` (dispatches to the goal loop) |
 | Goal budget override   | backend → core | `HandleOptions.GoalBudgetOverride`       |
+| E2S mode              | backend → core | `HandleOptions.E2S` (dispatches to the E2S explicit-state loop instead of the route→Conductor flow; mutually exclusive with `Goal`, rejected explicitly when both are set) |
 | Task ID (continuation) | backend → core | `HandleOptions.TaskID`                   |
 | Pending attachments    | backend → core | `HandleOptions.PendingAttachments` (user-attached documents converted to markdown via `core/markitdown`; flushed into the blackboard once before execution — see [../domains/session-lifecycle.md](../domains/session-lifecycle.md)) |
 | Pending image attachments | backend → core | `HandleOptions.PendingImages` (user-attached images, png/jpg/jpeg/gif/webp, as `[]llm.ContentBlock` base64 image blocks; injected into the context window as image content — NOT routed through the blackboard, which is markdown/text-only — see [../domains/session-lifecycle.md](../domains/session-lifecycle.md)) |

@@ -380,7 +380,7 @@ security:
       blacklist:
         # --- Destructive file/disk operations ---
         - 'rm\s+-rf\s+/'
-        - "mkfs"
+        - 'mkfs'
         - 'dd\s+if='
         # `dd of=` writing to a block or kernel-memory device destroys the disk
         # or escalates privileges (e.g. `dd of=/dev/sda bs=1M` with no if=, which
@@ -423,21 +423,22 @@ security:
         # adds objects and updates remote-tracking refs (additive /
         # non-destructive).
         #
-        # RE2 has no lookahead, so the precision below comes from three
+        # RE2 has no lookahead, so the precision below comes from four
         # techniques that replaced the old coarse `\bgit\s+(…)` wholesale
         # patterns:
         #
-        #  1. Command-position prefix P = (^|[\s;&|(\x60]) instead of \b.
-        #     \b also matched `git …` inside quoted strings that are DATA,
+        #  1. Command-position prefix P = (^|[\s;&|(\x60]|[/\\]) instead of
+        #     \b. \b also matched `git …` inside quoted strings that are DATA,
         #     not commands (`rg "git checkout"`, `echo 'git stash'`), so the
         #     old patterns hard-confirmed pure text. P demands genuine command
         #     position — start of input, or right after a separator (; & |),
-        #     a `$(` command substitution, a subshell `(`, a newline, or a
-        #     backtick — so `$(git push)`, `cd repo && git push` and
-        #     `xargs git rm` still block while quoted data no longer does.
-        #     Residual FP (heredoc): a `git <mutating>` line inside a heredoc
-        #     body still hard-confirms; accepted — it over-confirms, never
-        #     under-confirms.
+        #     a `$(` command substitution, a subshell `(`, a newline, a
+        #     backtick — or right after a path separator / backslash,
+        #     so path-qualified and escaped invocations (`/usr/bin/git rm x`,
+        #     `./git push`, `\git push`) block too. Residual FPs: a
+        #     `git <mutating>` line inside a heredoc body and git-mutating
+        #     text glued to a path token (`a/git push`) still hard-confirm;
+        #     accepted — they over-confirm, never under-confirm.
         #
         #  2. Inverted dual-mode patterns. Subcommands that also have
         #     read-only forms (branch, tag, stash, remote, config, reflog,
@@ -446,17 +447,40 @@ security:
         #     inverted to enumerate the MUTATING forms: a bare non-flag token
         #     (create target, pathspec, patch file, key+value pair), a
         #     short-flag cluster containing a mutating letter, or the
-        #     enumerated mutating long flags/subactions. Read-only forms
-        #     (branch -a/--show-current, tag -l, stash list/show, remote
-        #     -v/get-url, config <key> reads, reflog bare/show, apply
-        #     --check/--stat, clean -n/--dry-run, add -n, rm -n, submodule
-        #     status, worktree list, notes list, reset bare / reset HEAD
-        #     <path>, sparse-checkout list) stay unblocked. Subcommands
-        #     without a read-only form (mv, checkout, switch, restore, commit,
-        #     merge, rebase, revert, cherry-pick, clone, push, pull, init,
-        #     gc, ...) remain wholesale-blocked. Residual FPs: combined short
-        #     clusters (`git clean -dn`) and quiet index-only forms
-        #     (`git reset -q`).
+        #     enumerated mutating long flags/subactions. Flag-tolerance is
+        #     per-pattern, not universal: where a quiet/verbose flag cannot
+        #     hide a read the pattern carries a `(?:-[^\s-]*[qv]|--quiet|
+        #     --verbose)` prefix so the mutation still blocks (`git rm -q
+        #     foo.txt`, `git notes --ref=ns add -m x`, `git submodule -q
+        #     update`, `git apply -q p.diff`), while `reset`/`clean`/`stash`
+        #     absorb a leading flag through their own alternations (`git
+        #     reset -q --hard`, `git clean -q -f`, `git stash -q push`).
+        #     Operands before the mutating flag (`git reset HEAD --hard`,
+        #     `git clean . -f`) also block. A lone operand confirms whichever
+        #     it is (`git reset main` moves the branch pointer, `git reset
+        #     README.md` unstages one path — no regex separates them), while
+        #     the common index-only spellings (bare `git reset`, `git reset
+        #     HEAD <path>`) stay free. Read-only forms (branch
+        #     -a/--show-current, tag -l, stash list/show, remote -v/get-url,
+        #     config <key> reads, reflog bare/show, apply --check/--stat,
+        #     clean -n/--dry-run, add -n, rm -n/--dry-run, submodule status,
+        #     worktree list, notes list, reset bare / reset [--] HEAD <path>,
+        #     sparse-checkout list) stay unblocked. Subcommands without a
+        #     read-only form (mv, checkout, switch, restore, commit, merge,
+        #     rebase, revert, cherry-pick, clone, push, pull, init, gc, ...)
+        #     remain wholesale-blocked. Residual FPs: combined short clusters
+        #     mixing a mutating letter into a dry-run, or a mutating flag
+        #     before the `-n` (`git clean -dn`, `git clean -f -n`), quiet
+        #     index-only forms (`git reset -q`), and index-only unstages that
+        #     still match — a lone pathspec (`git reset README.md`), a
+        #     leading commit-ish operand with a pathspec
+        #     (`git reset origin/main README.md`) and bare `git reset HEAD`
+        #     (all recoverable by re-staging).
+        #     Residual FNs: `add`,
+        #     `branch` and `tag` have no quiet/verbose prefix rule, so
+        #     `git add -v f`, `git branch -q -D t` and `git tag -q -d v1`
+        #     stay unblocked (`tag`'s `-v` is verify — a read-only spelling
+        #     the generic prefix would false-positive).
         #
         #  3. FN plugs + a compensating interpreter wrapper. Wholesale
         #     coverage for plumbing that bypasses the porcelain (update-index/
@@ -466,51 +490,74 @@ security:
         #     an interpreter (`sh -c "git push"`, `bash -lc 'git …'`,
         #     `eval "git …"`) where the quote before `git` defeats the P
         #     prefix.
+        #  4. A global-option preamble G woven into every pattern head
+        #     (and both wrapper tails). Without it one global option
+        #     defeated every pattern at once (`git -C repo push`,
+        #     `git -c k=v commit`, `git --git-dir=.git reset --hard`).
+        #     G admits only genuine git(1) global options — the -c/-C and
+        #     -p/-P short switches, value-taking and standalone long flags,
+        #     with each flag's value a shell word so a quoted /
+        #     space-containing value stays bound to its flag (`git -C "my
+        #     repo" push`) — so reads keep flowing (`git -C repo status`,
+        #     `git -p log`).
         # working tree / index / staging — wholesale (no read-only form):
-        - '(^|[\s;&|(\x60])git\s+(mv|checkout|switch|restore)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(mv|checkout|switch|restore)\b'
         # index plumbing & mergetool — wholesale FN plugs (bypass the porcelain):
-        - '(^|[\s;&|(\x60])git\s+(update-index|read-tree|checkout-index|mergetool)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(update-index|read-tree|checkout-index|mergetool|difftool|hook)\b'
         # add — inverted: -n/--dry-run reads stay free; bare `git add` blocks too:
-        - '(^|[\s;&|(\x60])git\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[A-Za-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal)\b|--\s|[^\s;&|<>()\x60-]))'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[A-Za-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal|pathspec-from-file)\b|--\s|[^\s;&|<>()\x60-]))'
         # rm — inverted: -n/--dry-run reads stay free; bare `git rm` blocks too:
-        - '(^|[\s;&|(\x60])git\s+rm(\s*($|[;&|)\n])|\s+(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch)\b|--\s|[^\s;&|<>()\x60-]))'
-        # clean — inverted: -n/--dry-run reads stay free:
-        - '(^|[\s;&|(\x60])git\s+clean\s+(-[^\s-]*[dDfFxX]|--(force|directory)\b)'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+rm(\s*($|[;&|)\n])|\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch|pathspec-from-file)\b|--\s|[^\s;&|<>()\x60-]))'
+        # clean — inverted: -n/--dry-run reads stay free; the prefix before the mutating flag is matched token-by-token and none may be the dry-run -n:
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+clean\s+(?:(?:[^\s;&|()-][^\s;&|()]*|-[^\sn-][^\sn]*|--(?:exclude|quiet|verbose)\b(?:=[^\s;&|()]+|\s+[^\s;&|()]+)?)\s+)*(-[^\s-]*[dDfFxXiI]|--(force|directory|interactive)\b)'
         # stash — bare `git stash` (= push), any flag, and mutating subactions block:
-        - '(^|[\s;&|(\x60])git\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
         # apply — bare/in stdin and index/3way flags block; --check/--stat stay free:
-        - '(^|[\s;&|(\x60])git\s+apply(\s*($|[;&|)\n])|\s+(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|[^\s;&|()\x60-]))'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+apply(\s*($|[;&|)\n])|\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|--\s|[^\s;&|()\x60-]))'
         # history / commits / refs (incl. history rewrites) — wholesale:
-        - '(^|[\s;&|(\x60])git\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
-        # reset — inverted: bare / HEAD <path> stay free; flags and commit-ish block:
-        - '(^|[\s;&|(\x60])git\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch)\b|\S*[~^/])'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
+        # reset — inverted: bare / HEAD <path> stay free; mutating flags and any single operand block:
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch|quiet|interactive|pathspec-from-file)\b|\S*[~^/]|[^;&|()]*\s--(hard|soft|mixed|keep|merge|patch|quiet|interactive)\b|[^\s;&|<>()\x60-]+["''\x60]?\s*($|[;&|\n)]))'
         # config — inverted: <key> reads stay free; key+value writes and flags block:
-        - '(^|[\s;&|(\x60])git\s+config\s+(--[^\s]+\s+)*(--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+config\s+((?:--[^\s]+|--|-[fF]\s+\S+)\s+)*(-[eE]\b|--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
         # notes — mutating subactions only (list/show reads stay free):
-        - '(^|[\s;&|(\x60])git\s+notes\s+(add|append|copy|edit|prune|remove|merge)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+notes\s+((?:-[^\s-]*[qv]|--quiet|--verbose|--ref(=[^\s]+|\s+[^-\s]\S*)?)\s+)*(add|append|copy|edit|prune|remove|merge)\b'
         # reflog — mutating subactions only (bare/show reads stay free):
-        - '(^|[\s;&|(\x60])git\s+reflog\s+(expire|delete)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+reflog\s+(expire|delete)\b'
         # branch — inverted: listing flags stay free; bare names and create/delete block:
-        - '(^|[\s;&|(\x60])git\s+branch\s+(-[^\s-]*[dDmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|[^\s;&|<>()\x60-])'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+branch\s+(-[^\s-]*[dDfFmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|--\s|[^\s;&|<>()\x60-])'
         # tag — inverted: -l/-n listings stay free; bare names and create/delete block:
-        - '(^|[\s;&|(\x60])git\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|[^\s;&|<>()\x60-])'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|--\s|[^\s;&|<>()\x60-])'
         # remote — mutating subactions only (-v/show/get-url reads stay free):
-        - '(^|[\s;&|(\x60])git\s+remote\s+(add|remove|rm|rename|set-url|set-head|prune|update)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+remote\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b'
         # submodule — mutating subactions only (status/summary reads stay free):
-        - '(^|[\s;&|(\x60])git\s+submodule\s+(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+submodule\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs|foreach)\b'
         # worktree — mutating subactions only (list reads stay free):
-        - '(^|[\s;&|(\x60])git\s+worktree\s+(add|remove|prune|move|repair|lock|unlock)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+worktree\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|remove|prune|move|repair|lock|unlock)\b'
         # sparse-checkout — mutating subactions only (list reads stay free):
-        - '(^|[\s;&|(\x60])git\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
         # network / exfil (transmit patch data or spawn a repo-bound server) — wholesale:
-        - '(^|[\s;&|(\x60])git\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        # bundle create — the exfil twin of clone (whole repo to a file; verify/
+        # list-heads reads stay free):
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+bundle\s+create\b'
         # transport / server faces — wholesale FN plugs (bypass the push/fetch porcelain):
-        - '(^|[\s;&|(\x60])git\s+(send-pack|upload-pack|receive-pack|shell|http-backend)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(send-pack|upload-pack|receive-pack|shell|http-backend|upload-archive|http-push)\b'
         # repo lifecycle / maintenance — wholesale:
-        - '(^|[\s;&|(\x60])git\s+(init|gc|prune|maintenance)\b'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(init|gc|prune|maintenance|repack|pack-refs|pack-objects|update-server-info|multi-pack-index|for-each-repo|hash-object|write-tree|mktree|mktag|unpack-objects|index-pack|credential|rerere|backfill|p4|svn|lfs)\b'
+        # exfil-to-file flag forms — archive --output / format-patch -o:
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+archive\s+[^;&|()]*\s?(-o\S*|--output\S*)'
+        - '(^|[\s;&|(\x60]|[/\\])git(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+format-patch\s+[^;&|()]*\s?(-o\S*|--output\S*)'
         # compensating interpreter wrapper — a shell interpreter (`sh -c "git push"`,
         # `bash -lc 'git …'`, `eval "git …"`) hides `git` behind a quote, defeating P:
-        - '(?i)(^|[\s;&|(\x60])((sh|bash|zsh|dash|ksh|fish)(\s+-[a-z-]+)*\s+-[a-z]*c\b|\beval\b)[^;|\n]*git(\.exe)?\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|send-pack|upload-pack|receive-pack|shell|http-backend|init|gc|prune|maintenance|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)\s+-)'
+        # compensating interpreter wrappers — the unified main wrapper
+        # (every interpreter family incl. csh/tcsh/ash/ksh93/mksh/yash,
+        # value-tolerant option runs, c-anywhere clusters, cmd /c AND
+        # /k) plus the script-host wrapper (python -c / node -e / perl -e
+        # / ruby -e / php -r payloads and iex/Invoke-Expression, whose
+        # [^|\n]* tail may cross the `;` inside program text):
+        - '(?i)(^|[\s;&|(\x60]|[/\\])((sh|bash|zsh|dash|ksh|ksh93|mksh|yash|ash|csh|tcsh|fish)(\.exe)?(\s+-[a-z-]+(=[^\s]+|\s+[^-\s]\S*)?)*\s+-[a-z]*c[a-z]*\b|(powershell|pwsh)(\.exe)?(\s+-[a-z-]+(=[^\s]+|\s+[^-\s]\S*)?)*\s+-(command|c)\b|cmd(\.exe)?(\s+/[a-z:]+)*\s+/[ck]\b|\beval\b)[^;|\n]*git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|difftool|hook|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|bundle\s+create|send-pack|upload-pack|receive-pack|shell|http-backend|upload-archive|http-push|init|gc|prune|maintenance|repack|pack-refs|pack-objects|update-server-info|multi-pack-index|for-each-repo|hash-object|write-tree|mktree|mktag|unpack-objects|index-pack|credential|rerere|backfill|p4|svn|lfs|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)(\s+-|\s+[^\s;&|()<>\x60-]|["''\x60]?\s*($|[;&|\n)])))'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])((python3?|node|perl|ruby|php)(\.exe)?(\s+-[a-z-]+(=[^\s]+|\s+[^-\s]\S*)?)*\s+(-[cer]|--eval)\b|\b(iex|Invoke-Expression)\b)[^|\n]*git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|difftool|hook|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|bundle\s+create|send-pack|upload-pack|receive-pack|shell|http-backend|upload-archive|http-push|init|gc|prune|maintenance|repack|pack-refs|pack-objects|update-server-info|multi-pack-index|for-each-repo|hash-object|write-tree|mktree|mktag|unpack-objects|index-pack|credential|rerere|backfill|p4|svn|lfs|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)(\s+-|\s+[^\s;&|()<>\x60-]|["''\x60]?\s*($|[;&|\n)])))'
         # --- PowerShell specifics (case-insensitive cmdlets/aliases) ---
         # Remove-Item matches parameters by case-insensitive prefix
         # (-r/-rec/-recurse, -f/-fo/-force); RE2 has no lookaheads, so the
@@ -545,50 +592,55 @@ security:
         # ones (`sh -c`, `bash -lc`, `eval`) — because a PowerShell host still
         # spawns sh-style wrappers:
         # working tree / index / staging — wholesale:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(mv|checkout|switch|restore)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(mv|checkout|switch|restore)\b'
         # index plumbing & mergetool — wholesale FN plugs:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(update-index|read-tree|checkout-index|mergetool)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(update-index|read-tree|checkout-index|mergetool|difftool|hook)\b'
         # add — inverted: -n/--dry-run reads stay free; bare `git add` blocks too:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[a-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal)\b|--\s|[^\s;&|<>()\x60-]))'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+add(\s*($|[;&|)\n])|\s+(-[^\s-]*[a-mo-uw-z]|--(all|update|patch|interactive|force|edit|intent-to-add|chmod|renormalize|refresh|sparse|ignore-missing|ignore-removal|pathspec-from-file)\b|--\s|[^\s;&|<>()\x60-]))'
         # rm — inverted: -n/--dry-run reads stay free; bare `git rm` blocks too:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+rm(\s*($|[;&|)\n])|\s+(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch)\b|--\s|[^\s;&|<>()\x60-]))'
-        # clean — inverted: -n/--dry-run reads stay free:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+clean\s+(-[^\s-]*[dDfFxX]|--(force|directory)\b)'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+rm(\s*($|[;&|)\n])|\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(-[^\s-]*[frRF]|--(cached|force|recursive|ignore-unmatch|pathspec-from-file)\b|--\s|[^\s;&|<>()\x60-]))'
+        # clean — inverted: -n/--dry-run reads stay free; the prefix before the mutating flag is matched token-by-token and none may be the dry-run -n:
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+clean\s+(?:(?:[^\s;&|()-][^\s;&|()]*|-[^\sn-][^\sn]*|--(?:exclude|quiet|verbose)\b(?:=[^\s;&|()]+|\s+[^\s;&|()]+)?)\s+)*(-[^\s-]*[dDfFxXiI]|--(force|directory|interactive)\b)'
         # stash — bare `git stash` (= push), any flag, and mutating subactions block:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+stash(\s*($|[;&|)\n])|\s+(push|pop|apply|drop|clear|store|branch|create|save)\b|\s+-)'
         # apply — bare/in stdin and index/3way flags block; --check/--stat stay free:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+apply(\s*($|[;&|)\n])|\s+(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|[^\s;&|()\x60-]))'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+apply(\s*($|[;&|)\n])|\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(-[^\s-]*[3R]|--(cached|index|3way|reverse|whitespace|exclude|include|directory|recount|build-fake-ancestor|allow-empty|inaccurate-eof|unsafe-paths|binary)\b|--\s|[^\s;&|()\x60-]))'
         # history / commits / refs (incl. history rewrites) — wholesale:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
-        # reset — inverted: bare / HEAD <path> stay free; flags and commit-ish block:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch)\b|\S*[~^/])'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import)\b'
+        # reset — inverted: bare / HEAD <path> stay free; mutating flags and any single operand block:
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+reset\s+(-[^\s-]+|--(hard|soft|mixed|keep|merge|patch|quiet|interactive|pathspec-from-file)\b|\S*[~^/]|[^;&|()]*\s--(hard|soft|mixed|keep|merge|patch|quiet|interactive)\b|[^\s;&|<>()\x60-]+["''\x60]?\s*($|[;&|\n)]))'
         # config — inverted: <key> reads stay free; key+value writes and flags block:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+config\s+(--[^\s]+\s+)*(--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+config\s+((?:--[^\s]+|--|-[fF]\s+\S+)\s+)*(-[eE]\b|--(unset(-all)?|add|replace-all|rename-section|remove-section|edit)\b|[^-\s]\S*\s+\S)'
         # notes — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+notes\s+(add|append|copy|edit|prune|remove|merge)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+notes\s+((?:-[^\s-]*[qv]|--quiet|--verbose|--ref(=[^\s]+|\s+[^-\s]\S*)?)\s+)*(add|append|copy|edit|prune|remove|merge)\b'
         # reflog — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+reflog\s+(expire|delete)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+reflog\s+(expire|delete)\b'
         # branch — inverted: listing flags stay free; bare names and create/delete block:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+branch\s+(-[^\s-]*[dDmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|[^\s;&|<>()\x60-])'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+branch\s+(-[^\s-]*[dDfFmMcCtuU]|--(delete|move|copy|edit-description|set-upstream-to|unset-upstream|track|force|create-reflog)\b|--\s|[^\s;&|<>()\x60-])'
         # tag — inverted: -l/-n listings stay free; bare names and create/delete block:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|[^\s;&|<>()\x60-])'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+tag\s+(-[^\s-]*[aAdDfFmsSuU]|--(delete|force|annotate|sign|local-user|edit|create-reflog)\b|--\s|[^\s;&|<>()\x60-])'
         # remote — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+remote\s+(add|remove|rm|rename|set-url|set-head|prune|update)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+remote\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b'
         # submodule — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+submodule\s+(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+submodule\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|init|deinit|update|set-url|set-branch|sync|absorbgitdirs|foreach)\b'
         # worktree — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+worktree\s+(add|remove|prune|move|repair|lock|unlock)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+worktree\s+((?:-[^\s-]*[qv]|--quiet|--verbose)\s+)*(add|remove|prune|move|repair|lock|unlock)\b'
         # sparse-checkout — mutating subactions only:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+sparse-checkout\s+(set|add|reapply|disable|init|cone|no-cone)\b'
         # network / exfil — wholesale:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(clone|push|pull|send-email|imap-send|daemon|instaweb)\b'
+        # bundle create — the exfil twin of clone (whole repo to a file; verify/
+        # list-heads reads stay free):
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+bundle\s+create\b'
         # transport / server faces — wholesale FN plugs:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(send-pack|upload-pack|receive-pack|shell|http-backend)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(send-pack|upload-pack|receive-pack|shell|http-backend|upload-archive|http-push)\b'
         # repo lifecycle / maintenance — wholesale:
-        - '(?i)(^|[\s;&|(\x60])git(\.exe)?\s+(init|gc|prune|maintenance)\b'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+(init|gc|prune|maintenance|repack|pack-refs|pack-objects|update-server-info|multi-pack-index|for-each-repo|hash-object|write-tree|mktree|mktag|unpack-objects|index-pack|credential|rerere|backfill|p4|svn|lfs)\b'
+        # exfil-to-file flag forms — archive --output / format-patch -o:
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+archive\s+[^;&|()]*\s?(-o\S*|--output\S*)'
+        - '(?i)(^|[\s;&|(\x60]|[/\\])git(\.exe)?(?:\s+(?:-[cC](?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|-[pP]|--(?:git-dir|work-tree|namespace|exec-path|config-env|attr-source|list-cmds)(?:[=\s]*(?:"[^"]*"|''[^'']*''|\\[\s\S]|[^\s"''])+)?|--(?:bare|no-replace-objects|no-lazy-fetch|no-optional-locks|no-advice|paginate|no-pager|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs)\b))*\s+format-patch\s+[^;&|()]*\s?(-o\S*|--output\S*)'
         # compensating wrapper — keys on both the Windows and the POSIX
         # interpreter faces (a PowerShell host still spawns sh-style wrappers):
-        - '(?i)(^|[\s;&|(\x60])((sh|bash|zsh|dash|ksh|fish)(\s+-[a-z-]+)*\s+-[a-z]*c\b|(powershell|pwsh)(\.exe)?(\s+-[a-z-]+)*\s+-(command|c)\b|cmd(\.exe)?(\s+/[a-z-]+)*\s+/c\b|\beval\b)[^;|\n]*git(\.exe)?\s+(mv|checkout|switch|restore|update-index|read-tree|checkout-index|mergetool|commit|am|merge|rebase|revert|cherry-pick|replace|update-ref|symbolic-ref|bisect|filter-branch|filter-repo|fast-import|clone|push|pull|send-email|imap-send|daemon|instaweb|send-pack|upload-pack|receive-pack|shell|http-backend|init|gc|prune|maintenance|(reset|branch|tag|stash|remote|config|reflog|apply|clean|submodule|worktree|notes|add|rm|sparse-checkout)\s+-)'
     local_write:
       policy: "user_confirm"
     local_mcp:
@@ -1319,32 +1371,50 @@ orchestration:
 # schema (objective, checklist, files_touched, findings, decisions,
 # next_steps, done_criteria, status) that is validated on every merge; core
 # keys can be updated in place (same JSON type) but never deleted or
-# re-typed, and any other key is an add-only extension. A JSON null patch
-# value deletes a key (extension keys only). The domain types and the merge
-# operator live in core/e2s.
+# re-typed, and any other key is a MUTABLE extension — a value write
+# replaces the previous value in place (cursors and phase markers update
+# under stable names), and a JSON null patch value deletes the key
+# (extension keys only; null against a core key is rejected). The merged
+# state is size-capped (state_byte_limit below). The domain types and the
+# merge operator live in core/e2s.
 #
 # GATED: the entire section is ineffective, and the per-message E2S toggle is
 # hidden, while experimental.enabled is false. There is no separate e2s master
 # toggle — the experimental switch is the mode's only gate.
 #
 # e2s:
-#   # Maximum number of E2S turns (patch+action cycles) per run before the
-#   # run fails as budget exhaustion. Default: 50.
+#   # Maximum number of E2S turns (patch+action cycles) per run. Exhaustion
+#   # is a RESUMABLE checkpoint, not a failure: the task ends with partial
+#   # status and Σ preserved; Resume re-enters the loop with the accumulated
+#   # Σ and a fresh turn budget. Default: 50.
 #   max_steps: 50
 #   # Hard cap on the JSON-encoded size of the working state Σ, in bytes.
 #   # A patch whose merged state exceeds the cap is rejected as a
-#   # validation error (the model may retry). Default: 16384.
+#   # validation error (the model may retry); after the retries the error
+#   # becomes the next observation and the run CONTINUES with Σ unchanged.
+#   # The initial Σ is also checked up front, so an oversized objective
+#   # fails fast instead of wedging every turn. Default: 16384.
 #   state_byte_limit: 16384
-#   # How many times a rejected state patch may be re-requested from the
-#   # model before the run fails. Default: 1.
+#   # How many times a rejected state patch (validation error or over-limit
+#   # Σ) may be re-requested from the model before the failure becomes an
+#   # error observation (the run continues with Σ unchanged). Default: 1.
 #   patch_retries: 1
 #   # Cap on the tool observation fed back to the model each turn, in
-#   # characters (longer observations are truncated). Default: 2000.
+#   # characters (longer observations are truncated; the full content is
+#   # cached and the truncation nudge lets the model page through it via
+#   # tool_result_read). Default: 2000.
 #   observation_truncate: 2000
-#   # Anti-spin: consecutive identical step actions (same tool + same args)
-#   # before a corrective nudge observation is injected instead of
-#   # dispatching the redundant action again. Default: 3.
+#   # Anti-spin: consecutive semantically identical step actions before a
+#   # corrective nudge observation is injected instead of dispatching the
+#   # redundant action again. The fingerprint is SEMANTIC — tool + the
+#   # target-anchor args (path, pattern, command, query, url, name, skill,
+#   # hash) plus the content payloads of write_file/edit_file
+#   # (content/old_string/new_string); precision args such as line ranges
+#   # and limits are ignored, so re-reading one file with shifting ranges
+#   # still spins while successive different edits of one file do not;
+#   # batch fingerprints per sub-call. Default: 3.
 #   repeat_nudge_threshold: 3
-#   # Anti-spin: consecutive identical step actions before the run is
-#   # aborted as a spin. Must be >= the nudge threshold. Default: 5.
+#   # Anti-spin: consecutive semantically identical step actions before the
+#   # run is aborted as a spin. Must be >= the nudge threshold so the model
+#   # always gets at least one nudge first. Default: 5.
 #   repeat_abort_threshold: 5

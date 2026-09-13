@@ -2035,11 +2035,21 @@ type conductorPublisher struct {
 func (p *conductorPublisher) Publish(ctx context.Context, tasks []tools.PlanTaskInput) (string, error) {
 	plan := &orchestration.Plan{}
 	for _, t := range tasks {
+		// Normalize ids/dependencies exactly as validatePlanTasks matched
+		// them (TrimSpace): a padded id or depends_on entry that passed
+		// validation would otherwise be published verbatim and never match
+		// the registered step id at execution time.
+		deps := make([]string, 0, len(t.DependsOn))
+		for _, d := range t.DependsOn {
+			if trimmed := strings.TrimSpace(d); trimmed != "" {
+				deps = append(deps, trimmed)
+			}
+		}
 		plan.Steps = append(plan.Steps, orchestration.PlanStep{
-			ID:          t.ID,
+			ID:          strings.TrimSpace(t.ID),
 			Summary:     t.Summary,
 			Description: t.Description,
-			DependsOn:   append([]string(nil), t.DependsOn...),
+			DependsOn:   deps,
 			Agent:       t.Agent,
 		})
 	}

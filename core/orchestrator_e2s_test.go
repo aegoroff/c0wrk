@@ -52,11 +52,20 @@ type mockDelegationLauncher struct {
 	out    []tools.DelegationResult
 }
 
-func (m *mockDelegationLauncher) Launch(_ context.Context, tasks []tools.DelegationTask, _ *tools.DelegationRegistry) []tools.DelegationResult {
+func (m *mockDelegationLauncher) Launch(_ context.Context, tasks []tools.DelegationTask, registry *tools.DelegationRegistry) []tools.DelegationResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.launch++
 	m.tasks = append(m.tasks, tasks...)
+	// Mirror the real launcher's blocking-delegation bookkeeping: a
+	// delegation whose result is returned synchronously is marked completed
+	// in the registry, so the E2S finish-join guard (ListPending) does not
+	// veto a later finish over already-settled work.
+	for _, res := range m.out {
+		if res.Status == tools.DelegationStatusCompleted && registry != nil {
+			registry.Complete(res.ID, res.Output, nil, nil)
+		}
+	}
 	return m.out
 }
 
@@ -636,6 +645,94 @@ func TestRunE2SLoop_PausePersistsSigmaAndResumeContinues(t *testing.T) {
 	})
 }
 
+// TestRunE2SLoop_ResumeWithImagesKeepsSigmaReachable pins the image-resume
+// regression: an image-bearing E2S task resumed must restore its images via
+// IMAGE-ONLY content blocks. The loop sends Σ + the observation as the user
+// message's Content and relies on the provider prepending Content as a text
+// block when the blocks carry no text; a text block in the list would make
+// llm.NormalizeContentBlocks return the blocks unchanged, so the provider
+// would render the blocks INSTEAD of Content and silently drop the model's
+// entire memory on every resumed turn.
+func TestRunE2SLoop_ResumeWithImagesKeepsSigmaReachable(t *testing.T) {
+	store := newE2SCheckpointStore()
+
+	const request = "work on the screenshot until paused"
+	var resumedMsg llm.Message
+	var o *Orchestrator
+	var mockLLM *mockLLMCaller
+	mockLLM = &mockLLMCaller{
+		callFn: func(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+			mockLLM.mu.Lock()
+			n := len(mockLLM.calls)
+			mockLLM.mu.Unlock()
+			switch n {
+			case 1:
+				o.PauseSession()
+				return e2sStepResponse("e2s-img1",
+					fmt.Sprintf(`{"findings": [%q]}`, e2sSigmaMarker),
+					"bash_exec", `{"command":"echo hi"}`), nil
+			default:
+				if len(req.Messages) > 0 {
+					resumedMsg = req.Messages[len(req.Messages)-1]
+				}
+				return e2sFinishResponse("e2s-img2", "done"), nil
+			}
+		},
+	}
+
+	o = newE2STestOrchestrator(mockLLM, createTestRegistry(), &spyEmitter{}, store)
+	// The restored history carries the ORIGINAL request with image content
+	// blocks (what convertChatMessagesToLLM rebuilds for a vision task).
+	o.SetConversationHistory([]llm.Message{{
+		Role:    "user",
+		Content: request,
+		ContentBlocks: []llm.ContentBlock{
+			{Type: "text", Text: request},
+			{Type: "image", ImageB64: "aGVsbG8=", MediaType: "image/png"},
+		},
+	}})
+
+	paused, err := o.HandleMessage(context.Background(), request, "session-e2s-img-resume", HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if paused.Status != orchestration.ExecutionStatusPaused {
+		t.Fatalf("HandleResult.Status = %q, want paused", paused.Status)
+	}
+
+	if _, err := o.Resume(context.Background(), paused.Blackboard, nil, "", nil, nil, ""); err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if resumedMsg.Role != "user" {
+		t.Fatalf("no resumed user message captured (last role = %q)", resumedMsg.Role)
+	}
+	// The image must have been restored...
+	hasImage := false
+	for _, blk := range resumedMsg.ContentBlocks {
+		if blk.Type == "image" {
+			hasImage = true
+		}
+		if blk.Type == "text" {
+			t.Errorf("resumed user message carries a text content block %+v — the provider renders blocks instead of Content, dropping Σ + the observation", blk)
+		}
+	}
+	if !hasImage {
+		t.Fatalf("resumed user message lost the image content blocks: %+v", resumedMsg.ContentBlocks)
+	}
+	// ...and normalizing must still surface Σ as the effective text block, so
+	// the model's memory reaches the provider.
+	var sb strings.Builder
+	for _, blk := range llm.NormalizeContentBlocks(resumedMsg) {
+		if blk.Type == "text" {
+			sb.WriteString(blk.Text)
+		}
+	}
+	if effectiveText := sb.String(); !strings.Contains(effectiveText, e2sSigmaMarker) {
+		t.Errorf("normalized resumed user message does not carry the persisted Σ finding %q — the model's memory was dropped:\n%q", e2sSigmaMarker, effectiveText)
+	}
+}
+
 // TestE2SResumeNote_InformsBudgetRefresh pins the plain-resume note: without
 // a user nudge the model is still told the budget was refreshed and Σ is the
 // continuation point (a resumed run's [turn N of M] counts the NEW budget).
@@ -647,5 +744,130 @@ func TestE2SResumeNote_InformsBudgetRefresh(t *testing.T) {
 	nudged := e2sResumeNote("please also check tests")
 	if !strings.Contains(nudged, "please also check tests") || !strings.Contains(nudged, "budget was also refreshed") {
 		t.Errorf("nudged resume note must carry the follow-up and the budget note: %q", nudged)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Review-fix regressions: UserAgents directive, spin_stop output
+// ----------------------------------------------------------------------------
+
+// TestRunE2SLoop_UserAgentsRenderRequestedSection pins #agent-mention
+// parity: an explicit UserAgents request must reach the E2S system prompt as
+// the same mandatory "## Requested Subagents" directive the Conductor
+// renders, instead of being silently dropped by the E2S early return.
+func TestRunE2SLoop_UserAgentsRenderRequestedSection(t *testing.T) {
+	var systemPrompt string
+	var mockLLM *mockLLMCaller
+	mockLLM = &mockLLMCaller{
+		callFn: func(_ context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
+			mockLLM.mu.Lock()
+			n := len(mockLLM.calls)
+			mockLLM.mu.Unlock()
+			if n == 1 && len(req.Messages) > 0 && req.Messages[0].Role == "system" {
+				systemPrompt = req.Messages[0].Content
+			}
+			return e2sFinishResponse("e2s-f1", "done"), nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistryWithDelegate(t), &spyEmitter{}, nil)
+	if _, err := o.HandleMessage(context.Background(), "review the auth module", "session-e2s-agents",
+		HandleOptions{E2S: true, UserAgents: []string{"code-reviewer"}}); err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if !strings.Contains(systemPrompt, "## Requested Subagents") {
+		t.Errorf("E2S system prompt missing the Requested Subagents section:\n%s", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "code-reviewer") {
+		t.Errorf("E2S system prompt missing the requested agent name:\n%s", systemPrompt)
+	}
+}
+
+// TestRunE2SLoop_SpinStopOutputNotUserEcho pins the empty-answer termination
+// contract: a run aborted by the anti-spin detector must surface an explicit
+// honest outcome, never the user's own message echoed as the final answer.
+func TestRunE2SLoop_SpinStopOutputNotUserEcho(t *testing.T) {
+	spinArgs := `{"path":"same.txt"}`
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			// The same anchored action forever: nudge at 3, abort at 5.
+			return e2sStepResponse("e2s-s1", `{}`, "read_file", spinArgs), nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistryWithDelegate(t), &spyEmitter{}, nil)
+	result, err := o.HandleMessage(context.Background(), "read same.txt forever", "session-e2s-spin",
+		HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil HandleResult")
+	}
+	if result.Output == "read same.txt forever" {
+		t.Fatal("spin_stop output echoes the user message — the frontend would render the user's own words as the assistant answer")
+	}
+	if !strings.Contains(result.Output, "anti-spin") {
+		t.Errorf("spin_stop output should name the anti-spin abort:\n%s", result.Output)
+	}
+}
+
+// TestRunE2SLoop_SmallLLMNudgeOverrideCannotBypassOrdering pins the guard on
+// the profile path: a Small-LLM loop-hardening repeat-nudge override at or
+// above the configured E2S abort threshold is ignored, falling back to the
+// validated nudge. Without the guard the override (9 >= abort 5) would make
+// Config.withDefaults silently raise the effective abort to nudge+1 (10),
+// diverging from the configured repeat_abort_threshold — the same silent
+// divergence the e2s config validation rejects up front.
+func TestRunE2SLoop_SmallLLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
+	spinArgs := `{"path":"same.txt"}`
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return e2sStepResponse("e2s-sl1", `{}`, "read_file", spinArgs), nil
+		},
+	}
+	emitter := &spyEmitter{}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistryWithDelegate(t), emitter, nil)
+	o.config.E2S.RepeatNudgeThreshold = 3
+	o.config.E2S.RepeatAbortThreshold = 5
+	// A misconfigured profile override: request a nudge at 9, at/above the
+	// abort threshold — it must be ignored rather than diverge.
+	o.config.SmallLLM = SmallLLMSettings{
+		Enabled:       true,
+		LoopHardening: SmallLLMLoopHardeningSettings{Enabled: true, RepeatNudgeThreshold: 9},
+	}
+
+	result, err := o.HandleMessage(context.Background(), "read same.txt forever", "session-e2s-sl", HandleOptions{E2S: true})
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil HandleResult")
+	}
+
+	nudged, aborted := false, false
+	firstNudge := 0
+	for _, c := range emitter.calls {
+		if c.method != "ExecutorDiagnostic" || len(c.args) < 3 {
+			continue
+		}
+		kind, _ := c.args[1].(string)
+		switch kind {
+		case "spin_nudge":
+			if !nudged {
+				nudged = true
+				if m, ok := c.args[2].(map[string]any); ok {
+					firstNudge, _ = m["repeat_count"].(int)
+				}
+			}
+		case "spin_stop":
+			aborted = true
+		}
+	}
+	if !nudged {
+		t.Error("no spin_nudge was emitted — the Small-LLM override (9 >= abort 5) fired the abort first, bypassing the validated ordering")
+	} else if firstNudge != 3 {
+		t.Errorf("first spin_nudge at repeat_count %d, want 3 (the validated nudge, not the ignored 9 override)", firstNudge)
+	}
+	if !aborted {
+		t.Error("run did not abort with spin_stop")
 	}
 }

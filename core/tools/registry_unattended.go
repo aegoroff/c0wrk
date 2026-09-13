@@ -45,8 +45,11 @@ func (r *ToolRegistry) ExecuteUnattended(ctx context.Context, name string, input
 
 	// Gate 1: structural input validation — the SDK's general validator
 	// (sdktools.ValidateToolInput), same as Execute: required keys, JSON
-	// types, unknown keys, recursively into nested objects and array items,
-	// with fail-open semantics on unmodeled schema constructs.
+	// types, unknown keys, recursively into nested objects and array items.
+	// Fail-open ONLY on unmodeled constructs (empty schemas, $ref subtrees,
+	// levels without a declared property set); a level with a declared
+	// property set is closed, so tolerated-by-the-tool payloads (extra keys,
+	// off-type values) are rejected here before dispatch — same as Execute.
 	if verr := sdktools.ValidateToolInput(name, tool.InputSchema(), input); verr != nil {
 		return sdktools.ErrorResult("%s", verr), nil
 	}
