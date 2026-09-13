@@ -1,4 +1,4 @@
-package smallllm
+package slm
 
 import (
 	sdktools "github.com/v0lka/sp4rk/tools"

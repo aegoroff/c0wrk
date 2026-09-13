@@ -1052,8 +1052,10 @@ orchestration:
 # ---------------------------------------------------------------------------
 # Master switch for features that are still under active development. It is
 # all-or-nothing: enabling it exposes every gated feature, disabling it hides
-# every gated feature and treats each as off. Gated features today:
-#   - the Small-LLM profile settings tab (small_llm.*)
+# every gated feature and treats each as off. Disabling it also clears the
+# persisted Small-LLM master toggle (slm.enabled), so re-enabling the gate
+# never silently reactivates the profile. Gated features today:
+#   - the Small-LLM profile settings tab (slm.*)
 #   - the E2S explicit-state execution mode (e2s.*)
 #
 # experimental:
@@ -1125,196 +1127,38 @@ orchestration:
 #   auto_fetch_interval: "2m"
 
 # ---------------------------------------------------------------------------
-# Small-LLM Profile
+# Small-LLM Profile (slm)
 # ---------------------------------------------------------------------------
-# Optimizations applied when running on a "small" (low-capacity / cheaper) LLM.
-# The master toggle is MANUAL ONLY — there is no auto-detection; you decide
-# when to enable the profile. Each variant carries its own sub-toggle so a
-# single optimization can be turned off without disabling the whole profile,
-# and every threshold/value is exposed so behaviour can be tuned without a
-# rebuild.
+# Optimizations applied when running on a "small" (low-capacity / cheaper)
+# LLM. Only TWO durable choices live in this section: the MANUAL-ONLY master
+# toggle (no auto-detection; normally flipped from the Settings UI) and the
+# active profile id. The 25 variant knobs
+# (essential_tools, system_prompt, sampling, loop_hardening, context) are
+# NOT stored in this file anymore — they come from the ACTIVE PROFILE,
+# resolved at runtime:
 #
-# small_llm:
+#   - predefined profiles are compiled into the app: qwen3.8-27b,
+#     qwen3.6-35b-a3b, gemma-4-26b-a4b-it, gemma-4-31b-it, and the
+#     model-agnostic "generic" (read-only in the UI);
+#   - custom profiles are created/edited in the Settings UI and persisted to
+#     ~/.c0wrk/slm-profiles.yaml (create-from-base, edit values and name,
+#     delete; predefined profiles are read-only).
+#
+# A slm.active_profile that no longer resolves (e.g. a custom profile
+# deleted by hand) falls back to "generic" with a load warning — it never
+# breaks the run. A LEGACY inline `small_llm:` section from an older
+# config.yaml is ignored at load and dropped by the next save (its knob
+# values do not migrate; the active profile's values apply instead).
+#
+# slm:
 #   # Master toggle. When false every variant is ignored. Default: false.
+#   # Normally flipped from Settings → Small LLM (RPC SetSLMEnabled), which
+#   # writes this key — there is no need to edit the file. Enabling requires
+#   # the experimental gate (experimental.enabled); closing that gate resets
+#   # this value to false.
 #   enabled: false
-#
-#   # --- Essential Tools -----------------------------------------------------
-#   # Narrows the visible tool set for the model via a static selection.
-#   # When active, the assigned set is a static union: the operator's
-#   # always-present picks below, the protected orchestration base
-#   # (finish, memory, ask_user), every connected MCP server's tools, and
-#   # any turn-scoped guarantees — emitted in registry order. There is no
-#   # router matching and no slot budget: nothing in the set is ever
-#   # trimmed, so a partially-exposed MCP server never happens.
-#   essential_tools:
-#     # Gates this variant in addition to the master `enabled` toggle above
-#     # (selection is applied only when both are on).
-#     enabled: false
-#     # Tools always kept in the assigned set. Protected tools (finish,
-#     # memory, ask_user) and every MCP tool are always included as well and
-#     # cannot be removed.
-#     always_present:
-#       - read_file
-#       - write_file
-#       - edit_file
-#       - list_directory
-#       - glob
-#       - ripgrep
-#       - bash_exec
-#       - semantic_search
-#       - store_fact
-#       - search_facts
-#       - ask_user
-#       - finish
-#     # Replace every known builtin's full description (rubric:
-#     # purpose/when-to-use/inputs/outputs/example/anti-example, 480-1100
-#     # chars) with a one-line compact variant while this variant is active —
-#     # saves prompt tokens on small models. Off by default: when off,
-#     # descriptions are byte-identical to the non-small-LLM behavior.
-#     # Unknown tools (e.g. MCP) always keep their original descriptions.
-#     compact_descriptions: false
-#
-#   # --- System Prompt Simplification ---------------------------------------
-#   # Applies prompt-simplification variants to shrink the system prompt. Each
-#   # flag is independent; few_shot and reasoning_scaffold only take effect
-#   # when lite is on (both are tailored to the compact lite directive).
-#   system_prompt:
-#     # Trims verbose guidance from the base system prompt, swapping the verbose
-#     # OrchestratorSystem directive for the compact OrchestratorSystemLite.
-#     lite: false
-#     # Appends curated worked-example ReAct cycles (correct tool-call format,
-#     # tool choice, error recovery, finish). Only applied when lite is on.
-#     few_shot: false
-#     # Appends a lightweight three-step reasoning scaffold (goal → tool+why
-#     # → args). Only applied when lite is on.
-#     reasoning_scaffold: false
-#
-#   # --- Sampling Overrides --------------------------------------------------
-#   # Overrides LLM sampling parameters for more deterministic, lower-effort
-#   # generation suitable for smaller models.
-#   sampling:
-#     # Gates this variant.
-#     enabled: false
-#     # Every sampling numeric parameter uses "inherit by default": an unset
-#     # (zero) value keeps the per-family vendor preset instead of replacing
-#     # it with a constant. Only explicitly set parameters override the
-#     # preset. The one exception is reasoning_effort (see below), which
-#     # seeds "medium" — so enabling this variant with no explicit values
-#     # lowers the reasoning depth from the inherited vendor default
-#     # (xhigh on qwen thinking models) to medium.
-#     # Mode-mismatch caveat: the inherited qwen preset is the official
-#     # thinking-mode recipe (temperature 1.0 / top_p 0.95 / top_k 20), and
-#     # the preset is family-keyed with no per-mode signal. If this variant
-#     # turns thinking off (reasoning_effort: "off"), the inherited numeric
-#     # preset still remains the thinking recipe — for instruct-style
-#     # (non-thinking) operation set the values explicitly: temperature 0.7,
-#     # top_p 0.80, top_k 20 and presence_penalty 1.5 (the official instruct
-#     # recipe). Rationale: docs/small-llm-defaults-research.md (R2).
-#     # Generation temperature (lower = more deterministic). When set, must
-#     # be > 0. Default: inherit the vendor preset.
-#     temperature: 0
-#     # Nucleus-sampling probability mass. When set, must be in (0, 1].
-#     # Default: inherit the vendor preset.
-#     top_p: 0
-#     # Top-k sampling. When set, must be >= 1. Only sent to providers that
-#     # support it (Anthropic, Google, LM Studio/vLLM-style endpoints).
-#     # Default: inherit the vendor preset.
-#     top_k: 0
-#     # Repetition penalty. When set, must be in [1, 2]. Only sent to
-#     # providers that support it (LM Studio/vLLM-style endpoints).
-#     # Default: inherit the vendor preset.
-#     repetition_penalty: 0
-#     # Presence penalty (OpenAI-schema anti-repetition lever). When set,
-#     # must be in [0, 2] — the Qwen card sanctions 0–2 (instruct default
-#     # 1.5); values above 2 increase language mixing. Unlike
-#     # repetition_penalty this is part of the official OpenAI Chat
-#     # Completions schema, so it is sent to every OpenAI-compatible
-#     # endpoint when set (including strict api.openai.com); the Anthropic
-#     # and Google providers do not serialize it.
-#     # Default: inherit the vendor preset (field not sent).
-#     presence_penalty: 0
-#     # Reasoning depth: "off" | "low" | "medium". Default: "medium" when
-#     # unset — an empty/absent value inherits the model's own default,
-#     # which for qwen thinking models is "xhigh": measured overthinking on
-#     # trivial tasks (22,276 reasoning tokens / 21 min for a simple SVG vs
-#     # 3,715 tokens / 137 s with thinking off). "medium" is the model's
-#     # native pre-training regime — no effort instruction is injected —
-#     # and cuts thinking-token spend 60–90%. Prefer it over "low" for
-#     # agentic work: Qwen warns that reduced effort can *increase* total
-#     # time in multi-turn agent tasks via failures and retries. Explicit
-#     # values here are never overwritten by the default; "" is the
-#     # documented "unset" sentinel and resolves to "medium" — disable this
-#     # variant to inherit the vendor xhigh default instead.
-#     # Rationale: docs/small-llm-defaults-research.md (R3).
-#     reasoning_effort: medium
-#
-#   # --- Loop Hardening ------------------------------------------------------
-#   # Tightens the executor circuit-breaker thresholds so a small model that
-#   # repeats itself or makes no progress is nudged/aborted sooner, conserving
-#   # the token budget. These are tighter than the baseline
-#   # executor.circuitBreaker values.
-#   loop_hardening:
-#     # Gates this variant.
-#     enabled: false
-#     # Consecutive identical tool calls before a corrective nudge.
-#     # Default: 2.
-#     repeat_nudge_threshold: 2
-#     # Consecutive response parse errors before the executor aborts.
-#     # Default: 3.
-#     parse_error_abort_threshold: 3
-#     # Consecutive minimal-result tool calls before a corrective nudge.
-#     # Default: 3.
-#     fruitless_nudge_threshold: 3
-#     # Consecutive minimal-result tool calls before the executor aborts.
-#     # Default: 5.
-#     fruitless_abort_threshold: 5
-#     # Same-tool (varied args, similar results) calls before a corrective
-#     # nudge. Default: 4.
-#     same_tool_repeat_nudge_threshold: 4
-#
-#   # --- Context Management --------------------------------------------------
-#   # Aggressive context management for small context windows: tightens
-#   # compaction, prunes older tool outputs harder, and reserves headroom for
-#   # the model's own answer. Every value here is tighter than the general
-#   # executor/compaction defaults (keep_last 10, block_size 7, trigger 85%,
-#   # tool keep_last 3) — except the reserve, which is deliberately LARGER
-#   # than the general executor default (8192); see output_token_reserve
-#   # below for why.
-#   context:
-#     # Gates this variant in addition to the master `enabled` toggle above
-#     # (overrides are applied only when both are on).
-#     enabled: false
-#     # Compaction overrides (context.compaction keeps the general
-#     # keep_last/block_size/trigger_percent semantics, with tighter values).
-#     compaction:
-#       # Messages kept verbatim at the conversation tail during compaction.
-#       # Default: 6 (vs 10 general).
-#       keep_last: 6
-#       # Batch size for pruning per compaction round. Default: 5 (vs 7).
-#       block_size: 5
-#       # Percentage of the context window at which compaction triggers.
-#       # Default: 80 (vs 85).
-#       trigger_percent: 80
-#     # Tool outputs: keep only the N most recent outputs verbatim; older ones
-#     # are pruned harder than the general keep_last 3. Default: 2. Must be
-#     # >= 1 when the variant is enabled.
-#     tool_output_keep_last_n: 2
-#     # Output reserve for the router's pre-submission context-window
-#     # validation: it overrides executor.output_token_reserve while this
-#     # variant is on and is consulted ONLY as the fallback when a model's
-#     # resolved metadata carries no OutputLimit (the registry resolves a
-#     # catalog, probe-cache, or 32768 static value for every model, so
-#     # this is effectively unreachable). This knob does NOT change the
-#     # per-request MaxTokens generation ceiling: the ceiling is the
-#     # model's resolved OutputLimit — raise llm.models.<model>.
-#     # output_limit (or the per-provider llm.<provider>.
-#     # output_token_reserve) when a thinking model's catalog ceiling
-#     # (e.g. 8192) truncates reasoning + answer (thinking tokens are
-#     # spent before content; measured ~3.7K–22.3K per turn).
-#     # Default: 16384 (thinking-aware fallback headroom vs the general
-#     # executor default 8192).
-#     # Must be >= 1 when the variant is enabled.
-#     output_token_reserve: 16384
+#   # Active profile id. Default: "generic".
+#   active_profile: generic
 
 # ---------------------------------------------------------------------------
 # Goal — budget model.

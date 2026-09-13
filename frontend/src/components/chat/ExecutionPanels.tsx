@@ -45,9 +45,9 @@ function SessionStatsRow({ sessionId }: { sessionId: string }) {
       <span>invalid calls: {m.invalid_tool_calls}</span>
       <span>nudges: {countersSummary(m.nudges)}</span>
       <span>aborts: {countersSummary(m.aborts)}</span>
-      {m.small_llm.enabled && (
+      {m.slm.enabled && (
         <span className="text-warning">
-          small-llm: {m.small_llm.variants.length > 0 ? m.small_llm.variants.join(', ') : 'on'}
+          small-llm: {m.slm.variants.length > 0 ? m.slm.variants.join(', ') : 'on'}
         </span>
       )}
     </div>

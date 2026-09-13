@@ -30,12 +30,12 @@ var defaultAgentDirs = []string{
 	"~/.c0wrk/.agents/agents",
 }
 
-// defaultSmallLLMAlwaysPresent is the default always-present tool allow-list
+// defaultSLMAlwaysPresent is the default always-present tool allow-list
 // exposed when the small-LLM essential-tools variant is active. It balances a
 // minimal schema footprint against enough capability to navigate, edit,
 // search, and finalize tasks. MCP-backed tools are layered on separately at
 // runtime.
-var defaultSmallLLMAlwaysPresent = []string{
+var defaultSLMAlwaysPresent = []string{
 	"read_file",
 	"write_file",
 	"edit_file",
@@ -464,97 +464,18 @@ func ApplyDefaults(cfg *Config) {
 		cfg.Proxy.SetGlobalEnv = &trueVal
 	}
 
-	// Small-LLM profile defaults. The master toggle defaults to false (manual
-	// only — no auto-detection); the operator opts in explicitly. The
-	// per-variant sub-toggles default to false too, so each optimization only
-	// activates when both the master toggle and its own toggle are on. Every
-	// value/threshold is populated with a sensible default so nothing requires
-	// a rebuild once enabled.
-	if cfg.SmallLLM.EssentialTools.AlwaysPresent == nil {
-		cfg.SmallLLM.EssentialTools.AlwaysPresent = defaultSmallLLMAlwaysPresent
-	}
-	// Sampling numeric parameters are deliberately NOT seeded: zero means
-	// "inherit the vendor preset" (see SmallLLMSamplingConfig). Seeding a
-	// constant temperature here previously forced 0.1/top_p 0.9 onto every
-	// family the moment the sampling variant was enabled, clobbering
-	// vendor-tuned presets (the 27-30B regression). Users who want an
-	// override set an explicit value in YAML or the UI.
-	// ReasoningEffort is the deliberate exception. An unset value inherits
-	// the model's own default, which for qwen thinking models is "xhigh" —
-	// measured overthinking on trivial tasks (22,276 reasoning tokens /
-	// 21 min for a simple SVG vs 3,715 tokens / 137 s with thinking off;
-	// docs/small-llm-defaults-research.md, R3). "medium" is the model's
-	// native pre-training regime — no effort instruction is injected, unlike
-	// "low" which shortens traces but risks retries in multi-turn agentic
-	// tasks — and cuts thinking-token spend 60–90%. So it is seeded like
-	// the other variant values: unconditionally (visible/editable in the
-	// UI), and a no-op until both the master and variant toggles are on.
-	// An explicit non-empty YAML value ("off" | "low" | "medium") is never
-	// overwritten; "" is the "unset" sentinel (indistinguishable from an
-	// absent key at the type level) and resolves to this default. Operators
-	// wanting the vendor xhigh default can disable the sampling variant —
-	// with every numeric parameter unset that is otherwise a behavioral
-	// no-op.
-	if cfg.SmallLLM.Sampling.ReasoningEffort == "" {
-		cfg.SmallLLM.Sampling.ReasoningEffort = "medium"
-	}
-
-	// Loop-hardening thresholds — tighter than the baseline CircuitBreaker so a
-	// small model that repeats itself or makes no progress is caught sooner.
-	if cfg.SmallLLM.LoopHardening.RepeatNudgeThreshold == 0 {
-		cfg.SmallLLM.LoopHardening.RepeatNudgeThreshold = 2
-	}
-	if cfg.SmallLLM.LoopHardening.ParseErrorAbortThreshold == 0 {
-		cfg.SmallLLM.LoopHardening.ParseErrorAbortThreshold = 3
-	}
-	if cfg.SmallLLM.LoopHardening.FruitlessNudgeThreshold == 0 {
-		cfg.SmallLLM.LoopHardening.FruitlessNudgeThreshold = 3
-	}
-	if cfg.SmallLLM.LoopHardening.FruitlessAbortThreshold == 0 {
-		cfg.SmallLLM.LoopHardening.FruitlessAbortThreshold = 5
-	}
-	if cfg.SmallLLM.LoopHardening.SameToolRepeatNudgeThreshold == 0 {
-		cfg.SmallLLM.LoopHardening.SameToolRepeatNudgeThreshold = 4
-	}
-
-	// Small-LLM context-management variant defaults. Like the other variants,
-	// these are seeded unconditionally (zero → variant default) so the values
-	// are visible/editable; the profile itself stays a no-op until both the
-	// master toggle and the variant toggle are enabled. Zero continues to mean
-	// "do not override" at apply time.
-	if cfg.SmallLLM.Context.Compaction.KeepLast == 0 {
-		cfg.SmallLLM.Context.Compaction.KeepLast = 6
-	}
-	if cfg.SmallLLM.Context.Compaction.BlockSize == 0 {
-		cfg.SmallLLM.Context.Compaction.BlockSize = 5
-	}
-	if cfg.SmallLLM.Context.Compaction.TriggerPercent == 0 {
-		cfg.SmallLLM.Context.Compaction.TriggerPercent = 80
-	}
-	if cfg.SmallLLM.Context.ToolOutputKeepLastN == 0 {
-		cfg.SmallLLM.Context.ToolOutputKeepLastN = 2
-	}
-	// The output reserve reaches the router as llm.RouterConfig.
-	// OutputTokenReserve and is consulted only there, as the output
-	// reserve in pre-submission context-window validation
-	// (validateContextWindow) for models whose resolved metadata carries
-	// no OutputLimit. The registry resolves every model to a non-zero
-	// OutputLimit (built-in catalog, probe cache, or the 32768 static
-	// fallback), so the fallback tier is effectively unreachable and this
-	// knob does not change the per-request MaxTokens generation ceiling.
-	// The ceiling is the model's resolved ModelMetadata.OutputLimit:
-	// per-model llm.models.<model>.output_limit > per-provider
-	// llm.<provider>.output_token_reserve (applyProviderOutputReserves
-	// seeds it into the registry overrides) > catalog/probe tiers. For a
-	// thinking-capable small model whose catalog output limit (e.g. 8192)
-	// truncates reasoning + answer (thinking tokens are spent before
-	// content; measured ~3.7K-22.3K per turn), raise the ceiling via
-	// llm.models.<model>.output_limit or the per-provider reserve. The
-	// 16384 seed keeps the fallback tier thinking-aware relative to the
-	// general executor default 8192. An explicit YAML value always wins
-	// over this seed (zero → default, non-zero → kept).
-	if cfg.SmallLLM.Context.OutputTokenReserve == 0 {
-		cfg.SmallLLM.Context.OutputTokenReserve = 16384
+	// Small-LLM profile persist defaults. The section carries only the master
+	// toggle and the active profile id (SLMPersistConfig): the master toggle
+	// defaults to false (manual only — no auto-detection), and the active
+	// profile defaults to the model-agnostic "generic" profile. The 25
+	// variant knobs are no longer seeded here — they come from the active
+	// profile's catalog entry at resolve time (ResolveSLMConfig), where the
+	// generic profile carries the researched defaults (reasoning_effort
+	// "medium", loop thresholds 2/3/3/5/4, context 6/5/80/2/16384, the
+	// default always-present list). A legacy inline small_llm.* section is
+	// ignored at load and dropped on the next save.
+	if cfg.SLM.ActiveProfile == "" {
+		cfg.SLM.ActiveProfile = SLMGenericProfileID
 	}
 
 	// E2S execution-mode defaults. Like the Small-LLM profile the section is

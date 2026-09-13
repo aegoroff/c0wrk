@@ -1,4 +1,4 @@
-package smallllm_test
+package slm_test
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/v0lka/c0wrk/core/smallllm"
+	"github.com/v0lka/c0wrk/core/slm"
 	tools2 "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/tools"
 	"github.com/v0lka/sp4rk/tools/builtins"
@@ -105,7 +105,7 @@ func TestCompactDescriptionsShorterThanFull(t *testing.T) {
 		t.Fatalf("expected at least 15 real builtin descriptors, got %d", len(in))
 	}
 
-	out := smallllm.ApplyCompactDescriptions(in)
+	out := slm.ApplyCompactDescriptions(in)
 	compacted := 0
 	for i, desc := range out {
 		full := in[i].Description
@@ -129,7 +129,7 @@ func TestCompactDescriptionsShorterThanFull(t *testing.T) {
 func TestMaybeCompactDisabledByteIdentical(t *testing.T) {
 	in := realBuiltinDescriptors(t)
 
-	out := smallllm.MaybeCompactDescriptions(in, false)
+	out := slm.MaybeCompactDescriptions(in, false)
 
 	if len(out) != len(in) {
 		t.Fatalf("disabled compact changed tool count: %d -> %d", len(in), len(out))
@@ -149,8 +149,8 @@ func TestMaybeCompactDisabledByteIdentical(t *testing.T) {
 func TestMaybeCompactEnabledApplies(t *testing.T) {
 	in := realBuiltinDescriptors(t)
 
-	enabled := smallllm.MaybeCompactDescriptions(in, true)
-	direct := smallllm.ApplyCompactDescriptions(in)
+	enabled := slm.MaybeCompactDescriptions(in, true)
+	direct := slm.ApplyCompactDescriptions(in)
 
 	if len(enabled) != len(direct) {
 		t.Fatalf("length mismatch: %d vs %d", len(enabled), len(direct))
@@ -172,7 +172,7 @@ func TestApplyCompactDescriptionsUnknownToolsUntouched(t *testing.T) {
 		{Name: "mcp_weather_get", Description: unknownFull},
 	}
 
-	out := smallllm.ApplyCompactDescriptions(in)
+	out := slm.ApplyCompactDescriptions(in)
 
 	if out[0].Description == in[0].Description {
 		t.Error("known builtin read_file was not compacted")
@@ -189,12 +189,12 @@ func TestApplyCompactDescriptionsUnknownToolsUntouched(t *testing.T) {
 // compact bound so the set cannot regress to full-length prose.
 func TestCompactOneLinersBounded(t *testing.T) {
 	for _, name := range compactNames(t) {
-		compact := smallllm.CompactDescription(name)
+		compact := slm.CompactDescription(name)
 		if compact == "" {
 			t.Fatalf("tool %s: CompactDescription returned empty", name)
 		}
-		if len(compact) > smallllm.MaxCompactDescriptionLength {
-			t.Errorf("tool %s: compact description is %d chars, exceeds %d-char bound", name, len(compact), smallllm.MaxCompactDescriptionLength)
+		if len(compact) > slm.MaxCompactDescriptionLength {
+			t.Errorf("tool %s: compact description is %d chars, exceeds %d-char bound", name, len(compact), slm.MaxCompactDescriptionLength)
 		}
 	}
 }
@@ -208,7 +208,7 @@ func compactNames(t *testing.T) []string {
 	for _, d := range all {
 		stubs = append(stubs, tools.ToolDescriptor{Name: d.Name, Description: "stub"})
 	}
-	out := smallllm.ApplyCompactDescriptions(stubs)
+	out := slm.ApplyCompactDescriptions(stubs)
 	found := make([]string, 0, len(out))
 	for i := range out {
 		if out[i].Description != "stub" {
@@ -287,7 +287,7 @@ var compactAltTokenRe = regexp.MustCompile(`^"?([a-z_][a-z0-9_]*)"?$`)
 //     consists of schema enum values.
 func TestCompactDescriptionsMatchSchemas(t *testing.T) {
 	for _, tool := range c0wrkToolImpls(t) {
-		compact := smallllm.CompactDescription(tool.Name())
+		compact := slm.CompactDescription(tool.Name())
 		if compact == "" {
 			t.Fatalf("tool %s: no compact description for a c0wrk builtin — gap in the compact set?", tool.Name())
 		}

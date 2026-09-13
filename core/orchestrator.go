@@ -20,7 +20,7 @@ import (
 	"github.com/v0lka/c0wrk/core/goal"
 	"github.com/v0lka/c0wrk/core/markitdown"
 	"github.com/v0lka/c0wrk/core/research"
-	"github.com/v0lka/c0wrk/core/smallllm"
+	"github.com/v0lka/c0wrk/core/slm"
 	"github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
 	"github.com/v0lka/sp4rk/agent/reflector"
@@ -114,9 +114,9 @@ type injectionDefenseKeyType struct{}
 // whether to include the injection defense prompt text.
 var InjectionDefenseKey = injectionDefenseKeyType{}
 
-// smallLLMPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
+// slmPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
 // from prepareRequestContext to buildSystemPromptWith. It is stored under
-// SmallLLMLiteKey (a presence flag, like PlanModeKey): when present AND Lite
+// SLMLiteKey (a presence flag, like PlanModeKey): when present AND Lite
 // is set, buildSystemPromptWith swaps the verbose OrchestratorSystem core
 // directive for the compact OrchestratorSystemLite directive, and
 // conditionally appends the reasoning scaffold (ReasoningScaffold) and the
@@ -124,55 +124,55 @@ var InjectionDefenseKey = injectionDefenseKeyType{}
 // only honored when Lite is active, since both are tailored to the lite
 // directive's style. The injection-defense and verification sections are
 // appended UNCHANGED in both modes (strict constraint).
-type smallLLMPromptProfile struct {
+type slmPromptProfile struct {
 	Lite              bool
 	FewShot           bool
 	ReasoningScaffold bool
 }
 
-// smallLLMLiteKeyType is the context key for the small-LLM SystemPrompt
+// slmLiteKeyType is the context key for the small-LLM SystemPrompt
 // profile. Its presence signals the variant is active; the carried value is a
-// smallLLMPromptProfile with the sub-toggle flags.
-type smallLLMLiteKeyType struct{}
+// slmPromptProfile with the sub-toggle flags.
+type slmLiteKeyType struct{}
 
-// SmallLLMLiteKey is the context key signaling the small-LLM lite prompt profile.
-var SmallLLMLiteKey = smallLLMLiteKeyType{}
+// SLMLiteKey is the context key signaling the small-LLM lite prompt profile.
+var SLMLiteKey = slmLiteKeyType{}
 
-// WithSmallLLMLite returns a context carrying SmallLLMLiteKey with the full
+// WithSLMLite returns a context carrying SLMLiteKey with the full
 // profile (lite directive + few-shot examples + reasoning scaffold). It is a
-// test/fixture convenience; production wiring uses withSmallLLMPromptProfile
+// test/fixture convenience; production wiring uses withSLMPromptProfile
 // to carry the actual config-derived flags.
-func WithSmallLLMLite(ctx context.Context) context.Context {
-	return withSmallLLMPromptProfile(ctx, smallLLMPromptProfile{
+func WithSLMLite(ctx context.Context) context.Context {
+	return withSLMPromptProfile(ctx, slmPromptProfile{
 		Lite:              true,
 		FewShot:           true,
 		ReasoningScaffold: true,
 	})
 }
 
-// withSmallLLMPromptProfile returns a context carrying the small-LLM prompt
-// profile under SmallLLMLiteKey. This is the production entry point used by
+// withSLMPromptProfile returns a context carrying the small-LLM prompt
+// profile under SLMLiteKey. This is the production entry point used by
 // prepareRequestContext; it carries the config-derived sub-toggle flags so
 // buildSystemPromptWith can gate the lite directive, few-shot examples, and
 // reasoning scaffold independently.
-func withSmallLLMPromptProfile(ctx context.Context, p smallLLMPromptProfile) context.Context {
-	return context.WithValue(ctx, SmallLLMLiteKey, p)
+func withSLMPromptProfile(ctx context.Context, p slmPromptProfile) context.Context {
+	return context.WithValue(ctx, SLMLiteKey, p)
 }
 
-// smallLLMLiteFromCtx reports whether the small-LLM lite prompt profile is
+// slmLiteFromCtx reports whether the small-LLM lite prompt profile is
 // active for this run (the variant is enabled and Lite is on). Used by
 // buildSystemPromptWith to decide whether to swap in the compact
 // OrchestratorSystemLite directive.
-func smallLLMLiteFromCtx(ctx context.Context) bool {
-	p, ok := ctx.Value(SmallLLMLiteKey).(smallLLMPromptProfile)
+func slmLiteFromCtx(ctx context.Context) bool {
+	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
 	return ok && p.Lite
 }
 
-// smallLLMPromptProfileFromCtx returns the carried small-LLM prompt profile
+// slmPromptProfileFromCtx returns the carried small-LLM prompt profile
 // and whether one is present. Used by buildSystemPromptWith to read the
 // FewShot and ReasoningScaffold sub-toggle flags.
-func smallLLMPromptProfileFromCtx(ctx context.Context) (smallLLMPromptProfile, bool) {
-	p, ok := ctx.Value(SmallLLMLiteKey).(smallLLMPromptProfile)
+func slmPromptProfileFromCtx(ctx context.Context) (slmPromptProfile, bool) {
+	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
 	return p, ok
 }
 
@@ -233,12 +233,12 @@ type OrchestratorConfig struct {
 	// disables it so the loop relies solely on the agent's own verdict.
 	GoalLoop GoalLoopSettings
 
-	// SmallLLM holds the small-LLM optimization settings. When Enabled, the
+	// SLM holds the small-LLM optimization settings. When Enabled, the
 	// profile activates variant behaviors (essential-tools narrowing, prompt
 	// lite swap, loop hardening, sampling) — each variant independently gated
 	// by BOTH the master Enabled toggle and its own sub-toggle
 	// (defense-in-depth). Inert when the master toggle is disabled.
-	SmallLLM SmallLLMSettings
+	SLM SLMSettings
 
 	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
 	// the effective availability of the mode (experimental.enabled, mapped by
@@ -262,31 +262,31 @@ type GoalLoopSettings struct {
 	Verification string
 }
 
-// SmallLLMSettings is the runtime mirror of BuilderSmallLLMConfig, carrying
+// SLMSettings is the runtime mirror of BuilderSLMConfig, carrying
 // the small-LLM variant configuration to the orchestrator. The master Enabled
 // toggle gates every variant (defense-in-depth): when false, no variant
 // activates regardless of its sub-toggle.
-type SmallLLMSettings struct {
+type SLMSettings struct {
 	Enabled        bool
-	EssentialTools SmallLLMEssentialSettings
-	SystemPrompt   SmallLLMSystemPromptSettings
+	EssentialTools SLMEssentialSettings
+	SystemPrompt   SLMSystemPromptSettings
 	// LoopHardening carries the circuit-breaker tightening overrides. The
 	// executor applies them to its circuit breaker at builder level; the E2S
 	// loop (which has no executor) applies the RepeatNudgeThreshold override
 	// to its anti-spin nudge — the same concept under the same profile gate.
-	LoopHardening SmallLLMLoopHardeningSettings
+	LoopHardening SLMLoopHardeningSettings
 }
 
-// SmallLLMLoopHardeningSettings is the orchestrator-level projection of the
+// SLMLoopHardeningSettings is the orchestrator-level projection of the
 // loop-hardening thresholds the E2S path consumes. Zero values mean "keep
 // the configured/baseline threshold" (mirroring applyLoopHardening).
-type SmallLLMLoopHardeningSettings struct {
+type SLMLoopHardeningSettings struct {
 	Enabled              bool
 	RepeatNudgeThreshold int
 }
 
-// SmallLLMEssentialSettings holds the always-present tool-set narrowing settings.
-type SmallLLMEssentialSettings struct {
+// SLMEssentialSettings holds the always-present tool-set narrowing settings.
+type SLMEssentialSettings struct {
 	Enabled bool
 	// AlwaysPresent is the user-pinned list of tool names always exposed when
 	// this variant is active, regardless of routing. Protected orchestration
@@ -299,12 +299,12 @@ type SmallLLMEssentialSettings struct {
 	CompactDescriptions bool
 }
 
-// SmallLLMSystemPromptSettings holds the prompt-simplification variant
+// SLMSystemPromptSettings holds the prompt-simplification variant
 // settings. Lite is the variant master toggle (there is no separate Enabled —
 // it mirrors config.SystemPromptConfig, where Lite itself gates the variant).
 // FewShot and ReasoningScaffold are independent sub-toggles only honored when
 // Lite is active.
-type SmallLLMSystemPromptSettings struct {
+type SLMSystemPromptSettings struct {
 	Lite bool
 	// FewShot appends the worked-example ReAct block (requires Lite).
 	FewShot bool
@@ -2789,7 +2789,7 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// directive — the delegate tool must survive narrowing or the directive
 	// would reference a tool the model cannot call. Without mentions the
 	// helper returns nil and the filter behaves exactly as before.
-	availableTools = o.applySmallLLMToolFilter(availableTools, smallLLMAgentGuaranteedTools(ctx)...)
+	availableTools = o.applySLMToolFilter(availableTools, slmAgentGuaranteedTools(ctx)...)
 
 	// Truncate conversation history to the configured window so long
 	// sessions don't overflow the Conductor's context. The most recent
@@ -2852,10 +2852,10 @@ func (o *Orchestrator) disabledToolNames() map[string]bool {
 
 // delegateToolName is the conductor-only delegation channel. It is normally a
 // narrowable orchestration tool, but becomes turn-scoped guaranteed whenever
-// the user explicitly requested subagents (see smallLLMAgentGuaranteedTools).
+// the user explicitly requested subagents (see slmAgentGuaranteedTools).
 const delegateToolName = "delegate"
 
-// smallLLMAgentGuaranteedTools returns the extra tool names that must join the
+// slmAgentGuaranteedTools returns the extra tool names that must join the
 // small-LLM guaranteed set for THIS turn, derived from the request context
 // populated by enrichAgentContext. When the user explicitly requested
 // subagents (#agent mentions → WithUserAgents), the Conductor's system prompt
@@ -2865,15 +2865,15 @@ const delegateToolName = "delegate"
 // the MCP-sourced class: without an explicit request the helper returns nil
 // and delegate keeps its default semantics (a conductor-only tool excluded
 // by the narrowing). Static config validation is unaffected.
-func smallLLMAgentGuaranteedTools(ctx context.Context) []string {
+func slmAgentGuaranteedTools(ctx context.Context) []string {
 	if len(UserAgentsFromContext(ctx)) > 0 {
 		return []string{delegateToolName}
 	}
 	return nil
 }
 
-// applySmallLLMToolFilter narrows the conductor's available-tool set when the
-// small-LLM profile is active. It delegates to smallllm.SelectTools, which
+// applySLMToolFilter narrows the conductor's available-tool set when the
+// small-LLM profile is active. It delegates to slm.SelectTools, which
 // unions the user's always-present list, the protected orchestration tools
 // (finish + memory + ask_user), and every MCP-sourced tool — a static
 // selection with no quantitative budget and no router matching. It runs
@@ -2882,29 +2882,29 @@ func smallLLMAgentGuaranteedTools(ctx context.Context) []string {
 // never narrowed (HandleMessage returns before either call site).
 //
 // The optional extraGuaranteed names are turn-scoped guaranteed tools passed
-// by the caller (see smallLLMAgentGuaranteedTools): currently the delegate
+// by the caller (see slmAgentGuaranteedTools): currently the delegate
 // tool when the request explicitly asks for subagents. Like the MCP class,
 // the guarantee is scoped to this call and never part of static config
 // validation.
 //
 // When the profile is OFF (the default), it returns the tools untouched — zero
 // behavior change.
-func (o *Orchestrator) applySmallLLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
-	sc := o.config.SmallLLM
+func (o *Orchestrator) applySLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
+	sc := o.config.SLM
 	// Master toggle AND the essential-tools variant must both be enabled.
 	// When either is off, return the input untouched (zero behavior change).
-	if !o.smallLLMEssentialToolsEnabled() {
+	if !o.slmEssentialToolsEnabled() {
 		return in
 	}
 
-	filtered := smallllm.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
-	return smallllm.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
+	filtered := slm.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
+	return slm.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
 }
 
-// smallLLMEssentialToolsEnabled reports whether the small-LLM profile's
+// slmEssentialToolsEnabled reports whether the small-LLM profile's
 // essential-tools narrowing is active: master toggle AND the essential-tools
 // variant both on.
-func (o *Orchestrator) smallLLMEssentialToolsEnabled() bool {
-	sc := o.config.SmallLLM
+func (o *Orchestrator) slmEssentialToolsEnabled() bool {
+	sc := o.config.SLM
 	return sc.Enabled && sc.EssentialTools.Enabled
 }

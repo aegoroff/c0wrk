@@ -14,7 +14,7 @@ import { ProxySettings } from './ProxySettings'
 import { SoundSettings } from './SoundSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
 import { LLMSettings } from './LLMSettings'
-import { SmallLLMSettings } from './SmallLLMSettings'
+import { SLMSettings } from './SLMSettings'
 import { SearchSettings } from './SearchSettings'
 import { MCPSettings } from './MCPSettings'
 import { SecuritySettings } from './SecuritySettings'
@@ -241,7 +241,7 @@ export function SettingsModal() {
 
           {experimentalEnabled && (
             <TabsContent value="small-llm" className={TAB_CONTENT_CLASS}>
-              <SmallLLMSettings />
+              <SLMSettings />
             </TabsContent>
           )}
 

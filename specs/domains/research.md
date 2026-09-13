@@ -177,5 +177,5 @@ Metrics are derived from the reconciled graph:
 - [../contracts/desktop-frontend.md](../contracts/desktop-frontend.md) - RESEARCH RPC surface and DTO boundary
 - [../contracts/event-catalog.md](../contracts/event-catalog.md) - `research:changed` and `research:file_changed` events
 - [architecture/security-model.md](../architecture/security-model.md) - workspace containment and untrusted persisted artifacts
-- [small-llm.md](small-llm.md) and [e2s.md](e2s.md) - the features gated by `experimental.enabled` (the Small-LLM profile and the E2S execution mode; RESEARCH itself is never gated)
+- [slm.md](slm.md) - SLM profiles, one of the two features gated by `experimental.enabled` (the other is E2S)
 - [frontend/README.md](frontend/README.md) - frontend panel architecture

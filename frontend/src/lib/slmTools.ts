@@ -1,10 +1,10 @@
-import type { SmallLLMBuiltinTool, SmallLLMToolGroup } from '@/types/models'
+import type { SLMBuiltinTool, SLMToolGroup } from '@/types/models'
 
 /**
  * One selectable entry in the Small-LLM "Always-present tools" picker.
  *
  * The picker mixes two kinds of entry:
- *   - a **cluster** (see `SmallLLMToolGroup`): picking it pins every member at
+ *   - a **cluster** (see `SLMToolGroup`): picking it pins every member at
  *     once (`members`), so a workflow can never be selected partially — e.g.
  *     the plan-step tool without the plan-declaration tool;
  *   - a **single tool** left ungrouped (`members` undefined).
@@ -147,8 +147,8 @@ export function toolGroupTooltipMarkdown(
  * never listed individually — that is what makes the cluster atomic.
  */
 export function essentialToolPickerOptions(
-  builtinTools: readonly SmallLLMBuiltinTool[],
-  toolGroups: readonly SmallLLMToolGroup[],
+  builtinTools: readonly SLMBuiltinTool[],
+  toolGroups: readonly SLMToolGroup[],
   alwaysPresent: readonly string[],
   protectedTools: readonly string[] = [],
 ): PickerOption[] {

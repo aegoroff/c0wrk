@@ -26,7 +26,7 @@ type metricsState struct {
 	nudges           AgentMetricsCounters
 	aborts           AgentMetricsCounters
 	steps            int
-	smallLLM         SmallLLMMetaInfo
+	slm              SLMMetaInfo
 }
 
 // observeDiagnostic maps an executor diagnostic event name onto the counters.
@@ -84,11 +84,11 @@ func (m *metricsState) observeToolResult(isError bool, content string) {
 	m.invalidToolCalls++
 }
 
-// setSmallLLM snapshots the Small-LLM profile the session runs under.
-func (m *metricsState) setSmallLLM(info SmallLLMMetaInfo) {
+// setSLM snapshots the Small-LLM profile the session runs under.
+func (m *metricsState) setSLM(info SLMMetaInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.smallLLM = info
+	m.slm = info
 }
 
 // snapshot renders the accumulated counters as the "agent_metrics" payload
@@ -105,7 +105,7 @@ func (m *metricsState) snapshot(finish string, outputTokens int) AgentMetricsDat
 		Aborts:           m.aborts,
 		Steps:            m.steps,
 		OutputTokens:     outputTokens,
-		SmallLLM:         smallLLMInfoSnapshot(m.smallLLM),
+		SLM:              slmInfoSnapshot(m.slm),
 	}
 	m.parseErrors = 0
 	m.invalidToolCalls = 0
@@ -115,22 +115,35 @@ func (m *metricsState) snapshot(finish string, outputTokens int) AgentMetricsDat
 	return data
 }
 
-// smallLLMInfoSnapshot copies the stored profile, normalizing a nil variant
+// slmInfoSnapshot copies the stored profile, normalizing a nil variant
 // list to an empty slice so it serializes as [] rather than null.
-func smallLLMInfoSnapshot(info SmallLLMMetaInfo) SmallLLMMetaInfo {
+func slmInfoSnapshot(info SLMMetaInfo) SLMMetaInfo {
 	variants := make([]string, len(info.Variants))
 	copy(variants, info.Variants)
-	return SmallLLMMetaInfo{Enabled: info.Enabled, Variants: variants}
+	return SLMMetaInfo{
+		Enabled:     info.Enabled,
+		Profile:     info.Profile,
+		ProfileKind: info.ProfileKind,
+		Variants:    variants,
+	}
 }
 
-// smallLLMProfileFromConfig derives the Small-LLM profile snapshot a session
-// runs under. Variants lists every optimization that is actually active —
-// the master toggle AND the variant's own sub-toggle must both be on,
-// mirroring how the builder applies them. Works regardless of whether the
-// profile is enabled: metrics collection is a common layer, the profile only
-// annotates the payload.
-func smallLLMProfileFromConfig(cfg config.SmallLLMConfig) SmallLLMMetaInfo {
-	info := SmallLLMMetaInfo{Enabled: cfg.Enabled, Variants: []string{}}
+// slmProfileFromConfig derives the Small-LLM profile snapshot a session
+// runs under. The profile entry identifies the active profile (id + kind)
+// and is reported regardless of the master toggle — which profile is active
+// is independent of whether its optimizations are applied. Variants lists
+// every optimization that is actually active — the master toggle AND the
+// variant's own sub-toggle must both be on, mirroring how the builder
+// applies them. Works regardless of whether the profile is enabled:
+// metrics collection is a common layer, the profile only annotates the
+// payload.
+func slmProfileFromConfig(cfg config.SLMConfig, profile config.SLMProfile) SLMMetaInfo {
+	info := SLMMetaInfo{
+		Enabled:     cfg.Enabled,
+		Profile:     profile.ID,
+		ProfileKind: string(profile.Kind),
+		Variants:    []string{},
+	}
 	if !cfg.Enabled {
 		return info
 	}

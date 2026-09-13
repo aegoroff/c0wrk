@@ -40,13 +40,17 @@ type Config struct {
 	Terminal      TerminalConfig      `yaml:"terminal"`
 	Git           GitConfig           `yaml:"git"`
 
-	// SmallLLM configures optimizations applied when running on a "small"
-	// (low-capacity / cheaper) LLM. The master toggle is manual only — there
-	// is no auto-detection; the operator decides when to enable it. Each
-	// variant carries its own sub-toggle so individual optimizations can be
-	// turned off without disabling the whole profile, and every threshold/value
-	// is exposed so behaviour can be tuned without a rebuild.
-	SmallLLM SmallLLMConfig `yaml:"small_llm"`
+	// SLM configures optimizations applied when running on a "small"
+	// (low-capacity / cheaper) LLM. Only the two durable operator choices are
+	// persisted here — the manual-only master toggle (no auto-detection) and
+	// the active profile id. The 25 variant knobs are NOT stored in
+	// config.yaml: they are resolved at runtime from the active profile
+	// (predefined catalog ∪ custom store, see ResolveSLMConfig). A legacy
+	// inline `small_llm:` section with the full knob set is ignored at load
+	// (decoding is non-strict) and silently dropped by the next save — the
+	// sanctioned reset migration; the effective profile falls back to
+	// "generic".
+	SLM SLMPersistConfig `yaml:"slm"`
 
 	// E2S configures the E2S (explicit-state) execution mode: a run style
 	// where the model maintains an externalized state Σ that is patched and
@@ -825,13 +829,94 @@ type ExperimentalConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// SmallLLMConfig configures optimizations applied when running on a "small"
-// (low-capacity / cheaper) LLM. The master toggle is manual only — there is no
-// auto-detection; the operator decides when to enable the profile. Each variant
-// carries its own sub-toggle so individual optimizations can be turned off
-// independently, and every threshold/value is exposed so behaviour can be tuned
-// without a rebuild.
-type SmallLLMConfig struct {
+// SLMPersistConfig is the persisted `slm:` section of config.yaml. It carries
+// exactly the two durable operator choices; the 25 variant knobs live in
+// profiles (the predefined catalog and ~/.c0wrk/slm-profiles.yaml), so this
+// struct deliberately has no knob fields. Legacy inline `small_llm.*` keys in
+// an existing config.yaml are ignored by the non-strict YAML decoding and
+// disappear on the next save (sanctioned reset migration).
+type SLMPersistConfig struct {
+	// Enabled is the master toggle for the small-LLM profile. When false,
+	// every variant sub-toggle is ignored. There is no auto-detection — this
+	// must be set explicitly. Default: false.
+	Enabled bool `yaml:"enabled"`
+
+	// ActiveProfile is the id of the profile whose 25 knob values form the
+	// effective runtime configuration (see ResolveSLMConfig). ApplyDefaults
+	// seeds it with the model-agnostic "generic" profile; an id that no longer
+	// resolves (e.g. a custom profile deleted by hand) falls back to "generic"
+	// with a warning instead of failing the run.
+	ActiveProfile string `yaml:"active_profile"`
+}
+
+// FindSLMProfile returns the profile with the given id from the catalog, by
+// value (the catalog slice is never exposed for mutation).
+func FindSLMProfile(profiles []SLMProfile, id string) (SLMProfile, bool) {
+	for _, p := range profiles {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return SLMProfile{}, false
+}
+
+// ResolveSLMConfig builds the effective runtime SLMConfig for a persisted
+// `slm:` section against a profile catalog (predefined ∪ custom — see
+// LoadSLMCatalog). Resolution rules:
+//
+//   - a known profile id → that profile's values;
+//   - an empty or unknown id → soft fallback to the model-agnostic "generic"
+//     profile plus one warning each — a stale id must never break the run.
+//
+// The master Enabled flag is carried over from the persist section verbatim
+// (the experimental gate is applied separately by the backend adapter, as
+// before). The returned struct owns its slices, so callers cannot mutate the
+// catalog through it.
+func ResolveSLMConfig(persist SLMPersistConfig, catalog []SLMProfile) (resolved SLMConfig, warnings []string) {
+	var profile SLMProfile
+	if id := persist.ActiveProfile; id != "" {
+		if found, ok := FindSLMProfile(catalog, id); ok {
+			profile = found
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"slm.active_profile %q not found in the profile catalog; falling back to the %q profile",
+				id, SLMGenericProfileID))
+			profile, _ = FindPredefinedSLMProfile(SLMGenericProfileID)
+		}
+	} else {
+		warnings = append(warnings, "slm.active_profile is empty; falling back to the \""+SLMGenericProfileID+"\" profile")
+		profile, _ = FindPredefinedSLMProfile(SLMGenericProfileID)
+	}
+	values := cloneSLMProfileConfig(profile.Config)
+	resolved = SLMConfig{
+		Enabled:        persist.Enabled,
+		EssentialTools: values.EssentialTools,
+		SystemPrompt:   values.SystemPrompt,
+		Sampling:       values.Sampling,
+		LoopHardening:  values.LoopHardening,
+		Context:        values.Context,
+	}
+	return resolved, warnings
+}
+
+// LoadSLMCatalog assembles the full profile catalog used for resolution: the
+// compiled-in predefined entries plus the operator's custom profiles from
+// <agentDir>/slm-profiles.yaml. Store-level problems (unreadable/broken file,
+// discarded records) are returned as warnings rather than errors — a damaged
+// custom store must never take the predefined catalog down with it.
+func LoadSLMCatalog(agentDir string) (catalog []SLMProfile, warnings []string) {
+	custom, storeWarnings := LoadCustomSLMProfiles(SLMProfilesPath(agentDir))
+	catalog = PredefinedSLMProfiles()
+	return append(catalog, custom...), storeWarnings
+}
+
+// SLMConfig is the RESOLVED runtime view of the small-LLM profile: the master
+// toggle plus the 25 variant knobs of the active profile (see ResolveSLMConfig).
+// It is not persisted to config.yaml anymore — only slm.enabled and
+// slm.active_profile are (see SLMPersistConfig). Each variant carries its own
+// sub-toggle so individual optimizations can be turned off independently, and
+// every threshold/value is exposed so behaviour can be tuned without a rebuild.
+type SLMConfig struct {
 	// Enabled is the master toggle for the small-LLM profile. When false, every
 	// variant sub-toggle is ignored. There is no auto-detection — this must be
 	// set explicitly. Default: false.
@@ -847,7 +932,7 @@ type SmallLLMConfig struct {
 
 	// Sampling overrides LLM sampling parameters for more deterministic,
 	// lower-effort generation suitable for smaller models.
-	Sampling SmallLLMSamplingConfig `yaml:"sampling"`
+	Sampling SLMSamplingConfig `yaml:"sampling"`
 
 	// LoopHardening tightens the executor circuit-breaker thresholds so a small
 	// model that repeats itself or fails to make progress is nudged/aborted
@@ -856,14 +941,14 @@ type SmallLLMConfig struct {
 
 	// Context applies aggressive context management: tighter compaction, stricter
 	// tool-output pruning, and a larger output token reserve.
-	Context SmallLLMContextConfig `yaml:"context"`
+	Context SLMContextConfig `yaml:"context"`
 }
 
 // EssentialToolsConfig narrows the tool set visible to a small LLM to reduce
 // per-prompt schema overhead.
 type EssentialToolsConfig struct {
 	// Enabled gates this variant. When false the full tool set is exposed
-	// regardless of the master SmallLLM.Enabled toggle.
+	// regardless of the master SLM.Enabled toggle.
 	Enabled bool `yaml:"enabled"`
 
 	// AlwaysPresent is the allow-list of tool names always exposed when this
@@ -875,7 +960,7 @@ type EssentialToolsConfig struct {
 	// CompactDescriptions replaces every known builtin's full rubric
 	// description with a one-line compact variant while this variant is
 	// active, shrinking prompt overhead on small models. Off by default:
-	// with it off, descriptions are byte-identical to the non-SmallLLM
+	// with it off, descriptions are byte-identical to the non-SLM
 	// behavior.
 	CompactDescriptions bool `yaml:"compact_descriptions"`
 }
@@ -898,13 +983,13 @@ type SystemPromptConfig struct {
 	ReasoningScaffold bool `yaml:"reasoning_scaffold"`
 }
 
-// SmallLLMSamplingConfig overrides LLM sampling parameters for a small model.
+// SLMSamplingConfig overrides LLM sampling parameters for a small model.
 // Every parameter uses zero as the "not set" sentinel: an unset parameter
 // inherits the per-family vendor preset (prompt.DefaultSampling) instead of
 // clobbering it, so enabling the sampling variant with no explicit values is
 // a behavioral no-op. Out-of-range values are rejected by validation
 // (frontend_api_config.go) whenever they are set.
-type SmallLLMSamplingConfig struct {
+type SLMSamplingConfig struct {
 	// Enabled gates this variant.
 	Enabled bool `yaml:"enabled"`
 
@@ -966,20 +1051,20 @@ type LoopHardeningConfig struct {
 	SameToolRepeatNudgeThreshold int `yaml:"same_tool_repeat_nudge_threshold"`
 }
 
-// SmallLLMContextConfig is the fifth small-LLM profile variant: aggressive
+// SLMContextConfig is the fifth small-LLM profile variant: aggressive
 // context management. When active it tightens the executor's compaction knobs
 // (smaller sliding window, smaller summarization block, earlier trigger),
 // prunes tool outputs more aggressively, and reserves more output tokens so a
 // small model is less likely to exhaust the context window mid-task. The
 // general executor defaults are NOT changed — the overrides only apply while
-// both the master toggle (SmallLLM.Enabled) and this variant's toggle are
+// both the master toggle (SLM.Enabled) and this variant's toggle are
 // enabled.
-type SmallLLMContextConfig struct {
-	// Enabled gates this variant (in addition to the master SmallLLM.Enabled).
+type SLMContextConfig struct {
+	// Enabled gates this variant (in addition to the master SLM.Enabled).
 	Enabled bool `yaml:"enabled"`
 
 	// Compaction overrides the executor compaction knobs.
-	Compaction SmallLLMCompactionConfig `yaml:"compaction"`
+	Compaction SLMCompactionConfig `yaml:"compaction"`
 
 	// ToolOutputKeepLastN overrides the executor's tool-output pruning depth
 	// (stricter than the general executor default).
@@ -990,9 +1075,9 @@ type SmallLLMContextConfig struct {
 	OutputTokenReserve int `yaml:"output_token_reserve"`
 }
 
-// SmallLLMCompactionConfig holds the compaction-tightening overrides. Zero
+// SLMCompactionConfig holds the compaction-tightening overrides. Zero
 // values mean "do not override" — the corresponding executor baseline is kept.
-type SmallLLMCompactionConfig struct {
+type SLMCompactionConfig struct {
 	// KeepLast overrides the sliding-window keep-last count (variant default 6
 	// vs the general executor default of 10).
 	KeepLast int `yaml:"keep_last"`

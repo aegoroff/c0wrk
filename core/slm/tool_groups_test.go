@@ -1,4 +1,4 @@
-package smallllm
+package slm
 
 import "testing"
 

@@ -1,4 +1,4 @@
-// Package smallllm implements tool-set selection for running the conductor
+// Package slm implements tool-set selection for running the conductor
 // against a "small" LLM. Small models are disproportionately penalized by
 // large tool schemas (every prompt carries the full JSON schema of every
 // advertised tool), so narrowing the visible tool set reduces both token
@@ -23,7 +23,7 @@
 // or network calls. They are factored out so they can be unit-tested in
 // isolation and applied at a single, well-defined point in the orchestration
 // lifecycle (once per task, before the ReAct loop).
-package smallllm
+package slm
 
 import (
 	"sort"

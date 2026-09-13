@@ -910,6 +910,322 @@ export namespace backend {
 	        this.content = source["content"];
 	    }
 	}
+	export class SLMBuiltinTool {
+	    name: string;
+	    description: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMBuiltinTool(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	    }
+	}
+	export class SLMCompactionResp {
+	    keep_last: number;
+	    block_size: number;
+	    trigger_percent: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMCompactionResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.keep_last = source["keep_last"];
+	        this.block_size = source["block_size"];
+	        this.trigger_percent = source["trigger_percent"];
+	    }
+	}
+	export class SLMContextResp {
+	    enabled: boolean;
+	    compaction: SLMCompactionResp;
+	    tool_output_keep_last_n: number;
+	    output_token_reserve: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMContextResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.compaction = this.convertValues(source["compaction"], SLMCompactionResp);
+	        this.tool_output_keep_last_n = source["tool_output_keep_last_n"];
+	        this.output_token_reserve = source["output_token_reserve"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SLMEssentialToolsValues {
+	    enabled: boolean;
+	    always_present: string[];
+	    compact_descriptions: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMEssentialToolsValues(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.always_present = source["always_present"];
+	        this.compact_descriptions = source["compact_descriptions"];
+	    }
+	}
+	export class SLMLoopHardeningResp {
+	    enabled: boolean;
+	    repeat_nudge_threshold: number;
+	    parse_error_abort_threshold: number;
+	    fruitless_nudge_threshold: number;
+	    fruitless_abort_threshold: number;
+	    same_tool_repeat_nudge_threshold: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMLoopHardeningResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.repeat_nudge_threshold = source["repeat_nudge_threshold"];
+	        this.parse_error_abort_threshold = source["parse_error_abort_threshold"];
+	        this.fruitless_nudge_threshold = source["fruitless_nudge_threshold"];
+	        this.fruitless_abort_threshold = source["fruitless_abort_threshold"];
+	        this.same_tool_repeat_nudge_threshold = source["same_tool_repeat_nudge_threshold"];
+	    }
+	}
+	export class SLMSamplingResp {
+	    enabled: boolean;
+	    temperature: number;
+	    top_p: number;
+	    top_k: number;
+	    repetition_penalty: number;
+	    presence_penalty: number;
+	    reasoning_effort: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMSamplingResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.temperature = source["temperature"];
+	        this.top_p = source["top_p"];
+	        this.top_k = source["top_k"];
+	        this.repetition_penalty = source["repetition_penalty"];
+	        this.presence_penalty = source["presence_penalty"];
+	        this.reasoning_effort = source["reasoning_effort"];
+	    }
+	}
+	export class SLMSystemPromptResp {
+	    lite: boolean;
+	    few_shot: boolean;
+	    reasoning_scaffold: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMSystemPromptResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lite = source["lite"];
+	        this.few_shot = source["few_shot"];
+	        this.reasoning_scaffold = source["reasoning_scaffold"];
+	    }
+	}
+	export class SLMProfileValues {
+	    essential_tools: SLMEssentialToolsValues;
+	    system_prompt: SLMSystemPromptResp;
+	    sampling: SLMSamplingResp;
+	    loop_hardening: SLMLoopHardeningResp;
+	    context: SLMContextResp;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMProfileValues(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.essential_tools = this.convertValues(source["essential_tools"], SLMEssentialToolsValues);
+	        this.system_prompt = this.convertValues(source["system_prompt"], SLMSystemPromptResp);
+	        this.sampling = this.convertValues(source["sampling"], SLMSamplingResp);
+	        this.loop_hardening = this.convertValues(source["loop_hardening"], SLMLoopHardeningResp);
+	        this.context = this.convertValues(source["context"], SLMContextResp);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SLMProfileDTO {
+	    id: string;
+	    name: string;
+	    kind: string;
+	    values: SLMProfileValues;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMProfileDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.values = this.convertValues(source["values"], SLMProfileValues);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SLMProfileUpdateRequest {
+	    name?: string;
+	    config?: SLMProfileValues;
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMProfileUpdateRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.config = this.convertValues(source["config"], SLMProfileValues);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class SLMToolGroup {
+	    id: string;
+	    title: string;
+	    description: string;
+	    tools: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMToolGroup(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.tools = source["tools"];
+	    }
+	}
+	export class SLMProfilesResponse {
+	    enabled: boolean;
+	    profiles: SLMProfileDTO[];
+	    active_id: string;
+	    suggested_profile_id?: string;
+	    builtin_tools: SLMBuiltinTool[];
+	    tool_groups: SLMToolGroup[];
+	    protected_tools: string[];
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SLMProfilesResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.profiles = this.convertValues(source["profiles"], SLMProfileDTO);
+	        this.active_id = source["active_id"];
+	        this.suggested_profile_id = source["suggested_profile_id"];
+	        this.builtin_tools = this.convertValues(source["builtin_tools"], SLMBuiltinTool);
+	        this.tool_groups = this.convertValues(source["tool_groups"], SLMToolGroup);
+	        this.protected_tools = source["protected_tools"];
+	        this.warnings = source["warnings"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
 	export class SearchRequest {
 	    query: string;
 	    top_k: number;
@@ -1020,238 +1336,6 @@ export namespace backend {
 	        this.description = source["description"];
 	    }
 	}
-	export class SmallLLMBuiltinTool {
-	    name: string;
-	    description: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMBuiltinTool(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.description = source["description"];
-	    }
-	}
-	export class SmallLLMCompactionResp {
-	    keep_last: number;
-	    block_size: number;
-	    trigger_percent: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMCompactionResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.keep_last = source["keep_last"];
-	        this.block_size = source["block_size"];
-	        this.trigger_percent = source["trigger_percent"];
-	    }
-	}
-	export class SmallLLMContextResp {
-	    enabled: boolean;
-	    compaction: SmallLLMCompactionResp;
-	    tool_output_keep_last_n: number;
-	    output_token_reserve: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMContextResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.compaction = this.convertValues(source["compaction"], SmallLLMCompactionResp);
-	        this.tool_output_keep_last_n = source["tool_output_keep_last_n"];
-	        this.output_token_reserve = source["output_token_reserve"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SmallLLMLoopHardeningResp {
-	    enabled: boolean;
-	    repeat_nudge_threshold: number;
-	    parse_error_abort_threshold: number;
-	    fruitless_nudge_threshold: number;
-	    fruitless_abort_threshold: number;
-	    same_tool_repeat_nudge_threshold: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMLoopHardeningResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.repeat_nudge_threshold = source["repeat_nudge_threshold"];
-	        this.parse_error_abort_threshold = source["parse_error_abort_threshold"];
-	        this.fruitless_nudge_threshold = source["fruitless_nudge_threshold"];
-	        this.fruitless_abort_threshold = source["fruitless_abort_threshold"];
-	        this.same_tool_repeat_nudge_threshold = source["same_tool_repeat_nudge_threshold"];
-	    }
-	}
-	export class SmallLLMSamplingResp {
-	    enabled: boolean;
-	    temperature: number;
-	    top_p: number;
-	    top_k: number;
-	    repetition_penalty: number;
-	    presence_penalty: number;
-	    reasoning_effort: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMSamplingResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.temperature = source["temperature"];
-	        this.top_p = source["top_p"];
-	        this.top_k = source["top_k"];
-	        this.repetition_penalty = source["repetition_penalty"];
-	        this.presence_penalty = source["presence_penalty"];
-	        this.reasoning_effort = source["reasoning_effort"];
-	    }
-	}
-	export class SmallLLMSystemPromptResp {
-	    lite: boolean;
-	    few_shot: boolean;
-	    reasoning_scaffold: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMSystemPromptResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.lite = source["lite"];
-	        this.few_shot = source["few_shot"];
-	        this.reasoning_scaffold = source["reasoning_scaffold"];
-	    }
-	}
-	export class SmallLLMToolGroup {
-	    id: string;
-	    title: string;
-	    description: string;
-	    tools: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMToolGroup(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.title = source["title"];
-	        this.description = source["description"];
-	        this.tools = source["tools"];
-	    }
-	}
-	export class SmallLLMEssentialToolsResp {
-	    enabled: boolean;
-	    always_present: string[];
-	    compact_descriptions: boolean;
-	    protected_tools: string[];
-	    builtin_tools: SmallLLMBuiltinTool[];
-	    tool_groups: SmallLLMToolGroup[];
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMEssentialToolsResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.always_present = source["always_present"];
-	        this.compact_descriptions = source["compact_descriptions"];
-	        this.protected_tools = source["protected_tools"];
-	        this.builtin_tools = this.convertValues(source["builtin_tools"], SmallLLMBuiltinTool);
-	        this.tool_groups = this.convertValues(source["tool_groups"], SmallLLMToolGroup);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SmallLLMConfigResponse {
-	    enabled: boolean;
-	    essential_tools: SmallLLMEssentialToolsResp;
-	    system_prompt: SmallLLMSystemPromptResp;
-	    sampling: SmallLLMSamplingResp;
-	    loop_hardening: SmallLLMLoopHardeningResp;
-	    context: SmallLLMContextResp;
-	
-	    static createFrom(source: any = {}) {
-	        return new SmallLLMConfigResponse(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.essential_tools = this.convertValues(source["essential_tools"], SmallLLMEssentialToolsResp);
-	        this.system_prompt = this.convertValues(source["system_prompt"], SmallLLMSystemPromptResp);
-	        this.sampling = this.convertValues(source["sampling"], SmallLLMSamplingResp);
-	        this.loop_hardening = this.convertValues(source["loop_hardening"], SmallLLMLoopHardeningResp);
-	        this.context = this.convertValues(source["context"], SmallLLMContextResp);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	
-	
-	
-	
-	
 	export class ToolInfo {
 	    name: string;
 	    description: string;

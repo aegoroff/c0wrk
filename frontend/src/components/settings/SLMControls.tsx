@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import { Markdown } from '@/lib/markdownConfig'
-import type { PickerOption } from '@/lib/smallLlmTools'
+import type { PickerOption } from '@/lib/slmTools'
 
 /**
  * Toggle switch — master / sub-toggles for the Small LLM profile.

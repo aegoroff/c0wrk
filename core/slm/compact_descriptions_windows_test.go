@@ -1,6 +1,6 @@
 //go:build windows
 
-package smallllm_test
+package slm_test
 
 import (
 	"testing"

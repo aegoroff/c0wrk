@@ -4,15 +4,17 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 // Mock the API layer: the component must not touch real Wails bindings.
-const updateSmallLLMConfigMock = vi.fn()
-const getSmallLLMConfigMock = vi.fn()
+const updateSLMProfileMock = vi.fn()
+const getSLMProfilesMock = vi.fn()
+const setSLMEnabledMock = vi.fn()
 vi.mock('@/api/config', () => ({
-  getSmallLLMConfig: (...args: unknown[]) => getSmallLLMConfigMock(...args),
-  updateSmallLLMConfig: (...args: unknown[]) => updateSmallLLMConfigMock(...args),
+  getSLMProfiles: (...args: unknown[]) => getSLMProfilesMock(...args),
+  updateSLMProfile: (...args: unknown[]) => updateSLMProfileMock(...args),
+  setSLMEnabled: (...args: unknown[]) => setSLMEnabledMock(...args),
 }))
 
 // Failure-path tests (backend validation rejection) intentionally make
-// SmallLLMSettings' logger.error fire; mock the logger so the expected
+// SLMSettings' logger.error fire; mock the logger so the expected
 // errors don't pollute vitest output.
 vi.mock('@/lib/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -31,42 +33,43 @@ vi.stubGlobal(
 )
 
 import { TooltipProvider, TOOLTIP_DELAY_MS } from '@/components/ui/tooltip'
-import { SmallLLMSettings } from './SmallLLMSettings'
+import type { SLMProfilesResponse, SLMProfileValues } from '@/types/models'
+import { SLMSettings } from './SLMSettings'
 
-const baseConfig = {
-  enabled: true,
+const builtinTools = [
+  { name: 'ask_user', description: 'ask the user a question' },
+  {
+    name: 'bash_exec',
+    description:
+      'Purpose: run shell commands.\nUse when: you need a shell.\nInputs: command.\nAnti-example: not for file reads.',
+  },
+  { name: 'cancel_delegation', description: 'cancel a running delegation' },
+  { name: 'delegate', description: 'delegate work to a subagent' },
+  { name: 'finish', description: 'finish the task' },
+  { name: 'read_file', description: 'read a file' },
+  {
+    name: 'read_skill_resource',
+    description:
+      "Purpose: read a resource file bundled with an activated skill — its reference material, scripts, or other supporting files — by skill name and a path relative to that skill's directory.\nUse when: a skill's instructions point you at a bundled file (e.g. \"see references/api.md\"); the skill must already be active on the current request.\nInputs: skill (name of the active skill that contains the resource); path (relative path within the skill directory, e.g. 'references/api.md').\nOutputs: the resource file's raw contents as text.\nExample: skill=\"pdf-processing\", path=\"references/forms.md\".\nAnti-example: not for reading a skill's instruction body or arbitrary workspace files (use read_file with a path).",
+  },
+  { name: 'reflect', description: 'reflect on the trajectory' },
+  { name: 'web_search', description: 'search the web' },
+]
+const toolGroups = [
+  {
+    id: 'subagents',
+    title: 'Subagents & reflection',
+    description: 'Delegate work to subagents and read their results.',
+    tools: ['delegate', 'cancel_delegation', 'reflect'],
+  },
+]
+const protectedTools = ['ask_user', 'finish']
+
+const baseValues: SLMProfileValues = {
   essential_tools: {
     enabled: true,
     always_present: ['finish', 'read_file'],
     compact_descriptions: false,
-    protected_tools: ['ask_user', 'finish'],
-    builtin_tools: [
-      { name: 'ask_user', description: 'ask the user a question' },
-      {
-        name: 'bash_exec',
-        description:
-          'Purpose: run shell commands.\nUse when: you need a shell.\nInputs: command.\nAnti-example: not for file reads.',
-      },
-      { name: 'cancel_delegation', description: 'cancel a running delegation' },
-      { name: 'delegate', description: 'delegate work to a subagent' },
-      { name: 'finish', description: 'finish the task' },
-      { name: 'read_file', description: 'read a file' },
-      {
-        name: 'read_skill_resource',
-        description:
-          "Purpose: read a resource file bundled with an activated skill — its reference material, scripts, or other supporting files — by skill name and a path relative to that skill's directory.\nUse when: a skill's instructions point you at a bundled file (e.g. \"see references/api.md\"); the skill must already be active on the current request.\nInputs: skill (name of the active skill that contains the resource); path (relative path within the skill directory, e.g. 'references/api.md').\nOutputs: the resource file's raw contents as text.\nExample: skill=\"pdf-processing\", path=\"references/forms.md\".\nAnti-example: not for reading a skill's instruction body or arbitrary workspace files (use read_file with a path).",
-      },
-      { name: 'reflect', description: 'reflect on the trajectory' },
-      { name: 'web_search', description: 'search the web' },
-    ],
-    tool_groups: [
-      {
-        id: 'subagents',
-        title: 'Subagents & reflection',
-        description: 'Delegate work to subagents and read their results.',
-        tools: ['delegate', 'cancel_delegation', 'reflect'],
-      },
-    ],
   },
   system_prompt: { lite: false, few_shot: false, reasoning_scaffold: false },
   sampling: {
@@ -94,13 +97,37 @@ const baseConfig = {
   },
 }
 
+const baseResponse: SLMProfilesResponse = {
+  enabled: true,
+  profiles: [
+    { id: 'generic', name: 'Generic (model-agnostic)', kind: 'predefined', values: structuredClone(baseValues) },
+    { id: 'test-tuned', name: 'Test Tuned', kind: 'custom', values: structuredClone(baseValues) },
+  ],
+  active_id: 'test-tuned',
+  suggested_profile_id: null,
+  builtin_tools: builtinTools,
+  tool_groups: toolGroups,
+  protected_tools: protectedTools,
+  warnings: [],
+}
+
+/** Response with per-variant overrides applied to the active custom profile's values. */
+function respWith(overrides: Partial<SLMProfileValues>): SLMProfilesResponse {
+  return structuredClone({
+    ...baseResponse,
+    profiles: baseResponse.profiles.map((p) =>
+      p.id === 'test-tuned' ? { ...p, values: { ...p.values, ...overrides } } : p,
+    ),
+  })
+}
+
 let container: HTMLDivElement
 let root: Root
 
 beforeEach(() => {
-  updateSmallLLMConfigMock.mockReset()
-  getSmallLLMConfigMock.mockReset().mockResolvedValue(structuredClone(baseConfig))
-  updateSmallLLMConfigMock.mockResolvedValue(undefined)
+  updateSLMProfileMock.mockReset()
+  getSLMProfilesMock.mockReset().mockResolvedValue(structuredClone(baseResponse))
+  updateSLMProfileMock.mockResolvedValue(undefined)
   container = document.createElement('div')
   document.body.replaceChildren(container)
   root = createRoot(container)
@@ -122,7 +149,7 @@ const render = () =>
   act(async () => {
     await root.render(
       <TooltipProvider>
-        <SmallLLMSettings />
+        <SLMSettings />
       </TooltipProvider>,
     )
   })
@@ -154,7 +181,7 @@ const toggleFor = (labelText: string) => {
 const chipFor = (name: string) =>
   Array.from(container.querySelectorAll('code')).find((c) => c.textContent === name)?.parentElement ?? null
 
-describe('SmallLLMSettings — sampling inherit semantics', () => {
+describe('SLMSettings — sampling inherit semantics', () => {
   it('renders inherit (0) fields as empty inputs with vendor-default placeholder', async () => {
     await render()
     const temp = field('Temperature')
@@ -165,8 +192,8 @@ describe('SmallLLMSettings — sampling inherit semantics', () => {
   })
 
   it('shows explicit values and sends them through on commit', async () => {
-    getSmallLLMConfigMock.mockResolvedValue(
-      structuredClone({ ...baseConfig, sampling: { ...baseConfig.sampling, temperature: 0.7, top_k: 40 } }),
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({ sampling: { ...baseValues.sampling, temperature: 0.7, top_k: 40 } }),
     )
     await render()
     expect(field('Temperature')?.value).toBe('0.7')
@@ -174,33 +201,33 @@ describe('SmallLLMSettings — sampling inherit semantics', () => {
 
     await setField(field('Top K')!, '20')
     await blur(field('Top K')!)
-    const sent = updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.sampling.top_k).toBe(20)
   })
 
   it('clearing an explicit value commits 0 (inherit)', async () => {
-    getSmallLLMConfigMock.mockResolvedValue(
-      structuredClone({ ...baseConfig, sampling: { ...baseConfig.sampling, temperature: 0.9 } }),
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({ sampling: { ...baseValues.sampling, temperature: 0.9 } }),
     )
     await render()
     const temp = field('Temperature')!
     expect(temp.value).toBe('0.9')
     await setField(temp, '')
     await blur(temp)
-    const sent = updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.sampling.temperature).toBe(0)
   })
 
   it('rejects out-of-bounds input and keeps the previous value', async () => {
-    getSmallLLMConfigMock.mockResolvedValue(
-      structuredClone({ ...baseConfig, sampling: { ...baseConfig.sampling, repetition_penalty: 1.2 } }),
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({ sampling: { ...baseValues.sampling, repetition_penalty: 1.2 } }),
     )
     await render()
     const rep = field('Repetition penalty')!
     await setField(rep, '9')
     await blur(rep)
     expect(rep.value).toBe('1.2')
-    expect(updateSmallLLMConfigMock).not.toHaveBeenCalled()
+    expect(updateSLMProfileMock).not.toHaveBeenCalled()
   })
 
   it('presence penalty: inherit renders empty, explicit value commits, >2 rejected', async () => {
@@ -214,19 +241,19 @@ describe('SmallLLMSettings — sampling inherit semantics', () => {
     // An explicit value (the Qwen instruct default 1.5) is sent through on commit.
     await setField(pp, '1.5')
     await blur(pp)
-    const sent = updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.sampling.presence_penalty).toBe(1.5)
 
     // Out-of-bounds input (> 2) is rejected and keeps the previous value.
-    const before = updateSmallLLMConfigMock.mock.calls.length
+    const before = updateSLMProfileMock.mock.calls.length
     await setField(pp, '2.5')
     await blur(pp)
     expect(pp.value).toBe('1.5')
-    expect(updateSmallLLMConfigMock.mock.calls.length).toBe(before)
+    expect(updateSLMProfileMock.mock.calls.length).toBe(before)
   })
 })
 
-describe('SmallLLMSettings — context section', () => {
+describe('SLMSettings — context section', () => {
   it('renders the context variant with compaction, pruning and reserve fields', async () => {
     await render()
     const text = container.textContent ?? ''
@@ -238,8 +265,8 @@ describe('SmallLLMSettings — context section', () => {
   })
 
   it('exposes compaction fields once the variant is enabled', async () => {
-    getSmallLLMConfigMock.mockResolvedValue(
-      structuredClone({ ...baseConfig, context: { ...baseConfig.context, enabled: true } }),
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({ context: { ...baseValues.context, enabled: true } }),
     )
     await render()
     expect(field('Keep last')?.value).toBe('6')
@@ -250,12 +277,12 @@ describe('SmallLLMSettings — context section', () => {
 
     await setField(field('Keep last')!, '4')
     await blur(field('Keep last')!)
-    const sent = updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.context.compaction.keep_last).toBe(4)
   })
 })
 
-describe('SmallLLMSettings — essential tools static selection & locked tools', () => {
+describe('SLMSettings — essential tools static selection & locked tools', () => {
   it('documents the static selection and renders protected tools as locked', async () => {
     await render()
     const text = container.textContent ?? ''
@@ -284,12 +311,12 @@ describe('SmallLLMSettings — essential tools static selection & locked tools',
       toggle?.click()
       await Promise.resolve()
     })
-    const sent = updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    const sent = updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
     expect(sent.essential_tools.compact_descriptions).toBe(true)
   })
 })
 
-describe('SmallLLMSettings — essential tools picker (combobox)', () => {
+describe('SLMSettings — essential tools picker (combobox)', () => {
   const picker = () =>
     container.querySelector('button[aria-label="Add Always-present tools"]') as HTMLButtonElement | null
 
@@ -327,7 +354,7 @@ describe('SmallLLMSettings — essential tools picker (combobox)', () => {
   }
 
   const lastSent = () =>
-    updateSmallLLMConfigMock.mock.calls[updateSmallLLMConfigMock.mock.calls.length - 1]?.[0]
+    updateSLMProfileMock.mock.calls[updateSLMProfileMock.mock.calls.length - 1]?.[1]?.config
 
   it('offers the workflow cluster plus only the built-ins that are not already allowed', async () => {
     await render()
@@ -409,13 +436,13 @@ describe('SmallLLMSettings — essential tools picker (combobox)', () => {
   })
 })
 
-describe('SmallLLMSettings — inline validation errors', () => {
+describe('SLMSettings — inline validation errors', () => {
   it('shows the backend validation error next to the form and reverts local state', async () => {
-    getSmallLLMConfigMock.mockResolvedValue(
-      structuredClone({ ...baseConfig, context: { ...baseConfig.context, enabled: true } }),
+    getSLMProfilesMock.mockResolvedValue(
+      respWith({ context: { ...baseValues.context, enabled: true } }),
     )
     await render()
-    updateSmallLLMConfigMock.mockRejectedValue(new Error('keep_last must be >= 2'))
+    updateSLMProfileMock.mockRejectedValue(new Error('keep_last must be >= 2'))
 
     await setField(field('Keep last')!, '4')
     await blur(field('Keep last')!)
@@ -427,7 +454,7 @@ describe('SmallLLMSettings — inline validation errors', () => {
     const text = container.textContent ?? ''
     expect(text).toContain('keep_last must be >= 2')
     // Config was reloaded from the backend (reverted).
-    expect(getSmallLLMConfigMock).toHaveBeenCalledTimes(2)
+    expect(getSLMProfilesMock).toHaveBeenCalledTimes(2)
     expect(field('Keep last')?.value).toBe('6')
   })
 })

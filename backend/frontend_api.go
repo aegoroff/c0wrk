@@ -29,6 +29,10 @@ type FrontendAPI struct {
 	configMu         sync.RWMutex
 	configPath       string
 	configLoadErrors []string
+	// slmNotices carries one-shot Small-LLM profile notices (e.g. "the
+	// active profile was deleted; switched to generic") for the NEXT
+	// GetSLMProfiles call. Guarded by configMu; drained on read.
+	slmNotices []string
 	// saveMu serializes full config-save sequences for writers that must not
 	// hold configMu across slow work (persist → No-Project provisioning →
 	// judge/router rebuild, currently UpdateLLMConfig). configMu above guards

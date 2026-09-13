@@ -1,4 +1,4 @@
-package smallllm
+package slm
 
 // ToolGroupDef describes a functional cluster of orchestration tools offered by
 // the always-present picker (settings UI). The picker presents the cluster as a

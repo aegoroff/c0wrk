@@ -10,7 +10,7 @@ const metrics: AgentMetricsData = {
   steps: 7,
   output_tokens: 1234,
   invalid_tool_calls: 0,
-  small_llm: { enabled: false, variants: [] },
+  slm: { enabled: false, variants: [] },
 }
 
 describe('planStore sessionStats (agent_metrics)', () => {
