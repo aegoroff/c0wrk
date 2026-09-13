@@ -33,10 +33,17 @@ var defaultAgentDirs = []string{
 // defaultSLMAlwaysPresent is the default always-present tool allow-list
 // exposed when the small-LLM essential-tools variant is active. It balances a
 // minimal schema footprint against enough capability to navigate, edit,
-// search, and finalize tasks. MCP-backed tools are layered on separately at
-// runtime.
+// search, and finalize tasks, and it pins the tools the ReAct loop itself
+// depends on — reading user attachments and activated-skill resources, and
+// paging through a truncated tool result (read_attachment, read_skill_resource,
+// tool_result_read) plus the step checklist (update_checklist) — so an active
+// profile never leaves a session unable to finish its loop. MCP-backed tools
+// are layered on separately at runtime.
 var defaultSLMAlwaysPresent = []string{
 	"read_file",
+	"read_attachment",
+	"read_skill_resource",
+	"tool_result_read",
 	"write_file",
 	"edit_file",
 	"list_directory",
@@ -47,6 +54,7 @@ var defaultSLMAlwaysPresent = []string{
 	"semantic_search",
 	"store_fact",
 	"search_facts",
+	"update_checklist",
 	"ask_user",
 	"finish",
 }

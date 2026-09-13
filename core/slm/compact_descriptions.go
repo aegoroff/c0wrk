@@ -36,14 +36,15 @@ var compactDescriptions = map[string]string{
 	"web_search": "Web search returning {title, URL, snippet} results. For reading a known URL use web_fetch; never paste secrets into a query.",
 
 	// sp4rk builtins — memory & workspace
-	"store_fact":        "Persist a durable fact (3-10 keywords) for later retrieval across steps. Store early — before context grows; retrieve via search_facts.",
-	"search_facts":      "Recall previously stored facts by keywords (ranked by relevance). For new information search the codebase instead; never reconstruct from memory.",
-	"read_step_output":  "Read the full raw output of one completed plan step by ID, when its summary is insufficient.",
-	"list_step_outputs": "List completed plan steps with short previews — discover step IDs before read_step_output.",
-	"read_final_result": "Read the previous task's final answer from the blackboard (e.g. after a restart). For plan steps use read_step_output.",
-	"update_checklist":  "Maintain the step's sub-task checklist: initialize at step start, then mark exactly one item [x] per completed sub-task. ASCII '- [ ]'/'- [x]' lines only.",
-	"tool_result_read":  "Re-read fragments of a truncated tool result via its cache hash — never re-run the original tool for truncated output.",
-	"read_attachment":   "Read a user-attached file's markdown by attachment_id (from the message). Not for workspace files — those go through read_file.",
+	"store_fact":          "Persist a durable fact (3-10 keywords) for later retrieval across steps. Store early — before context grows; retrieve via search_facts.",
+	"search_facts":        "Recall previously stored facts by keywords (ranked by relevance). For new information search the codebase instead; never reconstruct from memory.",
+	"read_step_output":    "Read the full raw output of one completed plan step by ID, when its summary is insufficient.",
+	"list_step_outputs":   "List completed plan steps with short previews — discover step IDs before read_step_output.",
+	"read_final_result":   "Read the previous task's final answer from the blackboard (e.g. after a restart). For plan steps use read_step_output.",
+	"update_checklist":    "Maintain the step's sub-task checklist: initialize at step start, then mark exactly one item [x] per completed sub-task. ASCII '- [ ]'/'- [x]' lines only.",
+	"tool_result_read":    "Re-read fragments of a truncated tool result via its cache hash — never re-run the original tool for truncated output.",
+	"read_attachment":     "Read a user-attached file's markdown by attachment_id (from the message). Not for workspace files — those go through read_file.",
+	"read_skill_resource": "Read a resource file bundled with an active skill (skill + path). Only active skills resolve; for workspace files use read_file.",
 
 	// sp4rk agent-loop tool (protected, always present)
 	"finish": "Signal task completion and deliver the final answer — call exactly once, only after verifying every acceptance criterion; if any is unmet, keep working.",

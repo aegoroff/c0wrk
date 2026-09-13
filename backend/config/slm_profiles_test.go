@@ -11,6 +11,9 @@ import (
 // the catalog) must surface here and be updated consciously.
 var goldenSLMTools = []string{
 	"read_file",
+	"read_attachment",
+	"read_skill_resource",
+	"tool_result_read",
 	"write_file",
 	"edit_file",
 	"list_directory",
@@ -21,6 +24,7 @@ var goldenSLMTools = []string{
 	"semantic_search",
 	"store_fact",
 	"search_facts",
+	"update_checklist",
 	"ask_user",
 	"finish",
 }

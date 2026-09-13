@@ -8,22 +8,23 @@ import (
 )
 
 // TestSLMDefaultAlwaysPresentUnionProtected pins the invariant that the
-// shipped default always-present list ∪ the protected orchestration tools
-// (finish, store_fact, search_facts, ask_user, update_checklist; 4 of the 5
-// overlap the pins) is exactly the guaranteed core. The static selection
+// shipped default always-present list ∪ the protected ReAct-mandatory tools
+// (finish, store_fact, search_facts, ask_user, update_checklist,
+// read_attachment, read_skill_resource, tool_result_read; all 8 are also
+// pinned by default) is exactly the guaranteed core. The static selection
 // (slm.SelectTools) serves exactly this union — the user's pins, the
 // protected tools, and every MCP tool — with no slot budget. bash_exec and
 // posh_exec are platform alternatives (only one is registered per host), so
-// the list carries 14 names while the effective per-host set is 13.
+// the list carries 17 names while the effective per-host set is 16.
 func TestSLMDefaultAlwaysPresentUnionProtected(t *testing.T) {
-	guaranteed := make(map[string]struct{}, 16)
+	guaranteed := make(map[string]struct{}, 20)
 	for _, n := range defaultSLMAlwaysPresent {
 		guaranteed[n] = struct{}{}
 	}
 	for _, n := range slm.ProtectedToolNames() {
 		guaranteed[n] = struct{}{}
 	}
-	const wantGuaranteed = 14
+	const wantGuaranteed = 17
 	if len(guaranteed) != wantGuaranteed {
 		names := make([]string, 0, len(guaranteed))
 		for n := range guaranteed {

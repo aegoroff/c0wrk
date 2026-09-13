@@ -8,15 +8,20 @@ import (
 
 	"github.com/v0lka/c0wrk/core/slm"
 	tools2 "github.com/v0lka/c0wrk/core/tools"
+	"github.com/v0lka/sp4rk/agent"
+	"github.com/v0lka/sp4rk/skills"
 	"github.com/v0lka/sp4rk/tools"
 	"github.com/v0lka/sp4rk/tools/builtins"
+	"github.com/v0lka/sp4rk/tools/builtins/websearch"
 )
 
-// realBuiltinDescriptors builds descriptors for the subset of builtins that
-// can be instantiated without runtime dependencies. Their descriptions are the
-// real full rubric texts our compact set is measured against. The platform
-// shell tool (bash_exec on Unix, posh_exec on Windows) is contributed by
-// platformShellTool in the build-tagged test files.
+// realBuiltinDescriptors builds descriptors for EVERY builtin that can be
+// instantiated without runtime dependencies — the full non-MCP builtin surface,
+// so the compact-set guards below hold for every tool rather than a subset.
+// Their descriptions are the real full rubric texts our compact set is measured
+// against. The platform shell tool (bash_exec on Unix, posh_exec on Windows) is
+// contributed by platformShellTool in the build-tagged test files (only one is
+// ever instantiable per host, which is also why the compact set carries both).
 func realBuiltinDescriptors(t *testing.T) []tools.ToolDescriptor {
 	t.Helper()
 
@@ -40,6 +45,11 @@ func realBuiltinDescriptors(t *testing.T) []tools.ToolDescriptor {
 		builtins.NewStoreFactTool(),
 		builtins.NewSearchFactsTool(),
 		builtins.NewReadAttachmentTool(),
+		agent.NewFinishTool(),
+		builtins.NewWebFetchToolWithClient(builtins.WebFetchLimits{}, nil),
+		websearch.NewTool(nil, builtins.DefaultWebSearchLimits()),
+		builtins.NewVectorSearchTool(nil, nil),
+		skills.NewReadSkillResourceTool(nil),
 	}
 
 	out := make([]tools.ToolDescriptor, 0, len(impls))

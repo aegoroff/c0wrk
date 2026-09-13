@@ -34,6 +34,9 @@ func fullToolSet() []sdktools.ToolDescriptor {
 		{Name: "glob", SourceCategory: sdktools.SourceCategoryCore},
 		{Name: "ripgrep", SourceCategory: sdktools.SourceCategoryCore},
 		{Name: "semantic_search", SourceCategory: sdktools.SourceCategoryCore},
+		{Name: "read_attachment", SourceCategory: sdktools.SourceCategoryCore},
+		{Name: "read_skill_resource", SourceCategory: sdktools.SourceCategoryCore},
+		{Name: "tool_result_read", SourceCategory: sdktools.SourceCategoryCore},
 		{Name: "web_search", SourceCategory: sdktools.SourceCategoryCore},
 		{Name: "web_fetch", SourceCategory: sdktools.SourceCategoryCore},
 		// Mutating.
@@ -68,8 +71,9 @@ func TestSelectTools_StaticUnionOfPinsProtectedAndMCP(t *testing.T) {
 	// unpinned core tools, no orchestration tools), nothing less.
 	want := []string{
 		"ask_user", "bash_exec", "finish", "get_code_snippet",
-		"mcp_linter", "read_file", "ripgrep", "search_facts",
-		"search_graph", "store_fact", "update_checklist", "write_file",
+		"mcp_linter", "read_attachment", "read_file", "read_skill_resource",
+		"ripgrep", "search_facts", "search_graph", "store_fact",
+		"tool_result_read", "update_checklist", "write_file",
 	}
 	if diff := cmp.Diff(want, descriptorNames(got)); diff != "" {
 		t.Errorf("static selection must be exactly pins ∪ protected ∪ MCP:\n%s", diff)
@@ -164,7 +168,8 @@ func defaultAlwaysPresent() []string {
 	return []string{
 		"read_file", "write_file", "edit_file", "list_directory",
 		"glob", "ripgrep", "bash_exec", "semantic_search",
-		"store_fact", "search_facts", "ask_user", "finish",
+		"read_attachment", "read_skill_resource", "tool_result_read",
+		"store_fact", "search_facts", "update_checklist", "ask_user", "finish",
 	}
 }
 
@@ -182,9 +187,10 @@ func coreToolSet() []sdktools.ToolDescriptor {
 }
 
 func TestSelectTools_DefaultAlwaysPresentSelection(t *testing.T) {
-	// The default always-present list (12) unioned with the 5 protected
-	// tools (4 overlap → 13 unique). Unpinned core tools and orchestration
-	// tools stay excluded.
+	// The default always-present list (16 names in this registry subset; the
+	// shipped list also carries posh_exec) now fully contains the 8 protected
+	// tools, so the selection is exactly those 16. Unpinned core tools and
+	// orchestration tools stay excluded.
 	got := SelectTools(coreToolSet(), defaultAlwaysPresent())
 	names := descriptorNames(got)
 
@@ -194,9 +200,11 @@ func TestSelectTools_DefaultAlwaysPresentSelection(t *testing.T) {
 			t.Errorf("default always-present %q must never be dropped; got %v", n, names)
 		}
 	}
-	// …plus update_checklist (protected, not among the default pins).
-	if !contains(names, "update_checklist") {
-		t.Errorf("protected update_checklist must always be present; got %v", names)
+	// …including the protected ReAct-mandatory tools.
+	for _, n := range []string{"update_checklist", "read_attachment", "read_skill_resource", "tool_result_read"} {
+		if !contains(names, n) {
+			t.Errorf("protected %q must always be present; got %v", n, names)
+		}
 	}
 
 	// Unpinned core tools and orchestration tools stay excluded.
@@ -205,8 +213,8 @@ func TestSelectTools_DefaultAlwaysPresentSelection(t *testing.T) {
 			t.Errorf("unpinned tool %q must stay excluded; got %v", ex, names)
 		}
 	}
-	if len(got) != 13 {
-		t.Errorf("expected 12 pins ∪ 5 protected = 13 unique tools; got %d (%v)", len(got), names)
+	if len(got) != 16 {
+		t.Errorf("expected the 16 default pins (protected ⊆ pins) to survive; got %d (%v)", len(got), names)
 	}
 }
 
@@ -216,7 +224,8 @@ func TestSelectTools_RegistryOrderPreserved(t *testing.T) {
 	got := SelectTools(coreToolSet(), defaultAlwaysPresent())
 	want := []string{
 		"read_file", "list_directory", "glob", "ripgrep",
-		"semantic_search", "write_file", "edit_file", "bash_exec",
+		"semantic_search", "read_attachment", "read_skill_resource",
+		"tool_result_read", "write_file", "edit_file", "bash_exec",
 		"finish", "store_fact", "search_facts", "ask_user",
 		"update_checklist",
 	}

@@ -5,20 +5,22 @@
 // overhead and decision fatigue.
 //
 // Selection is purely static: SelectTools unions the user's always-present
-// list, the protected orchestration tools (the completion channel, fact
-// memory, the human-interaction channel, and the step checklist), every
-// MCP-sourced tool, and any turn-scoped extra-guaranteed names the caller
-// passes (e.g. delegate when the user explicitly requested subagents). There
-// is no quantitative budget, no router matching, and no domain-specific
-// allow-listing — the user decides which tools are essential; this function
-// only assembles their selection.
+// list, the protected ReAct-mandatory tools (the completion channel, fact
+// memory, the human-interaction channel, the step checklist, and the
+// read/recovery tools the loop needs), every MCP-sourced tool, and any
+// turn-scoped extra-guaranteed names the caller passes (e.g. delegate when
+// the user explicitly requested subagents). There is no quantitative budget,
+// no router matching, and no domain-specific allow-listing — the user
+// decides which tools are essential; this function only assembles their
+// selection.
 //
 // Every tool in the selection is guaranteed and never trimmed: the pins are
 // explicit user choices, MCP tools are user-installed integrations, and the
-// protected set carries the completion channel — dropping any of them would
-// silently break pinned workflows, user-installed MCP servers, or the
-// conductor loop's ability to terminate. SelectTools never fails and never
-// drops a selected tool.
+// protected set carries the loop's completion channel and its read/recovery
+// tools — dropping any of them would silently break pinned workflows,
+// user-installed MCP servers, or the conductor loop's ability to terminate or
+// to read back what it produced. SelectTools never fails and never drops a
+// selected tool.
 //
 // All functions in this package are pure and deterministic — no LLM, embedding,
 // or network calls. They are factored out so they can be unit-tested in
@@ -38,22 +40,34 @@ import (
 const finishToolName = "finish"
 
 // protectedToolNames are retained regardless of the always-present list: the
-// completion channel, the fact memory (store/search), the human-interaction
-// channel, and the step checklist. MCP-sourced tools are likewise always kept
-// (they are user-installed and not part of the orchestration-noise problem).
+// tools a session's ReAct loop itself depends on and can never do without —
+// the completion channel (finish), the fact memory (store/search), the
+// human-interaction channel (ask_user), the step checklist
+// (update_checklist), and the read/recovery tools that keep the loop
+// productive: reading a user-attached file, reading an activated skill's
+// resource, and paging through a tool result truncated by the token-budget
+// transport (read_attachment, read_skill_resource, tool_result_read). They
+// are guaranteed in every session whatever the active profile pins. MCP
+// tools are likewise always kept (they are user-installed and not part of the
+// orchestration-noise problem).
 var protectedToolNames = map[string]struct{}{
-	finishToolName:     {},
-	"store_fact":       {},
-	"search_facts":     {},
-	"ask_user":         {},
-	"update_checklist": {},
+	finishToolName:        {},
+	"store_fact":          {},
+	"search_facts":        {},
+	"ask_user":            {},
+	"update_checklist":    {},
+	"read_attachment":     {},
+	"read_skill_resource": {},
+	"tool_result_read":    {},
 }
 
-// ProtectedToolNames returns the sorted names of the orchestration-mandatory
-// tools that SelectTools always keeps regardless of the always-present input:
-// the completion channel (finish), the fact memory (store/search_facts), and
-// the human-interaction channel (ask_user), plus update_checklist. Exposed so
-// UI layers can surface these as permanently present ("locked") alongside the
+// ProtectedToolNames returns the sorted names of the ReAct-mandatory tools
+// that SelectTools always keeps regardless of the always-present input: the
+// completion channel (finish), the fact memory (store/search_facts), the
+// human-interaction channel (ask_user), the step checklist
+// (update_checklist), and the read/recovery tools the loop needs
+// (read_attachment, read_skill_resource, tool_result_read). Exposed so UI
+// layers can surface these as permanently present ("locked") alongside the
 // user's always-present list. The result is deterministic (sorted) and freshly
 // allocated.
 func ProtectedToolNames() []string {
