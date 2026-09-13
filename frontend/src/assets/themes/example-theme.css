@@ -43,9 +43,13 @@
   -------------------------------------------------
   - The file must declare --color-background and --color-foreground
     (the two tokens every theme must provide).
-  - No stylesheet imports of other files. "Self-contained" only.
+  - Only custom-property declarations on a single :root rule are used;
+    anything else (regular declarations like `background:`, other
+    selectors, @-rules, functions like image-set()) is rejected at import.
   - Embedded resources must be inline data URIs; remote or local file
     references are rejected — a theme must never fetch anything.
+  - Import stores the sanitized canonical form (this file's comments are
+    kept only for the metadata header).
   - Max file size 512 KiB.
   - The file name must not collide with the built-ins "default-dark" /
     "default-light".
@@ -57,6 +61,9 @@
   app keeps using the default for that token.
 
   FULL TOKEN REFERENCE: specs/domains/theming.md (in the c0wrk repo).
+  LOCATION: this directory (frontend/src/assets/themes/) also ships the
+  bundled palette themes (nord.css, tokyo-night.css, …) — import any of
+  them the same way.
 */
 
 :root {

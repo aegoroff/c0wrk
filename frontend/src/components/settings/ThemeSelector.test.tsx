@@ -78,8 +78,9 @@ import { pickAndImportThemes, deleteTheme } from '@/api/themes'
 let container: HTMLDivElement
 let root: Root
 
-const NORD: ThemeInfo = { id: 'nord', name: 'Nord', type: 'dark', css: 'body{}' }
-const PAPER: ThemeInfo = { id: 'paper', name: 'Paper', type: 'light', css: 'body{}' }
+const NORD_CSS = ':root{--color-background:#2e3440;--color-foreground:#d8dee9}'
+const NORD: ThemeInfo = { id: 'nord', name: 'Nord', type: 'dark', css: NORD_CSS }
+const PAPER: ThemeInfo = { id: 'paper', name: 'Paper', type: 'light', css: ':root{--color-background:#faf8f2;--color-foreground:#3a3a38}' }
 
 beforeEach(() => {
   themeApi.list = []
@@ -92,6 +93,7 @@ beforeEach(() => {
     useThemeStore.setState({ themeId: 'default-dark', themeCss: '', customThemes: [] })
   })
   document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('data-custom-theme')
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -205,8 +207,13 @@ describe('ThemeSelector combobox', () => {
     })
     const state = useThemeStore.getState()
     expect(state.themeId).toBe('nord')
-    expect(state.themeCss).toBe('body{}')
-    expect(document.documentElement.getAttribute('data-theme')).toBe('nord')
+    expect(state.themeCss).toBe(NORD_CSS)
+    // v3: the kind attribute carries the TYPE, the slug lives on
+    // data-custom-theme, and the injected CSS is scoped to that attribute.
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('nord')
+    expect(document.getElementById('c0wrk-custom-theme')?.textContent)
+      .toContain(':root[data-custom-theme="nord"]{--color-background:#2e3440')
   })
 })
 
@@ -264,9 +271,10 @@ describe('ThemeSelector import', () => {
     })
     const state = useThemeStore.getState()
     expect(state.themeId).toBe('nord')
-    expect(state.themeCss).toBe('body{}')
+    expect(state.themeCss).toBe(NORD_CSS)
     expect(state.customThemes.map((t) => t.id)).toEqual(['nord'])
-    expect(document.documentElement.getAttribute('data-theme')).toBe('nord')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('nord')
     // No failure toast — every file in the batch installed.
     expect(emitSpy).not.toHaveBeenCalledWith('runtime_error', expect.anything())
   })
@@ -284,7 +292,7 @@ describe('ThemeSelector import', () => {
     })
     const state = useThemeStore.getState()
     expect(state.themeId).toBe('paper') // last successful pick wins
-    expect(state.themeCss).toBe('body{}')
+    expect(state.themeCss).toBe(PAPER.css)
     expect(state.customThemes.map((t) => t.id)).toEqual(['nord', 'paper'])
   })
 

@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -22,11 +21,15 @@ const (
 const maxThemeCSSSize = 512 * 1024
 
 // reservedThemeIDs are theme identifiers owned by the built-in themes. An
-// imported theme can never take one of these slugs, so a user theme can
-// neither shadow nor alias the defaults.
+// imported theme can never take one of these slugs. `default-dark` /
+// `default-light` name the built-ins themselves; `dark` / `light` are the
+// data-theme attribute keys the built-ins write, so a custom slug named
+// `light` or `dark` could alias the built-in override blocks.
 var reservedThemeIDs = map[string]struct{}{
 	"default-dark":  {},
 	"default-light": {},
+	"dark":          {},
+	"light":         {},
 }
 
 // ThemeDTO is a lightweight user-theme descriptor exposed to the frontend.
@@ -56,12 +59,9 @@ var themeHeaderRe = regexp.MustCompile(`(?is)^\s*/\*\s*c0wrk-theme\s*:\s*(.+?)\s
 // false-positive as a type declaration.
 var colorSchemeRe = regexp.MustCompile(`(?i)(?:^|[^-\w])color-scheme\s*:\s*["']?(dark|light)\b`)
 
-// themeImportRe matches any @import at-rule, case-insensitive.
-var themeImportRe = regexp.MustCompile(`(?i)@import\b`)
-
-// themeURLRe matches url(...) references with single-quoted, double-quoted or
-// unquoted payloads.
-var themeURLRe = regexp.MustCompile(`(?is)url\(\s*(?:'([^']*)'|"([^"]*)"|([^)'"]*))\s*\)`)
+// themeImportRe and the url() regex previously used by ValidateThemeCSS are
+// gone: validation is now structural (see sanitizeThemeCSS), not a chain of
+// pattern rejections.
 
 // Slug normalization helpers: disallowed character runs and repeated hyphens
 // both collapse to a single hyphen.
@@ -100,33 +100,24 @@ func ParseThemeCSS(filename, content string) (name, typ string) {
 }
 
 // ValidateThemeCSS checks that a CSS document is safe to install as a user
-// theme. It rejects:
-//   - any @import at-rule (case-insensitive) — themes must be self-contained;
-//   - url(...) references that are not data: URLs (external http(s)://, //,
-//     file:, and relative references all pull in remote or filesystem data);
-//   - payloads larger than 512 KiB;
-//   - documents that do not declare both --color-background and
-//     --color-foreground (the minimal contract the frontend relies on).
+// theme. Themes are injected into the webview as a global <style> element, so
+// the document is untrusted input: it is parsed with a real CSS tokenizer and
+// must consist solely of custom-property declarations on a single :root rule
+// (plus the metadata header comment and one optional color-scheme
+// declaration). Values may reference only literal tokens, data: URLs, and a
+// small allowlist of functions — every resource-referencing construct
+// (@import, url(), image-set(), escaped identifiers, …) is rejected by
+// construction rather than by enumeration. See sanitizeThemeCSS.
+//
+// The document must also declare both --color-background and
+// --color-foreground (the minimal contract the frontend relies on) and stay
+// within maxThemeCSSSize.
 func ValidateThemeCSS(content string) error {
 	if len(content) > maxThemeCSSSize {
 		return fmt.Errorf("theme CSS is too large: %d bytes (limit %d)", len(content), maxThemeCSSSize)
 	}
-	if themeImportRe.MatchString(content) {
-		return errors.New("theme CSS must not contain @import statements")
-	}
-	for _, m := range themeURLRe.FindAllStringSubmatch(content, -1) {
-		ref := firstNonEmpty(m[1], m[2], m[3])
-		if !strings.HasPrefix(strings.ToLower(ref), "data:") {
-			return fmt.Errorf("theme CSS must not reference external resources: url(%s) is not a data: URL", ref)
-		}
-	}
-	if !strings.Contains(content, "--color-background") {
-		return errors.New("theme CSS must declare the --color-background custom property")
-	}
-	if !strings.Contains(content, "--color-foreground") {
-		return errors.New("theme CSS must declare the --color-foreground custom property")
-	}
-	return nil
+	_, err := sanitizeThemeCSS(content)
+	return err
 }
 
 // themeSlug derives the stable theme identifier from a CSS file name: the
@@ -173,15 +164,4 @@ func prettyThemeName(filename string) string {
 		b.WriteString(w[size:])
 	}
 	return b.String()
-}
-
-// firstNonEmpty returns the first argument that is not empty, or "" when all
-// are empty.
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

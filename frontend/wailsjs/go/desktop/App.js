@@ -374,14 +374,6 @@ export function HasDefaultModel() {
   return window['go']['desktop']['App']['HasDefaultModel']();
 }
 
-export function ImportThemeFromPath(arg1) {
-  return window['go']['desktop']['App']['ImportThemeFromPath'](arg1);
-}
-
-export function ImportThemesFromPaths(arg1) {
-  return window['go']['desktop']['App']['ImportThemesFromPaths'](arg1);
-}
-
 export function Lifecycle() {
   return window['go']['desktop']['App']['Lifecycle']();
 }

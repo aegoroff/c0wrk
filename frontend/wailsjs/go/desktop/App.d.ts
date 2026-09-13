@@ -195,10 +195,6 @@ export function HardenGitRepo(arg1:string):Promise<void>;
 
 export function HasDefaultModel():Promise<boolean>;
 
-export function ImportThemeFromPath(arg1:string):Promise<backend.ThemeDTO>;
-
-export function ImportThemesFromPaths(arg1:Array<string>):Promise<Array<backend.ThemeImportResult>>;
-
 export function Lifecycle():Promise<backend.FrontendAPILifecycle>;
 
 export function ListAgents():Promise<Array<backend.AgentDescriptorDTO>>;

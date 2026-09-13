@@ -21,6 +21,7 @@ import { logger } from '@/lib/logger'
 import { cn } from '@/lib/utils'
 import {
   BUILTIN_THEMES,
+  themeTypeOf,
   useThemeStore,
 } from '@/stores/themeStore'
 
@@ -49,8 +50,8 @@ export function ThemeSelector() {
       // same theme keeps its cached CSS inside themeStore.setTheme).
       if (id === 'default-dark' || id === 'default-light') setTheme(id)
       else {
-        const css = useThemeStore.getState().customThemes.find((t) => t.id === id)
-        setTheme(id, css?.css ?? '')
+        const entry = useThemeStore.getState().customThemes.find((t) => t.id === id)
+        setTheme(id, entry?.css ?? '', entry ? themeTypeOf(entry) : undefined)
       }
     },
     [setTheme],
@@ -67,7 +68,7 @@ export function ThemeSelector() {
         // once it is the most recent pick, and single-file imports (the common
         // case) keep the exact "activate what you imported" behavior.
         const last = imported[imported.length - 1]?.theme
-        if (last) setTheme(last.id, last.css ?? '')
+        if (last) setTheme(last.id, last.css ?? '', themeTypeOf(last))
       }
       const failed = outcomes.length - imported.length
       if (failed > 0) {

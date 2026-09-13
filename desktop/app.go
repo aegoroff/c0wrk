@@ -233,10 +233,13 @@ func (a *App) PickAttachmentFiles() ([]string, error) {
 // On cancel, OpenMultipleFilesDialog returns an empty slice and a nil error;
 // the method then returns (nil, nil) — nothing is imported and the frontend
 // maps the null result to "user cancelled". The chosen paths are delegated to
-// the embedded FrontendAPI.ImportThemesFromPaths, which validates and installs
-// each file independently — one invalid file never blocks the rest of the
-// batch, and per-file outcomes (including failures) come back in the result
-// list so the frontend can surface them.
+// backend.ImportThemesFromPaths (the package-level bridge over the
+// unexported FrontendAPI importer), which validates and sanitizes each file
+// independently — one invalid file never blocks the rest of the batch, and
+// per-file outcomes (including failures) come back in the result list so the
+// frontend can surface them. This picker is the ONLY import entry point: the
+// underlying import functions are not FrontendAPI methods precisely so the
+// binding generator never publishes a path-taking RPC to the renderer.
 func (a *App) PickAndImportThemes() ([]backend.ThemeImportResult, error) {
 	if a.ctx == nil {
 		return nil, errors.New("PickAndImportThemes: application context is not initialized")
@@ -259,7 +262,12 @@ func (a *App) PickAndImportThemes() ([]backend.ThemeImportResult, error) {
 		return nil, nil
 	}
 
-	return a.ImportThemesFromPaths(paths), nil
+	// Delegate to the package-level batch importer: the import entry points
+	// are deliberately NOT FrontendAPI methods (exported methods are
+	// auto-bound to the renderer; a path-taking RPC must not be callable
+	// from compromised renderer JS). The picker above is the sole path
+	// source.
+	return backend.ImportThemesFromPaths(a.FrontendAPI, paths), nil
 }
 
 // log returns the instance logger, falling back to slog.Default() when nil.

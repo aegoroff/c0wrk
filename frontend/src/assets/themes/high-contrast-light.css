@@ -7,7 +7,7 @@
   Original c0wrk palette (no external palette); max-readability variant of
   the built-in One Light direction.
   Import: Settings → Theme → [+] → pick this .css file.
-  Token reference: specs/domains/theming.md
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
 */
 
 :root {

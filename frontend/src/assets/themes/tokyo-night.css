@@ -4,7 +4,7 @@
   Palette: Tokyo Night (github.com/folke/tokyonight.nvim).
   Import: Settings → Theme → [+] → pick this .css file. Re-importing an
   updated file with the same name updates the installed theme.
-  Token reference: specs/domains/theming.md
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
 */
 
 :root {

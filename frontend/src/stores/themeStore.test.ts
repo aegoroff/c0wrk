@@ -55,10 +55,12 @@ describe('themeStore', () => {
     useThemeStore.setState({
       themeId: 'default-dark',
       themeCss: '',
+      themeType: 'dark',
       customThemes: [],
     })
     localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('data-custom-theme')
     document.getElementById('c0wrk-custom-theme')?.remove()
   })
 
@@ -79,7 +81,7 @@ describe('themeStore', () => {
     // main.tsx applies the rehydrated state before first paint — the same
     // chain must land on data-theme="light" for a migrated light user.
     const s = useThemeStore.getState()
-    applyThemeToDocument(s.themeId, s.themeCss)
+    applyThemeToDocument(s.themeId, s.themeCss, s.themeType)
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
   })
 
@@ -118,20 +120,36 @@ describe('themeStore', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
   })
 
-  it('setTheme applies a custom theme: data-theme=<id> and one injected style', () => {
+  it('setTheme applies a custom theme: type on data-theme, id on data-custom-theme, scoped CSS', () => {
     const { setTheme } = useThemeStore.getState()
-    setTheme('nord', NORD_CSS)
+    setTheme('nord', NORD_CSS, 'light')
     expect(useThemeStore.getState().themeId).toBe('nord')
     expect(useThemeStore.getState().themeCss).toBe(NORD_CSS)
-    expect(document.documentElement.getAttribute('data-theme')).toBe('nord')
+    expect(useThemeStore.getState().themeType).toBe('light')
+    // The KIND attribute carries the type, never the custom slug.
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('nord')
 
     const styles = document.querySelectorAll('style#c0wrk-custom-theme')
     expect(styles.length).toBe(1)
     const style = styles[0] as HTMLStyleElement
-    expect(style.textContent).toContain('--color-background:#2e3440')
-    // The injected sheet must also pin color-scheme to the theme type.
-    expect(style.textContent).toContain(':root{color-scheme:light}')
+    expect(style.textContent).toContain(':root[data-custom-theme="nord"]{--color-background:#2e3440')
     expect(style.parentElement).toBe(document.head)
+  })
+
+  it('setTheme derives the type from color-scheme when not given (v2 activation shape)', () => {
+    const { setTheme } = useThemeStore.getState()
+    setTheme('nord', NORD_CSS)
+    expect(useThemeStore.getState().themeType).toBe('light')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+  })
+
+  it('a custom slug can never alias the builtin data-theme keys', () => {
+    const { setTheme } = useThemeStore.getState()
+    setTheme('light', ':root{--color-background:#fff;--color-foreground:#000}')
+    // The kind attribute stays a type token even for a slug named 'light'.
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('light')
   })
 
   it('switching back to a built-in removes the injected style element', () => {
@@ -142,6 +160,7 @@ describe('themeStore', () => {
     expect(document.getElementById('c0wrk-custom-theme')).toBeNull()
     expect(useThemeStore.getState().themeCss).toBe('')
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+    expect(document.documentElement.hasAttribute('data-custom-theme')).toBe(false)
   })
 
   it('re-applying a custom theme reuses the single style element', () => {
@@ -150,15 +169,14 @@ describe('themeStore', () => {
     setTheme('gruvbox', ':root{--color-background:#282828;--color-foreground:#ebdbb2}')
     const styles = document.querySelectorAll('style#c0wrk-custom-theme')
     expect(styles.length).toBe(1)
-    expect(styles[0]?.textContent).toContain('#282828')
-    expect(styles[0]?.textContent).toContain(':root{color-scheme:dark}')
+    expect(styles[0]?.textContent).toContain(':root[data-custom-theme="gruvbox"]{--color-background:#282828')
   })
 
   it('applyThemeToDocument is a no-op without a document', () => {
     const doc = globalThis.document
     // @ts-expect-error simulate a non-DOM environment (SSR/tests)
     delete globalThis.document
-    expect(() => applyThemeToDocument('default-light', '')).not.toThrow()
+    expect(() => applyThemeToDocument('default-light', '', 'light')).not.toThrow()
     globalThis.document = doc
   })
 
@@ -187,7 +205,9 @@ describe('themeStore', () => {
     applyThemes([customLight, customDark])
     expect(useThemeStore.getState().themeId).toBe('nord')
     expect(useThemeStore.getState().themeCss).toBe(NORD_CSS)
-    expect(document.documentElement.getAttribute('data-theme')).toBe('nord')
+    expect(useThemeStore.getState().themeType).toBe('light')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('nord')
   })
 
   it('loadThemes fetches the catalog through listThemes', async () => {
@@ -212,9 +232,9 @@ describe('themeStore', () => {
   it('selectActiveThemeType resolves builtin and custom descriptors', () => {
     useThemeStore.setState({ themeId: 'default-light', customThemes: [] })
     expect(selectActiveThemeType(useThemeStore.getState())).toBe('light')
-    useThemeStore.setState({ themeId: 'nord', customThemes: [customLight, customDark] })
+    useThemeStore.setState({ themeId: 'nord', themeType: 'light', customThemes: [customLight, customDark] })
     expect(selectActiveThemeType(useThemeStore.getState())).toBe('light')
-    useThemeStore.setState({ themeId: 'gruvbox', customThemes: [customLight, customDark] })
+    useThemeStore.setState({ themeId: 'gruvbox', themeType: 'dark', customThemes: [customLight, customDark] })
     expect(selectActiveThemeType(useThemeStore.getState())).toBe('dark')
   })
 

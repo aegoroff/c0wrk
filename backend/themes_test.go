@@ -106,12 +106,12 @@ func TestValidateThemeCSS_AcceptsMinimal(t *testing.T) {
 }
 
 // TestValidateThemeCSS_SpecExampleTheme keeps the author-facing example theme
-// in specs/assets/example-theme.css importable: it must pass every validation
+// in frontend/src/assets/themes/example-theme.css importable: it must pass every validation
 // rule and parse with the metadata it declares. If this test fails after an
 // edit to the example (or to the validator), fix the file — the documented
 // starting point for theme authors must stay valid.
 func TestValidateThemeCSS_SpecExampleTheme(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "specs", "assets", "example-theme.css"))
+	b, err := os.ReadFile(filepath.Join("..", "frontend", "src", "assets", "themes", "example-theme.css"))
 	if err != nil {
 		t.Fatalf("read spec example theme: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestValidateThemeCSS_SpecExampleTheme(t *testing.T) {
 }
 
 // bundledThemeFiles lists every bundled palette theme shipped under
-// specs/assets/themes/. Each entry pins the parsed display name and type the
+// frontend/src/assets/themes/. Each entry pins the parsed display name and type the
 // theme must carry — the file's basename (sans .css) must equal the theme id.
 var bundledThemeFiles = map[string]struct {
 	name string
@@ -146,13 +146,13 @@ var bundledThemeFiles = map[string]struct {
 }
 
 // TestValidateThemeCSS_BundledThemes keeps every bundled palette theme under
-// specs/assets/themes/ importable: each must pass all validation rules,
+// frontend/src/assets/themes/ importable: each must pass all validation rules,
 // parse with the metadata it declares, and own a slug that neither collides
 // with the built-ins nor contradicts its filename. If this test fails after
 // an edit to a bundled theme (or to the validator), fix the file — the
 // bundled themes must always stay valid.
 func TestValidateThemeCSS_BundledThemes(t *testing.T) {
-	dir := filepath.Join("..", "specs", "assets", "themes")
+	dir := filepath.Join("..", "frontend", "src", "assets", "themes")
 	for filename, want := range bundledThemeFiles {
 		t.Run(filename, func(t *testing.T) {
 			b, err := os.ReadFile(filepath.Join(dir, filename))

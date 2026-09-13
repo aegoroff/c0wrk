@@ -38,7 +38,7 @@ func TestFrontendAPI_Themes_ImportListDeleteLifecycle(t *testing.T) {
 	// Import a valid theme.
 	src := writeThemeFile(t, filepath.Join(agentDir, "downloads"), "nord.css",
 		"/* c0wrk-theme: Nord | dark */\n:root { --color-background: #2e3440; --color-foreground: #d8dee9; }\n")
-	dto, err := f.ImportThemeFromPath(src)
+	dto, err := f.importThemeFromPath(src)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -89,13 +89,13 @@ func TestFrontendAPI_Themes_ReimportOverwritesNoDuplicate(t *testing.T) {
 
 	v1 := writeThemeFile(t, srcDir, "nord.css",
 		"/* c0wrk-theme: Nord | dark */\n:root { --color-background: #111; --color-foreground: #eee; }\n")
-	if _, err := f.ImportThemeFromPath(v1); err != nil {
+	if _, err := f.importThemeFromPath(v1); err != nil {
 		t.Fatalf("first import: %v", err)
 	}
 	// Simulate a v2 download (same file name, new content) in the same dir.
 	v2 := writeThemeFile(t, srcDir, "nord.css",
 		"/* c0wrk-theme: Nord v2 | dark */\n:root { --color-background: #222; --color-foreground: #ddd; }\n")
-	dto, err := f.ImportThemeFromPath(v2)
+	dto, err := f.importThemeFromPath(v2)
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestFrontendAPI_Themes_ImportValidationErrors(t *testing.T) {
 	}
 	for name, css := range cases {
 		src := writeThemeFile(t, srcDir, name+".css", css)
-		if _, err := f.ImportThemeFromPath(src); err == nil {
+		if _, err := f.importThemeFromPath(src); err == nil {
 			t.Errorf("%s: expected import rejection, got nil", name)
 		}
 	}
@@ -143,14 +143,14 @@ func TestFrontendAPI_Themes_ImportValidationErrors(t *testing.T) {
 	// Reserved slug needs a valid CSS body to prove rejection comes from the
 	// slug rule, not the CSS validation.
 	reserved := writeThemeFile(t, srcDir, "Default-Dark.css", validThemeCSS)
-	if _, err := f.ImportThemeFromPath(reserved); err == nil {
+	if _, err := f.importThemeFromPath(reserved); err == nil {
 		t.Fatal("expected reserved-id rejection")
 	}
 
-	if _, err := f.ImportThemeFromPath(filepath.Join(srcDir, "does-not-exist.css")); err == nil {
+	if _, err := f.importThemeFromPath(filepath.Join(srcDir, "does-not-exist.css")); err == nil {
 		t.Fatal("expected error for missing source file")
 	}
-	if _, err := f.ImportThemeFromPath("   "); err == nil {
+	if _, err := f.importThemeFromPath("   "); err == nil {
 		t.Fatal("expected error for empty path")
 	}
 }
@@ -166,7 +166,7 @@ func TestFrontendAPI_Themes_ImportBatchIndependentResults(t *testing.T) {
 	broken := writeThemeFile(t, srcDir, "broken.css", ":root { --accent: #528bff; }")
 	missing := filepath.Join(srcDir, "does-not-exist.css")
 
-	results := f.ImportThemesFromPaths([]string{nord, broken, paper, missing})
+	results := f.importThemesFromPaths([]string{nord, broken, paper, missing})
 	if len(results) != 4 {
 		t.Fatalf("expected one result per input path, got %d: %+v", len(results), results)
 	}
@@ -198,7 +198,7 @@ func TestFrontendAPI_Themes_ImportBatchIndependentResults(t *testing.T) {
 	}
 
 	// An empty batch yields an empty non-nil slice.
-	if got := f.ImportThemesFromPaths(nil); got == nil || len(got) != 0 {
+	if got := f.importThemesFromPaths(nil); got == nil || len(got) != 0 {
 		t.Fatalf("expected empty non-nil result for empty input, got %#v", got)
 	}
 }
@@ -250,5 +250,51 @@ func TestFrontendAPI_Themes_ListSkipsInvalidSlug(t *testing.T) {
 	list := f.ListThemes()
 	if len(list) != 1 || list[0].ID != "ok" {
 		t.Fatalf("expected only ok.css, got %+v", list)
+	}
+}
+
+// TestFrontendAPI_Themes_ImportStoresSanitizedCSS pins the storage contract:
+// the installed file and every DTO/list entry carry the canonical sanitized
+// CSS, never the raw source (comments dropped, whitespace normalized) — the
+// webview only ever injects what the sanitizer emitted.
+func TestFrontendAPI_Themes_ImportStoresSanitizedCSS(t *testing.T) {
+	f, agentDir := newThemesTestAPI(t)
+	src := writeThemeFile(t, filepath.Join(agentDir, "downloads"), "nord.css",
+		"/* c0wrk-theme: Nord | dark */\n:root {\n  /* comment */\n  --color-background:   #2e3440 ;\n  --color-foreground: #d8dee9;\n}\n")
+
+	dto, err := f.importThemeFromPath(src)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	want := "/* c0wrk-theme: Nord | dark */\n:root {\n  --color-background: #2e3440;\n  --color-foreground: #d8dee9;\n}\n"
+	if dto.CSS != want {
+		t.Fatalf("import DTO CSS must be canonical:\ngot:\n%s\nwant:\n%s", dto.CSS, want)
+	}
+	installed, err := os.ReadFile(filepath.Join(agentDir, "themes", "nord.css"))
+	if err != nil {
+		t.Fatalf("read installed theme: %v", err)
+	}
+	if string(installed) != want {
+		t.Fatalf("installed file must store the sanitized CSS:\ngot:\n%s", installed)
+	}
+	if list := f.ListThemes(); len(list) != 1 || list[0].CSS != want {
+		t.Fatalf("list entry must carry the sanitized CSS: %+v", f.ListThemes())
+	}
+}
+
+// TestFrontendAPI_Themes_ListSkipsUnsanitizableFiles guards the defense in
+// depth: a theme file that was hand-edited (or hand-dropped) past validation
+// is skipped on listing instead of reaching the webview.
+func TestFrontendAPI_Themes_ListSkipsUnsanitizableFiles(t *testing.T) {
+	f, agentDir := newThemesTestAPI(t)
+	themesDir := filepath.Join(agentDir, "themes")
+	writeThemeFile(t, themesDir, "ok.css",
+		"/* c0wrk-theme: Ok | dark */\n:root { --color-background: #282c34; --color-foreground: #abb2bf; }\n")
+	writeThemeFile(t, themesDir, "hostile.css",
+		":root { --color-background: #fff; --color-foreground: #000; background-image: image-set(\"https://evil.example/b.png\" 1x); }\n")
+
+	list := f.ListThemes()
+	if len(list) != 1 || list[0].ID != "ok" {
+		t.Fatalf("expected only the sanitizable theme, got %+v", list)
 	}
 }

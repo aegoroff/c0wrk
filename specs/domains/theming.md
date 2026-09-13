@@ -2,24 +2,26 @@
 
 ## Purpose
 
-c0wrk ships two built-in themes (Default Dark / One Dark, Default Light / One Light) and lets users import custom CSS themes; a set of ready-to-import bundled palette themes lives in the repo (see "Bundled Themes"). A theme is a set of CSS custom-property (design-token) overrides on `:root`; all component styles reference `var(--color-*)` / `var(--radius-*)` exclusively, so a theme recolors the entire UI — including the embedded terminal (XTerm ANSI mapping) and syntax highlighting — without touching any component code.
+c0wrk ships two built-in themes (Default Dark / One Dark, Default Light / One Light) and lets users import custom CSS themes; a set of ready-to-import bundled palette themes ships in the repo at `frontend/src/assets/themes/` (see "Bundled Themes"). A theme is a set of CSS custom-property (design-token) overrides on `:root`; all component styles reference `var(--color-*)` / `var(--radius-*)` exclusively, so a theme recolors the entire UI — including the embedded terminal (XTerm ANSI mapping) and syntax highlighting — without touching any component code.
 
 ## Key Files
 
+- `backend/theme_sanitize.go` - theme CSS sanitizer: a real CSS tokenizer (`github.com/gorilla/css/scanner`) parses the document and keeps ONLY custom-property declarations on a single `:root` rule (plus the metadata header and one `color-scheme` declaration); every other construct — at-rules, other selectors, ordinary declarations, non-allowlisted functions such as `image-set()`, non-`data:` URLs, unbalanced parens — is rejected outright. The sanitizer emits a canonical `:root{…}` document that cannot reference any resource
 - `frontend/src/index.css` - design-token single source of truth: `@theme` block (One Dark defaults) + `[data-theme="light"]` override block (One Light); all component styles cascade from these variables
 - `frontend/src/stores/themeStore.ts` - Zustand store (persisted): active `themeId`, CSS cache for the active custom theme, builtin-theme table, `applyThemeToDocument`, `selectActiveThemeType` selector
-- `frontend/index.html` - pre-paint anti-FOUC inline script (reads the persisted state from `localStorage['c0wrk-theme']`; under the v2 store shape it is a no-op — the authoritative pre-paint apply lives in `main.tsx`)
+- `frontend/index.html` + `frontend/public/prepaint-theme.js` - pre-paint anti-FOUC apply: a blocking EXTERNAL script (inline scripts are disallowed by the production CSP `script-src 'self'`) that reads the persisted v3 store from `localStorage['c0wrk-theme']` and mirrors `applyThemeToDocument` — `data-theme` from the type, `data-custom-theme` + scoped style injection for a custom id
 - `frontend/src/main.tsx` - pre-paint apply: reads the persisted store synchronously (zustand-persist rehydrates from localStorage synchronously) and applies `data-theme` + injects the cached custom-theme CSS before React renders anything
 - `frontend/src/api/themes.ts` - typed RPC wrappers (`listThemes`, `pickAndImportThemes`, `deleteTheme`) over the generated Wails bindings
 - `frontend/src/components/settings/ThemeSelector.tsx` - settings UI: theme combobox, import button, hover-delete for custom themes
 - `backend/themes.go` - pure theme logic: `ThemeDTO`, `ParseThemeCSS`, `ValidateThemeCSS`, `themeSlug`
-- `backend/frontend_api_themes.go` - Wails-exposed methods: `ListThemes`, `ImportThemeFromPath`, `ImportThemesFromPaths`, `DeleteTheme`
+- `backend/frontend_api_themes.go` - Wails-exposed methods: `ListThemes`, `DeleteTheme`. The import functions (`importThemeFromPath` / `importThemesFromPaths`) are deliberately UNEXPORTED package-level functions — exported methods on FrontendAPI are auto-bound to the renderer, and a path-taking import RPC must not be callable from compromised renderer JS; `desktop.App.PickAndImportThemes` (native picker) is the sole import entry point
 - `desktop/app.go` - `PickAndImportThemes`: native multi-select file dialog + batch import in one action (requires Wails context)
 - `backend/config/paths.go` - `ThemesDir(agentDir)` → `<agentDir>/themes` (theme storage root)
 - `frontend/src/hooks/useXTermTheme.ts` - resolves XTerm ANSI colors from CSS variables at call time (re-resolves on theme change)
 - `frontend/src/lib/cmChatTheme.ts`, `frontend/src/components/fileViewer/CodeMirrorFileViewer.tsx` - CodeMirror themes resolved from CSS variables; re-created via Compartment on theme change
-- `specs/assets/example-theme.css` - fully annotated example theme (light, "Solar Light"): a self-contained authoring tutorial — metadata header, validation rules, every token group explained inline; guarded by `TestValidateThemeCSS_SpecExampleTheme`
-- `specs/assets/themes/` - bundled palette themes, ready to import as-is (see "Bundled Themes" below); each guarded by `TestValidateThemeCSS_BundledThemes` in `backend/themes_test.go`
+- `frontend/src/assets/themes/example-theme.css` - fully annotated example theme (light, "Solar Light"): a self-contained authoring tutorial — metadata header, validation rules, every token group explained inline; guarded by `TestValidateThemeCSS_SpecExampleTheme`
+- `frontend/src/assets/themes/` - bundled palette themes (plus the example theme), ready to import as-is (see "Bundled Themes" below); each guarded by `TestValidateThemeCSS_BundledThemes` in `backend/themes_test.go`
+- `desktop/csp.go` / `desktop/csp_dev.go` - production CSP middleware (`!dev` build) stamping a strict `Content-Security-Policy` on every asset response — the webview-level backstop that blocks any fetch an injected stylesheet might attempt, even if a future sanitizer bypass slipped through. No-op under `wails dev` (the `dev` build tag) so Vite/HMR keeps working
 
 ## Core Types
 
@@ -45,15 +47,14 @@ type ThemeImportResult struct {
 // frontend/src/stores/themeStore.ts
 interface ThemeState {
     themeId: string           // persisted; builtin id or custom slug, default 'default-dark'
-    themeCss: string          // persisted; cached CSS of the active custom theme ('' for builtins)
+    themeCss: string          // persisted; cached SANITIZED CSS of the active custom theme ('' for builtins)
+    themeType: ThemeType      // persisted (v3); dark|light kind of the active theme
     customThemes: ThemeInfo[] // NOT persisted; refreshed via loadThemes()
 }
 
 interface ThemeActions {
-    /** Activate a theme and cache its CSS (custom themes only). Re-selecting
-     *  the same custom theme without a css argument keeps the existing cache;
-     *  switching to a different custom theme without css clears it. */
-    setTheme: (id: string, css?: string) => void
+    /** Activate a theme and cache its CSS + type (custom themes only). */
+    setTheme: (id: string, css?: string, type?: ThemeType) => void
     /** Replace the custom-theme catalog; reset to Default Dark when the
      *  active custom theme disappears from the list. */
     applyThemes: (list: ThemeInfo[]) => void
@@ -74,8 +75,11 @@ export const BUILTIN_THEMES = [
 ```
 Import:  [settings: import button] → desktop.PickAndImportThemes()
               → wailsRuntime.OpenMultipleFilesDialog (filter *.css, multi-select)
-              → backend.ImportThemesFromPaths(paths)
-                   → per file: read → ValidateThemeCSS → copy into ThemesDir as <slug>.css
+              → backend.ImportThemesFromPaths(paths) (package-level bridge; the
+                 import funcs are unexported so the renderer can never call them
+                 with an arbitrary path)
+                   → per file: read → sanitizeThemeCSS → install the CANONICAL sanitized
+                     CSS into ThemesDir as <slug>.css
                      → ParseThemeCSS → ThemeDTO{id, name, type}
                    → one ThemeImportResult per input path, input order preserved
          ← ThemeImportResult[] → themeStore.setTheme(last successful id, css)
@@ -84,19 +88,25 @@ Import:  [settings: import button] → desktop.PickAndImportThemes()
              a second RPC; failed files (invalid CSS, unreadable, reserved id)
              are reported via a runtime_error toast while the valid ones still install
 
-Apply:   themeStore.setTheme(id, css)
-              → builtin: data-theme = 'dark' | 'light'; remove <style id="c0wrk-custom-theme">
-              → custom:  data-theme = <id>; ensure single <style id="c0wrk-custom-theme">
-                         in <head> whose textContent = css + ":root{color-scheme:<type>}"
+Apply:   themeStore.setTheme(id, css, type)
+              → builtin: data-theme = 'dark' | 'light'; remove data-custom-theme and
+                         <style id="c0wrk-custom-theme">
+              → custom:  data-theme = <type>  (dark|light — native controls and the
+                           One Light override block key off the TYPE, never a slug)
+                         data-custom-theme = <id>
+                         single <style id="c0wrk-custom-theme"> in <head> whose
+                         textContent = css with every :root selector re-scoped to
+                         :root[data-custom-theme="<id>"] (scopeThemeCSS)
 
-Startup: index.html inline script (blocking, before the CSS <link> applies)
-              → reads localStorage['c0wrk-theme']; under the v2 store shape
-                (themeId/themeCss) it no-ops (it only understands the legacy
-                {theme:"light"|"dark"} shape)
-         main.tsx (still before React renders) — the authoritative pre-paint apply:
+Startup: index.html loads public/prepaint-theme.js — a blocking EXTERNAL script
+              (CSP: script-src 'self'; inline scripts are not allowed) that reads
+              localStorage['c0wrk-theme'] (v3 {themeId, themeCss, themeType} or
+              v2 with the type derived) and mirrors applyThemeToDocument:
+              data-theme=<type>, and for a custom id data-custom-theme=<id> plus
+              the scoped style injection — correct palette before first paint
+         main.tsx (still before React renders) — the authoritative apply:
               → getState() rehydrates synchronously from localStorage
-              → applyThemeToDocument(themeId, themeCss): data-theme + cached
-                custom CSS injected → correct palette on the very first frame
+              → applyThemeToDocument(themeId, themeCss, type)
          App.tsx (after runtime-ready) → loadThemes() → listThemes() →
               applyThemes(list) reconciliation
 
@@ -140,21 +150,38 @@ All other tokens are optional; undeclared tokens keep the One Dark default from 
 
 ### Validation rules (import gate)
 
-`ValidateThemeCSS` rejects a theme file when:
+`ValidateThemeCSS` first enforces the 512 KiB size cap, then hands the document
+to `sanitizeThemeCSS` (see `backend/theme_sanitize.go`), which PARSES the CSS
+with a real tokenizer and enforces an allowlist — nothing is rejected by
+pattern-matching strings, so no syntax (`image-set()`, `-webkit-image-set()`,
+escaped identifiers like `\75 rl(`, HTML tokens) can smuggle a resource
+reference past it. A theme is accepted only when its entire shape is:
 
-| # | Rule | Reason |
-| - | ---- | ------ |
-| 1 | Any `@import` (case-insensitive) | `@import` would pull in network/filesystem resources at injection time |
-| 2 | Any `url(...)` whose argument does **not** start with `data:` | Blocks `http(s)://`, protocol-relative `//`, `file:`, and relative URLs — no external fetches, fonts, or tracking beacons |
-| 3 | Size > **512 KiB** | Keeps the injected `<style>`, the localStorage cache, and the persisted store small |
-| 4 | Missing `--color-background` or `--color-foreground` declaration | Minimum viable theme |
+| # | Allowed shape | Notes |
+| - | ------------- | ----- |
+| 1 | Optional `/* c0wrk-theme: <name> \| <dark\|light> */` header comment, at file start | preserved verbatim in the sanitized output |
+| 2 | Exactly one top-level `:root { … }` rule | no other selectors, no combinators, no at-rules (`@import`, `@media`, `@theme`… all rejected) |
+| 3 | Inside the rule: only custom-property declarations (`--token: value;`) plus at most one `color-scheme: dark\|light;` | ordinary declarations (`color:`, `background:`…) are rejected |
+| 4 | Values may use: identifiers, `#hex`, numbers, dimensions, percentages, quoted strings, `,` `/` `-` `*` `+` operators, `!important`, `url(data:…)` tokens, and the functions `rgb( rgba( hsl( hsla( hwb( var( calc( min( max( clamp(` (nested, balanced) | any other function or any non-`data:` URL is rejected |
+| 5 | `--color-background` and `--color-foreground` must be declared | minimum viable theme |
 
-`url(data:...)` (e.g. inline SVG data URIs) is allowed.
+The sanitizer emits (and the import stores) the CANONICAL form: the header
+comment plus a single normalized `:root { … }` block. What lands in
+`~/.c0wrk/themes/<slug>.css`, what `ListThemes` returns, and what the webview
+injects is always the sanitized output — never the raw source. `ListThemes`
+re-sanitizes every file on read as defense in depth (a hand-edited installed
+file that fails sanitization is skipped, not shipped to the webview).
+
+A second, webview-level backstop is the strict production CSP
+(`desktop/csp.go`, `!dev` builds): `default-src 'none'; script-src 'self';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';
+…` — even a hypothetical future sanitizer bypass cannot turn an injected
+stylesheet into a network request.
 
 ### Slug / identity
 
 - The theme ID is derived from the **source filename**: base name without extension, lowercased, restricted to `[a-z0-9-]` with runs of disallowed characters collapsed to single hyphens and edge hyphens trimmed; the result must be non-empty. `My Cool Theme.css` imports as `my-cool-theme.css`, ID `my-cool-theme`.
-- The reserved IDs `default-dark` and `default-light` cannot be used by imported themes (no shadowing/aliasing of the builtins).
+- The reserved IDs `default-dark`, `default-light`, `dark`, and `light` cannot be used by imported themes. `dark`/`light` are the `data-theme` attribute keys; since custom CSS is injected scoped to `:root[data-custom-theme="<id>"]` and `data-theme` only ever carries the TYPE, the aliasing channel is closed twice (reserved slugs AND the separate attribute namespace).
 
 ### Storage
 
@@ -170,18 +197,18 @@ Importing a file whose slug already exists **overwrites** the stored file — re
 
 ## Bundled Themes
 
-Besides the two built-in themes compiled into `index.css`, the repo ships ready-to-import palette themes under `specs/assets/themes/`. They are ordinary custom-theme files: users import them through the same `Settings → Appearance → Theme → [+]` flow, they land in `~/.c0wrk/themes/<slug>.css`, and they follow every rule of the custom-theme format (header, tokens, validation limits). They exist so users can try known palettes without authoring CSS.
+Besides the two built-in themes compiled into `index.css`, the repo ships ready-to-import palette themes under `frontend/src/assets/themes/` (next to the annotated `example-theme.css` — the directory doubles as the author-facing sample set; it lives in the frontend tree, NOT under `specs/`, because specs describe the system while these files are shipped assets). They are ordinary custom-theme files: users import them through the same `Settings → Appearance → Theme → [+]` flow, they land in `~/.c0wrk/themes/<slug>.css`, and they follow every rule of the custom-theme format (header, tokens, validation limits). They exist so users can try known palettes without authoring CSS.
 
 | File | Theme name | Type | Palette |
 | ---- | ---------- | ---- | ------- |
-| `specs/assets/themes/nord.css` | Nord | dark | Nord |
-| `specs/assets/themes/tokyo-night.css` | Tokyo Night | dark | Tokyo Night |
-| `specs/assets/themes/catppuccin-mocha.css` | Catppuccin Mocha | dark | Catppuccin (Mocha) |
-| `specs/assets/themes/high-contrast-dark.css` | High Contrast Dark | dark | original — black canvas / white text, every pair ≥ WCAG AA (core pairs AAA) |
-| `specs/assets/themes/high-contrast-light.css` | High Contrast Light | light | original — white canvas / near-black text, every pair ≥ WCAG AA (core pairs AAA) |
-| `specs/assets/themes/catppuccin-latte.css` | Catppuccin Latte | light | Catppuccin (Latte) |
-| `specs/assets/themes/rose-pine-dawn.css` | Rosé Pine Dawn | light | Rosé Pine (Dawn) |
-| `specs/assets/themes/gruvbox-light.css` | Gruvbox Light | light | Gruvbox (light) |
+| `frontend/src/assets/themes/nord.css` | Nord | dark | Nord |
+| `frontend/src/assets/themes/tokyo-night.css` | Tokyo Night | dark | Tokyo Night |
+| `frontend/src/assets/themes/catppuccin-mocha.css` | Catppuccin Mocha | dark | Catppuccin (Mocha) |
+| `frontend/src/assets/themes/high-contrast-dark.css` | High Contrast Dark | dark | original — black canvas / white text, every pair ≥ WCAG AA (core pairs AAA) |
+| `frontend/src/assets/themes/high-contrast-light.css` | High Contrast Light | light | original — white canvas / near-black text, every pair ≥ WCAG AA (core pairs AAA) |
+| `frontend/src/assets/themes/catppuccin-latte.css` | Catppuccin Latte | light | Catppuccin (Latte) |
+| `frontend/src/assets/themes/rose-pine-dawn.css` | Rosé Pine Dawn | light | Rosé Pine (Dawn) |
+| `frontend/src/assets/themes/gruvbox-light.css` | Gruvbox Light | light | Gruvbox (light) |
 
 Notes:
 
@@ -191,74 +218,18 @@ Notes:
 
 ## Anti-FOUC cache
 
-The persisted store key is `localStorage['c0wrk-theme']`. The custom-theme CSS is cached in the store (`themeCss`) so `main.tsx` can apply the theme — `data-theme` attribute plus `<style id="c0wrk-custom-theme">` injection — **before the first paint**, synchronously from the rehydrated store, without waiting for the Wails bridge or any RPC. The blocking inline script in `index.html` predates the v2 store: it only understands the legacy `{theme: 'light'|'dark'}` shape and is a no-op under v2 — the authoritative pre-paint apply is the `applyThemeToDocument(useThemeStore.getState().themeId, useThemeStore.getState().themeCss)` call at the top of `main.tsx`, which runs before React renders. Store migration: v1 `{theme: 'light'|'dark'}` → v2 `{themeId: 'default-light'|'default-dark', themeCss: ''}`.
+The persisted store key is `localStorage['c0wrk-theme']` (persist version 3). The custom-theme CSS is cached in the store (`themeCss`) together with its dark/light kind (`themeType`, new in v3) so the theme applies **before the first paint**, synchronously, without waiting for the Wails bridge or any RPC.
 
-The custom-theme type used for the injected `:root{color-scheme:…}` rule resolves in order: (1) the live store's `customThemes` descriptor (authoritative once `loadThemes()` resolved), (2) a `color-scheme: dark|light` literal inside the cached CSS — this covers the pre-paint window in `main.tsx` before the backend catalog has loaded —, (3) `dark`.
+Two pre-React passes exist and both are idempotent:
+
+1. `frontend/public/prepaint-theme.js` — a blocking EXTERNAL script referenced from `index.html`. It replaced the old inline script (which only understood the legacy v1 `{theme}` payload and had become a no-op; inline scripts are now impossible anyway because the production CSP allows `script-src 'self'` only). It reads the persisted store (v3 `themeId`/`themeCss`/`themeType`; the v2 shape is handled by deriving the type: builtin id → its type, else a `color-scheme:` literal in the cached CSS, else `dark`) and mirrors `applyThemeToDocument`: `data-theme=<type>` for built-ins; `data-theme=<type>` + `data-custom-theme=<id>` + a `<style id="c0wrk-custom-theme">` carrying the CSS re-scoped to `:root[data-custom-theme="<id>"]` for a custom id. Vite copies `public/` to the dist root, so the same file is served in dev and production.
+2. `main.tsx` — `applyThemeToDocument(themeId, themeCss, selectActiveThemeType(state))` from the synchronously rehydrated store, still before React renders.
+
+Store migrations: v1 `{theme: 'light'|'dark'}` → v3 (`default-light`/`default-dark`); v2 `{themeId, themeCss}` → v3 with `themeType` derived via `deriveThemeType`.
+
+The dark/light kind resolves in order: (1) the persisted `themeType` (v3), (2) the live store's `customThemes` descriptor (authoritative once `loadThemes()` resolved — `applyThemes` re-applies the active custom theme with it), (3) `dark`.
 
 ## Token Reference (authoring)
 
 Single source of truth: the `@theme` block in `frontend/src/index.css`. A custom theme should declare overrides on `:root`. Complete token list (with One Dark defaults):
 
-| Group | Token | Default (One Dark) |
-| ----- | ----- | ------------------ |
-| Core | `--color-background` | `#282c34` |
-| Core | `--color-foreground` | `#abb2bf` |
-| Surfaces | `--color-card` | `#252931` |
-| Surfaces | `--color-card-foreground` | `#abb2bf` |
-| Surfaces | `--color-popover` | `#252931` |
-| Surfaces | `--color-popover-foreground` | `#abb2bf` |
-| Primary/Accent | `--color-primary` | `#abb2bf` |
-| Primary/Accent | `--color-primary-foreground` | `#282c34` |
-| Primary/Accent | `--color-accent` | `#abb2bf` |
-| Primary/Accent | `--color-accent-foreground` | `#282c34` |
-| Secondary/Muted | `--color-secondary` | `#1d2025` |
-| Secondary/Muted | `--color-secondary-foreground` | `#cccccc` |
-| Secondary/Muted | `--color-muted` | `#1d2025` |
-| Secondary/Muted | `--color-muted-foreground` | `#cccccc` |
-| Semantic | `--color-destructive` | `#e06c75` |
-| Semantic | `--color-destructive-foreground` | `#282c34` |
-| Semantic | `--color-success` | `#98c379` |
-| Semantic | `--color-warning` | `#d19a66` |
-| Semantic | `--color-info` | `#61afef` |
-| Semantic | `--color-highlight` | `#e5c07b` |
-| Borders/Inputs | `--color-border` | `#1d2025` |
-| Borders/Inputs | `--color-input` | `#1d2025` |
-| Borders/Inputs | `--color-ring` | `#abb2bf` |
-| RGB triplets | `--color-primary-rgb` | `82, 139, 255` |
-| RGB triplets | `--color-success-rgb` | `152, 195, 121` |
-| RGB triplets | `--color-destructive-rgb` | `224, 108, 117` |
-| hljs | `--color-hljs-comment` | `#5c6370` |
-| hljs | `--color-hljs-keyword` | `#c678dd` |
-| hljs | `--color-hljs-literal` | `#56b6c2` |
-| Terminal | `--color-terminal-cursor` | `#528bff` |
-| Terminal | `--color-terminal-selection` | `#3e4451` |
-| Terminal | `--color-terminal-bright-white` | `#ffffff` |
-| Elevation | `--color-shadow` | `rgba(0, 0, 0, 0.3)` |
-| Radii | `--radius-sm` / `--radius-md` / `--radius-lg` / `--radius-xl` | `0.25rem` / `0.375rem` / `0.5rem` / `0.75rem` |
-
-Notes for authors:
-
-- `--color-*-rgb` triplets (comma-separated `r, g, b`) feed `rgba()` usage; keep them in sync with their base colors.
-- `--color-shadow` is adaptive per theme (softer on light backgrounds).
-- The embedded terminal maps ANSI colors onto these tokens (see `frontend/src/hooks/useXTermTheme.ts`): background ← `--color-popover`, black ← `--color-background`, red ← `--color-destructive`, green ← `--color-success`, yellow ← `--color-highlight`, blue ← `--color-info`, magenta ← `--color-hljs-keyword`, cyan ← `--color-hljs-literal`, white ← `--color-foreground`, brightBlack ← `--color-hljs-comment`, brightWhite ← `--color-terminal-bright-white`.
-- CodeMirror editor themes are resolved from the same variables and re-created via Compartment on theme change.
-- A complete, annotated starter theme with inline authoring guidance: [example-theme.css](../assets/example-theme.css) (type `light`).
-
-## UX
-
-The design target (settings → Appearance): a combobox lists **Default Dark** and **Default Light** (builtin; Moon/Sun type icons) separated from custom themes. Every item shows its type icon; the active item carries a check. Custom items expose a trash icon in a hover overlay (the `ItemAction` pattern used by the session/project lists) — one click deletes, no confirmation; deleting the active theme falls back to Default Dark automatically. Next to the combobox, an import button opens the native multi-select `.css` file picker; every valid picked file imports, the last successful one activates immediately, and skipped files surface a toast; canceling the picker changes nothing.
-
-Current state: the full design above has landed — backend storage + validation (`backend/themes.go`), the RPCs (`backend/frontend_api_themes.go`), the native picker bridge (`desktop/app.go` `PickAndImportThemes`), the API wrappers (`frontend/src/api/themes.ts`), the themeStore v2 (`frontend/src/stores/themeStore.ts`), and the settings surface itself (`frontend/src/components/settings/ThemeSelector.tsx` — combobox + import button + hover-delete via `ThemeMenuItem`).
-
-## Invariants
-
-- All UI colors come from design tokens; components never hardcode hex values. A theme is exactly a set of token overrides — never component CSS overrides.
-- `--color-background` and `--color-foreground` are always defined for every theme (validator-enforced minimum).
-- No theme ever triggers a network or filesystem fetch: `@import` and non-`data:` `url(...)` are rejected at import.
-- A theme file is at most 512 KiB.
-- Custom theme IDs are lowercase `[a-z0-9-]+` and never collide with `default-dark` / `default-light`.
-- Batch imports validate each file independently: one invalid file in a batch never blocks the others, and every input path yields exactly one `ThemeImportResult` carrying either the installed theme or the failure reason.
-- At most one `<style id="c0wrk-custom-theme">` element exists in `<head>`; builtins remove it.
-- The active theme is applied before first paint (`main.tsx` synchronous apply from the rehydrated store) — no flash of the wrong theme.
-- The store never points at a missing theme file: when the active theme disappears, the store resets to `default-dark` and clears the CSS cache.
-- The terminal, CodeMirror, and highlight.js palettes follow the active theme automatically because they resolve CSS variables at call time.

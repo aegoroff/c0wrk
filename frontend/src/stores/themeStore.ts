@@ -21,14 +21,30 @@ const DEFAULT_THEME_ID = 'default-dark'
 
 /** Storage key mirrors the persisted-store convention (c0wrk-*). */
 const STORAGE_KEY = 'c0wrk-theme'
-/** Attribute written to <html>; built-ins use dark/light, custom themes their id. */
+/** Kind attribute on <html>: always the dark/light TYPE (built-ins and
+ *  custom themes alike) so native controls/scrollbars and the One Light
+ *  override block resolve from the type, never from a custom slug. */
 const DATA_THEME_ATTR = 'data-theme'
+/** Identity attribute for the ACTIVE CUSTOM THEME id ('' removes it). Custom
+ *  CSS is injected scoped to :root[data-custom-theme="<id>"] so no custom
+ *  theme can ever collide with the built-in attribute namespaces. */
+const DATA_CUSTOM_THEME_ATTR = 'data-custom-theme'
 /** Id of the single <style> element that carries the active custom theme. */
-const CUSTOM_THEME_STYLE_ID = 'c0wrk-custom-theme'
+export const CUSTOM_THEME_STYLE_ID = 'c0wrk-custom-theme'
 
 /** Coerces a backend theme `type` string to the frontend dark/light union. */
 export function themeTypeOf(t: { type: string }): ThemeType {
   return t.type === 'light' ? 'light' : 'dark'
+}
+
+/** Derives the dark/light kind for a persisted theme when the store predates
+ *  the v3 `themeType` field: built-ins carry their type; a custom theme is
+ *  sniffed from a `color-scheme:` literal in its cached CSS, else dark. */
+export function deriveThemeType(themeId: string, css: string): ThemeType {
+  const builtin = BUILTIN_THEMES.find((b) => b.id === themeId)
+  if (builtin) return builtin.type
+  const m = /color-scheme:\s*(dark|light)/i.exec(css)
+  return m ? (m[1]!.toLowerCase() as ThemeType) : 'dark'
 }
 
 function isBuiltinId(id: string): boolean {
@@ -36,17 +52,13 @@ function isBuiltinId(id: string): boolean {
 }
 
 /**
- * Resolves the dark/light kind of a custom theme for the injected
- * `:root{color-scheme:…}` rule. Lookup order: the live store's descriptor
- * (authoritative once loadThemes resolved), then a `color-scheme:` literal
- * inside the cached CSS (covers the pre-paint window in main.tsx before the
- * backend catalog has loaded), then dark.
+ * Re-scopes a sanitized theme body to the active custom id: every `:root`
+ * selector in the CSS becomes `:root[data-custom-theme="<id>"]`. The backend
+ * sanitizer guarantees the document is a single canonical `:root { … }` rule
+ * (plus the header comment), so the replace covers exactly that selector.
  */
-function resolveCustomThemeType(themeId: string, css: string): ThemeType {
-  const custom = useThemeStore?.getState().customThemes.find((t) => t.id === themeId)
-  if (custom) return themeTypeOf(custom)
-  const m = /color-scheme:\s*(dark|light)/i.exec(css)
-  return m ? (m[1]!.toLowerCase() as ThemeType) : 'dark'
+export function scopeThemeCSS(themeId: string, css: string): string {
+  return css.split(':root').join(`:root[${DATA_CUSTOM_THEME_ATTR}="${themeId}"]`)
 }
 
 function removeCustomThemeStyle(): void {
@@ -54,44 +66,53 @@ function removeCustomThemeStyle(): void {
 }
 
 /**
- * Applies a theme to the document. Built-in themes write
- * `<html data-theme="dark|light">` and remove the custom-theme style;
- * custom themes write `<html data-theme="<id>">` and inject the theme CSS
- * (plus a `:root{color-scheme:<type>}` suffix) into a single
- * `<style id="c0wrk-custom-theme">` element in <head>. A no-op when the
- * document is unavailable (e.g. during tests).
+ * Applies a theme to the document.
+ *
+ * `data-theme` always carries the dark/light TYPE — the type drives native
+ * form controls/scrollbars and matches the built-in One Light override block
+ * without giving a custom slug a way to alias `light`/`dark`.
+ *
+ * Built-in themes remove the custom attributes/style. Custom themes write
+ * `<html data-custom-theme="<id>">` and inject the theme CSS scoped to that
+ * attribute into a single `<style id="c0wrk-custom-theme">` element in
+ * <head>. A no-op when the document is unavailable (e.g. during tests).
  */
-export function applyThemeToDocument(themeId: string, css: string): void {
+export function applyThemeToDocument(themeId: string, css: string, type: ThemeType): void {
   if (typeof document === 'undefined') return
   const builtin = BUILTIN_THEMES.find((b) => b.id === themeId)
   if (builtin) {
     document.documentElement.setAttribute(DATA_THEME_ATTR, builtin.type)
+    document.documentElement.removeAttribute(DATA_CUSTOM_THEME_ATTR)
     removeCustomThemeStyle()
     return
   }
-  document.documentElement.setAttribute(DATA_THEME_ATTR, themeId)
+  document.documentElement.setAttribute(DATA_THEME_ATTR, type)
+  document.documentElement.setAttribute(DATA_CUSTOM_THEME_ATTR, themeId)
   let style = document.getElementById(CUSTOM_THEME_STYLE_ID)
   if (!style) {
     style = document.createElement('style')
     style.id = CUSTOM_THEME_STYLE_ID
     document.head.appendChild(style)
   }
-  style.textContent = `${css}\n:root{color-scheme:${resolveCustomThemeType(themeId, css)}}`
+  style.textContent = scopeThemeCSS(themeId, css)
 }
 
 interface ThemeState {
   /** Active theme id — a BUILTIN_THEMES id or a custom theme id. */
   themeId: string
   /** Cached CSS of the active custom theme ('' for built-ins). Persisted so
-   *  main.tsx can apply the theme before first paint without an RPC. */
+   *  the pre-paint apply can inject it without an RPC. */
   themeCss: string
+  /** Dark/light kind of the active theme. Persisted since v3 so the
+   *  pre-paint apply needs no catalog round-trip. */
+  themeType: ThemeType
   /** Installed custom themes. Not persisted — refetched via loadThemes(). */
   customThemes: ThemeInfo[]
 }
 
 interface ThemeActions {
-  /** Activate a theme and cache its CSS (custom themes only). */
-  setTheme: (id: string, css?: string) => void
+  /** Activate a theme and cache its CSS + type (custom themes only). */
+  setTheme: (id: string, css?: string, type?: ThemeType) => void
   /** Replace the custom-theme catalog; resets to Default Dark when the
    *  active custom theme disappears from the list. */
   applyThemes: (list: ThemeInfo[]) => void
@@ -106,9 +127,10 @@ export type ThemeStore = ThemeState & ThemeActions
  * active theme (CodeMirror/mermaid/xterm theming). Returns a primitive, so
  * it is referentially stable across renders by construction.
  */
-export function selectActiveThemeType(s: Pick<ThemeStore, 'themeId' | 'customThemes'>): ThemeType {
+export function selectActiveThemeType(s: Pick<ThemeStore, 'themeId' | 'themeType' | 'customThemes'>): ThemeType {
   const builtin = BUILTIN_THEMES.find((b) => b.id === s.themeId)
   if (builtin) return builtin.type
+  if (s.themeType) return s.themeType
   const custom = s.customThemes.find((t) => t.id === s.themeId)
   return custom ? themeTypeOf(custom) : 'dark'
 }
@@ -118,9 +140,10 @@ export const useThemeStore = create<ThemeStore>()(
     (set, get) => ({
       themeId: DEFAULT_THEME_ID,
       themeCss: '',
+      themeType: 'dark',
       customThemes: [],
 
-      setTheme: (id, css) => {
+      setTheme: (id, css, type) => {
         const current = get()
         // Built-ins have no CSS. A custom theme takes the explicit css
         // argument (the activator knows the theme body); re-selecting the
@@ -132,8 +155,12 @@ export const useThemeStore = create<ThemeStore>()(
         else if (css !== undefined) nextCss = css
         else if (current.themeId === id) nextCss = current.themeCss
         else nextCss = ''
-        applyThemeToDocument(id, nextCss)
-        set({ themeId: id, themeCss: nextCss })
+        const builtin = BUILTIN_THEMES.find((b) => b.id === id)
+        const nextType: ThemeType =
+          builtin?.type ?? type ?? (current.themeId === id ? current.themeType : undefined) ??
+          (nextCss ? deriveThemeType(id, nextCss) : 'dark')
+        applyThemeToDocument(id, nextCss, nextType)
+        set({ themeId: id, themeCss: nextCss, themeType: nextType })
       },
 
       applyThemes: (list) => {
@@ -146,15 +173,18 @@ export const useThemeStore = create<ThemeStore>()(
         if (activeGone) {
           // The active custom theme was deleted — fall back to Default Dark
           // and drop the stale CSS cache.
-          applyThemeToDocument(DEFAULT_THEME_ID, '')
-          set({ customThemes: customs, themeId: DEFAULT_THEME_ID, themeCss: '' })
+          applyThemeToDocument(DEFAULT_THEME_ID, '', 'dark')
+          set({ customThemes: customs, themeId: DEFAULT_THEME_ID, themeCss: '', themeType: 'dark' })
           return
         }
         set({ customThemes: customs })
         // Re-apply the active custom theme now that its descriptor is known:
         // the pre-paint pass may have sniffed color-scheme from the CSS only.
         if (!isBuiltinId(current.themeId) && current.themeCss) {
-          applyThemeToDocument(current.themeId, current.themeCss)
+          const live = customs.find((t) => t.id === current.themeId)
+          const nextType = live ? themeTypeOf(live) : current.themeType
+          applyThemeToDocument(current.themeId, current.themeCss, nextType)
+          if (nextType !== current.themeType) set({ themeType: nextType })
         }
       },
 
@@ -170,18 +200,32 @@ export const useThemeStore = create<ThemeStore>()(
     }),
     {
       name: STORAGE_KEY,
-      version: 2,
+      version: 3,
       migrate: (persistedState, version) => {
+        const legacy = (persistedState ?? {}) as {
+          theme?: unknown
+          themeId?: unknown
+          themeCss?: unknown
+        }
         if (version < 2) {
           // v1 stored { theme: 'dark' | 'light' }.
-          const legacy = persistedState as { theme?: unknown } | undefined
-          const wasLight =
-            !!legacy && typeof legacy === 'object' && legacy.theme === 'light'
-          return { themeId: wasLight ? 'default-light' : DEFAULT_THEME_ID, themeCss: '' }
+          const wasLight = legacy.theme === 'light'
+          return {
+            themeId: wasLight ? 'default-light' : DEFAULT_THEME_ID,
+            themeCss: '',
+            themeType: wasLight ? 'light' : 'dark',
+          }
         }
-        return persistedState as Pick<ThemeState, 'themeId' | 'themeCss'>
+        // v2 stored { themeId, themeCss } without themeType — derive it.
+        const themeId = typeof legacy.themeId === 'string' ? legacy.themeId : DEFAULT_THEME_ID
+        const themeCss = typeof legacy.themeCss === 'string' ? legacy.themeCss : ''
+        return { themeId, themeCss, themeType: deriveThemeType(themeId, themeCss) }
       },
-      partialize: (state) => ({ themeId: state.themeId, themeCss: state.themeCss }),
+      partialize: (state) => ({
+        themeId: state.themeId,
+        themeCss: state.themeCss,
+        themeType: state.themeType,
+      }),
     },
   ),
 )

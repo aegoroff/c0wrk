@@ -15,6 +15,10 @@ import (
 // themes directory (~/.c0wrk/themes/*.css), sorted by display name. A missing
 // directory yields an empty (non-nil) slice — a fresh install has no themes
 // yet and the frontend selector must render an empty list, not an error.
+//
+// Every file is re-sanitized on read (defense in depth: a hand-edited or
+// hand-dropped file that no longer passes the sanitizer is skipped rather
+// than shipped to the webview).
 func (f *FrontendAPI) ListThemes() []ThemeDTO {
 	themesDir := config.ThemesDir(f.agentDir)
 	entries, err := os.ReadDir(themesDir)
@@ -27,41 +31,60 @@ func (f *FrontendAPI) ListThemes() []ThemeDTO {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".css") {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(themesDir, entry.Name()))
+		raw, err := os.ReadFile(filepath.Join(themesDir, entry.Name()))
 		if err != nil {
 			f.log().Warn("failed to read theme file", "file", entry.Name(), "error", err)
 			continue
 		}
-		name, typ := ParseThemeCSS(entry.Name(), string(content))
 		id, err := themeSlug(entry.Name())
 		if err != nil {
-			// Unreadable slugs should not happen for files that are already
-			// installed, but a hand-dropped file with an unusable name must
-			// not break the whole listing — skip it.
+			// Unusable slugs should not happen for files that were installed
+			// through the import flow, but a hand-dropped file with a
+			// reserved or unusable name must not break the whole listing.
 			f.log().Warn("skipping theme with invalid file name", "file", entry.Name(), "error", err)
 			continue
 		}
-		themes = append(themes, ThemeDTO{ID: id, Name: name, Type: typ, CSS: string(content)})
+		content, err := sanitizeThemeCSS(string(raw))
+		if err != nil {
+			f.log().Warn("skipping theme that fails sanitization", "file", entry.Name(), "error", err)
+			continue
+		}
+		name, typ := ParseThemeCSS(entry.Name(), content)
+		themes = append(themes, ThemeDTO{ID: id, Name: name, Type: typ, CSS: content})
 	}
 	sort.Slice(themes, func(i, j int) bool { return themes[i].Name < themes[j].Name })
 	return themes
 }
 
-// ImportThemeFromPath reads a CSS file from an arbitrary user-chosen path,
-// validates it as a theme, and installs it into the global themes directory
-// under the slug derived from its file name. Importing a file whose slug
-// already exists overwrites the installed copy — this is the update path for
-// a user theme, and the theme id stays stable across updates. The returned
-// DTO describes the installed theme.
-func (f *FrontendAPI) ImportThemeFromPath(path string) (ThemeDTO, error) {
+// importThemeFromPath reads a CSS file from a user-chosen path, validates it
+// as a theme, and installs it into the global themes directory under the slug
+// derived from its file name. Importing a file whose slug already exists
+// overwrites the installed copy — this is the update path for a user theme,
+// and the theme id stays stable across updates.
+//
+// What is installed is the CANONICAL SANITIZED CSS, not the raw source: the
+// stored theme (and everything the frontend later injects from it) is
+// structurally incapable of referencing any resource. The returned DTO
+// describes the installed theme and carries the sanitized body.
+//
+// This is deliberately NOT a method on FrontendAPI: `desktop.App` embeds
+// *FrontendAPI, so every exported method is auto-bound to the renderer. A
+// path-taking import would be directly callable from compromised renderer
+// JS with any filesystem path; the sole entry point is the native picker
+// (desktop.App.PickAndImportThemes).
+func (f *FrontendAPI) importThemeFromPath(path string) (ThemeDTO, error) {
 	if strings.TrimSpace(path) == "" {
 		return ThemeDTO{}, errors.New("theme path is empty")
 	}
-	content, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ThemeDTO{}, fmt.Errorf("failed to read theme file: %w", err)
 	}
-	if err := ValidateThemeCSS(string(content)); err != nil {
+	if len(raw) > maxThemeCSSSize {
+		return ThemeDTO{}, fmt.Errorf("invalid theme CSS: theme CSS is too large: %d bytes (limit %d)", len(raw), maxThemeCSSSize)
+	}
+	content, err := sanitizeThemeCSS(string(raw))
+	if err != nil {
 		return ThemeDTO{}, fmt.Errorf("invalid theme CSS: %w", err)
 	}
 	id, err := themeSlug(filepath.Base(path))
@@ -77,7 +100,7 @@ func (f *FrontendAPI) ImportThemeFromPath(path string) (ThemeDTO, error) {
 	// Write via a temp file + rename so a failed write never leaves a
 	// half-written theme behind (the previous copy, if any, stays intact).
 	tmp := dest + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		_ = os.Remove(tmp)
 		return ThemeDTO{}, fmt.Errorf("failed to write theme file: %w", err)
 	}
@@ -86,9 +109,9 @@ func (f *FrontendAPI) ImportThemeFromPath(path string) (ThemeDTO, error) {
 		return ThemeDTO{}, fmt.Errorf("failed to install theme file: %w", err)
 	}
 
-	name, typ := ParseThemeCSS(filepath.Base(path), string(content))
+	name, typ := ParseThemeCSS(filepath.Base(path), content)
 	f.log().Info("theme imported", "id", id, "name", name, "type", typ, "source", path)
-	return ThemeDTO{ID: id, Name: name, Type: typ, CSS: string(content)}, nil
+	return ThemeDTO{ID: id, Name: name, Type: typ, CSS: content}, nil
 }
 
 // ThemeImportResult reports the per-file outcome of a batch import. Theme is
@@ -99,15 +122,18 @@ type ThemeImportResult struct {
 	Error string    `json:"error,omitempty"`
 }
 
-// ImportThemesFromPaths imports several CSS files in one call, preserving the
+// importThemesFromPaths imports several CSS files in one call, preserving the
 // input order in the results. Each file is validated and installed
 // independently: one invalid file never blocks the others — its result carries
 // the failure while the rest of the batch still installs. An empty input
 // yields an empty (non-nil) slice.
-func (f *FrontendAPI) ImportThemesFromPaths(paths []string) []ThemeImportResult {
+//
+// Not a FrontendAPI method for the same reason as importThemeFromPath: the
+// renderer must only reach the import flow through the native picker.
+func (f *FrontendAPI) importThemesFromPaths(paths []string) []ThemeImportResult {
 	results := make([]ThemeImportResult, 0, len(paths))
 	for _, path := range paths {
-		theme, err := f.ImportThemeFromPath(path)
+		theme, err := f.importThemeFromPath(path)
 		if err != nil {
 			results = append(results, ThemeImportResult{File: path, Error: err.Error()})
 			continue
@@ -115,6 +141,14 @@ func (f *FrontendAPI) ImportThemesFromPaths(paths []string) []ThemeImportResult 
 		results = append(results, ThemeImportResult{File: path, Theme: &theme})
 	}
 	return results
+}
+
+// ImportThemesFromPaths is the exported bridge used by desktop.App's native
+// picker (PickAndImportThemes) to run a batch import with the user-picked
+// paths. It must stay unexposed from the FrontendAPI method set so the Wails
+// binding generator never publishes a path-taking RPC to the renderer.
+func ImportThemesFromPaths(f *FrontendAPI, paths []string) []ThemeImportResult {
+	return f.importThemesFromPaths(paths)
 }
 
 // DeleteTheme removes an installed user theme by its id (the slug stem of
