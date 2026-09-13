@@ -819,26 +819,26 @@ func TestWithUserAgents_RoundTrip(t *testing.T) {
 // Small-LLM lite system-prompt profile
 // ---------------------------------------------------------------------------
 
-// TestSmallLLMLiteFromCtx_DefaultOff verifies the lite profile is OFF by
-// default — a plain context (no SmallLLMLiteKey) must read as inactive. This is
+// TestSLMLiteFromCtx_DefaultOff verifies the lite profile is OFF by
+// default — a plain context (no SLMLiteKey) must read as inactive. This is
 // the foundation of the no-regression guarantee: without an explicit
-// WithSmallLLMLite, behavior is identical to the pre-profile baseline.
-func TestSmallLLMLiteFromCtx_DefaultOff(t *testing.T) {
-	if smallLLMLiteFromCtx(context.Background()) {
-		t.Error("smallLLMLiteFromCtx returned true for a plain context; lite must be OFF by default")
+// WithSLMLite, behavior is identical to the pre-profile baseline.
+func TestSLMLiteFromCtx_DefaultOff(t *testing.T) {
+	if slmLiteFromCtx(context.Background()) {
+		t.Error("slmLiteFromCtx returned true for a plain context; lite must be OFF by default")
 	}
-	ctx := WithSmallLLMLite(context.Background())
-	if !smallLLMLiteFromCtx(ctx) {
-		t.Error("smallLLMLiteFromCtx returned false after WithSmallLLMLite")
+	ctx := WithSLMLite(context.Background())
+	if !slmLiteFromCtx(ctx) {
+		t.Error("slmLiteFromCtx returned false after WithSLMLite")
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLMLite_SwapsDirectiveAndAppendsFewShot verifies
+// TestBuildSystemPrompt_SLMLite_SwapsDirectiveAndAppendsFewShot verifies
 // that when the lite profile is ON, the assembled prompt uses the compact
 // OrchestratorSystemLite core directive (not the verbose OrchestratorSystem)
 // and appends the few-shot ReAct examples block.
-func TestBuildSystemPrompt_SmallLLMLite_SwapsDirectiveAndAppendsFewShot(t *testing.T) {
-	ctx := tools.WithWorkspacePath(WithSmallLLMLite(context.Background()), "/ws")
+func TestBuildSystemPrompt_SLMLite_SwapsDirectiveAndAppendsFewShot(t *testing.T) {
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
 	got := buildSystemPrompt(ctx, "do the thing", llmModelMetaForTests())
 
 	// Lite directive content present (Core Directives is always in the lite
@@ -846,7 +846,7 @@ func TestBuildSystemPrompt_SmallLLMLite_SwapsDirectiveAndAppendsFewShot(t *testi
 	if !strings.Contains(got, "Core Directives") {
 		t.Error("lite prompt missing OrchestratorSystemLite content (Core Directives)")
 	}
-	// Reasoning scaffold present (WithSmallLLMLite enables the full bundle).
+	// Reasoning scaffold present (WithSLMLite enables the full bundle).
 	if !strings.Contains(got, "Thought Scaffold") {
 		t.Error("lite prompt missing the OrchestratorLiteScaffold block")
 	}
@@ -860,14 +860,14 @@ func TestBuildSystemPrompt_SmallLLMLite_SwapsDirectiveAndAppendsFewShot(t *testi
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLMLite_SingleEditVerifyCycle verifies the
+// TestBuildSystemPrompt_SLMLite_SingleEditVerifyCycle verifies the
 // single-source invariant for the Edit → Verify Cycle guidance: with the full
 // lite bundle active (Lite + ReasoningScaffold + FewShot), the assembled
 // prompt must contain the 'Edit → Verify Cycle' heading exactly once — it
 // lives only in OrchestratorSystemLite; the scaffold and few-shot blocks must
 // not duplicate it.
-func TestBuildSystemPrompt_SmallLLMLite_SingleEditVerifyCycle(t *testing.T) {
-	ctx := tools.WithWorkspacePath(WithSmallLLMLite(context.Background()), "/ws")
+func TestBuildSystemPrompt_SLMLite_SingleEditVerifyCycle(t *testing.T) {
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
 	got := buildSystemPrompt(ctx, "do the thing", llmModelMetaForTests())
 
 	if n := strings.Count(got, "Edit → Verify Cycle"); n != 1 {
@@ -898,15 +898,15 @@ func TestEditVerifyCycleExactlyOnceInFullAndLiteDirectives(t *testing.T) {
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLM_SubTogglesIndependent proves the FewShot and
+// TestBuildSystemPrompt_SLM_SubTogglesIndependent proves the FewShot and
 // ReasoningScaffold sub-toggles are independently honored (the SF-2 wiring
 // fix): with Lite on but each sub-toggle off, the corresponding block must be
 // ABSENT from the assembled prompt while the lite directive itself is present.
 // This guards against a regression where the toggles become no-ops again.
-func TestBuildSystemPrompt_SmallLLM_SubTogglesIndependent(t *testing.T) {
+func TestBuildSystemPrompt_SLM_SubTogglesIndependent(t *testing.T) {
 	// Lite on, both sub-toggles off → lite directive only, no scaffold/few-shot.
 	ctx := tools.WithWorkspacePath(
-		withSmallLLMPromptProfile(context.Background(), smallLLMPromptProfile{
+		withSLMPromptProfile(context.Background(), slmPromptProfile{
 			Lite: true, FewShot: false, ReasoningScaffold: false,
 		}),
 		"/ws",
@@ -927,7 +927,7 @@ func TestBuildSystemPrompt_SmallLLM_SubTogglesIndependent(t *testing.T) {
 
 	// Lite on, only scaffold on → scaffold present, few-shot absent.
 	ctxScaffold := tools.WithWorkspacePath(
-		withSmallLLMPromptProfile(context.Background(), smallLLMPromptProfile{
+		withSLMPromptProfile(context.Background(), slmPromptProfile{
 			Lite: true, FewShot: false, ReasoningScaffold: true,
 		}),
 		"/ws",
@@ -942,7 +942,7 @@ func TestBuildSystemPrompt_SmallLLM_SubTogglesIndependent(t *testing.T) {
 
 	// Lite on, only few-shot on → few-shot present, scaffold absent.
 	ctxFew := tools.WithWorkspacePath(
-		withSmallLLMPromptProfile(context.Background(), smallLLMPromptProfile{
+		withSLMPromptProfile(context.Background(), slmPromptProfile{
 			Lite: true, FewShot: true, ReasoningScaffold: false,
 		}),
 		"/ws",
@@ -956,12 +956,12 @@ func TestBuildSystemPrompt_SmallLLM_SubTogglesIndependent(t *testing.T) {
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLM_SubTogglesRequireLite proves FewShot and
+// TestBuildSystemPrompt_SLM_SubTogglesRequireLite proves FewShot and
 // ReasoningScaffold are NOT applied when Lite is off, even if their toggles
 // are on — both are tailored to the compact lite directive.
-func TestBuildSystemPrompt_SmallLLM_SubTogglesRequireLite(t *testing.T) {
+func TestBuildSystemPrompt_SLM_SubTogglesRequireLite(t *testing.T) {
 	ctx := tools.WithWorkspacePath(
-		withSmallLLMPromptProfile(context.Background(), smallLLMPromptProfile{
+		withSLMPromptProfile(context.Background(), slmPromptProfile{
 			Lite: false, FewShot: true, ReasoningScaffold: true,
 		}),
 		"/ws",
@@ -980,13 +980,13 @@ func TestBuildSystemPrompt_SmallLLM_SubTogglesRequireLite(t *testing.T) {
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLMLite_PreservesInjectionDefenseAndVerification
+// TestBuildSystemPrompt_SLMLite_PreservesInjectionDefenseAndVerification
 // is the STRICT-CONSTRAINT test: even with the lite profile ON, the full
 // injection_defense.md content (verbatim) and the VerificationMandate MUST
 // still appear in the assembled prompt. The lite directive never carries or
 // replaces injection-defense content.
-func TestBuildSystemPrompt_SmallLLMLite_PreservesInjectionDefenseAndVerification(t *testing.T) {
-	ctx := tools.WithWorkspacePath(WithSmallLLMLite(context.Background()), "/ws")
+func TestBuildSystemPrompt_SLMLite_PreservesInjectionDefenseAndVerification(t *testing.T) {
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
 	ctx = context.WithValue(ctx, InjectionDefenseKey, true) // defense enabled
 	got := buildSystemPrompt(ctx, "do the thing", llmModelMetaForTests())
 
@@ -1007,7 +1007,7 @@ func TestBuildSystemPrompt_SmallLLMLite_PreservesInjectionDefenseAndVerification
 	}
 }
 
-// TestBuildSystemPrompt_SmallLLMLite_OffNoRegression verifies the OFF path
+// TestBuildSystemPrompt_SLMLite_OffNoRegression verifies the OFF path
 // produces the pre-profile baseline. Two independent guarantees:
 //  1. An extra .Core("") (the empty few-shot in the OFF path) is a no-op —
 //     joinSections skips empty sections, confirmed here by asserting the
@@ -1016,7 +1016,7 @@ func TestBuildSystemPrompt_SmallLLMLite_PreservesInjectionDefenseAndVerification
 //     the OFF path adds zero bytes versus the convenience wrapper.
 //  2. The OFF baseline contains the verbose OrchestratorSystem and NOT the
 //     lite directive — i.e. the lite swap does not leak when the flag is absent.
-func TestBuildSystemPrompt_SmallLLMLite_OffNoRegression(t *testing.T) {
+func TestBuildSystemPrompt_SLMLite_OffNoRegression(t *testing.T) {
 	ctx := tools.WithWorkspacePath(context.Background(), "/ws")
 	meta := llmModelMetaForTests()
 
@@ -1057,12 +1057,12 @@ func TestOrchestratorSystemLite_TokenFootprint(t *testing.T) {
 	}
 }
 
-// TestBuildSpecializedSystemPrompt_SmallLLMLite_NotSwapped verifies that a
+// TestBuildSpecializedSystemPrompt_SLMLite_NotSwapped verifies that a
 // specialized run (e.g. goal derivation) is NEVER swapped to the lite
-// orchestrator directive, even when SmallLLMLiteKey is set. The specialized
+// orchestrator directive, even when SLMLiteKey is set. The specialized
 // directive owns its own completion semantics and must not be replaced.
-func TestBuildSpecializedSystemPrompt_SmallLLMLite_NotSwapped(t *testing.T) {
-	ctx := tools.WithWorkspacePath(WithSmallLLMLite(context.Background()), "/ws")
+func TestBuildSpecializedSystemPrompt_SLMLite_NotSwapped(t *testing.T) {
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
 	got := buildSpecializedSystemPrompt(ctx, "derive a goal", llmModelMetaForTests(), prompts.GoalDerivation)
 
 	// The specialized directive content must be present.

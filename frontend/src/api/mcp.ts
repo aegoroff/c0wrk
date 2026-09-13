@@ -59,10 +59,12 @@ export async function getToolList(): Promise<ToolInfo[]> {
   }
 }
 
-export async function listProviderModels(provider: string): Promise<string[]> {
+export async function listProviderModels(
+  req: import('@/types/models').ListProviderModelsRequest,
+): Promise<string[]> {
   try {
     const app = getApp()
-    const result = await app.ListProviderModels(provider)
+    const result = await app.ListProviderModels(req)
     if (!Array.isArray(result)) {
       logger.error('listProviderModels: unexpected response shape, returning []', result)
       return []

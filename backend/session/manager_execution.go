@@ -16,6 +16,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/core"
+	e2spkg "github.com/v0lka/c0wrk/core/e2s"
 	goalpkg "github.com/v0lka/c0wrk/core/goal"
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
@@ -67,7 +68,7 @@ func (m *Manager) finishLiveLeftover(_ context.Context, id string, session *Sess
 	}
 	joined := strings.Join(leftover, "\n\n")
 	m.log().Info("launching follow-up task for undelivered live messages", "session_id", id, "count", len(leftover))
-	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, nil, nil, "", "", false, "", false, true); err != nil {
+	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, nil, nil, "", "", false, "", false, false, true); err != nil {
 		if errors.Is(err, ErrSessionCompacting) && m.requeueLiveMessages(session, joined) {
 			m.log().Info("follow-up deferred by manual compaction: live messages re-queued", "session_id", id)
 			m.emitFunc(Event{
@@ -562,11 +563,14 @@ func (m *Manager) InvalidateIgnoreCache(changedPaths []string) {
 // Runs in a goroutine, results come via events.
 // reviewMode, when true, marks the message as carrying code review feedback
 // the agent must address (see core HandleOptions.ReviewMode).
+// e2s, when true, enables the E2S (explicit-state) execution mode for the
+// task — the mirror of the goal flag. It must be exclusive with goal (the
+// manager rejects both set; the frontend store enforces the same rule).
 //
 // This is the single-return convenience form of SendMessageClassified for
 // callers that do not need the authoritative send classification.
-func (m *Manager) SendMessage(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, reviewMode bool) error {
-	_, err := m.SendMessageClassified(ctx, id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, reviewMode)
+func (m *Manager) SendMessage(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool) error {
+	_, err := m.SendMessageClassified(ctx, id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
 	return err
 }
 
@@ -594,8 +598,8 @@ const (
 // classification (fresh / nudge-resume / live) so the caller can persist the
 // correct is_nudge metadata after the decision is made under the session lock.
 // The task itself runs in a goroutine and reports via events.
-func (m *Manager) SendMessageClassified(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, reviewMode bool) (SendClassification, error) {
-	return m.sendMessage(ctx, id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, reviewMode, false)
+func (m *Manager) SendMessageClassified(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool) (SendClassification, error) {
+	return m.sendMessage(ctx, id, text, activeSkills, activeAgents, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, false)
 }
 
 // liveAction tells the request epilogue what to do with live user messages
@@ -624,7 +628,7 @@ const (
 // the send may queue. The caller must hold session.mu. The same conditions are
 // checked by ValidateLiveSend before the frontend persists the message and by
 // the live branch here under the lock (the authoritative gate).
-func liveSendRejectionLocked(session *Session, goal bool, text string, activeSkills, activeAgents []string) error {
+func liveSendRejectionLocked(session *Session, goal, e2s bool, text string, activeSkills, activeAgents []string) error {
 	// A leading "/goal" command selects goal mode even when the explicit goal
 	// flag is absent. The fresh-task path detects it via
 	// DetectAndStripGoalMode; the live-send gate must reject it identically
@@ -638,6 +642,11 @@ func liveSendRejectionLocked(session *Session, goal bool, text string, activeSki
 		return ErrPausePending
 	case goal:
 		return errors.New("goal requests cannot be sent while a task is running — pause or wait for completion first")
+	case e2s:
+		// E2S mirrors goal: an E2S run owns the whole task lifecycle (its Σ
+		// is seeded only at task start), so it can never join a running task
+		// as a live interjection.
+		return errors.New("E2S requests cannot be sent while a task is running — pause or wait for completion first")
 	case len(activeSkills) > 0 || len(activeAgents) > 0:
 		return errors.New("skill or agent references cannot be sent while a task is running — pause or wait for completion first")
 	case session.orchestrator == nil:
@@ -650,7 +659,7 @@ func liveSendRejectionLocked(session *Session, goal bool, text string, activeSki
 // relaunch of an already-rendered message (the live-send follow-up): it skips
 // the message_received emission and title generation because the UI and the
 // message store already hold the message from the original send.
-func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, reviewMode, presented bool) (SendClassification, error) {
+func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills, activeAgents []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode, presented bool) (SendClassification, error) {
 	// No task may be launched once Shutdown has begun (see ResumeTask).
 	if m.shuttingDown.Load() {
 		return SendFresh, errors.New("session manager is shutting down")
@@ -681,7 +690,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 	// delivered by that request or becomes its follow-up task — never lost
 	// and never duplicated.
 	if session.active {
-		if err := liveSendRejectionLocked(session, goal, text, activeSkills, activeAgents); err != nil {
+		if err := liveSendRejectionLocked(session, goal, e2s, text, activeSkills, activeAgents); err != nil {
 			session.mu.Unlock()
 			return SendFresh, err
 		}
@@ -713,11 +722,12 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 	// Nudge-resume: if the session has a paused task, sending a message does
 	// NOT start a new task — the message becomes a nudge that resumes the
 	// paused task via ResumeSession (which re-activates the session and injects
-	// the text as a trailing user turn). Goal requests are excluded: a /goal
-	// message supersedes any paused task (abandonUnfinishedTaskForGoal handles
+	// the text as a trailing user turn). Goal and E2S requests are excluded:
+	// a /goal or E2S message supersedes any paused task
+	// (abandonUnfinishedTaskForGoal/abandonUnfinishedTaskForE2S handle
 	// cleanup). Detected here before activation so ResumeTask's own activation
 	// path is not tripped by a spurious "already processing" check.
-	if !goal && m.hasPausedUnfinishedTask(id) {
+	if !goal && !e2s && m.hasPausedUnfinishedTask(id) {
 		// Emit message_received so the UI shows the user message (mirrors the
 		// normal SendMessage path's emission that the goroutine skips).
 		m.emitFunc(Event{
@@ -900,21 +910,29 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 		goalMsg, isGoal := core.DetectAndStripGoalMode(msg)
 		goalEnabled := isGoal || goal
 
-		if goalEnabled {
+		switch {
+		case goalEnabled:
 			// Goal mode supersedes any interrupted task: cancel it so it does
 			// not linger as resumable WIP across the new goal task, then fall
 			// through to the goal dispatch below. Best-effort; a missing task
 			// store or no unfinished task is a no-op.
 			m.abandonUnfinishedTaskForGoal(id)
-		} else if m.tryContinueInterruptedTask(ctx, id, session, msg, modelOverride, reasoningEffort, pendingAttachments) {
+		case e2s:
+			// E2S mirrors goal: an E2S run seeds its Σ only at task start, so
+			// it can never continue an interrupted plain task — the unfinished
+			// task is abandoned and a fresh E2S task starts below.
+			m.abandonUnfinishedTaskForE2S(id)
+		default:
 			// Continue an interrupted (unfinished) task if one exists: the new
 			// user message is appended as a final user-nudge turn to the prior
 			// trajectory and the ReAct cycle resumes — no routing, no new task,
 			// no conversation-history pair. The function fully owns terminal
 			// handling (deactivate + emit + follow-up) for every outcome, so
 			// mark finished to skip the deferred epilogue's second deactivation.
-			finished = true
-			return
+			if m.tryContinueInterruptedTask(ctx, id, session, msg, modelOverride, reasoningEffort, pendingAttachments) {
+				finished = true
+				return
+			}
 		}
 
 		// No unfinished task took the resume path (or goal was requested): run
@@ -969,6 +987,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 			PendingImages:      imageBlocks,
 			Goal:               goalEnabled,
 			GoalBudgetOverride: budgetOverride,
+			E2S:                e2s,
 			ReviewMode:         reviewMode,
 		})
 
@@ -1009,6 +1028,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 				PendingImages:      imageBlocks,
 				Goal:               goalEnabled,
 				GoalBudgetOverride: budgetOverride,
+				E2S:                e2s,
 				ReviewMode:         reviewMode,
 			})
 			if err != nil && errors.Is(err, orchestration.ErrExecutionIncomplete) && result != nil {
@@ -1022,11 +1042,13 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 			if ctx.Err() == context.Canceled {
 				// On shutdown, leave the task in_progress so it can be
 				// resumed after restart; only user-initiated cancels are
-				// persisted as cancelled. The goal is abandoned (cancelled)
-				// only on a user cancel, not on shutdown.
+				// persisted as cancelled. The goal and the E2S run are
+				// abandoned (cancelled) only on a user cancel, not on
+				// shutdown.
 				if m.emitTaskCancelledUnlessShuttingDown(id) {
 					action = liveActionDiscard
 					m.abandonGoalIfUnfinished(id)
+					m.abandonE2SIfUnfinished(id)
 					m.persistCancellationIfUnfinished(id)
 				}
 				return
@@ -1059,6 +1081,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 			if m.emitTaskCancelledUnlessShuttingDown(id) {
 				action = liveActionDiscard
 				m.abandonGoalIfUnfinished(id)
+				m.abandonE2SIfUnfinished(id)
 				m.persistCancellationIfUnfinished(id)
 			}
 			return
@@ -1219,6 +1242,7 @@ func (m *Manager) tryContinueInterruptedTask(
 		if ctx.Err() == context.Canceled {
 			if m.emitTaskCancelledUnlessShuttingDown(id) {
 				m.abandonGoalIfUnfinished(id)
+				m.abandonE2SIfUnfinished(id)
 				bb.CancelTask()
 				m.deactivateSessionTask(session, liveActionDiscard)
 				return true
@@ -1493,11 +1517,13 @@ func (m *Manager) ResumeTask(ctx context.Context, id, modelOverride, reasoningEf
 			if taskCtx.Err() == context.Canceled {
 				// On shutdown, leave the restored task in_progress so it can
 				// be resumed after restart; only user-initiated cancels mark
-				// the task as cancelled. The goal is abandoned (cancelled)
-				// only on a user cancel, not on shutdown.
+				// the task as cancelled. The goal and the E2S run are
+				// abandoned (cancelled) only on a user cancel, not on
+				// shutdown.
 				if m.emitTaskCancelledUnlessShuttingDown(id) {
 					action = liveActionDiscard
 					m.abandonGoalIfUnfinished(id)
+					m.abandonE2SIfUnfinished(id)
 					bb.CancelTask()
 				}
 				return
@@ -1525,6 +1551,7 @@ func (m *Manager) ResumeTask(ctx context.Context, id, modelOverride, reasoningEf
 			if m.emitTaskCancelledUnlessShuttingDown(id) {
 				action = liveActionDiscard
 				m.abandonGoalIfUnfinished(id)
+				m.abandonE2SIfUnfinished(id)
 				bb.CancelTask()
 			}
 			return
@@ -1855,14 +1882,14 @@ func (m *Manager) LiveTokenSnapshot(sessionID string) (TokenSnapshot, bool) {
 
 // ValidateLiveSend performs the live-send gate checks without queuing: when a
 // task is currently running, it returns the same rejection errors the live
-// branch of sendMessage would (pause window, goal, skill/agent references).
-// The frontend API calls this BEFORE persisting the user message so a rejected
-// live send never leaves a phantom persisted message. It is a memory-only
-// lookup (no session restore side effect); when no task is running it is a
-// no-op. The authoritative re-check still happens under the session lock in
-// sendMessage — a message that passes here but finds the task finished
+// branch of sendMessage would (pause window, goal, E2S, skill/agent
+// references). The frontend API calls this BEFORE persisting the user message
+// so a rejected live send never leaves a phantom persisted message. It is a
+// memory-only lookup (no session restore side effect); when no task is running
+// it is a no-op. The authoritative re-check still happens under the session
+// lock in sendMessage — a message that passes here but finds the task finished
 // afterwards simply starts a normal task.
-func (m *Manager) ValidateLiveSend(sessionID string, goal bool, text string, activeSkills, activeAgents []string) error {
+func (m *Manager) ValidateLiveSend(sessionID string, goal, e2s bool, text string, activeSkills, activeAgents []string) error {
 	m.mu.RLock()
 	sess := m.sessions[sessionID]
 	m.mu.RUnlock()
@@ -1880,7 +1907,7 @@ func (m *Manager) ValidateLiveSend(sessionID string, goal bool, text string, act
 	if !sess.active {
 		return nil
 	}
-	return liveSendRejectionLocked(sess, goal, text, activeSkills, activeAgents)
+	return liveSendRejectionLocked(sess, goal, e2s, text, activeSkills, activeAgents)
 }
 
 // emitTaskCancelledUnlessShuttingDown emits the "task_cancelled" event for the
@@ -2016,6 +2043,66 @@ func (m *Manager) abandonGoalIfUnfinished(sessionID string) {
 	}
 }
 
+// abandonE2SIfUnfinished terminalizes the unfinished task's E2S state as
+// cancelled (terminal) on a user-initiated cancel so a later resume does not
+// re-enter the E2S loop with a stale Σ. It mirrors abandonGoalIfUnfinished:
+// on shutdown the state is left active/paused (non-terminal) so it survives
+// restart; it is only called inside the emitTaskCancelledUnlessShuttingDown(id)
+// == true branch (i.e. NOT shutting down) and BEFORE
+// persistCancellationIfUnfinished/bb.CancelTask (a cancelled task is no longer
+// "unfinished"). Best-effort: errors are logged only. No-op when there is no
+// task store, no unfinished task, or no non-terminal E2S state.
+func (m *Manager) abandonE2SIfUnfinished(sessionID string) {
+	tid := m.unfinishedTaskID(sessionID)
+	if tid == "" {
+		return
+	}
+	m.terminalizeE2SState(tid)
+}
+
+// terminalizeE2SState marks the given task's persisted E2S state as cancelled
+// (terminal) so a later resume does not re-enter the E2S loop with a stale Σ.
+// It is a no-op when there is no task store, no persisted state, or the state
+// is already terminal. Best-effort: errors are logged only.
+func (m *Manager) terminalizeE2SState(tid string) {
+	if tid == "" {
+		return
+	}
+	m.mu.RLock()
+	ts := m.taskStore
+	m.mu.RUnlock()
+	if ts == nil {
+		return
+	}
+	adapter := NewTaskStoreAdapter(ts)
+	st, err := adapter.LoadE2SState(tid)
+	if err != nil {
+		m.log().Warn("failed to load e2s state to terminalize", "task", tid, "error", err)
+		return
+	}
+	if st == nil || e2sStateTerminal(st.Status) {
+		return
+	}
+	st.Status = e2spkg.StateStatusCancelled
+	if st.Sigma != nil {
+		st.Sigma[e2spkg.CoreKeyStatus] = string(e2spkg.StateStatusCancelled)
+	}
+	if err := adapter.PersistE2SState(tid, st); err != nil {
+		m.log().Warn("failed to persist e2s cancellation", "task", tid, "error", err)
+	}
+}
+
+// e2sStateTerminal reports whether the E2S lifecycle status is terminal — a
+// resume must only re-enter the loop for a non-terminal (active/paused) run.
+func e2sStateTerminal(s e2spkg.StateStatus) bool {
+	switch s {
+	case e2spkg.StateStatusMet, e2spkg.StateStatusFailed, e2spkg.StateStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // abandonUnfinishedTaskForGoal cancels the session's unfinished task (if any)
 // so a goal request can start a fresh goal pursuit instead of resuming the
 // interrupted task. It persists the cancellation, resolves any pending
@@ -2024,38 +2111,89 @@ func (m *Manager) abandonGoalIfUnfinished(sessionID string) {
 // Best-effort: errors are logged only. No-op when there is no task store or
 // no unfinished task.
 func (m *Manager) abandonUnfinishedTaskForGoal(id string) {
+	m.abandonUnfinishedTaskForMode(id, "abandoned_for_goal", "Interrupted task abandoned to start goal mode.")
+}
+
+// abandonUnfinishedTaskForE2S cancels the session's unfinished task (if any)
+// so an E2S request can start a fresh E2S run instead of resuming the
+// interrupted task — the E2S mirror of abandonUnfinishedTaskForGoal.
+//
+// Unlike the goal takeover, the E2S takeover is not stateless: runE2SLoop
+// resumes any non-terminal persisted Σ it finds under the continuation anchor
+// (core.loadE2SResumeState) and seeds the loop from that Σ's objective —
+// ResumeState takes precedence over the new message. A leftover active Σ or a
+// stale anchor would therefore make the new E2S instruction a silent no-op, so
+// the abandoned task's Σ is terminalized and the anchor dropped when it points
+// at that task.
+func (m *Manager) abandonUnfinishedTaskForE2S(id string) {
+	tid := m.abandonUnfinishedTaskForMode(id, "abandoned_for_e2s", "Interrupted task abandoned to start E2S mode.")
+	if tid == "" {
+		return
+	}
+	// Drop the continuation anchor when it points at the abandoned task. The
+	// anchor is restored from GetLatestTaskID (status-agnostic) on session
+	// restore, so after a restart it can equal the interrupted task; leaving it
+	// would make the send below restore the abandoned task's blackboard instead
+	// of starting the fresh E2S task this takeover intends.
+	m.mu.RLock()
+	sess := m.sessions[id]
+	m.mu.RUnlock()
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	if sess.lastCompletedTaskID == tid {
+		sess.lastCompletedTaskID = ""
+	}
+	sess.mu.Unlock()
+}
+
+// abandonUnfinishedTaskForMode is the shared body behind the goal/E2S
+// abandon-on-mode-takeover helpers: it drops any armed deferred
+// resume-compaction, persists the unfinished task's cancellation, resolves
+// the lingering task_failed_resumable banner, and emits the given service
+// notice. It returns the abandoned task's ID ("" when there was none) so the
+// E2S takeover can also clear the run's persisted state and continuation
+// anchor (see abandonUnfinishedTaskForE2S); the goal takeover ignores it.
+func (m *Manager) abandonUnfinishedTaskForMode(id, bannerReason, serviceContent string) string {
 	// The interrupted task being abandoned may carry an armed deferred
 	// resume-compaction (a manual no-op compaction deferred to its resume) —
-	// drop it so the goal loop (or any later task) does not inherit the
+	// drop it so the new mode's loop (or any later task) does not inherit the
 	// forced compaction chosen for the abandoned task.
 	m.clearResumeCompaction(id)
 	m.mu.RLock()
 	ts := m.taskStore
 	m.mu.RUnlock()
 	if ts == nil {
-		return
+		return ""
 	}
 	adapter := NewTaskStoreAdapter(ts)
 	tid, err := adapter.GetUnfinishedTaskID(id)
 	if err != nil {
-		m.log().Warn("goal-on-resume: failed to look up unfinished task to abandon", "session", id, "error", err)
-		return
+		m.log().Warn("mode takeover: failed to look up unfinished task to abandon", "session", id, "error", err)
+		return ""
 	}
 	if tid == "" {
-		return
+		return ""
 	}
 	if err := adapter.PersistCancellation(tid); err != nil {
-		m.log().Warn("goal-on-resume: failed to cancel unfinished task", "task", tid, "error", err)
+		m.log().Warn("mode takeover: failed to cancel unfinished task", "task", tid, "error", err)
 	}
-	m.resolveResumableTaskMessage(id, tid, "abandoned_for_goal")
+	// A takeover abandons the unfinished task for good, so terminalize any
+	// persisted E2S Σ as well: otherwise a later resume that still resolves the
+	// anchor could re-enter the E2S loop with the abandoned run's state. No-op
+	// for a non-E2S task (nothing persisted).
+	m.terminalizeE2SState(tid)
+	m.resolveResumableTaskMessage(id, tid, bannerReason)
 	m.emitFunc(Event{
 		SessionID: id,
 		Type:      "service",
 		Data: map[string]any{
-			"content": "Interrupted task abandoned to start goal mode.",
+			"content": serviceContent,
 			"phase":   "orchestration",
 		},
 	})
+	return tid
 }
 
 // shouldRetryContinuationFresh reports whether a failed continuation attempt

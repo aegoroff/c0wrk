@@ -1063,6 +1063,20 @@ func (e *EventEmitter) GoalProgress(data map[string]any) {
 	})
 }
 
+// E2SState emits a dedicated e2s_state session event carrying the full
+// execution-state snapshot (Σ map, turn, max turns, status) of an E2S-mode
+// run. Emitted after every applied state patch so the frontend's Execution
+// State panel renders the live Σ.
+func (e *EventEmitter) E2SState(data map[string]any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.emitEvent(Event{
+		SessionID: e.sessionID,
+		Type:      "e2s_state",
+		Data:      data,
+	})
+}
+
 // ExecutorDiagnostic logs an internal executor diagnostic at DEBUG level.
 // These are internal diagnostics, not user-facing events.
 func (e *EventEmitter) ExecutorDiagnostic(stepNum int, event string, details map[string]any) {
@@ -1118,12 +1132,13 @@ func (e *EventEmitter) SkillsActivated(skillNames []string) {
 	})
 }
 
-// SetSmallLLMProfile snapshots the Small-LLM profile state the session runs
-// under; it annotates the "agent_metrics" payload so measurements can be
-// grouped by active optimization variants. Metrics are collected regardless —
-// an unset profile just reports enabled=false with no variants.
-func (e *EventEmitter) SetSmallLLMProfile(enabled bool, variants []string) {
-	e.metrics.setSmallLLM(SmallLLMMetaInfo{Enabled: enabled, Variants: variants})
+// SetSLMProfile snapshots the Small-LLM profile state the session runs
+// under — including the active profile's id and kind — it annotates the
+// "agent_metrics" payload so measurements can be grouped by active
+// optimization variants. Metrics are collected regardless — an unset
+// profile just reports enabled=false with no variants and no profile fields.
+func (e *EventEmitter) SetSLMProfile(info SLMMetaInfo) {
+	e.metrics.setSLM(info)
 }
 
 // EmitAgentMetrics emits the "agent_metrics" event carrying the accumulated

@@ -160,8 +160,13 @@ export interface AgentMetricsCounters {
   readonly truncation: number
 }
 
-export interface AgentMetricsSmallLLM {
+export interface AgentMetricsSLM {
   readonly enabled: boolean
+  /** Id (slug) of the active SLM profile; optional — absent in payloads from
+   *  sessions that never recorded a profile (and in legacy persisted rows). */
+  readonly profile?: string
+  /** Kind of the active profile; present iff `profile` is present. */
+  readonly profile_kind?: 'predefined' | 'custom'
   readonly variants: readonly string[]
 }
 
@@ -173,7 +178,7 @@ export interface AgentMetricsData {
   readonly steps: number
   readonly output_tokens: number
   readonly invalid_tool_calls: number
-  readonly small_llm: AgentMetricsSmallLLM
+  readonly slm: AgentMetricsSLM
 }
 export interface BlackboardUpdatedData { change_type: string }
 
@@ -322,6 +327,66 @@ export interface GoalProgressData {
   readonly condition: string
 }
 
+// --- E2S (execution-state stream) event payloads ---
+
+/** One checklist entry of the execution state Σ: a task line plus whether it
+ *  is done. Mirrors the backend's checklist item record (snake_case). */
+export interface E2SChecklistItem {
+  readonly text: string
+  readonly checked: boolean
+}
+
+/**
+ * The accumulated execution state Σ for an E2S session — the running summary
+ * the agent maintains instead of a plan DAG. Every field is optional: the
+ * backend seeds the core keys (objective, checklist, files_touched, findings,
+ * decisions, next_steps, done_criteria, status) but the shape is
+ * model-patched, and unknown extension keys pass through untouched.
+ */
+export interface E2SSigma {
+  readonly objective?: string
+  readonly status?: string
+  readonly files_touched?: readonly string[]
+  readonly findings?: readonly string[]
+  readonly decisions?: readonly string[]
+  readonly next_steps?: readonly string[]
+  readonly done_criteria?: readonly string[]
+  readonly checklist?: readonly E2SChecklistItem[]
+  /** Extension keys: arbitrary JSON values the model added (add-only). */
+  readonly [key: string]: unknown
+}
+
+/**
+ * Payload of the dedicated `e2s_state` session event — the execution-state
+ * snapshot for an E2S session, emitted after every applied state patch.
+ * `state` is the FULL Σ snapshot by default (the current backend emitter
+ * always sends the merged Σ; the store keeps only the latest). `turn` is the
+ * current turn number.
+ *
+ * `total_turns` (cumulative applied patches), `max_turns` (the run's turn
+ * budget; 0 = unbudgeted) and `status` (the domain lifecycle status) are
+ * validated when present but OPTIONAL for backward compatibility with
+ * older emitters: the store falls back to Σ.status for the badge and
+ * treats a missing max_turns as an unbudgeted run (panel shows "turn N"
+ * without a cap). `patch` is a tolerated reserved flag — the current
+ * backend emitter never sets it and always sends the full Σ; if a future
+ * partial emitter appears it must also ship the merge (the store replaces
+ * the Σ outright and does not merge).
+ */
+export interface E2SStateData {
+  readonly state: E2SSigma
+  readonly turn: number
+  /** Cumulative applied patches across all runs of the task (present on
+   *  current emitters; a resumed run's `turn` restarts at 1 against its
+   *  fresh budget while `total_turns` continues the count). */
+  readonly total_turns?: number
+  readonly max_turns?: number
+  readonly status?: string
+  /** Reserved: true would mark `state` as a partial slice. No current
+   *  emitter sets it; the store keeps only the latest full snapshot. */
+  readonly patch?: boolean
+}
+
 // --- Tool manager event payloads ---
 
 export interface ToolManagerToolInfo { readonly name: string; readonly version: string }
@@ -412,6 +477,9 @@ export interface SessionEventMap {
   readonly goal_proposal: GoalProposalData
   readonly goal_status: GoalStatusData
   readonly goal_progress: GoalProgressData
+  /** E2S execution-state snapshot (Σₜ): emitted per step/turn transition; the
+   *  Execution State panel replaces the plan view for E2S sessions. */
+  readonly e2s_state: E2SStateData
   /** Attachment list + optional per-file failures. Replace the store, toast failures. */
   readonly 'attachments:changed': AttachmentsChangedData
 }
@@ -693,28 +761,45 @@ function isAgentMetricsCounters(v: unknown): v is AgentMetricsCounters {
   )
 }
 
-/** Guard for the `agent_metrics` payload; validates shape, not semantics. */
+/** Guard for the `agent_metrics` payload; validates shape, not semantics.
+ *  The slm profile fields are optional (omitempty on the Go side): payloads
+ *  without them — legacy persisted rows, sessions without a recorded
+ *  profile — stay valid, but a present field must be well-formed.
+ *
+ *  The block's container key was renamed `small_llm` → `slm`; both are
+ *  accepted so rows persisted before the rename keep validating. */
 export function isAgentMetricsData(d: unknown): d is AgentMetricsData {
   if (!isObj(d)) return false
+  const slmBlock = d.slm ?? d.small_llm
+  if (
+    typeof d.finish !== 'string' ||
+    typeof d.parse_errors !== 'number' ||
+    typeof d.steps !== 'number' ||
+    typeof d.output_tokens !== 'number' ||
+    typeof d.invalid_tool_calls !== 'number' ||
+    !isAgentMetricsCounters(d.nudges) ||
+    !isAgentMetricsCounters(d.aborts) ||
+    !isObj(slmBlock) ||
+    typeof (slmBlock as { enabled?: unknown }).enabled !== 'boolean' ||
+    !Array.isArray((slmBlock as { variants?: unknown }).variants)
+  ) {
+    return false
+  }
+  const slm = slmBlock as { profile?: unknown; profile_kind?: unknown }
   return (
-    typeof d.finish === 'string' &&
-    typeof d.parse_errors === 'number' &&
-    typeof d.steps === 'number' &&
-    typeof d.output_tokens === 'number' &&
-    typeof d.invalid_tool_calls === 'number' &&
-    isAgentMetricsCounters(d.nudges) &&
-    isAgentMetricsCounters(d.aborts) &&
-    isObj(d.small_llm) &&
-    typeof (d.small_llm as { enabled?: unknown }).enabled === 'boolean' &&
-    Array.isArray((d.small_llm as { variants?: unknown }).variants)
+    (slm.profile === undefined || typeof slm.profile === 'string') &&
+    (slm.profile_kind === undefined || slm.profile_kind === 'predefined' || slm.profile_kind === 'custom')
   )
 }
 
 /**
  * Normalize a persisted `agent_metrics` payload for history-load, tolerating
  * fields added after the row was saved. Older rows predate
- * `invalid_tool_calls` and the `truncation` abort counter; both are defaulted
- * to 0 here. The live `agent_metrics` event handler keeps using the strict
+ * `invalid_tool_calls`, the `truncation` abort counter, and the slm
+ * `profile`/`profile_kind` identity fields; the counters are defaulted to 0
+ * and the profile fields are omitted when absent or malformed. They may also
+ * predate the `small_llm` → `slm` container-key rename, so either key is
+ * accepted. The live `agent_metrics` event handler keeps using the strict
  * `isAgentMetricsData` guard (Go always serializes the full shape for fresh
  * events). Returns undefined when the payload is not an agent_metrics row.
  */
@@ -749,10 +834,18 @@ export function normalizeAgentMetricsData(d: unknown): AgentMetricsData | undefi
   const nudges = counters(d.nudges)
   const aborts = counters(d.aborts)
   if (!nudges || !aborts) return undefined
-  const small = d.small_llm
+  // Accept the current `slm` key and the pre-rename `small_llm` key, so
+  // persisted rows from builds older than the rename still normalize.
+  const small = d.slm ?? d.small_llm
   if (!isObj(small) || typeof small.enabled !== 'boolean' || !Array.isArray(small.variants)) {
     return undefined
   }
+  // Profile identity fields are optional (omitempty on the Go side): carried
+  // through when well-formed, dropped when absent or malformed — legacy rows
+  // normalize to the pre-profile shape unchanged.
+  const profile = typeof small.profile === 'string' ? small.profile : undefined
+  const profileKind =
+    small.profile_kind === 'predefined' || small.profile_kind === 'custom' ? small.profile_kind : undefined
   return {
     finish: d.finish,
     parse_errors: d.parse_errors,
@@ -761,9 +854,11 @@ export function normalizeAgentMetricsData(d: unknown): AgentMetricsData | undefi
     invalid_tool_calls: typeof d.invalid_tool_calls === 'number' ? d.invalid_tool_calls : 0,
     nudges,
     aborts,
-    small_llm: {
+    slm: {
       enabled: small.enabled,
       variants: small.variants,
+      ...(profile !== undefined ? { profile } : {}),
+      ...(profileKind !== undefined ? { profile_kind: profileKind } : {}),
     },
   }
 }
@@ -869,6 +964,61 @@ export function isGoalProgressData(d: unknown): d is GoalProgressData {
   return typeof d.turn === 'number'
     && typeof d.max_turns === 'number'
     && typeof d.condition === 'string'
+}
+
+// --- E2S event type guards ---
+
+/** Guard for a single Σ checklist item: text + checked flag. */
+function isE2SChecklistItem(v: unknown): v is E2SChecklistItem {
+  return isObj(v) && typeof v.text === 'string' && typeof v.checked === 'boolean'
+}
+
+function isStringArray(v: unknown): v is readonly string[] {
+  return isArrayOf(v, (s): s is string => typeof s === 'string')
+}
+
+/**
+ * Guard for a Σ slice (full snapshot or patch): every PRESENT field must be
+ * correctly typed. Absent fields are fine — the backend seeds core keys but
+ * the shape is model-patched, and unknown extension keys pass through
+ * untouched (they are not rejected).
+ *
+ * The element shapes mirror the backend merge operator (core/e2s/merge.go),
+ * which rejects a wrong-shaped element before it can be persisted — checklist
+ * items are `{text, checked}` and the other list keys hold strings — so a
+ * conforming snapshot always passes this guard.
+ */
+export function isE2SSigma(v: unknown): v is E2SSigma {
+  if (!isObj(v) || Array.isArray(v)) return false
+  if (v.objective !== undefined && typeof v.objective !== 'string') return false
+  if (v.status !== undefined && typeof v.status !== 'string') return false
+  if (v.files_touched !== undefined && !isStringArray(v.files_touched)) return false
+  if (v.findings !== undefined && !isStringArray(v.findings)) return false
+  if (v.decisions !== undefined && !isStringArray(v.decisions)) return false
+  if (v.next_steps !== undefined && !isStringArray(v.next_steps)) return false
+  if (v.done_criteria !== undefined && !isStringArray(v.done_criteria)) return false
+  if (v.checklist !== undefined && !isArrayOf(v.checklist, isE2SChecklistItem)) return false
+  return true
+}
+
+/**
+ * Guard for an `e2s_state` payload. `state` must be a valid Σ (the current
+ * backend always sends the full Σ; a partial patch slice is a reserved
+ * forward form) and `turn` a number — both are always present. The forward
+ * fields (`total_turns`, `max_turns`, `status`, `patch`) are OPTIONAL:
+ * validated when present, tolerated when absent. An invalid payload is
+ * dropped at the boundary (reportDroppedEvent) — it must never reach the e2s
+ * store's snapshot application logic.
+ */
+export function isE2SStateData(d: unknown): d is E2SStateData {
+  if (!isObj(d)) return false
+  if (!isE2SSigma(d.state)) return false
+  if (typeof d.turn !== 'number') return false
+  if (d.total_turns !== undefined && typeof d.total_turns !== 'number') return false
+  if (d.max_turns !== undefined && typeof d.max_turns !== 'number') return false
+  if (d.status !== undefined && typeof d.status !== 'string') return false
+  if (d.patch !== undefined && typeof d.patch !== 'boolean') return false
+  return true
 }
 
 // --- Global event type guards ---

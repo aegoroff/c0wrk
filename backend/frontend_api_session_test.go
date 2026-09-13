@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/review"
 	"github.com/v0lka/c0wrk/backend/session"
@@ -240,5 +241,145 @@ func TestListAllSessions_NilManagerReturnsEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("expected 0 sessions, got %d", len(got))
+	}
+}
+
+// TestSendMessage_E2SFailClosedWhenExperimentalDisabled verifies the
+// fail-closed experimental gate on the E2S flag: while experimental features
+// are disabled (including the nil-config startup state), an E2S send is
+// rejected BEFORE any side effect — no message is persisted and no task is
+// started.
+func TestSendMessage_E2SFailClosedWhenExperimentalDisabled(t *testing.T) {
+	api, sessionStore, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	// The harness carries no runtime config → experimentalFeaturesEnabled()
+	// reports false (fail-closed).
+	err := api.SendMessage("fork-src", "do the thing", nil, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error sending an E2S message while experimental features are disabled")
+	}
+	if !strings.Contains(err.Error(), "experimental") {
+		t.Errorf("expected an experimental-gate rejection, got: %v", err)
+	}
+
+	// Fail-closed = no side effects: no user message persisted, no task row.
+	msgs, mErr := sessionStore.LoadMessages(ctx, "fork-src")
+	if mErr != nil {
+		t.Fatalf("LoadMessages: %v", mErr)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("gated send must not persist a message, got %d", len(msgs))
+	}
+	if latest, lErr := sessionStore.GetLatestTaskID(ctx, "fork-src"); lErr != nil || latest != "" {
+		t.Errorf("gated send must not start a task (latest=%q, err=%v)", latest, lErr)
+	}
+}
+
+// TestSendMessage_E2SGatePassesWhenExperimentalEnabled verifies the gate
+// opens only with the experimental switch: with the config present and
+// Experimental.Enabled=true, an E2S send passes the gate and proceeds into
+// the send pipeline (it fails later in this harness — on session restore
+// with a nil orchestrator factory — which proves the gate itself did not
+// reject it).
+func TestSendMessage_E2SGatePassesWhenExperimentalEnabled(t *testing.T) {
+	api, _, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+
+	// Drop the app so the send — after passing the gate — stops at the
+	// manager-initialized guard. Any error OTHER than the gate/exclusivity
+	// rejections proves the gate itself was open.
+	api.app = nil
+
+	api.configMu.Lock()
+	api.config = &config.Config{}
+	api.config.Experimental.Enabled = true
+	api.configMu.Unlock()
+
+	err := api.SendMessage("fork-src", "do the thing", nil, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected the send to stop at the manager-initialized guard, not succeed")
+	}
+	if strings.Contains(err.Error(), "experimental") || strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("gate must be open with experimental features enabled, got gate rejection: %v", err)
+	}
+	if !strings.Contains(err.Error(), "session manager not initialized") {
+		t.Errorf("expected the manager-initialized rejection after the open gate, got: %v", err)
+	}
+}
+
+// TestSendMessage_E2SAndGoalMutuallyExclusive verifies the server-side
+// exclusivity defense: arming both mode flags is rejected outright.
+func TestSendMessage_E2SAndGoalMutuallyExclusive(t *testing.T) {
+	api, _, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+
+	// The exclusivity guard runs before the experimental gate, so the test
+	// needs no config: both flags set → exclusivity rejection.
+	err := api.SendMessage("fork-src", "both modes", nil, nil, "", "", true, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error when both goal and E2S flags are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusivity rejection, got: %v", err)
+	}
+}
+
+// TestSendMessage_E2SRejectsGoalCommandPrefix verifies the "/goal" command
+// prefix cannot slip past the E2S/goal exclusivity defense: a leading /goal
+// arms goal mode inside the manager even without the explicit flag, so it must
+// be rejected before any side effect rather than surfacing the core-level
+// conflict error (and skipping the E2S takeover cleanup).
+func TestSendMessage_E2SRejectsGoalCommandPrefix(t *testing.T) {
+	api, sessionStore, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	// No config needed: the prefix guard runs before the experimental gate.
+	err := api.SendMessage("fork-src", "/goal do the thing", nil, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error for an E2S message carrying a /goal command")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusivity rejection, got: %v", err)
+	}
+
+	// Rejected before any side effect: no message persisted, no task row.
+	if msgs, mErr := sessionStore.LoadMessages(ctx, "fork-src"); mErr != nil {
+		t.Fatalf("LoadMessages: %v", mErr)
+	} else if len(msgs) != 0 {
+		t.Errorf("gated send must not persist a message, got %d", len(msgs))
+	}
+	if latest, lErr := sessionStore.GetLatestTaskID(ctx, "fork-src"); lErr != nil || latest != "" {
+		t.Errorf("gated send must not start a task (latest=%q, err=%v)", latest, lErr)
+	}
+}
+
+// TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing pins the
+// post-preprocessing guard: PreprocessMessageText strips leading /skill (and
+// #agent) refs, which can EXPOSE a "/goal" prefix hidden behind them — the
+// manager arms goal mode from the processed text, so the raw-text guard alone
+// misses this form and core would reject the run only after side effects.
+func TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing(t *testing.T) {
+	api, _, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+
+	// "/realskill" is a known active skill, so preprocessing strips it and
+	// leaves "/goal do x" as the leading command.
+	err := api.SendMessage("fork-src", "/realskill /goal refactor the auth module", []string{"realskill"}, nil, "", "", false, "", true, false)
+	if err == nil {
+		t.Fatal("expected an error: the stripped /skill ref exposes a /goal prefix on an E2S send")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected a mutual-exclusivity rejection, got: %v", err)
+	}
+
+	// A non-goal skill message under E2S must be unaffected by the PREFIX
+	// guard: it proceeds past the exclusivity check (this harness has no
+	// experimental config, so the send stops at the gate — which is exactly
+	// the proof wanted: the rejection names the gate, not exclusivity).
+	if err := api.SendMessage("fork-src", "/realskill please proceed", []string{"realskill"}, nil, "", "", false, "", true, false); err == nil || strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("a plain skill-ref E2S send must pass the prefix guard, got: %v", err)
 	}
 }

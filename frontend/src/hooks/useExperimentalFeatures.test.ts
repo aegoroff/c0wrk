@@ -21,6 +21,7 @@ vi.mock('@/lib/logger', () => ({
 
 import { useExperimentalFeatures } from './useExperimentalFeatures'
 import { useExperimentalStore } from '@/stores/experimentalStore'
+import { useInputModeStore } from '@/stores/inputModeStore'
 import type { ConfigResponse } from '@/types/models'
 
 /**
@@ -88,6 +89,7 @@ beforeEach(() => {
   onGlobalEventMock.mockClear()
   capturedHandlers.clear()
   useExperimentalStore.setState({ enabled: false, loaded: false })
+  useInputModeStore.setState({ e2sEnabled: false })
 })
 
 afterEach(() => {
@@ -115,6 +117,18 @@ describe('useExperimentalFeatures', () => {
     // The hook subscribes to both retry triggers.
     expect(onGlobalEventMock).toHaveBeenCalledWith('backend:ready', expect.any(Function))
     expect(onGlobalEventMock).toHaveBeenCalledWith('config:updated', expect.any(Function))
+  })
+
+  it('disarms a persisted E2S arming when the gate is off on load', async () => {
+    // experimental off: the persisted per-message arming must not outlive the
+    // gate, or the next send would be rejected.
+    configMocks.getConfig.mockResolvedValue(makeConfig(true, false))
+    useInputModeStore.setState({ e2sEnabled: true })
+
+    renderHook()
+    await flushMicrotasks()
+
+    expect(useInputModeStore.getState().e2sEnabled).toBe(false)
   })
 
   it('does NOT latch when the backend answers loaded=false during startup', async () => {

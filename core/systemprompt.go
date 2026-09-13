@@ -545,9 +545,9 @@ func buildSystemPromptWith(ctx context.Context, userMessage string, modelMeta ll
 	coreDirective := spec.coreDirective
 	fewShot := ""
 	scaffold := ""
-	if smallLLMLiteFromCtx(ctx) && !spec.specialized {
+	if slmLiteFromCtx(ctx) && !spec.specialized {
 		coreDirective = prompts.SubstituteShellTool(prompts.OrchestratorSystemLite)
-		if profile, ok := smallLLMPromptProfileFromCtx(ctx); ok {
+		if profile, ok := slmPromptProfileFromCtx(ctx); ok {
 			if profile.ReasoningScaffold {
 				scaffold = prompts.OrchestratorLiteScaffold
 			}

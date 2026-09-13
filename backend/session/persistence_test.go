@@ -2243,6 +2243,181 @@ func TestTaskGoalState_CascadeDelete(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadE2SState(t *testing.T) {
+	store, sessionID, cleanup := setupTestStoreWithSession(t)
+	defer cleanup()
+
+	// Parent task must exist (e2s state FK references tasks).
+	if err := store.SaveTask(context.Background(), TaskRecord{
+		ID: "task-e2s", SessionID: sessionID, OriginalRequest: "e2s task",
+		RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
+		Reflections: json.RawMessage(`[]`), Status: "in_progress", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveTask failed: %v", err)
+	}
+
+	payload := json.RawMessage(`{"sigma":{"objective":"ship it","status":"active"},"schema":"fp","turn_count":3,"status":"active","created_at":"2026-09-12T10:00:00Z","updated_at":"2026-09-12T10:05:00Z"}`)
+
+	// Save
+	if err := store.SaveE2SState(context.Background(), "task-e2s", payload); err != nil {
+		t.Fatalf("SaveE2SState failed: %v", err)
+	}
+
+	// Load — should round-trip the exact bytes.
+	loaded, err := store.LoadE2SState(context.Background(), "task-e2s")
+	if err != nil {
+		t.Fatalf("LoadE2SState failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected non-nil e2s state")
+	}
+	if string(loaded) != string(payload) {
+		t.Errorf("e2s state round-trip mismatch:\n got: %s\nwant: %s", loaded, payload)
+	}
+
+	// Save again (replace) — should overwrite, not duplicate (one row per task).
+	updated := json.RawMessage(`{"sigma":{"objective":"ship it","status":"paused"},"status":"paused"}`)
+	if err := store.SaveE2SState(context.Background(), "task-e2s", updated); err != nil {
+		t.Fatalf("SaveE2SState (replace) failed: %v", err)
+	}
+	loaded2, err := store.LoadE2SState(context.Background(), "task-e2s")
+	if err != nil {
+		t.Fatalf("LoadE2SState (replace) failed: %v", err)
+	}
+	if string(loaded2) != string(updated) {
+		t.Errorf("expected replaced e2s state %s, got %s", updated, loaded2)
+	}
+}
+
+func TestLoadE2SState_NotFound(t *testing.T) {
+	store, _, cleanup := setupTestStoreWithSession(t)
+	defer cleanup()
+
+	// No e2s state persisted for this task → nil, nil (not an error) — the
+	// signal for "non-E2S task" on the resume path.
+	loaded, err := store.LoadE2SState(context.Background(), "missing-task")
+	if err != nil {
+		t.Fatalf("LoadE2SState should not error on missing, got: %v", err)
+	}
+	if loaded != nil {
+		t.Errorf("expected nil e2s state for missing task, got %s", loaded)
+	}
+}
+
+func TestTaskE2SState_CascadeDelete(t *testing.T) {
+	store, sessionID, cleanup := setupTestStoreWithSession(t)
+	defer cleanup()
+
+	if err := store.SaveTask(context.Background(), TaskRecord{
+		ID: "task-e2s-cascade", SessionID: sessionID, OriginalRequest: "test",
+		RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
+		Reflections: json.RawMessage(`[]`), Status: "in_progress", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveTask failed: %v", err)
+	}
+	if err := store.SaveE2SState(context.Background(), "task-e2s-cascade", json.RawMessage(`{"status":"active"}`)); err != nil {
+		t.Fatalf("SaveE2SState failed: %v", err)
+	}
+
+	// Confirm present.
+	if loaded, err := store.LoadE2SState(context.Background(), "task-e2s-cascade"); err != nil || loaded == nil {
+		t.Fatalf("expected e2s state present before cascade (loaded=%v, err=%v)", loaded, err)
+	}
+
+	// Deleting the task must cascade to the e2s state (FK ON DELETE CASCADE).
+	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM tasks WHERE id = ?`, "task-e2s-cascade"); err != nil {
+		t.Fatalf("delete task failed: %v", err)
+	}
+
+	loaded, err := store.LoadE2SState(context.Background(), "task-e2s-cascade")
+	if err != nil {
+		t.Fatalf("LoadE2SState after cascade: %v", err)
+	}
+	if loaded != nil {
+		t.Error("e2s state should be deleted by task cascade")
+	}
+}
+
+// TestTaskE2SState_MigrationOnOldDatabase verifies that opening a database
+// created BEFORE the E2S feature existed (no task_e2s_state table) migrates it
+// in place: the table is created and every pre-existing row survives intact.
+func TestTaskE2SState_MigrationOnOldDatabase(t *testing.T) {
+	db := openTestDB(t)
+	createProjectsTable(t, db)
+	insertTestProject(t, db, testProjectID)
+
+	// Build a pre-E2S database: full current schema, then drop task_e2s_state
+	// to simulate a database written by an older build. Seed a session, a
+	// task, and a goal state so the migration can be checked against real
+	// sibling data.
+	oldStore, err := NewSQLiteSessionStore(db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to create pre-migration store: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DROP TABLE task_e2s_state`); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to drop task_e2s_state for old-db simulation: %v", err)
+	}
+	if err := oldStore.SaveSession(context.Background(), SessionInfo{
+		ID: "e2s-migration-session", ProjectID: testProjectID, Name: "Old Session",
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to seed session: %v", err)
+	}
+	if err := oldStore.SaveTask(context.Background(), TaskRecord{
+		ID: "e2s-migration-task", SessionID: "e2s-migration-session", OriginalRequest: "pre-e2s task",
+		RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
+		Reflections: json.RawMessage(`[]`), Status: "in_progress", CreatedAt: time.Now(),
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to seed task: %v", err)
+	}
+	if err := oldStore.SaveGoalState(context.Background(), "e2s-migration-task", json.RawMessage(`{"status":"active"}`)); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to seed goal state: %v", err)
+	}
+
+	// Simulate the app restart: the same DB file is reopened through
+	// NewSQLiteSessionStore, whose idempotent createTables acts as the
+	// migration.
+	migrated, err := NewSQLiteSessionStore(db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to reopen (migrate) store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// The table exists and accepts rows.
+	if err := migrated.SaveE2SState(context.Background(), "e2s-migration-task", json.RawMessage(`{"status":"active"}`)); err != nil {
+		t.Fatalf("SaveE2SState after migration failed: %v", err)
+	}
+	loaded, err := migrated.LoadE2SState(context.Background(), "e2s-migration-task")
+	if err != nil {
+		t.Fatalf("LoadE2SState after migration failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected e2s state to round-trip after migration")
+	}
+
+	// Pre-existing data survived: the task row, its goal state, and the
+	// session are all intact.
+	task, err := migrated.LoadTask(context.Background(), "e2s-migration-task")
+	if err != nil || task == nil {
+		t.Fatalf("pre-existing task lost after migration (task=%v, err=%v)", task, err)
+	}
+	if task.OriginalRequest != "pre-e2s task" {
+		t.Errorf("pre-existing task mutated: %q", task.OriginalRequest)
+	}
+	if gs, err := migrated.LoadGoalState(context.Background(), "e2s-migration-task"); err != nil || gs == nil {
+		t.Errorf("pre-existing goal state lost after migration (gs=%v, err=%v)", gs, err)
+	}
+	if sess, err := migrated.LoadSession(context.Background(), "e2s-migration-session"); err != nil || sess == nil {
+		t.Errorf("pre-existing session lost after migration (sess=%v, err=%v)", sess, err)
+	}
+}
+
 func TestSaveAndLoadAttachments(t *testing.T) {
 	store, sessionID, cleanup := setupTestStoreWithSession(t)
 	defer cleanup()

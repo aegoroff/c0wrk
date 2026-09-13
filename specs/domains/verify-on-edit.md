@@ -55,7 +55,7 @@ Suppression points: No Project (CHAT) mode (`verifyOnEditForMode` → nil), plai
 
 The command ALWAYS originates from user configuration, never from model output — which is why running it requires no interactive confirmation. `ExecuteUnattended` nevertheless keeps every hard gate, fail-closed:
 
-1. required-field validation,
+1. structural input validation (`sdktools.ValidateToolInput` — required keys, declared types, unknown keys, recursively into nested objects and array items),
 2. disabled tools (No Project mode),
 3. per-session extra shell blacklist,
 4. execute-group policy `deny`,

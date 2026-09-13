@@ -9,8 +9,10 @@ The orchestration domain coordinates the full lifecycle of a user request: class
 - `core/orchestrator.go` — top-level Orchestrator (HandleMessage, Resume, `ResolveVisionOptions` — per-call markitdown vision params for the currently active model, consumed by the backend attachment flow)
 - `core/orchestrator_handle.go` — HandleMessage body: router → Conductor launch, `prepareRequestContext` (task-context enrichment incl. the markitdown vision resolver, attached on HandleMessage and Resume; flows through to subagent delegations)
 - `core/orchestrator_goal.go` — goal mode: deriveGoal, runGoalLoop, resumeGoalLoop, runGoalTurns, budgets, anti-spin (see [../goal-mode.md](../goal-mode.md))
+- `core/orchestrator_e2s.go` — E2S mode entry: runE2SLoop (context/launcher wiring, Σ persistence via `task_e2s_state`, resume checkpoints), hooks the `e2s_state` snapshots
+- `core/e2s/` — the E2S loop itself: the turn loop (`loop.go`), the `e2s_step` meta-tool + semantic anti-spin fingerprint (`steptool.go`), the Σ merge operator (`merge.go`), prompt composition (`prompt.go`), domain types (`types.go`) (see [../e2s.md](../e2s.md))
 - `core/conductor.go` — Conductor entry point: builds system prompt, tool set, launches `Executor.Run`
-- `core/smallllm/tools_filter.go` — pure tool-set narrowing for the Small-LLM essential-tools variant (see [../small-llm.md](../small-llm.md))
+- `core/slm/tools_filter.go` — pure tool-set narrowing for the SLM essential-tools variant (see [../slm.md](../slm.md))
 - `core/tools/delegate.go` — `delegate` tool (subagent launch with DAG + async)
 - `core/tools/declare_plan.go` — `declare_plan` tool (roadmap publish + approval gate)
 - `core/tools/reflect.go` — `reflect` tool (invokes Reflector on trajectory)
@@ -75,7 +77,7 @@ type OrchestratorConfig struct {
     AgentsMDSearchPaths         []string // extra AGENTS.md paths (global, c0wrk) read ahead of the workspace file
     ConductorHistoryWindow      int     // recent conversation messages injected into the Conductor context (default: 20)
     GoalLoop                    GoalLoopSettings // goal-loop settings: Verification gates the independent verifier turn ("independent" | "off"); see [../goal-mode.md](../goal-mode.md)
-    SmallLLM                    SmallLLMSettings // small-LLM profile (master toggle + essential-tools / system-prompt variants); see [../small-llm.md](../small-llm.md)
+    SLM                        SLMSettings // SLM profile (master toggle + essential-tools / system-prompt variants); see [../slm.md](../slm.md)
 }
 
 // Routing result — domain, complexity, skills, and a clarification flag.
@@ -105,6 +107,7 @@ type HandleOptions struct {
     ReviewMode         bool                       // renders the Code Review prompt section (agent treats review comments as actionable code edits)
     Goal               bool                       // enter the multi-turn goal loop (see ../goal-mode.md)
     GoalBudgetOverride *goal.GoalBudget           // optional per-request budget tightening; any non-zero field overrides the config default
+    E2S                bool                       // enter the explicit-execution-state loop; mutually exclusive with Goal (see ../e2s.md)
 }
 
 // Handle result
@@ -132,6 +135,18 @@ HandleMessage(ctx, message, sessionID, opts)
 │
 ├─ 2. Load available tools from registry (filtered via ListFiltered
 │     to exclude disabled tools in No Project mode)
+│
+├─ E2S MODE (checked BEFORE goal mode): when opts.E2S, dispatch to
+│     runE2SLoop instead of the route→Conductor flow below. The run
+│     maintains an externalized state Σ the model reads and patches each
+│     turn via the e2s_step meta-tool (state_patch + action); every turn is
+│     a fresh one-shot [system, user] request (bounded O(1) context), and
+│     actions dispatch through ToolRegistry.Execute with every security
+│     gate intact. opts.E2S + opts.Goal together are a wiring mistake,
+│     rejected with ErrE2SGoalConflict. Step-limit exhaustion is a
+│     resumable checkpoint (Σ persists in task_e2s_state; Resume re-enters
+│     the loop with the accumulated Σ and a fresh turn budget).
+│     See [../e2s.md](../e2s.md).
 │
 ├─ GOAL MODE: when opts.Goal, dispatch to runGoalLoop instead of the
 │     route→Conductor flow below. Goal mode runs on BOTH a fresh task
@@ -164,9 +179,11 @@ HandleMessage(ctx, message, sessionID, opts)
 │       (skills narrow the available toolset only — policy comes from
 │        security.groups, ADR-024; there is no skill policy layer)
 │
-├─ 4a. Small-LLM essential-tools filter (non-goal path only):
-│     → When small_llm.enabled AND essential_tools.enabled, narrow the
-│       available tool set via smallllm.SelectTools (static union:
+├─ 4a. SLM essential-tools filter (Conductor path and E2S mode
+│     — never in goal mode):
+│     → When the SLM master toggle AND essential_tools.enabled (both
+│       from slm.enabled + the active profile's values), narrow the
+│       available tool set via slm.SelectTools (static union:
 │       always-present + protected base + every MCP tool + turn-scoped
 │       guarantees; no budget, no router matching, no events emitted).
 │       No-op when the profile is off.
@@ -210,6 +227,7 @@ HandleMessage(ctx, message, sessionID, opts)
 | Complex task | Conductor calls `delegate` with one or more tasks | Subagents run isolated ReAct loops; Conductor sees only summaries. Replaces the former "advanced" multi-step DAG mode. |
 | Interactive skill | Conductor calls `ask_user` / `declare_plan` mid-loop | Skill instructions are executable because the tools are available inside the loop. No pipeline-level gate. |
 | Goal mode | Any message with `opts.Goal` (fresh task or continuation) | `runGoalLoop` replaces the single route→Conductor pass: derives a {condition, verify} goal with user sign-off, then iterates the Conductor turn-by-turn (each a fresh `Executor.Run`) until the agent declares the goal met, the budget is exhausted, the agent goes idle, or the task is paused (session-level). See [../goal-mode.md](../goal-mode.md). |
+| E2S mode | Any message with `opts.E2S` (per-message frontend toggle; gated fail-closed on `experimental.enabled` on both sides) | `runE2SLoop` replaces the route→Conductor flow entirely: its own loop on raw sp4rk primitives (no Executor, no Conductor, no router) where the model's only memory is the externalized state Σ it patches every turn via `e2s_step`; actions dispatch through the registry with every security gate intact; delegation reuses the same conductor launcher with an inert plan state. Mutually exclusive with goal mode. See [../e2s.md](../e2s.md). |
 
 There is no `executionMode` toggle. The Conductor chooses its own granularity based on task complexity and its system-prompt guidance.
 
@@ -220,6 +238,7 @@ There is no `executionMode` toggle. The Conductor chooses its own granularity ba
 - Complexity is always in range [1, 5].
 - Exactly one Conductor `Executor.Run` instance owns a given task from start to finish.
 - **Goal mode is a turn-of-Conductors, not one long-lived executor.** When `opts.Goal`, `runGoalLoop` iterates: each turn launches a fresh `Executor.Run` via `RunConductor`, reusing the normal continuation-trajectory mechanism so dialogue context persists across the turn boundary. Goal mode runs on BOTH a fresh task (`opts.TaskID == ""`) and a continuation (`opts.TaskID != ""`); on a continuation the prior task's blackboard is restored and the agent derives a fresh goal against the inherited facts/history. Routing is decided once at the top of `runGoalLoop` (before derivation) and inherited unchanged by every turn; no turn re-routes. The loop holds the single-flight guard for its whole run; `PauseSession` releases it by stopping the in-flight conductor at the next step boundary (the task is persisted as paused; the goal stays `active`). See [../goal-mode.md](../goal-mode.md).
+- **E2S mode owns its loop and never mixes with the Conductor.** When `opts.E2S`, `runE2SLoop` runs on raw sp4rk primitives — no `Executor`, no Conductor, no router — with the `e2s_step` meta-tool as the model's only protocol surface. `opts.E2S` + `opts.Goal` together are rejected with `ErrE2SGoalConflict` (the E2S branch is checked first, so a conflict can never be silently swallowed by the goal branch). Plan-workflow and goal-only tools are stripped from the E2S catalog; step-limit exhaustion maps to `ExecutionStatusPartial` (a resumable checkpoint, not a failure). See [../e2s.md](../e2s.md).
 - The Conductor always has `ask_user`, `declare_plan`, `execute_plan`, `reflect`, `delegate`, `cancel_delegation`, `finish` available (they are `system`-group tools — bypass policy; ADR-024).
 - `finish` with pending async delegations is rejected: the executor's finish guard (`Executor.SetFinishGuard`, set by the sp4rk Conductor) returns an error while async delegations are pending, and the executor injects a nudge and retries rather than accepting finish. Finish is accepted only once every pending delegation completes or is cancelled via `cancel_delegation` — there is no implicit join, nothing waits.
 - `ExecutionResult.Status` is the typed success contract: success | partial | failed | aborted | cancelled | paused. Callers consult it instead of parsing Output.
@@ -231,7 +250,7 @@ There is no `executionMode` toggle. The Conductor chooses its own granularity ba
 - When the assistant output contains tool-call syntax printed as text (failure-mode detected by `agent.DetectToolCallSyntaxInContent`), the history records a `HistoryNoteFailed(...)` note instead of the hallucinated text.
 - isNoProject: routing domain "code" is overridden to "general" after classification.
 - SetNoProjectMode(): disables code tools and adds extended bash command blacklist on the core tool registry.
-- Small-LLM essential-tools filter: when active it runs exactly once per task on the non-goal path (before the ReAct loop) and never in goal mode; `finish` and the fact-memory / human-interaction tools always survive. The profile is strictly additive — every variant is inert when its master/sub-toggle is off. See [../small-llm.md](../small-llm.md).
+- SLM essential-tools filter: when active it runs exactly once per task on the Conductor path (before the ReAct loop) and inside the E2S branch (`runE2SWithState`), but never in goal mode; `finish` and the fact-memory / human-interaction tools always survive. The profile is strictly additive — every variant is inert when its master/sub-toggle is off. See [../slm.md](../slm.md).
 
 ## Configuration
 
@@ -246,7 +265,7 @@ From `config.yaml` (via BuilderConfig → OrchestratorConfig):
 | `executor.compaction.thresholds.pre_warning_percent` | 75 | Context-fill % that triggers the pre-compaction store_fact nudge |
 | `security.agents_md_max_bytes` | 65536 | Cap on AGENTS.md content injected into prompts (0 = default; -1 = unlimited). Applies to the combined content of all AGENTS.md sources. |
 
-The small-LLM profile (`small_llm.*`) tunes the Conductor for small/local models (tool-set narrowing, system-prompt Lite swap, sampling override, loop hardening). It is strictly additive and defaults to off. See [../small-llm.md](../small-llm.md).
+The SLM profiles (`slm.*` — knob values resolved from the active catalog profile) tune the Conductor for small/local models (tool-set narrowing, system-prompt Lite swap, sampling override, loop hardening, context management). The feature is strictly additive and defaults to off. See [../slm.md](../slm.md).
 
 Not wired from `config.yaml` (hardcoded defaults in code):
 - `OrchestratorConfig.ConductorHistoryWindow` — default 20 (set in `NewOrchestrator`; not exposed as a config key).
@@ -270,6 +289,7 @@ Note: yaml key casing is mixed within and across config sections (see the struct
 - [router.md](router.md) — request classification
 - [executor.md](executor.md) — ReAct loop (shared by Conductor and subagents)
 - [../goal-mode.md](../goal-mode.md) — goal mode (multi-turn objective loop, reuses the Conductor per turn)
+- [../e2s.md](../e2s.md) — E2S mode (explicit execution state Σ, e2s_step protocol, O(1)-context loop)
 - [../memory/README.md](../memory/README.md) — context management
 - [../../contracts/conductor-tools.md](../../contracts/conductor-tools.md) — Conductor tool surface contract
 - [../../decisions/012-conductor-orchestration-pipeline.md](../../decisions/012-conductor-orchestration-pipeline.md) — architectural decision

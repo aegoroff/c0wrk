@@ -20,7 +20,7 @@ import (
 	"github.com/v0lka/c0wrk/core/goal"
 	"github.com/v0lka/c0wrk/core/markitdown"
 	"github.com/v0lka/c0wrk/core/research"
-	"github.com/v0lka/c0wrk/core/smallllm"
+	"github.com/v0lka/c0wrk/core/slm"
 	"github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
 	"github.com/v0lka/sp4rk/agent/reflector"
@@ -114,9 +114,9 @@ type injectionDefenseKeyType struct{}
 // whether to include the injection defense prompt text.
 var InjectionDefenseKey = injectionDefenseKeyType{}
 
-// smallLLMPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
+// slmPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
 // from prepareRequestContext to buildSystemPromptWith. It is stored under
-// SmallLLMLiteKey (a presence flag, like PlanModeKey): when present AND Lite
+// SLMLiteKey (a presence flag, like PlanModeKey): when present AND Lite
 // is set, buildSystemPromptWith swaps the verbose OrchestratorSystem core
 // directive for the compact OrchestratorSystemLite directive, and
 // conditionally appends the reasoning scaffold (ReasoningScaffold) and the
@@ -124,55 +124,55 @@ var InjectionDefenseKey = injectionDefenseKeyType{}
 // only honored when Lite is active, since both are tailored to the lite
 // directive's style. The injection-defense and verification sections are
 // appended UNCHANGED in both modes (strict constraint).
-type smallLLMPromptProfile struct {
+type slmPromptProfile struct {
 	Lite              bool
 	FewShot           bool
 	ReasoningScaffold bool
 }
 
-// smallLLMLiteKeyType is the context key for the small-LLM SystemPrompt
+// slmLiteKeyType is the context key for the small-LLM SystemPrompt
 // profile. Its presence signals the variant is active; the carried value is a
-// smallLLMPromptProfile with the sub-toggle flags.
-type smallLLMLiteKeyType struct{}
+// slmPromptProfile with the sub-toggle flags.
+type slmLiteKeyType struct{}
 
-// SmallLLMLiteKey is the context key signaling the small-LLM lite prompt profile.
-var SmallLLMLiteKey = smallLLMLiteKeyType{}
+// SLMLiteKey is the context key signaling the small-LLM lite prompt profile.
+var SLMLiteKey = slmLiteKeyType{}
 
-// WithSmallLLMLite returns a context carrying SmallLLMLiteKey with the full
+// WithSLMLite returns a context carrying SLMLiteKey with the full
 // profile (lite directive + few-shot examples + reasoning scaffold). It is a
-// test/fixture convenience; production wiring uses withSmallLLMPromptProfile
+// test/fixture convenience; production wiring uses withSLMPromptProfile
 // to carry the actual config-derived flags.
-func WithSmallLLMLite(ctx context.Context) context.Context {
-	return withSmallLLMPromptProfile(ctx, smallLLMPromptProfile{
+func WithSLMLite(ctx context.Context) context.Context {
+	return withSLMPromptProfile(ctx, slmPromptProfile{
 		Lite:              true,
 		FewShot:           true,
 		ReasoningScaffold: true,
 	})
 }
 
-// withSmallLLMPromptProfile returns a context carrying the small-LLM prompt
-// profile under SmallLLMLiteKey. This is the production entry point used by
+// withSLMPromptProfile returns a context carrying the small-LLM prompt
+// profile under SLMLiteKey. This is the production entry point used by
 // prepareRequestContext; it carries the config-derived sub-toggle flags so
 // buildSystemPromptWith can gate the lite directive, few-shot examples, and
 // reasoning scaffold independently.
-func withSmallLLMPromptProfile(ctx context.Context, p smallLLMPromptProfile) context.Context {
-	return context.WithValue(ctx, SmallLLMLiteKey, p)
+func withSLMPromptProfile(ctx context.Context, p slmPromptProfile) context.Context {
+	return context.WithValue(ctx, SLMLiteKey, p)
 }
 
-// smallLLMLiteFromCtx reports whether the small-LLM lite prompt profile is
+// slmLiteFromCtx reports whether the small-LLM lite prompt profile is
 // active for this run (the variant is enabled and Lite is on). Used by
 // buildSystemPromptWith to decide whether to swap in the compact
 // OrchestratorSystemLite directive.
-func smallLLMLiteFromCtx(ctx context.Context) bool {
-	p, ok := ctx.Value(SmallLLMLiteKey).(smallLLMPromptProfile)
+func slmLiteFromCtx(ctx context.Context) bool {
+	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
 	return ok && p.Lite
 }
 
-// smallLLMPromptProfileFromCtx returns the carried small-LLM prompt profile
+// slmPromptProfileFromCtx returns the carried small-LLM prompt profile
 // and whether one is present. Used by buildSystemPromptWith to read the
 // FewShot and ReasoningScaffold sub-toggle flags.
-func smallLLMPromptProfileFromCtx(ctx context.Context) (smallLLMPromptProfile, bool) {
-	p, ok := ctx.Value(SmallLLMLiteKey).(smallLLMPromptProfile)
+func slmPromptProfileFromCtx(ctx context.Context) (slmPromptProfile, bool) {
+	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
 	return p, ok
 }
 
@@ -233,13 +233,27 @@ type OrchestratorConfig struct {
 	// disables it so the loop relies solely on the agent's own verdict.
 	GoalLoop GoalLoopSettings
 
-	// SmallLLM holds the small-LLM optimization settings. When Enabled, the
+	// SLM holds the small-LLM optimization settings. When Enabled, the
 	// profile activates variant behaviors (essential-tools narrowing, prompt
 	// lite swap, loop hardening, sampling) — each variant independently gated
 	// by BOTH the master Enabled toggle and its own sub-toggle
 	// (defense-in-depth). Inert when the master toggle is disabled.
-	SmallLLM SmallLLMSettings
+	SLM SLMSettings
+
+	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
+	// the effective availability of the mode (experimental.enabled, mapped by
+	// the builder). When false, an E2S request is rejected fail-closed before
+	// the loop starts; the numeric fields configure the loop (turn budget, Σ
+	// byte cap, retry/observation caps, anti-spin thresholds) and fall back to
+	// the core/e2s defaults when zero.
+	E2S E2SSettings
 }
+
+// E2SSettings is the runtime mirror of BuilderE2SConfig carried on
+// OrchestratorConfig. It is a type alias: the E2S settings are a flat,
+// behavior-only value with no core-side reshaping, so a distinct struct would
+// only duplicate the fields.
+type E2SSettings = BuilderE2SConfig
 
 // GoalLoopSettings mirrors the config-layer GoalLoopConfig for the
 // orchestrator's runtime config field. Verification is "independent"
@@ -248,18 +262,31 @@ type GoalLoopSettings struct {
 	Verification string
 }
 
-// SmallLLMSettings is the runtime mirror of BuilderSmallLLMConfig, carrying
+// SLMSettings is the runtime mirror of BuilderSLMConfig, carrying
 // the small-LLM variant configuration to the orchestrator. The master Enabled
 // toggle gates every variant (defense-in-depth): when false, no variant
 // activates regardless of its sub-toggle.
-type SmallLLMSettings struct {
+type SLMSettings struct {
 	Enabled        bool
-	EssentialTools SmallLLMEssentialSettings
-	SystemPrompt   SmallLLMSystemPromptSettings
+	EssentialTools SLMEssentialSettings
+	SystemPrompt   SLMSystemPromptSettings
+	// LoopHardening carries the circuit-breaker tightening overrides. The
+	// executor applies them to its circuit breaker at builder level; the E2S
+	// loop (which has no executor) applies the RepeatNudgeThreshold override
+	// to its anti-spin nudge — the same concept under the same profile gate.
+	LoopHardening SLMLoopHardeningSettings
 }
 
-// SmallLLMEssentialSettings holds the always-present tool-set narrowing settings.
-type SmallLLMEssentialSettings struct {
+// SLMLoopHardeningSettings is the orchestrator-level projection of the
+// loop-hardening thresholds the E2S path consumes. Zero values mean "keep
+// the configured/baseline threshold" (mirroring applyLoopHardening).
+type SLMLoopHardeningSettings struct {
+	Enabled              bool
+	RepeatNudgeThreshold int
+}
+
+// SLMEssentialSettings holds the always-present tool-set narrowing settings.
+type SLMEssentialSettings struct {
 	Enabled bool
 	// AlwaysPresent is the user-pinned list of tool names always exposed when
 	// this variant is active, regardless of routing. Protected orchestration
@@ -272,12 +299,12 @@ type SmallLLMEssentialSettings struct {
 	CompactDescriptions bool
 }
 
-// SmallLLMSystemPromptSettings holds the prompt-simplification variant
+// SLMSystemPromptSettings holds the prompt-simplification variant
 // settings. Lite is the variant master toggle (there is no separate Enabled —
 // it mirrors config.SystemPromptConfig, where Lite itself gates the variant).
 // FewShot and ReasoningScaffold are independent sub-toggles only honored when
 // Lite is active.
-type SmallLLMSystemPromptSettings struct {
+type SLMSystemPromptSettings struct {
 	Lite bool
 	// FewShot appends the worked-example ReAct block (requires Lite).
 	FewShot bool
@@ -333,6 +360,16 @@ type Orchestrator struct {
 	// write of these two fields escapes those helpers; the rest of config is
 	// immutable after Build.
 	modelMu sync.RWMutex
+
+	// e2sSettingsOverride, when set, supersedes config.E2S for the effective
+	// E2S execution-mode settings. config is immutable after Build, so a
+	// runtime experimental-features toggle (which flips the effective E2S
+	// gate) cannot mutate it directly — it stores the refreshed settings here
+	// via SetE2SSettings and every reader goes through e2sSettings(). The
+	// pointer is swapped atomically so a toggle is safe against an in-flight
+	// HandleMessage / E2S loop.
+	e2sSettingsOverride atomic.Pointer[E2SSettings]
+
 	// historyMu guards conversationHistory against cross-goroutine access.
 	// Writers run on the request goroutine (the recordConversationOutcome /
 	// recordResumeOutcome epilogues, CompactConversationHistory's swap) and
@@ -450,6 +487,13 @@ type Orchestrator struct {
 	// the full routing+LLM+executor stack. The default (nil) resolves to
 	// defaultGoalTurnRunner, which reuses runConductor under the hood.
 	goalTurnRunner func(ctx context.Context, turn int, message string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, plansDir string, conversationHistory []llm.Message, deps conductorDeps) (toolCallCount int, result *orchestration.ExecutionResult, err error)
+
+	// e2sLauncher overrides the delegation launcher injected into the E2S
+	// loop's context (test seam, mirroring goalTurnRunner). The default (nil)
+	// resolves to the standard conductorLauncher built over conductorDeps —
+	// the SAME launcher a Conductor run uses, so delegated subagents inherit
+	// identical wiring (executor options, security gates, resolvers).
+	e2sLauncher tools.DelegationLauncher
 
 	// goalVerifier is the independent verifier that re-checks an agent's "met"
 	// goal verdict. When the goal loop reaches a "met" verdict and independent
@@ -1199,6 +1243,14 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 			goalMessage += waveFallbackNote
 		}
 		return o.resumeGoalLoop(ctx, goalMessage, bb, availableTools, plansDir, routing, goalState, resumeSteps, nudge, forceCompactionStrategy)
+	}
+
+	// E2S-mode resume: a paused/interrupted E2S task re-enters the E2S loop
+	// with its persisted Σ (loaded best-effort from the task store's optional
+	// E2S capability). Terminal or absent E2S states fall through to the
+	// normal resume path below.
+	if e2sState := o.loadE2SResumeState(bb); e2sState != nil {
+		return o.resumeE2SLoop(ctx, bb, availableTools, routing, e2sState, nudge)
 	}
 
 	// Goal-mode-only tools exist solely for goal mode and must not reach a
@@ -2172,6 +2224,25 @@ func (o *Orchestrator) SetReasoningEffort(effort string) {
 	}
 }
 
+// SetE2SSettings replaces the effective E2S execution-mode settings. It exists
+// for runtime config changes (the experimental-features toggle) that must
+// reach orchestrators built before the change: OrchestratorConfig is immutable
+// after Build, so the refreshed settings are stored in an atomic override
+// (e2sSettingsOverride) that e2sSettings reads. It is safe to call while a
+// task runs — the override is swapped atomically and read once per request.
+func (o *Orchestrator) SetE2SSettings(settings E2SSettings) {
+	o.e2sSettingsOverride.Store(&settings)
+}
+
+// e2sSettings returns the effective E2S settings: the runtime override when a
+// toggle has refreshed them, otherwise the build-time config snapshot.
+func (o *Orchestrator) e2sSettings() E2SSettings {
+	if p := o.e2sSettingsOverride.Load(); p != nil {
+		return *p
+	}
+	return o.config.E2S
+}
+
 // ApplyRequestOverrides applies per-request model and reasoning-effort
 // overrides to all LLM-calling components (router, reflector, the direct LLM
 // caller, and config.Model for metadata resolution). It is the shared step 0
@@ -2616,6 +2687,32 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	}
 	o.logDebug("orchestrator: tools loaded from registry", "total", len(availableTools), "mcp", mcpCount)
 
+	// E2S MODE: an explicit-execution-state request enters runE2SLoop instead
+	// of the route→Conductor flow. The run maintains an externalized state Σ
+	// the model reads and patches each turn (bounded O(1) context), with
+	// actions dispatching through the tool registry and delegation through
+	// the same launcher a Conductor run uses. E2S and Goal are mutually
+	// exclusive — both set is a wiring mistake, surfaced as an explicit error
+	// rather than a silent preference. This branch must precede the goal
+	// branch: the goal check below would otherwise win and swallow the E2S
+	// request (and the conflict).
+	if opts.E2S {
+		if opts.Goal {
+			return nil, ErrE2SGoalConflict
+		}
+		if !o.e2sSettings().Enabled {
+			return nil, ErrE2SModeDisabled
+		}
+		// Commit point for an E2S continuation (mirrors the goal branch):
+		// reactivation happens only now, after blackboard restore succeeded.
+		o.reactivateContinuationTask(bb, opts.TaskID)
+		// taskMessage (resolveTaskMessage) — not the raw message: skill-ref
+		// preprocessing can leave the raw text empty ("/skill"-only sends),
+		// and the E2S objective seeds Σ from it, so it must match what the
+		// Conductor path and the blackboard record.
+		return o.runE2SLoop(ctx, taskMessage, opts, bb, availableTools)
+	}
+
 	// GOAL MODE: a goal request enters the multi-turn goal loop instead of the
 	// single-pass route→Conductor flow. The loop derives a crisp {condition,
 	// verify} goal (with user sign-off), then iterates the Conductor
@@ -2678,11 +2775,13 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 
 	// Small-LLM essential-tools filter: when enabled, narrow the conductor's
 	// tool set ONCE here (before the ReAct loop starts) to reduce per-prompt
-	// schema overhead. This is the NON-GOAL path only: goal mode returns
+	// schema overhead. Goal mode is the only documented exception: it returns
 	// early above (runGoalLoop), before this point, so the goal-mode tool set
 	// — including the verifier-required goal-mode-only tools
 	// (declare_verification etc.) that SelectTools would otherwise drop — is
-	// never narrowed. Runs exactly once per task, never inside the step loop.
+	// never narrowed. E2S also returns earlier, but applies the SAME filter
+	// inside its own branch (runE2SWithState) for full profile parity. Runs
+	// exactly once per task, never inside the step loop.
 	// When the profile is OFF (default) this is a no-op passthrough.
 	// Turn-scoped agent guarantee: when the user explicitly requested
 	// subagents (#mentions threaded into ctx by enrichAgentContext earlier in
@@ -2690,7 +2789,7 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// directive — the delegate tool must survive narrowing or the directive
 	// would reference a tool the model cannot call. Without mentions the
 	// helper returns nil and the filter behaves exactly as before.
-	availableTools = o.applySmallLLMToolFilter(availableTools, smallLLMAgentGuaranteedTools(ctx)...)
+	availableTools = o.applySLMToolFilter(availableTools, slmAgentGuaranteedTools(ctx)...)
 
 	// Truncate conversation history to the configured window so long
 	// sessions don't overflow the Conductor's context. The most recent
@@ -2753,10 +2852,10 @@ func (o *Orchestrator) disabledToolNames() map[string]bool {
 
 // delegateToolName is the conductor-only delegation channel. It is normally a
 // narrowable orchestration tool, but becomes turn-scoped guaranteed whenever
-// the user explicitly requested subagents (see smallLLMAgentGuaranteedTools).
+// the user explicitly requested subagents (see slmAgentGuaranteedTools).
 const delegateToolName = "delegate"
 
-// smallLLMAgentGuaranteedTools returns the extra tool names that must join the
+// slmAgentGuaranteedTools returns the extra tool names that must join the
 // small-LLM guaranteed set for THIS turn, derived from the request context
 // populated by enrichAgentContext. When the user explicitly requested
 // subagents (#agent mentions → WithUserAgents), the Conductor's system prompt
@@ -2766,46 +2865,46 @@ const delegateToolName = "delegate"
 // the MCP-sourced class: without an explicit request the helper returns nil
 // and delegate keeps its default semantics (a conductor-only tool excluded
 // by the narrowing). Static config validation is unaffected.
-func smallLLMAgentGuaranteedTools(ctx context.Context) []string {
+func slmAgentGuaranteedTools(ctx context.Context) []string {
 	if len(UserAgentsFromContext(ctx)) > 0 {
 		return []string{delegateToolName}
 	}
 	return nil
 }
 
-// applySmallLLMToolFilter narrows the conductor's available-tool set when the
-// small-LLM profile is active. It delegates to smallllm.SelectTools, which
+// applySLMToolFilter narrows the conductor's available-tool set when the
+// small-LLM profile is active. It delegates to slm.SelectTools, which
 // unions the user's always-present list, the protected orchestration tools
 // (finish + memory + ask_user), and every MCP-sourced tool — a static
 // selection with no quantitative budget and no router matching. It runs
-// exactly once per task, before the non-goal ReAct loop starts (HandleMessage
-// applies it after the goal-mode early return, so goal mode is intentionally
-// never narrowed).
+// exactly once per task on the Conductor path (before the ReAct loop) and
+// once inside the E2S branch (runE2SWithState); goal mode is intentionally
+// never narrowed (HandleMessage returns before either call site).
 //
 // The optional extraGuaranteed names are turn-scoped guaranteed tools passed
-// by the caller (see smallLLMAgentGuaranteedTools): currently the delegate
+// by the caller (see slmAgentGuaranteedTools): currently the delegate
 // tool when the request explicitly asks for subagents. Like the MCP class,
 // the guarantee is scoped to this call and never part of static config
 // validation.
 //
 // When the profile is OFF (the default), it returns the tools untouched — zero
 // behavior change.
-func (o *Orchestrator) applySmallLLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
-	sc := o.config.SmallLLM
+func (o *Orchestrator) applySLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
+	sc := o.config.SLM
 	// Master toggle AND the essential-tools variant must both be enabled.
 	// When either is off, return the input untouched (zero behavior change).
-	if !o.smallLLMEssentialToolsEnabled() {
+	if !o.slmEssentialToolsEnabled() {
 		return in
 	}
 
-	filtered := smallllm.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
-	return smallllm.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
+	filtered := slm.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
+	return slm.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
 }
 
-// smallLLMEssentialToolsEnabled reports whether the small-LLM profile's
+// slmEssentialToolsEnabled reports whether the small-LLM profile's
 // essential-tools narrowing is active: master toggle AND the essential-tools
 // variant both on.
-func (o *Orchestrator) smallLLMEssentialToolsEnabled() bool {
-	sc := o.config.SmallLLM
+func (o *Orchestrator) slmEssentialToolsEnabled() bool {
+	sc := o.config.SLM
 	return sc.Enabled && sc.EssentialTools.Enabled
 }

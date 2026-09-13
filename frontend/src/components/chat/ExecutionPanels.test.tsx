@@ -14,6 +14,7 @@ import { ExecutionPanels } from './ExecutionPanels'
 import { usePlanStore } from '@/stores/planStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import type { AgentMetricsData } from '@/types/events'
 import type { PlanGroup } from '@/types/models'
 
@@ -25,7 +26,7 @@ const metrics: AgentMetricsData = {
   steps: 3,
   output_tokens: 1200,
   invalid_tool_calls: 0,
-  small_llm: { enabled: false, variants: [] },
+  slm: { enabled: false, variants: [] },
 }
 
 const planGroup: PlanGroup = {
@@ -55,6 +56,7 @@ describe('ExecutionPanels render guard', () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     // Stats row display is opt-in (Settings → General, off by default).
     useUIStore.setState({ showSessionStats: false })
+    useE2SStore.getState().clearAll()
   })
 
   afterEach(() => {
@@ -103,5 +105,83 @@ describe('ExecutionPanels render guard', () => {
     const container = render(<ExecutionPanels />)
     expect(container.textContent).toContain('Execution plan')
     expect(container.textContent).not.toContain('finish: full')
+  })
+})
+
+describe('ExecutionPanels E2S mode (plan view replacement)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    root = null
+    usePlanStore.setState({ planGroups: [], sessionStats: {} })
+    useSessionStore.setState({ activeSessionId: 's1' })
+    useUIStore.setState({ showSessionStats: false })
+    useE2SStore.getState().clearAll()
+  })
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount()
+    })
+    root = null
+  })
+
+  it('an E2S session renders the Execution State panel instead of the plan view', () => {
+    // Plan groups exist (e.g. restored from an earlier phase) — E2S must
+    // still win: Σₜ replaces the plan DAG for the whole E2S session.
+    usePlanStore.setState({ planGroups: [planGroup] })
+    act(() => {
+      useE2SStore.getState().applySnapshot('s1', {
+        state: { objective: 'E2S objective', checklist: [{ text: 'step', checked: false }] },
+        turn: 2,
+        max_turns: 7,
+        status: 'running',
+      })
+    })
+    const container = render(<ExecutionPanels />)
+    expect(container.textContent).toContain('Execution state')
+    expect(container.textContent).toContain('turn 2/7')
+    expect(container.textContent).toContain('E2S objective')
+    expect(container.textContent).not.toContain('Execution plan')
+  })
+
+  it('an E2S session without a plan still renders the container', () => {
+    act(() => {
+      useE2SStore.getState().applySnapshot('s1', {
+        state: { objective: 'planless E2S' },
+        turn: 1,
+        max_turns: 3,
+        status: 'running',
+      })
+    })
+    const container = render(<ExecutionPanels />)
+    expect(container.textContent).toContain('Execution state')
+    expect(container.innerHTML).not.toBe('')
+  })
+
+  it('an ordinary session (no e2s_state seen) keeps the plan view unchanged', () => {
+    usePlanStore.setState({ planGroups: [planGroup] })
+    const container = render(<ExecutionPanels />)
+    expect(container.textContent).toContain('Execution plan')
+    expect(container.textContent).not.toContain('Execution state')
+  })
+
+  it('clearing the E2S snapshot (switch away) restores the plan view', () => {
+    usePlanStore.setState({ planGroups: [planGroup] })
+    act(() => {
+      useE2SStore.getState().applySnapshot('s1', {
+        state: { objective: 'transient' },
+        turn: 1,
+        max_turns: 3,
+        status: 'running',
+      })
+    })
+    const container = render(<ExecutionPanels />)
+    expect(container.textContent).toContain('Execution state')
+
+    act(() => {
+      useE2SStore.getState().clearSession('s1')
+    })
+    expect(container.textContent).not.toContain('Execution state')
+    expect(container.textContent).toContain('Execution plan')
   })
 })

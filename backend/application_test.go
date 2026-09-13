@@ -152,7 +152,7 @@ func TestApplication_NilSafe(t *testing.T) {
 func TestApplicationConfig_Defaults(t *testing.T) {
 	// Validate that BuilderConfig conversion handles a near-empty Config.
 	cfg := &config.Config{}
-	bcfg := ToBuilderConfig(cfg)
+	bcfg := ToBuilderConfig(cfg, config.PredefinedSLMProfiles())
 	if bcfg.ExpandEnvVars == nil {
 		t.Error("ToBuilderConfig should populate ExpandEnvVars")
 	}

@@ -6,8 +6,10 @@ import type { AgentMetricsCounters } from '@/types/events'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
+import { useE2SActive } from '@/stores/e2sStore'
 import { DAGGraph } from './DAGGraph'
 import { PlanView } from './PlanView'
+import { ExecutionStatePanel } from './ExecutionStatePanel'
 
 /** Summarizes one nudges/aborts counter block as "2 (1r·1s·0f·0p)"; the
  *  truncation "·Nt" segment is omitted while it is zero (nudges never emit it). */
@@ -43,9 +45,9 @@ function SessionStatsRow({ sessionId }: { sessionId: string }) {
       <span>invalid calls: {m.invalid_tool_calls}</span>
       <span>nudges: {countersSummary(m.nudges)}</span>
       <span>aborts: {countersSummary(m.aborts)}</span>
-      {m.small_llm.enabled && (
+      {m.slm.enabled && (
         <span className="text-warning">
-          small-llm: {m.small_llm.variants.length > 0 ? m.small_llm.variants.join(', ') : 'on'}
+          small-llm: {m.slm.variants.length > 0 ? m.slm.variants.join(', ') : 'on'}
         </span>
       )}
     </div>
@@ -65,13 +67,20 @@ export function ExecutionPanels() {
 
   const [planOpen, setPlanOpen] = useState(false)
 
+  // An E2S session renders the Execution State panel INSTEAD of the plan view
+  // — it has no plan DAG; Σₜ is the execution progress display. `active` flips
+  // true on the first e2s_state event and back on session switch/delete or
+  // when a fresh non-E2S task starts, so ordinary sessions keep the plan view
+  // untouched.
+  const e2sActive = useE2SActive(activeSessionId)
   const hasPlan = planGroups.length > 0
+  const showPlan = hasPlan && !e2sActive
   // The stats row renders only once the per-run agent_metrics report arrives
   // AND the user enabled the display in Settings → General (hidden by
   // default; metrics are still collected). Without the setting, routing/retry
   // stats alone must not produce an empty bordered container.
   const hasMetrics = showSessionStats && sessionStats?.lastAgentMetrics !== undefined
-  if (!activeSessionId || (!hasPlan && !hasMetrics)) return null
+  if (!activeSessionId || (!showPlan && !hasMetrics && !e2sActive)) return null
 
   return (
     <div className={cn(
@@ -79,7 +88,8 @@ export function ExecutionPanels() {
       sidebarCollapsed && 'ml-1',
       viewerCollapsed && 'mr-1',
     )}>
-      {hasPlan && (
+      {e2sActive && <ExecutionStatePanel sessionId={activeSessionId} />}
+      {showPlan && (
         <div className="group">
           <button
             onClick={() => setPlanOpen(!planOpen)}

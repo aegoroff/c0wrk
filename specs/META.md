@@ -46,7 +46,7 @@ specs/
 │   ├── research.md
 │   ├── review.md
 │   ├── session-lifecycle.md
-│   ├── small-llm.md
+│   ├── slm.md
 │   ├── tool-manager.md
 │   ├── verify-on-edit.md
 │   ├── workspace.md

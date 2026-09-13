@@ -42,11 +42,21 @@ export function useModelFetch(activeProvider: string, providerConfigs: Record<st
 
     const handleApply = useCallback(async () => {
         if (!activeProvider) return
+        const config = providerConfigs[activeProvider]
+        if (!config) return
         const myId = ++fetchIdRef.current
         setModelsLoading(true)
         setModelsError(null)
         try {
-            const list = await listProviderModels(activeProvider)
+            // Pass draft credentials so an unsaved compatible provider
+            // (first-run / no default_model yet) can still list models —
+            // ListProviderModels only sees persisted config otherwise.
+            const list = await listProviderModels({
+                provider: activeProvider,
+                api_key: config.api_key,
+                base_url: config.base_url || undefined,
+                type: config.type,
+            })
             if (myId !== fetchIdRef.current) return
             setModels(list || [])
             setApiKeyDirty(false)
@@ -57,7 +67,7 @@ export function useModelFetch(activeProvider: string, providerConfigs: Record<st
         } finally {
             if (myId === fetchIdRef.current) setModelsLoading(false)
         }
-    }, [activeProvider])
+    }, [activeProvider, providerConfigs])
 
     return {
         models,

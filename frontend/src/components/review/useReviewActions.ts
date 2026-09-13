@@ -4,6 +4,7 @@ import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
 import { generateMessageId } from '@/lib/ids'
 import * as reviewApi from '@/api/review'
@@ -139,7 +140,17 @@ export function useReviewActions(sessionId: string) {
       // fails, clear the flag so no spurious reopen happens.
       enterReviewLoop(sessionId)
       try {
-        await chatApi.sendMessage(sessionId, commentsText, [], [], '', '', false, '', true)
+        // Positional args: (…, goal, goalBudget, e2s, reviewMode) — e2s
+        // must be explicitly false so reviewMode stays in its binding slot.
+        await chatApi.sendMessage(sessionId, commentsText, [], [], '', '', false, '', false, true)
+        // Confirmed fresh, non-E2S review task (e2s=false in the binding): drop
+        // any stale E2S snapshot so the Execution State panel does not shadow
+        // the plan view for the review task. Cleared AFTER the send succeeds so
+        // a rejected send leaves the previous snapshot intact (mirrors
+        // useMessageSender).
+        if (!wasPaused && !isRunning) {
+          useE2SStore.getState().clearSession(sessionId)
+        }
       } catch (err) {
         // Roll back the optimistic card and restore the exact pre-send task
         // state (mirrors useMessageSender's rollback): the feedback text

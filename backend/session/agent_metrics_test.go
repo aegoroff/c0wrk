@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,7 +19,12 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 	var emitted []Event
 	emitter := NewEventEmitter("sess-1", func(evt Event) { emitted = append(emitted, evt) })
 
-	emitter.SetSmallLLMProfile(true, []string{"essential_tools", "system_prompt_lite"})
+	emitter.SetSLMProfile(SLMMetaInfo{
+		Enabled:     true,
+		Profile:     "qwen3.8-27b",
+		ProfileKind: "predefined",
+		Variants:    []string{"essential_tools", "system_prompt_lite"},
+	})
 
 	// Executor loop-detector diagnostics (as emitted by sp4rk agent.Executor).
 	emitter.ExecutorDiagnostic(1, "repeated_tool_call_nudge", nil)
@@ -49,9 +55,11 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 		Aborts:       AgentMetricsCounters{SameTool: 1, Fruitless: 1, Parse: 1, Truncation: 1},
 		Steps:        3,
 		OutputTokens: 1200,
-		SmallLLM: SmallLLMMetaInfo{
-			Enabled:  true,
-			Variants: []string{"essential_tools", "system_prompt_lite"},
+		SLM: SLMMetaInfo{
+			Enabled:     true,
+			Profile:     "qwen3.8-27b",
+			ProfileKind: "predefined",
+			Variants:    []string{"essential_tools", "system_prompt_lite"},
 		},
 	}
 	got := emitter.EmitAgentMetrics("full")
@@ -74,26 +82,32 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 	}
 
 	// Counters reset after emission: the next task run starts from zero
-	// (session-level small-LLM profile and token totals persist).
+	// (the session-level small-LLM profile — including its identity — and
+	// token totals persist).
 	next := emitter.EmitAgentMetrics("failed")
 	wantNext := AgentMetricsData{
 		Finish:       "failed",
 		OutputTokens: 1200,
-		SmallLLM:     SmallLLMMetaInfo{Enabled: true, Variants: []string{"essential_tools", "system_prompt_lite"}},
+		SLM: SLMMetaInfo{
+			Enabled:     true,
+			Profile:     "qwen3.8-27b",
+			ProfileKind: "predefined",
+			Variants:    []string{"essential_tools", "system_prompt_lite"},
+		},
 	}
 	if !reflect.DeepEqual(next, wantNext) {
 		t.Fatalf("expected counters reset after emission:\n got: %+v\nwant: %+v", next, wantNext)
 	}
 }
 
-// TestAgentMetrics_CollectedWithoutSmallLLMProfile verifies the acceptance
+// TestAgentMetrics_CollectedWithoutSLMProfile verifies the acceptance
 // criterion that metrics are collected even when the small-LLM profile is
 // disabled: the aggregator is part of the common session layer, not gated by
 // the profile.
-func TestAgentMetrics_CollectedWithoutSmallLLMProfile(t *testing.T) {
+func TestAgentMetrics_CollectedWithoutSLMProfile(t *testing.T) {
 	emitter := NewEventEmitter("sess-2", func(Event) {})
 
-	// No SetSmallLLMProfile call — the profile was never enabled.
+	// No SetSLMProfile call — the profile was never enabled.
 	emitter.ExecutorDiagnostic(1, "parse_error_nudge", nil)
 	emitter.StepStart(1)
 
@@ -101,36 +115,50 @@ func TestAgentMetrics_CollectedWithoutSmallLLMProfile(t *testing.T) {
 	if got.ParseErrors != 1 || got.Nudges.Parse != 1 || got.Steps != 1 {
 		t.Fatalf("metrics must be collected with the small-LLM profile off: %+v", got)
 	}
-	if got.SmallLLM.Enabled {
-		t.Fatalf("small_llm.enabled must be false when the profile is off: %+v", got.SmallLLM)
+	if got.SLM.Enabled {
+		t.Fatalf("slm.enabled must be false when the profile is off: %+v", got.SLM)
 	}
-	if len(got.SmallLLM.Variants) != 0 {
-		t.Fatalf("small_llm.variants must be empty when the profile is off: %+v", got.SmallLLM)
+	if len(got.SLM.Variants) != 0 {
+		t.Fatalf("slm.variants must be empty when the profile is off: %+v", got.SLM)
+	}
+	if got.SLM.Profile != "" || got.SLM.ProfileKind != "" {
+		t.Fatalf("slm.profile/profile_kind must be empty when no profile was recorded: %+v", got.SLM)
 	}
 }
 
-// TestSmallLLMProfileFromConfig verifies the config → metrics-meta mapping:
+// TestSLMProfileFromConfig verifies the config → metrics-meta mapping:
 // every variant sub-toggle counts only when BOTH the master toggle and the
-// sub-toggle are on (mirroring ApplySmallLLM semantics).
-func TestSmallLLMProfileFromConfig(t *testing.T) {
-	enabled := config.SmallLLMConfig{
+// sub-toggle are on (mirroring ApplySLM semantics), and the active
+// profile's identity (id + kind) is carried regardless of the master
+// toggle — which profile is active is independent of variant activation.
+func TestSLMProfileFromConfig(t *testing.T) {
+	enabled := config.SLMConfig{
 		EssentialTools: config.EssentialToolsConfig{Enabled: true},
 		SystemPrompt:   config.SystemPromptConfig{Lite: true, FewShot: true},
-		Sampling:       config.SmallLLMSamplingConfig{Enabled: true},
+		Sampling:       config.SLMSamplingConfig{Enabled: true},
 	}
+	entry := config.SLMProfile{ID: "qwen3.8-27b", Kind: config.SLMProfileKindPredefined}
 
-	// Master toggle off → whole profile reported as disabled, no variants.
+	// Master toggle off → whole profile reported as disabled, no variants,
+	// but the active profile identity is still reported.
 	off := enabled
 	off.Enabled = false
-	if info := smallLLMProfileFromConfig(off); info.Enabled || len(info.Variants) != 0 {
+	if info := slmProfileFromConfig(off, entry); info.Enabled || len(info.Variants) != 0 {
 		t.Fatalf("master toggle off must disable the whole profile: %+v", info)
+	} else if info.Profile != "qwen3.8-27b" || info.ProfileKind != "predefined" {
+		t.Fatalf("profile identity must be reported even when disabled: %+v", info)
+	}
+
+	// A zero profile entry (no profile ever resolved) → no identity fields.
+	if info := slmProfileFromConfig(off, config.SLMProfile{}); info.Profile != "" || info.ProfileKind != "" {
+		t.Fatalf("zero profile entry must yield empty identity fields: %+v", info)
 	}
 
 	// Master toggle on → only enabled sub-toggles are listed, in canonical order.
 	on := enabled
 	on.Enabled = true
 	on.LoopHardening = config.LoopHardeningConfig{Enabled: true}
-	on.Context = config.SmallLLMContextConfig{Enabled: true}
+	on.Context = config.SLMContextConfig{Enabled: true}
 	want := []string{
 		"essential_tools",
 		"system_prompt_lite",
@@ -139,19 +167,96 @@ func TestSmallLLMProfileFromConfig(t *testing.T) {
 		"loop_hardening",
 		"context",
 	}
-	info := smallLLMProfileFromConfig(on)
+	info := slmProfileFromConfig(on, entry)
 	if !info.Enabled || !reflect.DeepEqual(info.Variants, want) {
 		t.Fatalf("variant mapping mismatch:\n got: %+v\nwant: %v", info.Variants, want)
 	}
 
 	// ReasoningScaffold is reported only when its parent Lite variant is on.
-	scaffoldOnly := config.SmallLLMConfig{
+	scaffoldOnly := config.SLMConfig{
 		Enabled:      true,
 		SystemPrompt: config.SystemPromptConfig{ReasoningScaffold: true},
 	}
-	info = smallLLMProfileFromConfig(scaffoldOnly)
+	info = slmProfileFromConfig(scaffoldOnly, entry)
 	if !reflect.DeepEqual(info.Variants, []string{}) {
 		t.Fatalf("reasoning scaffold without lite must not be reported: %+v", info.Variants)
+	}
+}
+
+// TestManager_SetSLMProfile_AnnotatesAgentMetrics verifies the acceptance
+// criterion at the manager level: a session created while a profile is
+// active emits agent_metrics annotated with the active profile's id and
+// kind (predefined|custom), and the annotation reaches the manager's event
+// sink — the wire consumers (frontend handler, event persister) see the
+// same payload.
+func TestManager_SetSLMProfile_AnnotatesAgentMetrics(t *testing.T) {
+	manager, eventChan, _ := testManager(t)
+
+	// A custom profile active with the master toggle on, resolved the way
+	// the backend resolves slm.active_profile (see backend.activeSLMProfile).
+	entry, err := config.NewSLMProfile("my-tuned", "My Tuned", config.SLMProfileKindCustom, config.SLMProfileConfig{})
+	if err != nil {
+		t.Fatalf("NewSLMProfile: %v", err)
+	}
+	resolved := config.SLMConfig{
+		Enabled:        true,
+		EssentialTools: config.EssentialToolsConfig{Enabled: true},
+	}
+	manager.SetSLMProfile(resolved, entry)
+
+	info, err := manager.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	drainEvents(eventChan) // session_created
+
+	sess, ok := manager.GetSession(info.ID)
+	if !ok {
+		t.Fatalf("session %s not found", info.ID)
+	}
+	got := sess.emitter.EmitAgentMetrics("full")
+
+	wantMeta := SLMMetaInfo{
+		Enabled:     true,
+		Profile:     "my-tuned",
+		ProfileKind: "custom",
+		Variants:    []string{"essential_tools"},
+	}
+	if !reflect.DeepEqual(got.SLM, wantMeta) {
+		t.Fatalf("agent_metrics slm meta mismatch:\n got: %+v\nwant: %+v", got.SLM, wantMeta)
+	}
+
+	// The emitted event (the wire payload) carries the same profile fields.
+	evt := <-eventChan
+	if data, ok := evt.Data.(AgentMetricsData); !ok || !reflect.DeepEqual(data.SLM, wantMeta) {
+		t.Fatalf("emitted agent_metrics event must carry the profile fields: %+v", evt.Data)
+	}
+}
+
+// TestAgentMetrics_ProfileFieldsWireCompat pins the wire contract: the new
+// profile fields are omitempty, so payloads from sessions without a recorded
+// profile serialize exactly like the pre-profile shape — consumers that do
+// not know the fields keep working.
+func TestAgentMetrics_ProfileFieldsWireCompat(t *testing.T) {
+	raw, err := json.Marshal(AgentMetricsData{Finish: "full", SLM: slmInfoSnapshot(SLMMetaInfo{})})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "profile") {
+		t.Fatalf("unset profile fields must be omitted from the wire payload: %s", raw)
+	}
+
+	withProfile, err := json.Marshal(AgentMetricsData{
+		Finish: "full",
+		SLM:    SLMMetaInfo{Enabled: true, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"profile":"my-tuned"`, `"profile_kind":"custom"`} {
+		if !strings.Contains(string(withProfile), want) {
+			t.Errorf("payload %s must contain %s", withProfile, want)
+		}
 	}
 }
 
@@ -174,7 +279,7 @@ func TestEventPersister_AgentMetricsPersistedAsStatus(t *testing.T) {
 			Aborts:           AgentMetricsCounters{Truncation: 1},
 			Steps:            3,
 			OutputTokens:     42,
-			SmallLLM:         SmallLLMMetaInfo{Enabled: false, Variants: []string{}},
+			SLM:              SLMMetaInfo{Enabled: false, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
 		},
 	})
 
@@ -185,7 +290,7 @@ func TestEventPersister_AgentMetricsPersistedAsStatus(t *testing.T) {
 	if rows[0].Role != "status" {
 		t.Fatalf("expected role %q, got %q", "status", rows[0].Role)
 	}
-	for _, want := range []string{`"finish":"full"`, `"parse_errors":1`, `"invalid_tool_calls":2`, `"truncation":1`, `"steps":3`, `"output_tokens":42`} {
+	for _, want := range []string{`"finish":"full"`, `"parse_errors":1`, `"invalid_tool_calls":2`, `"truncation":1`, `"steps":3`, `"output_tokens":42`, `"profile":"my-tuned"`, `"profile_kind":"custom"`} {
 		if !strings.Contains(string(rows[0].Metadata), want) {
 			t.Errorf("metadata %s must contain %s", string(rows[0].Metadata), want)
 		}

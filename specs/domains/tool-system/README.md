@@ -10,7 +10,7 @@ c0wrk provides tool infrastructure for the agent on top of sp4rk's `Tool`/`ToolR
 - `core/tools/registry_canonical_reasons_test.go` — drift guard for the ADR-026 cross-repo contract: drives the real sp4rk builtin judges so a dropped/reworded `JudgeReasonCode` fails CI instead of silently making a canonical hard reason clearable
 - `core/tools/registry_symlink.go` — symlink detection/traversal integration calling sp4rk `DetectSymlinksInToolInput`
 - `core/tools/builtin_registration.go` — `RegisterBuiltinTools` function + `BuiltinToolsConfig`
-- `core/tools/registry_unattended.go` — `ExecuteUnattended(ctx, name, input)`: second execution entry point, used by verify-on-edit; enforces required fields, disabled tools, execute-group deny, and the extra shell blacklist; never model-facing (see [../verify-on-edit.md](../verify-on-edit.md))
+- `core/tools/registry_unattended.go` — `ExecuteUnattended(ctx, name, input)`: second execution entry point, used by verify-on-edit; enforces structural input validation (`sdktools.ValidateToolInput`), disabled tools, execute-group deny, and the extra shell blacklist; never model-facing (see [../verify-on-edit.md](../verify-on-edit.md))
 - `core/tools/askuser.go` / `core/tools/askuser_types.go` — c0wrk-specific `ask_user` tool + AskUser request/response types (moved out of sp4rk per ADR-011)
 - `core/toolnames.go` — tool name constants, `NoProjectDisabledTools`, `NoProjectShellBlacklist`
 - `core/toolmanager/` — manages external binary dependencies (`rg`, `uv`, `markitdown`), auto-downloaded on first run (see ADR-010)
@@ -53,7 +53,7 @@ The embedded sp4rk `ToolRegistry` satisfies `github.com/v0lka/sp4rk/agent.ToolEx
 core ToolRegistry.Execute(ctx, name, input)
 │
 ├─ 1. Lookup tool by name → not found? return error result
-├─ 2. Required-field validation (JSON-Schema "required" params; fail-closed) → missing? return error result
+├─ 2. Structural input validation (sdktools.ValidateToolInput against the tool's JSON schema — required keys, declared types, unknown keys, recursively into nested objects and array items; fail-open on unmodeled constructs) → invalid? return error result naming the offending path (e.g. tasks[2].id)
 ├─ 3. Disabled tool (No Project mode)? → return error result (applies to ALL tools including system-group)
 ├─ 4. Tool's group == system? → execute immediately (bypass remaining policy/judge/hook checks)
 ├─ 5. PostExecuteHook deferred (runs on every later return path)

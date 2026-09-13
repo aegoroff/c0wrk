@@ -53,7 +53,8 @@ persist also mutated the global default mid-run.
    sessions built afterwards (the fallback) — never a live session.
 
 4. **Per-message selectors lock with the run.** The chat toolbar's selector
-   cluster (model, reasoning, goal toggle, goal budget) is disabled while
+   cluster (model, reasoning, goal toggle, goal budget, E2S toggle) is
+   disabled while
    `taskActive || pausing || compacting` and unlocks when the task finished,
    failed, or is cooperatively paused (a paused resume honors a freshly picked
    model/reasoning override). Frontend presentation only; the backend

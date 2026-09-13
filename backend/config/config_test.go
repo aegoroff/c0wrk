@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -447,6 +448,21 @@ func TestDefaultExecuteGroupBlacklist_CrossDialectSafe(t *testing.T) {
 		}
 	}
 
+	// Benign git read forms must stay unblocked in the unified list: both
+	// dialects compile it, so the carved-out read-only spellings of
+	// dual-mode subcommands (e.g. `git branch --show-current`, the standard
+	// scripted way to query the current branch on either shell) must flow
+	// through the group policy instead of the irreversible blacklist. The
+	// per-dialect pairing contract (read free ↔ mutating blocked) is pinned
+	// by TestApplyDefaults_GitMutatingBlacklist.
+	for _, cmd := range []string{
+		"git branch --show-current",
+	} {
+		if matches(cmd) {
+			t.Errorf("unified blacklist hard-confirms benign git read command %q", cmd)
+		}
+	}
+
 	// Destructive PowerShell deletions via the unambiguous cmdlet name must
 	// stay blocked (the rm/del/… alias spellings are the Windows platform
 	// supplement's contract, not this list's).
@@ -552,6 +568,27 @@ func TestApplyDefaults_DestructiveDevPaths(t *testing.T) {
 // is additive / non-destructive) unblocked. This guards against regressions
 // when the git patterns are edited (e.g. accidentally re-broadening to a
 // blanket \bgit\b, or dropping a mutating subcommand).
+//
+// Dual-mode subcommands (branch, tag, remote, stash, config, reflog, apply,
+// clean, add, rm, submodule, worktree, notes, reset, sparse-checkout) are
+// carved rather than blocked wholesale: their read-only spellings (--show-
+// current, -l, -v/get-url, list/show, key-only config reads, --check/--stat,
+// -n/--dry-run, bare/HEAD-path reset, ...) must stay free, while their
+// mutating spellings (--track, -a/-d, set-url/prune, push/drop/-u, --global/
+// --unset/--file writes, delete, --cached/-3/positional, -fd, ...) must stay
+// blocked — every carve-out is pinned as an explicit (read, mutating) pair in
+// carveOuts. Git mentioned as DATA (search patterns, echo payloads) must not
+// hard-confirm, while git reached indirectly (separators, command
+// substitution, interpreter wrappers) must stay blocked. A git GLOBAL option
+// between `git` and the subcommand (`git -C repo push`, `git -c k=v commit`,
+// `git --git-dir=.git reset --hard`) must not defeat any pattern (the
+// gitGlobalOpts preamble), while read-only spellings carrying the same
+// preamble (`git -C repo status`) stay free. External-tool runners
+// (mergetool, difftool, hook run), transport faces (upload-archive,
+// http-push), the for-each-repo dispatcher, maintenance-class plumbing
+// (repack, pack-refs, update-server-info, multi-pack-index), long-flag gaps
+// (reset --quiet, add/rm --pathspec-from-file) and bundle create
+// (exfil-to-file) are all pinned as mustBlock.
 func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 	mustBlock := []string{
 		// working tree / index / staging
@@ -602,6 +639,207 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		"git prune",
 		"git worktree add ../wt",
 		"git maintenance run",
+		// dual-mode subcommands — mutating spellings. Each pairs with a
+		// carved-out read-only spelling in mustNotBlock / carveOuts below:
+		// the read form flows through the group policy, the mutating form
+		// stays on the irreversible blacklist.
+		"git branch --track topic origin/main",
+		"git tag -a v1.0 -m msg",
+		"git tag -d v1.0",
+		"git config --global user.name x",
+		"git config --global --add alias.st status",
+		"git config --unset user.name",
+		"git config --file extra.config user.name x",
+		"git config --file=extra.config user.name x",
+		"git stash push -m wip",
+		"git stash drop",
+		"git stash -u",
+		"git reflog delete HEAD@{1}",
+		"git apply --cached fix.diff",
+		"git apply -3 fix.diff",
+		"git remote set-url origin https://example.com/repo.git",
+		"git remote prune origin",
+		"git reset HEAD~2",
+		"git reset origin/main",
+		// mutating plumbing / newer subcommands absent from the classic set
+		"git send-pack origin refs/heads/main:refs/heads/main",
+		"git update-index --add newfile.txt",
+		"git sparse-checkout set '/*'",
+		// indirect invocation — git reached via separators, command
+		// substitution, or interpreter wrappers must still be blocked
+		"cd repo && git push",
+		"xargs git rm",
+		"$(git push)",
+		"sh -c 'git push'",
+		"bash -lc \"git reset --hard\"",
+		"eval \"git push\"",
+		// global-option preamble — a single -C/-c/--git-dir/--work-tree/
+		// --namespace between git and the subcommand must not defeat the
+		// patterns (without the gitGlobalOpts preamble every pattern above
+		// was bypassable this way):
+		"git -C repo push",
+		"git -Crepo merge feature",
+		"git -C repo reset --hard origin/main",
+		"git -C repo branch -D topic",
+		"git -C repo tag v1.0",
+		"git -C repo config user.name x",
+		"git -C repo stash push -m wip",
+		"git -C repo add -A",
+		"git -C repo rm foo.txt",
+		"git -C repo commit -m msg",
+		"git -C repo clean -fd",
+		"git -C repo checkout .",
+		"git --git-dir=.git reset --hard",
+		"git --git-dir .git commit -m msg",
+		"git --work-tree=. stash",
+		"git -c user.name=x commit -m msg",
+		"git --namespace=refs/namespaces/x push",
+		"git --no-pager push",
+		`bash -c "git -C x push"`,
+		// quoted / space-containing flag values and the short paginate
+		// switches must not slip past the preamble: a separated value used to
+		// break at the quote's inner space (`\S+`), and `-p`/`-P` had no rule
+		// at all — both defeated every pattern above as a one-token bypass:
+		"git -p push",
+		"git -P push",
+		`git -C "my repo" push`,
+		`git -C 'my repo' reset --hard`,
+		`git -C my\ repo commit -m msg`,
+		`git -c "user.name=John Doe" commit -m msg`,
+		`git -c 'user.name=John Doe' push`,
+		"git -p -C repo push",
+		"git -C repo -p push",
+		// remaining real git(1) globals beyond the classic preamble set:
+		"git --no-advice push",
+		"git --no-lazy-fetch reset --hard",
+		"git --attr-source=HEAD clean -fd",
+		"git --config-env=A=B push",
+		"git --list-cmds=main merge feature",
+		"git --exec-path=/x push",
+		// a multi-char separator between a value-taking global option and
+		// its value must not re-open the bypass that a single `[=\s]?` left:
+		// a doubled space or a tab (`git -C  repo push`, `git -C\trepo push`)
+		// defeated every pattern until the separator became `[=\s]*`:
+		"git -C  repo push",
+		"git -C   repo reset --hard",
+		"git -C\trepo commit -m msg",
+		"git -c  user.name=x commit -m msg",
+		"git -c\tcore.hooksPath=/tmp/hooks commit -m msg",
+		"git --git-dir  .git reset --hard",
+		"git --git-dir\t.git commit -m msg",
+		"git --work-tree  . stash",
+		"git --namespace  refs/namespaces/x push",
+		"git --exec-path  /x push",
+		"git --config-env  A=B push",
+		"git -C  repo branch -D topic",
+		"git -C  repo add -A",
+		`bash -c "git -C  repo push"`,
+		"git -p  -C  repo push",
+		// external-tool runners — mergetool parity (difftool --extcmd is
+		// arbitrary command execution; hook run executes .git/hooks/*):
+		"git difftool HEAD^",
+		"git difftool --extcmd='sh -c id' HEAD^",
+		"git hook run pre-commit",
+		// long-flag gaps closed on the inverted patterns:
+		"git reset --quiet HEAD~1",
+		"git add --pathspec-from-file=-",
+		"git rm --pathspec-from-file=-",
+		// transport / server faces beyond the porcelain:
+		"git upload-archive .",
+		"git http-push https://example.com/repo.git main",
+		// subcommand dispatcher + maintenance-class plumbing:
+		"git for-each-repo --config=maintenance.repo push",
+		"git repack -ad",
+		"git pack-refs --all",
+		"git update-server-info",
+		"git multi-pack-index write",
+		// exfil-to-file — the clone twin (whole repo incl. refs to a file):
+		"git bundle create out.bundle --all",
+		// flag-tolerant inversions — a quiet/verbose flag between the
+		// subcommand and its operand/subaction must not hide the mutation
+		// (review #20; was a wholesale-blocked form at v0.8.0):
+		"git rm -q foo.txt",
+		"git rm --quiet foo.txt",
+		"git apply -q p.diff",
+		"git notes --ref=ns add -m x",
+		"git remote -q prune origin",
+		"git submodule -q update",
+		"git worktree -q add ../w",
+		// operand BEFORE the mutating flag (#30) — the flag-anywhere forms:
+		"git clean . -f",
+		"git clean sub -f",
+		// a non-dry-run, non-mutating prefix flag still lets the mutation
+		// block (the dry-run `-n` is the only excluded prefix token):
+		"git clean -e x -f",
+		"git clean --exclude=x -f",
+		"git clean -q -f",
+		"git reset HEAD --hard",
+		"git reset main --hard",
+		// single bare commit-ish operand (#54) — moves the branch pointer:
+		"git reset main",
+		"git reset abc1234",
+		// short-force branch (#21) and `--` terminator forms (#44):
+		"git branch -f topic HEAD~1",
+		"git branch -- topic",
+		"git tag -- v1",
+		// remote set-branches (#22) and submodule foreach (#31 — runs an
+		// arbitrary command in every submodule):
+		"git remote set-branches origin main",
+		"git submodule foreach 'git clean -fdx'",
+		// remaining mutating spellings (#44/#69/#70/#71/#76):
+		"git clean -i",
+		"git clean --interactive",
+		"git config -e",
+		"git reset --interactive",
+		"git apply -- p.diff",
+		"git config -f cfg user.name x",
+		"git config -- user.name x",
+		"git config --global -- core.hooksPath /tmp/hooks",
+		// remaining object-store / credential / vcs-bridge faces (#56):
+		"git pack-objects --stdout",
+		"git hash-object -w f",
+		"git write-tree",
+		"git credential approve",
+		"git rerere",
+		"git p4 submit",
+		"git svn dcommit",
+		"git lfs install",
+		"git archive --output=o.tar main",
+		"git archive -o o.tar main",
+		"git archive -oo.tar main",
+		"git format-patch -o /tmp main",
+		// interpreter-wrapper bare-operand forms (#42) — the wrapper
+		// mirrors the per-subcommand bodies, not just their flags:
+		`sh -c "git add foo.txt"`,
+		`sh -c "git rm foo.txt"`,
+		`sh -c "git config user.name x"`,
+		`sh -c "git branch topic"`,
+		`bash -lc 'git add .'`,
+		`eval "git rm x"`,
+		`sh -c "git stash"`, // bare end-form (= push) behind a wrapper
+		// interpreter prelude hardening (#62/#67/#68/#81) — value-taking
+		// options, c-anywhere clusters, cmd /k, extra shells:
+		`bash -ce "git rm -r foo"`,
+		`bash -eci "git rm -r foo"`,
+		`bash -o errexit -c "git rm -r foo"`,
+		`bash -euo pipefail -c 'git push'`,
+		`powershell -NoProfile -InputFormat Text -Command "git rm -r foo"`,
+		`powershell -ExecutionPolicy Bypass -Command "git reset --hard"`,
+		`iex "git push"`,
+		`Invoke-Expression "git reset --hard"`,
+		`python -c 'import os; os.system("git push")'`,
+		`node -e 'require("child_process").execSync("git reset --hard")'`,
+		`perl -e 'system("git push")'`,
+		`cmd /k "git push"`,
+		"csh -c 'git push'",
+		"ksh93 -c 'git push'",
+		"yash -c 'git push'",
+		// path-qualified / escaped invocations (#55/#83):
+		"/usr/bin/git rm foo.txt",
+		"./git push",
+		`sh -c '/usr/bin/git push'`,
+		"/bin/sh -c 'git push'",
+		"/bin/bash -c 'git push'",
 	}
 
 	mustNotBlock := []string{
@@ -620,6 +858,102 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		// fetch is excluded by design (additive / non-destructive)
 		"git fetch origin",
 		"git fetch --all --prune",
+		// class A: git mentioned as DATA, not as an invoked command —
+		// searching for the literal text or echoing it must not hard-confirm
+		`rg "git checkout"`,
+		`git log --grep="git rebase"`,
+		`echo 'git stash'`,
+		// carved-out read-only spellings of dual-mode subcommands (each
+		// pairs with a mutating spelling in mustBlock / carveOuts below)
+		"git branch --show-current",
+		"git branch -a",
+		"git tag -l",
+		"git remote -v",
+		"git remote get-url origin",
+		"git stash list",
+		"git stash show",
+		"git config user.name", // key without a value = read
+		"git config --get user.name",
+		"git config --list",
+		"git reflog",
+		"git reflog show",
+		"git apply --check fix.diff",
+		"git apply --stat fix.diff",
+		"git clean -n",
+		"git clean --dry-run",
+		// a separated dry-run keeps the read free even when a mutating flag
+		// follows it (-n before every mutating flag is still a dry run):
+		"git clean -n -d",
+		"git clean -n -f",
+		"git clean -n -x",
+		"git clean -n -X",
+		"git clean -n . -d",
+		"git clean . -n -d",
+		"git add -n .",
+		"git rm -n foo.txt",
+		"git submodule status",
+		"git worktree list",
+		"git notes list",
+		"git reset",
+		"git reset HEAD foo.txt",
+		"git sparse-checkout list",
+		// global-option reads must flow through the group policy: the
+		// gitGlobalOpts preamble admits only genuine global-option tokens,
+		// so read-only spellings with a -C/-c/--git-dir preamble stay free
+		"git -C repo status",
+		"git -C repo log --oneline",
+		"git -C repo config user.name",
+		"git -C repo branch -a",
+		"git -C repo tag -l",
+		"git -C repo add -n .",
+		"git -c color.ui=auto status",
+		`git -C repo log --grep="git rebase"`,
+		// the short paginate switches and space-containing / newer global
+		// option values must not over-confirm reads either:
+		"git -p log --oneline",
+		"git -P status",
+		"git --no-advice status",
+		"git --no-lazy-fetch log",
+		`git -C "my repo" log`,
+		`git -c "core.pager=cat" log`,
+		"git --exec-path=/x status",
+		"git --attr-source=HEAD log",
+		// a multi-char separator must not over-confirm reads either — the
+		// `[=\s]*` separator still admits only global options, so a doubled
+		// space / tab before a read-only subcommand stays free:
+		"git -C  repo status",
+		"git -C\trepo log --oneline",
+		"git -c  color.ui=auto status",
+		"git --git-dir  .git status",
+		"git -C  repo config user.name",
+		"git -p  log --oneline",
+		// bundle verify/list-heads reads stay free (only create blocks)
+		"git bundle verify out.bundle",
+		// flag-tolerance must not eat the dry-run carve-outs: -n/--dry-run
+		// spellings (with or without operands) stay free; the accepted FP is
+		// documented in the pattern comment (quiet-prefix rule cannot admit
+		// -n without reopening the `-q <operand>` hole):
+		"git rm --dry-run foo.txt",
+		"git apply --check p.diff",
+		"git notes --ref=ns show",
+		"git worktree -q list",
+		"git remote -q get-url origin",
+		// reset carve-outs under the flag-tolerant inversion: bare, `--`
+		// pathspec and two-operand `reset HEAD <path>` forms stay free:
+		"git reset -- README.md",
+		"git reset main README.md",
+		"git reset HEAD src/foo.go",
+		// config carve-outs: single-key reads after -f/--/--get stay free:
+		"git config -- user.name",
+		"git config -f cfg --get user.name",
+		// path-qualified READ commands stay free (P's path class only
+		// catches git at command position, not read-only subcommands):
+		"/usr/bin/git status",
+		"/usr/bin/git log --oneline",
+		// exfil flag-form reads stay free:
+		"git archive main",
+		"git format-patch -1 main",
+		"git format-patch --stdout main",
 	}
 
 	// posh-only casing variants: PowerShell resolves the git executable
@@ -631,6 +965,97 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 		"GIT PUSH origin main",
 		"gIt reset --hard",
 		"git CHECKOUT feature",
+		`BASH -C "GIT PUSH"`,             // (?i) must survive arbitrary casing of the wrapper line
+		`powershell -Command "git push"`, // nested interpreter wrapper
+		`cmd /c "git push"`,              // nested interpreter wrapper
+		"Git.exe push",                   // explicit executable suffix must still match
+		// global-option preamble + casing / Windows interpreter faces
+		"git -C repo PUSH",
+		"Git -C repo commit -m msg",
+		"git.exe -C repo push",
+		`powershell -Command "git -C repo push"`,
+		"git -C repo reset --hard",
+		// wrapper prelude hardening — value-taking options, c-anywhere
+		// clusters, cmd /k, script hosts, path-qualified interpreters:
+		`BASH -CE "GIT PUSH"`,
+		`POWERSHELL -ExecutionPolicy Bypass -Command "git push"`,
+		`CMD /K "git push"`,
+		`IEX "git push"`,
+		`C:\Git\bin\git push`,
+	}
+
+	// carveOuts pins the pairing contract for every dual-mode subcommand
+	// whose read-only spelling is carved out of the wholesale block: the
+	// read form must stay free while its mutating counterpart stays blocked,
+	// in BOTH dialects. Every carve-out in mustNotBlock must appear here
+	// with its mutating witness — adding a read form without its pair (or
+	// vice versa) is a contract violation.
+	carveOuts := []struct{ read, mutating string }{
+		{"git branch --show-current", "git branch --track topic origin/main"},
+		{"git branch -a", "git branch -D topic"},
+		{"git tag -l", "git tag -a v1.0 -m msg"},
+		{"git tag -l", "git tag -d v1.0"},
+		{"git remote -v", "git remote set-url origin https://example.com/repo.git"},
+		{"git remote get-url origin", "git remote prune origin"},
+		{"git stash list", "git stash push -m wip"},
+		{"git stash show", "git stash drop"},
+		{"git stash show", "git stash -u"},
+		{"git config --list", "git config --global user.name x"},
+		{"git config --get user.name", "git config --unset user.name"},
+		{"git config user.name", "git config user.name x"},
+		{"git config user.name", "git config --file extra.config user.name x"},
+		{"git config user.name", "git config --file=extra.config user.name x"},
+		{"git reflog", "git reflog delete HEAD@{1}"},
+		{"git reflog show", "git reflog expire --all"},
+		{"git apply --check fix.diff", "git apply --cached fix.diff"},
+		{"git apply --stat fix.diff", "git apply -3 fix.diff"},
+		{"git apply --stat fix.diff", "git apply patch.diff"},
+		{"git clean -n", "git clean -fd"},
+		{"git clean --dry-run", "git clean -fd"},
+		{"git add -n .", "git add -A"},
+		{"git rm -n foo.txt", "git rm foo.txt"},
+		{"git submodule status", "git submodule update --init"},
+		{"git worktree list", "git worktree add ../wt"},
+		{"git notes list", "git notes add -m x"},
+		{"git reset", "git reset HEAD~2"},
+		{"git reset HEAD foo.txt", "git reset origin/main"},
+		{"git reset HEAD foo.txt", "git reset --hard origin/main"},
+		{"git sparse-checkout list", "git sparse-checkout set '/*'"},
+		// flag-tolerance pairs — the quiet-prefixed mutating form blocks
+		// while the plain read form stays free:
+		{"git rm -n foo.txt", "git rm -q foo.txt"},
+		{"git apply --stat fix.diff", "git apply -q fix.diff"},
+		{"git notes list", "git notes --ref=ns add -m x"},
+		{"git remote -v", "git remote -q prune origin"},
+		{"git worktree list", "git worktree -q add ../w"},
+		{"git submodule status", "git submodule foreach 'git clean -fdx'"},
+		// operand-before-flag and bare-commit-ish pairs (#30/#54):
+		{"git clean -n", "git clean . -f"},
+		{"git clean -n -x", "git clean -x -f"},
+		{"git clean -n . -d", "git clean . -f"},
+		{"git reset HEAD foo.txt", "git reset HEAD --hard"},
+		{"git reset", "git reset main"},
+		// a lone operand is ambiguous — a commit-ish or a lone pathspec —
+		// so both confirm, while the two-operand `HEAD <path>` spelling
+		// stays free:
+		{"git reset HEAD README.md", "git reset README.md"},
+		{"git reset main README.md", "git reset main"},
+		// terminator / short-flag pairs (#21/#44/#70/#71/#76):
+		{"git branch -a", "git branch -f topic HEAD~1"},
+		{"git branch -a", "git branch -- topic"},
+		{"git tag -l", "git tag -- v1"},
+		{"git apply --check fix.diff", "git apply -- p.diff"},
+		{"git config user.name", "git config -f cfg user.name x"},
+		{"git config user.name", "git config -- user.name x"},
+		// quoted / space-containing flag values pair the read twin with its
+		// mutating counterpart (the preamble must bind the quoted value to
+		// its flag in both directions):
+		{`git -C "my repo" log`, `git -C "my repo" push`},
+		{`git -c "core.pager=cat" log`, `git -c "user.name=John Doe" commit -m msg`},
+		{"git -p log --oneline", "git -p push"},
+		{"git -P status", "git -P push"},
+		{"git --no-advice status", "git --no-advice push"},
+		{"git --attr-source=HEAD log", "git --attr-source=HEAD clean -fd"},
 	}
 
 	tools := map[string][]string{
@@ -667,6 +1092,16 @@ func TestApplyDefaults_GitMutatingBlacklist(t *testing.T) {
 			for _, cmd := range mustNotBlock {
 				if ok, pat := matches(cmd); ok {
 					t.Errorf("%s default blacklist must NOT block read-only git command %q (matched %q)", tool, cmd, pat)
+				}
+			}
+		})
+		t.Run(tool+"/carveouts", func(t *testing.T) {
+			for _, c := range carveOuts {
+				if ok, pat := matches(c.read); ok {
+					t.Errorf("%s default blacklist must NOT block read-only carve-out %q (matched %q)", tool, c.read, pat)
+				}
+				if ok, _ := matches(c.mutating); !ok {
+					t.Errorf("%s default blacklist should block mutating counterpart %q of carve-out %q", tool, c.mutating, c.read)
 				}
 			}
 		})
@@ -727,6 +1162,162 @@ llm:
 
 	if len(result.LoadErrors) != 0 {
 		t.Errorf("Expected no load errors, got %v", result.LoadErrors)
+	}
+}
+
+// TestSLMLegacyInlineSectionIgnoredAndDropped pins the sanctioned reset
+// migration: a pre-profiles config.yaml with an inline `small_llm:` section
+// (full 25-knob set + master toggle) must load WITHOUT errors — decoding is
+// non-strict, so the unknown legacy key is silently ignored — and the next
+// save must drop it entirely, persisting only the new slim `slm:` section
+// (enabled + active_profile).
+func TestSLMLegacyInlineSectionIgnoredAndDropped(t *testing.T) {
+	content := `
+llm:
+  default_model: claude-3-haiku
+  anthropic:
+    api_key: "test-key"
+    models:
+      - claude-3-haiku
+small_llm:
+  enabled: true
+  essential_tools:
+    enabled: true
+    always_present: [read_file, bash_exec]
+  system_prompt:
+    lite: true
+  sampling:
+    enabled: true
+    temperature: 0.1
+    reasoning_effort: low
+  loop_hardening:
+    enabled: true
+    repeat_nudge_threshold: 2
+  context:
+    enabled: true
+    output_token_reserve: 8192
+`
+	configPath := writeTestConfig(t, content)
+
+	// Load: the legacy section is ignored without errors; the effective state
+	// is the fresh slm defaults (master off, generic active).
+	result, err := LoadWithResult(configPath)
+	if err != nil {
+		t.Fatalf("LoadWithResult() failed on a legacy inline small_llm config: %v", err)
+	}
+	if len(result.LoadErrors) != 0 {
+		t.Fatalf("legacy small_llm.* must be ignored without load errors, got %v", result.LoadErrors)
+	}
+	if result.Config.SLM.Enabled {
+		t.Error("legacy small_llm.enabled must be ignored (reset migration), want slm.enabled=false")
+	}
+	if got := result.Config.SLM.ActiveProfile; got != SLMGenericProfileID {
+		t.Errorf("slm.active_profile = %q, want the seeded %q", got, SLMGenericProfileID)
+	}
+
+	// Save: only the slim slm section survives; the legacy knobs are gone.
+	if err := Save(result.Config, configPath); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+	saved, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if strings.Contains(string(saved), "small_llm") {
+		t.Errorf("saved config still contains the legacy small_llm section:\n%s", saved)
+	}
+	for _, want := range []string{"slm:", "enabled: false", "active_profile: " + SLMGenericProfileID} {
+		if !strings.Contains(string(saved), want) {
+			t.Errorf("saved config missing %q in the slim slm section:\n%s", want, saved)
+		}
+	}
+
+	// The migrated file reloads cleanly with the same state.
+	reloaded, err := LoadWithResult(configPath)
+	if err != nil {
+		t.Fatalf("LoadWithResult() failed on the migrated config: %v", err)
+	}
+	if len(reloaded.LoadErrors) != 0 {
+		t.Errorf("migrated config must load without warnings, got %v", reloaded.LoadErrors)
+	}
+	if reloaded.Config.SLM.Enabled || reloaded.Config.SLM.ActiveProfile != SLMGenericProfileID {
+		t.Errorf("migrated slm state = %+v, want disabled generic", reloaded.Config.SLM)
+	}
+}
+
+// TestResolveAndLoad_SLMFallbackWarningSurfaced verifies that a stale
+// slm.active_profile (e.g. a custom profile deleted by hand) surfaces the
+// soft generic fallback through the same load-warnings channel the UI
+// displays (configLoadErrors) instead of failing the load.
+func TestResolveAndLoad_SLMFallbackWarningSurfaced(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // windows parity
+	agentDir := AgentDir()
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	content := `
+llm:
+  default_model: claude-3-haiku
+  anthropic:
+    api_key: "test-key"
+    models:
+      - claude-3-haiku
+slm:
+  enabled: true
+  active_profile: deleted-externally
+`
+	if err := os.WriteFile(ConfigPath(agentDir), []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	resolved := ResolveAndLoad(slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if resolved.Config.SLM.ActiveProfile != "deleted-externally" {
+		t.Errorf("the stored active profile id must be preserved, got %q", resolved.Config.SLM.ActiveProfile)
+	}
+	if len(resolved.LoadErrors) != 1 {
+		t.Fatalf("LoadErrors = %v, want exactly the SLM fallback warning", resolved.LoadErrors)
+	}
+	if !strings.Contains(resolved.LoadErrors[0], "deleted-externally") ||
+		!strings.Contains(resolved.LoadErrors[0], SLMGenericProfileID) {
+		t.Errorf("warning must name the stale id and the generic fallback, got %q", resolved.LoadErrors[0])
+	}
+}
+
+// TestLoadSLMCatalog_MergesCustomProfiles verifies the catalog assembly used
+// for resolution: the predefined entries plus the custom store, with store
+// problems reported as warnings rather than errors.
+func TestLoadSLMCatalog_MergesCustomProfiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// No store file yet: the catalog is exactly the predefined set.
+	catalog, warnings := LoadSLMCatalog(dir)
+	if len(warnings) != 0 {
+		t.Errorf("pristine catalog must load without warnings, got %v", warnings)
+	}
+	if len(catalog) != len(PredefinedSLMProfiles()) {
+		t.Fatalf("catalog size = %d, want %d (predefined only)", len(catalog), len(PredefinedSLMProfiles()))
+	}
+
+	custom, err := NewSLMProfile("my-tuned", "My Tuned", SLMProfileKindCustom, SLMProfileConfig{})
+	if err != nil {
+		t.Fatalf("NewSLMProfile: %v", err)
+	}
+	if err := SaveCustomSLMProfiles(SLMProfilesPath(dir), []SLMProfile{custom}); err != nil {
+		t.Fatalf("SaveCustomSLMProfiles: %v", err)
+	}
+
+	catalog, warnings = LoadSLMCatalog(dir)
+	if len(warnings) != 0 {
+		t.Errorf("catalog with a healthy store must load without warnings, got %v", warnings)
+	}
+	if _, ok := FindSLMProfile(catalog, "my-tuned"); !ok {
+		t.Error("custom profile missing from the merged catalog")
+	}
+	if _, ok := FindSLMProfile(catalog, SLMGenericProfileID); !ok {
+		t.Error("predefined generic profile missing from the merged catalog")
 	}
 }
 
@@ -2023,8 +2614,25 @@ func TestApplyDefaults_ExecuteGroupBlacklistUnion(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("execute blacklist = union mismatch:\ngot  %d patterns\nwant %d patterns", len(got), len(want))
 	}
-	if len(got) != len(bash)+len(posh) {
-		t.Errorf("expected union of %d+%d patterns without loss, got %d", len(bash), len(posh), len(got))
+	// The union may drop exact duplicates BY DESIGN (see
+	// DefaultExecuteGroupBlacklist): the compensating interpreter wrappers
+	// are intentionally identical in both dialect lists so each shell
+	// compiles the full interpreter-family coverage. Every dropped pattern
+	// must be one of those shared wrappers — nothing else may be lost.
+	dropped := make(map[string]struct{})
+	for _, pattern := range posh {
+		if slices.Contains(bash, pattern) {
+			dropped[pattern] = struct{}{}
+		}
+	}
+	if n := len(bash) + len(posh) - len(got); n != len(dropped) {
+		t.Errorf("expected union of %d+%d patterns losing only the %d shared wrappers, lost %d",
+			len(bash), len(posh), len(dropped), n)
+	}
+	for pattern := range dropped {
+		if !strings.Contains(pattern, "((sh|bash|zsh|dash|ksh|ksh93") && !strings.Contains(pattern, "((python3?|node") {
+			t.Errorf("unexpected non-wrapper duplicate pattern deduplicated: %q", pattern)
+		}
 	}
 
 	// Validity guard: every blacklist pattern must compile as valid RE2.

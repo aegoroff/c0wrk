@@ -5,6 +5,7 @@ import type { ChatInputController } from '@/hooks/useChatInputController'
 import { ModelCombobox } from './ModelCombobox'
 import { ReasoningCombobox } from './ReasoningCombobox'
 import { GoalToggle } from './GoalToggle'
+import { E2SToggle } from './E2SToggle'
 import { BudgetCombobox } from './BudgetCombobox'
 import { useWorkDirsStore } from '@/stores/workDirsStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
@@ -134,6 +135,9 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
             <ReasoningCombobox disabled={selectorsLocked} />
             <div className="w-px h-4 bg-border mx-1" />
             <GoalToggle disabled={selectorsLocked} />
+            {/* E2S renders itself only while the experimental gate is on
+                (see E2SToggle) — no extra gating here. */}
+            <E2SToggle disabled={selectorsLocked} />
             {goalEnabled && <BudgetCombobox disabled={selectorsLocked} />}
           </div>
         </>

@@ -15,6 +15,7 @@ import { useBlackboardEvents } from './events/useBlackboardEvents'
 import { useAttachmentEvents } from './events/useAttachmentEvents'
 import { useReviewRestore } from './events/useReviewRestore'
 import { useGoalEvents } from './events/useGoalEvents'
+import { useE2SStateEvents } from './events/useE2SStateEvents'
 import { useSoundEvents } from './events/useSoundEvents'
 
 export function useSessionEvents(sessionId: string | null): void {
@@ -70,5 +71,6 @@ export function useSessionEvents(sessionId: string | null): void {
   useAttachmentEvents(sessionId)
   useReviewRestore(sessionId)
   useGoalEvents(sessionId)
+  useE2SStateEvents(sessionId)
   useSoundEvents(sessionId)
 }

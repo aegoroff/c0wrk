@@ -31,6 +31,15 @@ vi.mock('@/hooks/useAttachmentsInput', () => ({
   useAttachmentsInput: () => ({ handleAttach: vi.fn() }),
 }) as unknown as typeof import('@/hooks/useAttachmentsInput'))
 
+// E2SToggle (rendered by the toolbar) consults the experimental gate through
+// this hook, whose real implementation fetches the config via the Wails
+// bindings — unavailable in jsdom, so every mount logged two backend errors.
+// The gate is irrelevant to the lock behaviour under test; pin it off (the
+// same default the store latches in these tests).
+vi.mock('@/hooks/useExperimentalFeatures', () => ({
+  useExperimentalFeatures: () => false,
+}))
+
 function makeController(overrides: Partial<ChatInputController>): ChatInputController {
   return {
     editor: {} as ChatInputController['editor'],

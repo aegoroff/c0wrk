@@ -321,8 +321,8 @@ type AgentMetricsData struct {
 	// delegated subagents sharing the session metrics).
 	Steps int `json:"steps"`
 	// OutputTokens is the session-wide accumulated output token usage.
-	OutputTokens int              `json:"output_tokens"`
-	SmallLLM     SmallLLMMetaInfo `json:"small_llm"`
+	OutputTokens int         `json:"output_tokens"`
+	SLM          SLMMetaInfo `json:"slm"`
 }
 
 // AgentMetricsCounters breaks nudges/aborts down by executor loop detector:
@@ -337,9 +337,19 @@ type AgentMetricsCounters struct {
 	Truncation int `json:"truncation"`
 }
 
-// SmallLLMMetaInfo snapshots the Small-LLM profile state the session ran
+// SLMMetaInfo snapshots the Small-LLM profile state the session ran
 // under, so metrics can be grouped by active optimization variants.
-type SmallLLMMetaInfo struct {
-	Enabled  bool     `json:"enabled"`
-	Variants []string `json:"variants"`
+type SLMMetaInfo struct {
+	Enabled bool `json:"enabled"`
+	// Profile is the id (slug) of the active profile the snapshot was taken
+	// from — the same id `slm.active_profile` persists and GetSLMProfiles
+	// reports as active_id. Reported even when the master toggle is off (the
+	// active profile is a fact independent of variant activation); empty
+	// when no profile was ever recorded.
+	Profile string `json:"profile,omitempty"`
+	// ProfileKind is the kind of the active profile: "predefined" or
+	// "custom" (see config.SLMProfileKind). Empty exactly when Profile is
+	// empty, so legacy payloads without profile fields keep their shape.
+	ProfileKind string   `json:"profile_kind,omitempty"`
+	Variants    []string `json:"variants"`
 }

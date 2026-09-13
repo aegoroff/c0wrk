@@ -184,7 +184,7 @@ type Manager struct {
 	fileTracker         *FileCoherenceTracker
 	converter           *markitdown.Converter // lazy-init markitdown converter for AttachFiles
 	converterMu         sync.Mutex            // guards lazy converter initialization
-	smallLLM            SmallLLMMetaInfo      // Small-LLM profile annotating agent_metrics events (guarded by mu)
+	slm                 SLMMetaInfo           // Small-LLM profile annotating agent_metrics events (guarded by mu)
 
 	// ignoreCache caches per-root ignore.Resolver instances so the directory
 	// tree is walked only once per root (not on every SendMessage). The key
@@ -366,22 +366,53 @@ func (m *Manager) SetMaxSummaryLen(n int) {
 	m.maxSummaryLen = n
 }
 
-// SetSmallLLMProfile records the Small-LLM profile sessions run under, so
+// SetSLMProfile records the Small-LLM profile sessions run under, so
 // "agent_metrics" events can be grouped by the active optimization variants.
-// Metrics collection itself is profile-independent; the profile only
-// annotates the payload. Applies to emitters created after the call.
-func (m *Manager) SetSmallLLMProfile(cfg config.SmallLLMConfig) {
-	info := smallLLMProfileFromConfig(cfg)
+// The profile entry is the catalog entry the persisted slm.active_profile
+// resolves to (callers resolve it via backend.activeSLMProfile) and carries
+// the id + kind reported in the payload — reported even when the master
+// toggle is off. Metrics collection itself is profile-independent; the
+// profile only annotates the payload. Applies to emitters created after the
+// call.
+func (m *Manager) SetSLMProfile(cfg config.SLMConfig, profile config.SLMProfile) {
+	info := slmProfileFromConfig(cfg, profile)
 	m.mu.Lock()
-	m.smallLLM = info
+	m.slm = info
 	m.mu.Unlock()
 }
 
-// smallLLMProfile returns the recorded Small-LLM profile snapshot.
-func (m *Manager) smallLLMProfile() SmallLLMMetaInfo {
+// SetE2SSettings refreshes the E2S execution-mode settings on every live
+// session orchestrator so a runtime experimental-features toggle takes effect
+// on sessions built before the change. The builder seeds config.E2S once at
+// Build, and the orchestrator factory reads the live config only for sessions
+// built afterwards, so an already-built orchestrator would otherwise keep the
+// stale gate (leaving an enabled E2S mode unusable until restart). Mirrors
+// SetSLMProfile. Safe while a session's task is running.
+//
+// A session's orchestrator pointer is set in the Session literal before the
+// session is published in m.sessions and is never reassigned afterwards, so
+// reading it under m.mu alone is race-free (the same immutability contract the
+// orchestratorFactory relies on); the per-orchestrator override applied here
+// is itself atomic.
+func (m *Manager) SetE2SSettings(settings core.E2SSettings) {
+	m.mu.RLock()
+	orchestrators := make([]*core.Orchestrator, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if s.orchestrator != nil {
+			orchestrators = append(orchestrators, s.orchestrator)
+		}
+	}
+	m.mu.RUnlock()
+	for _, o := range orchestrators {
+		o.SetE2SSettings(settings)
+	}
+}
+
+// slmProfile returns the recorded Small-LLM profile snapshot.
+func (m *Manager) slmProfile() SLMMetaInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.smallLLM
+	return m.slm
 }
 
 // SetServiceLLMTimeout sets the timeout for one-shot "service" LLM requests
@@ -563,8 +594,8 @@ func (m *Manager) getOrRestoreSession(id string) (*Session, error) {
 		m.lastToolCallIDs.Store(id, toolCallIDEntry{id: toolCallID, tool: tool})
 	})
 	// Annotate agent metrics with the Small-LLM profile the session runs under.
-	smallLLM := m.smallLLMProfile()
-	emitter.SetSmallLLMProfile(smallLLM.Enabled, smallLLM.Variants)
+	slm := m.slmProfile()
+	emitter.SetSLMProfile(slm)
 
 	// Snapshot mutable fields under read lock.
 	m.mu.RLock()
@@ -932,8 +963,8 @@ func (m *Manager) CreateSession(projectID, workspacePath string) (*SessionInfo, 
 		m.lastToolCallIDs.Store(id, toolCallIDEntry{id: toolCallID, tool: tool})
 	})
 	// Annotate agent metrics with the Small-LLM profile the session runs under.
-	smallLLM := m.smallLLMProfile()
-	emitter.SetSmallLLMProfile(smallLLM.Enabled, smallLLM.Variants)
+	slm := m.slmProfile()
+	emitter.SetSLMProfile(slm)
 
 	// Snapshot mutable fields under read lock
 	m.mu.RLock()

@@ -6,9 +6,42 @@
 // suspensions/interruptions — the regression behind "sound notifications
 // periodically drop even though they are enabled".
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest'
+
+// zustand's persist middleware captures its default storage —
+// `createJSONStorage(() => window.localStorage)` — at store-creation time,
+// i.e. when `@/stores/soundStore` is imported below. This file runs in the
+// node environment, where `window` does not exist yet (the fake window is
+// installed per-test in beforeEach), so without a storage present at import
+// time every `setEnabled` warns "Unable to update item 'c0wrk-sound'". Install
+// an in-memory window.localStorage first — the same pattern as
+// themeStore.test.ts / uiScaleStore.test.ts.
+vi.hoisted(() => {
+  const g = globalThis as Record<string, unknown>
+  const map = new Map<string, string>()
+  g.window = {
+    localStorage: {
+      getItem: (k: string): string | null => map.get(k) ?? null,
+      setItem: (k: string, v: string): void => {
+        map.set(k, v)
+      },
+      removeItem: (k: string): void => {
+        map.delete(k)
+      },
+      clear: (): void => {
+        map.clear()
+      },
+      key: (i: number): string | null => Array.from(map.keys())[i] ?? null,
+      get length(): number {
+        return map.size
+      },
+    },
+  }
+})
+
 import { playSound, initSoundUnlock, __resetSoundModule } from '@/lib/sound'
 import { useSoundStore } from '@/stores/soundStore'
+import { logger } from '@/lib/logger'
 
 interface MockOscillator {
   type: string
@@ -120,7 +153,16 @@ function createdCtx(): MockAudioContext {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
+// The recovery paths under test deliberately fail resume() and wedge
+// contexts, and sound.ts surfaces those anomalies via logger.warn
+// ("[sound] context resume failed", "[sound] replacing non-revivable audio
+// context", …) — expected output for these failure-injection tests, not a
+// defect. Silence the logger's warn channel so the run log stays
+// signal-only; the assertions observe the contexts/stores, not the logs.
+let loggerWarnSpy: MockInstance
+
 beforeEach(() => {
+  loggerWarnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
   __resetSoundModule()
   MockAudioContext.instances = []
   MockAudioContext.initialState = 'running'
@@ -131,6 +173,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  loggerWarnSpy.mockRestore()
   __resetSoundModule()
   delete (globalThis as unknown as { window?: unknown }).window
 })

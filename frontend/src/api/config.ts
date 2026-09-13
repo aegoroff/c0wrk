@@ -2,8 +2,8 @@
 
 import { getApp } from './runtime'
 import { logger } from '@/lib/logger'
-import { isConfigResponse, isSecuritySettingsResponse, isSmallLLMConfigResponse } from '@/types/guards'
-import type { ConfigResponse, SecuritySettingsResponse, LLMFullConfigRequest, SearchSettingsRequest, ProxySettingsRequest, ModelConfigResponse, ModelConfigRequest, SmallLLMConfigResponse } from '@/types/models'
+import { isConfigResponse, isSecuritySettingsResponse, isSLMProfilesResponse } from '@/types/guards'
+import type { ConfigResponse, SecuritySettingsResponse, LLMFullConfigRequest, SearchSettingsRequest, ProxySettingsRequest, ModelConfigResponse, ModelConfigRequest, SLMProfilesResponse, SLMProfileUpdateRequest } from '@/types/models'
 
 /** Sentinel value returned by backend when an API key is configured but should not be displayed */
 export const MASKED_API_KEY = '***configured***'
@@ -160,26 +160,76 @@ export async function updateProxySettings(settings: ProxySettingsRequest): Promi
   }
 }
 
-export async function getSmallLLMConfig(): Promise<SmallLLMConfigResponse> {
+export async function getSLMProfiles(): Promise<SLMProfilesResponse> {
   try {
     const app = getApp()
-    const result = await app.GetSmallLLMConfig()
-    if (!isSmallLLMConfigResponse(result)) {
-      throw new Error('getSmallLLMConfig: backend returned invalid data')
+    const result = await app.GetSLMProfiles()
+    if (!isSLMProfilesResponse(result)) {
+      throw new Error('getSLMProfiles: backend returned invalid data')
     }
     return result
   } catch (err) {
-    logger.error('Failed to get Small LLM config:', err)
+    logger.error('Failed to get Small LLM profiles:', err)
     throw err
   }
 }
 
-export async function updateSmallLLMConfig(config: SmallLLMConfigResponse): Promise<void> {
+/**
+ * Toggle the manual-only Small-LLM master switch (config.yaml slm.enabled).
+ * Enabling requires the experimental gate to be on — the backend fails closed
+ * otherwise. The change is persisted and applied immediately; there is no RPC
+ * that flips the gate itself (that is updateExperimentalFeatures).
+ */
+export async function setSLMEnabled(enabled: boolean): Promise<void> {
   try {
     const app = getApp()
-    await app.UpdateSmallLLMConfig(config)
+    await app.SetSLMEnabled(enabled)
   } catch (err) {
-    logger.error('Failed to update Small LLM config:', err)
+    logger.error('Failed to set Small LLM enabled:', err)
+    throw err
+  }
+}
+
+/** Duplicate the base profile (empty baseId = generic) under a new name; returns the new profile id. */
+export async function createSLMProfile(baseId: string, name: string): Promise<string> {
+  try {
+    const app = getApp()
+    return await app.CreateSLMProfile(baseId, name)
+  } catch (err) {
+    logger.error('Failed to create Small LLM profile:', err)
+    throw err
+  }
+}
+
+/** Partially update a CUSTOM profile (name and/or the 25 knob values). */
+export async function updateSLMProfile(id: string, req: SLMProfileUpdateRequest): Promise<void> {
+  try {
+    const app = getApp()
+    await app.UpdateSLMProfile(id, req)
+  } catch (err) {
+    logger.error('Failed to update Small LLM profile:', err)
+    throw err
+  }
+}
+
+/** Delete a CUSTOM profile; deleting the active one falls back to generic. */
+export async function deleteSLMProfile(id: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.DeleteSLMProfile(id)
+  } catch (err) {
+    logger.error('Failed to delete Small LLM profile:', err)
+    throw err
+  }
+}
+
+/** Make a catalog profile the active one (persisted to config.yaml). */
+export async function selectSLMProfile(id: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.SelectSLMProfile(id)
+  } catch (err) {
+    logger.error('Failed to select Small LLM profile:', err)
     throw err
   }
 }

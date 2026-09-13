@@ -23,7 +23,8 @@ type ConfigResponse struct {
 
 // ExperimentalSettingsResponse exposes the master experimental-features switch
 // to the settings UI. It carries no feature-specific state by design — the
-// switch is all-or-nothing and gates only the Small-LLM profile.
+// switch is all-or-nothing and gates every experimental feature (currently the
+// Small-LLM profile and the E2S execution mode).
 type ExperimentalSettingsResponse struct {
 	Enabled bool `json:"enabled"`
 }
@@ -92,6 +93,22 @@ type ProviderConfigRequest struct {
 	APIKey  string   `json:"api_key,omitempty"`
 	BaseURL string   `json:"base_url,omitempty"`
 	Models  []string `json:"models,omitempty"`
+}
+
+// ListProviderModelsRequest is the payload for ListProviderModels.
+//
+// Provider is required. APIKey / BaseURL / Type are optional draft overrides
+// from the settings UI so a compatible provider that has not been persisted
+// yet (first-run, or no default_model selected so saves are held back) can
+// still fetch its model list. Empty / masked APIKey falls back to the saved
+// key when the provider already exists in config.
+type ListProviderModelsRequest struct {
+	Provider string `json:"provider"`
+	APIKey   string `json:"api_key,omitempty"`
+	BaseURL  string `json:"base_url,omitempty"`
+	// Type is the transport: "openai" or "anthropic". Empty means derive from
+	// the saved provider, or default to "openai" for an unknown provider.
+	Type string `json:"type,omitempty"`
 }
 
 // ModelConfigResponse returns a single model's configurable parameters: the
@@ -200,77 +217,105 @@ type GroupPolicyResponse struct {
 	Blacklist []string `json:"blacklist"`
 }
 
-// SmallLLMConfigResponse is the small-LLM profile configuration exposed to the
-// UI. It mirrors config.SmallLLMConfig with JSON (snake_case) tags and is used
-// for both GetSmallLLMConfig (read) and UpdateSmallLLMConfig (write). There
-// are no secrets to mask, so a single type serves both directions.
-type SmallLLMConfigResponse struct {
-	Enabled        bool                       `json:"enabled"`
-	EssentialTools SmallLLMEssentialToolsResp `json:"essential_tools"`
-	SystemPrompt   SmallLLMSystemPromptResp   `json:"system_prompt"`
-	Sampling       SmallLLMSamplingResp       `json:"sampling"`
-	LoopHardening  SmallLLMLoopHardeningResp  `json:"loop_hardening"`
-	Context        SmallLLMContextResp        `json:"context"`
+// SLMProfilesResponse is the small-LLM profile catalog view for the settings
+// picker: every profile (predefined ∪ custom) with its 25 knob values, the
+// persisted active profile id (config.yaml slm.active_profile), the
+// suggested profile id (a normalized match of the default model name against
+// the predefined slugs; null when nothing matches), and the read-only picker
+// universe (builtin_tools / tool_groups) read from the live tool registry.
+type SLMProfilesResponse struct {
+	// Enabled is the global master toggle (config.yaml slm.enabled) reported
+	// verbatim — it is NOT a value of any profile. False when config is not
+	// yet initialized.
+	Enabled bool `json:"enabled"`
+	// Profiles is the full catalog: predefined entries first (catalog order),
+	// then custom entries in store order. Always non-nil ([] not null).
+	Profiles []SLMProfileDTO `json:"profiles"`
+	// ActiveID is the STORED active profile id, reported verbatim — including
+	// a dangling id after an external store edit; the resolver then falls
+	// back to generic and says so in Warnings.
+	ActiveID string `json:"active_id"`
+	// SuggestedProfileID is nil (JSON null) when no predefined profile
+	// matches the default model name.
+	SuggestedProfileID *string          `json:"suggested_profile_id"`
+	BuiltinTools       []SLMBuiltinTool `json:"builtin_tools"`
+	ToolGroups         []SLMToolGroup   `json:"tool_groups"`
+	// ProtectedTools lists the orchestration tools the backend always keeps
+	// regardless of any selection, so the UI can render them as locked chips.
+	ProtectedTools []string `json:"protected_tools"`
+	// Warnings carries store-load warnings, resolver warnings (dangling
+	// active id → generic fallback) and one-shot notices (e.g. "the active
+	// profile was deleted; switched to generic"). Always non-nil.
+	Warnings []string `json:"warnings"`
 }
 
-// SmallLLMBuiltinTool describes one pin-able built-in tool for the
+// SLMProfileDTO is one catalog entry: stable id, display name, kind
+// ("predefined"|"custom") and the profile's 25 knob values.
+type SLMProfileDTO struct {
+	ID     string           `json:"id"`
+	Name   string           `json:"name"`
+	Kind   string           `json:"kind"`
+	Values SLMProfileValues `json:"values"`
+}
+
+// SLMProfileValues carries the 25 knob values of one profile. The master
+// enabled toggle is NOT here: it is a config.yaml field (slm.enabled), not a
+// profile value.
+type SLMProfileValues struct {
+	EssentialTools SLMEssentialToolsValues `json:"essential_tools"`
+	SystemPrompt   SLMSystemPromptResp     `json:"system_prompt"`
+	Sampling       SLMSamplingResp         `json:"sampling"`
+	LoopHardening  SLMLoopHardeningResp    `json:"loop_hardening"`
+	Context        SLMContextResp          `json:"context"`
+}
+
+// SLMEssentialToolsValues is the value part of the always-present
+// tool-subset variant (the picker universe lives on SLMProfilesResponse).
+type SLMEssentialToolsValues struct {
+	Enabled             bool     `json:"enabled"`
+	AlwaysPresent       []string `json:"always_present"`
+	CompactDescriptions bool     `json:"compact_descriptions"`
+}
+
+// SLMProfileUpdateRequest is the update payload for UpdateSLMProfile. Only
+// the two request-level fields are optional: nil Name keeps the stored display
+// name and nil Config keeps the stored values. A non-nil Config replaces the
+// WHOLE 25-knob value set (no per-section merge).
+type SLMProfileUpdateRequest struct {
+	Name   *string           `json:"name"`
+	Config *SLMProfileValues `json:"config"`
+}
+
+// SLMBuiltinTool describes one pin-able built-in tool for the
 // always-present picker: its registry name plus the description the UI renders
 // in the entry's hover tooltip.
-type SmallLLMBuiltinTool struct {
+type SLMBuiltinTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
-// SmallLLMToolGroup describes a functional cluster of built-in tools offered
+// SLMToolGroup describes a functional cluster of built-in tools offered
 // as one atomic picker entry: picking the cluster pins every still-selectable
 // member at once. The UI renders Title and Description in the entry's tooltip
 // and lists Tools alongside them. Members are already restricted to the picker
 // universe reported in BuiltinTools.
-type SmallLLMToolGroup struct {
+type SLMToolGroup struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	Tools       []string `json:"tools"`
 }
 
-// SmallLLMEssentialToolsResp is the always-present tool-subset variant.
-// ProtectedTools, BuiltinTools and ToolGroups are read-only informational
-// fields:
-//   - ProtectedTools — the backend always includes the protected set
-//     regardless of any UI selection, so the UI can render those tools as
-//     locked.
-//   - BuiltinTools — the picker universe: every registered built-in tool that
-//     is neither MCP-sourced nor goal-mode-only, with its description, sorted
-//     by name. Both excluded classes are already "pin-free" — MCP tools are
-//     always kept, and goal-mode-only tools are stripped before any selection
-//     runs — so offering them would be inert. The field still contains the
-//     always-protected tools (see ProtectedTools), which SelectTools keeps
-//     regardless of the selection; the picker must therefore subtract the
-//     already-allowed set (always_present, into which the backend already
-//     unions the protected set) before offering an entry.
-//   - ToolGroups — the functional clusters (plan, subagents) whose members are
-//     pinned together; the UI offers each as one atomic entry.
-//
-// All three are ignored on write (responseToSmallLLM does not map them back).
-type SmallLLMEssentialToolsResp struct {
-	Enabled             bool                  `json:"enabled"`
-	AlwaysPresent       []string              `json:"always_present"`
-	CompactDescriptions bool                  `json:"compact_descriptions"`
-	ProtectedTools      []string              `json:"protected_tools"`
-	BuiltinTools        []SmallLLMBuiltinTool `json:"builtin_tools"`
-	ToolGroups          []SmallLLMToolGroup   `json:"tool_groups"`
-}
-
-// SmallLLMSystemPromptResp is the prompt-simplification variant.
-type SmallLLMSystemPromptResp struct {
+// SLMSystemPromptResp is the prompt-simplification variant.
+type SLMSystemPromptResp struct {
 	Lite              bool `json:"lite"`
 	FewShot           bool `json:"few_shot"`
 	ReasoningScaffold bool `json:"reasoning_scaffold"`
 }
 
-// SmallLLMSamplingResp is the sampling-override variant. Zero numeric values
+// SLMSamplingResp is the sampling-override variant. Zero numeric values
 // mean "inherit the vendor preset" (not "send 0").
-type SmallLLMSamplingResp struct {
+type SLMSamplingResp struct {
 	Enabled           bool    `json:"enabled"`
 	Temperature       float64 `json:"temperature"`
 	TopP              float64 `json:"top_p"`
@@ -280,8 +325,8 @@ type SmallLLMSamplingResp struct {
 	ReasoningEffort   string  `json:"reasoning_effort"`
 }
 
-// SmallLLMLoopHardeningResp is the tightened circuit-breaker variant.
-type SmallLLMLoopHardeningResp struct {
+// SLMLoopHardeningResp is the tightened circuit-breaker variant.
+type SLMLoopHardeningResp struct {
 	Enabled                      bool `json:"enabled"`
 	RepeatNudgeThreshold         int  `json:"repeat_nudge_threshold"`
 	ParseErrorAbortThreshold     int  `json:"parse_error_abort_threshold"`
@@ -290,17 +335,17 @@ type SmallLLMLoopHardeningResp struct {
 	SameToolRepeatNudgeThreshold int  `json:"same_tool_repeat_nudge_threshold"`
 }
 
-// SmallLLMContextResp is the aggressive context-management variant.
-type SmallLLMContextResp struct {
-	Enabled             bool                   `json:"enabled"`
-	Compaction          SmallLLMCompactionResp `json:"compaction"`
-	ToolOutputKeepLastN int                    `json:"tool_output_keep_last_n"`
-	OutputTokenReserve  int                    `json:"output_token_reserve"`
+// SLMContextResp is the aggressive context-management variant.
+type SLMContextResp struct {
+	Enabled             bool              `json:"enabled"`
+	Compaction          SLMCompactionResp `json:"compaction"`
+	ToolOutputKeepLastN int               `json:"tool_output_keep_last_n"`
+	OutputTokenReserve  int               `json:"output_token_reserve"`
 }
 
-// SmallLLMCompactionResp holds the compaction-tightening overrides of the
+// SLMCompactionResp holds the compaction-tightening overrides of the
 // context variant.
-type SmallLLMCompactionResp struct {
+type SLMCompactionResp struct {
 	KeepLast       int `json:"keep_last"`
 	BlockSize      int `json:"block_size"`
 	TriggerPercent int `json:"trigger_percent"`

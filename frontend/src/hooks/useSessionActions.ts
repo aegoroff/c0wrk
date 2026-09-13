@@ -20,6 +20,7 @@ import { useTerminalRegistryStore } from '@/stores/terminalRegistryStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
+import { useE2SStore } from '@/stores/e2sStore'
 import { isSessionBusy } from '@/hooks/useSessionStatusIndicator'
 import {
   createSession,
@@ -112,6 +113,9 @@ export function useSessionActions(): SessionActions {
         // Drop the deleted session's bookmarks so the per-session map stays
         // bounded (the backend already cascade-deleted them from the DB).
         useBookmarkStore.getState().clearSession(id)
+        // Drop its E2S execution-state snapshot (live-only stream — a deleted
+        // session never re-emits e2s_state, so the entry would go stale).
+        useE2SStore.getState().clearSession(id)
       } catch (error) {
         logger.error('Failed to delete session:', error)
       }

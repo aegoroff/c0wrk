@@ -553,6 +553,18 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 		return nil, errors.New("execute_plan: the plan on the blackboard was restored from a previous (completed) task and was not declared in this run — call declare_plan to publish a new plan, or use delegate for plan-less work")
 	}
 
+	// Well-formedness preflight. Plans published via declare_plan are
+	// validated there, but plans can also reach the blackboard by other
+	// routes (restored from previous sessions, legacy data). An empty or
+	// duplicate step ID would otherwise surface mid-registration as a cryptic
+	// `register plan step "": delegation ID already exists` with no recovery
+	// hint. Fail fast — before any step is registered or any wave launches —
+	// with an actionable message. The error deliberately carries no
+	// "execute_plan:" prefix: the tool wrapper prepends it.
+	if err := planStepsWellFormed(plan.Steps); err != nil {
+		return nil, err
+	}
+
 	// Compute the forced-rerun set when explicit step IDs were requested.
 	var forced map[string]bool
 	if len(stepIDs) > 0 {
@@ -734,6 +746,35 @@ func (l *conductorLauncher) CompletedStep(stepID string) (tools.DelegationComple
 		return tools.DelegationCompletedStep{}, false
 	}
 	return tools.DelegationCompletedStep{Output: sr.FullOutput, Steps: sr.Steps}, true
+}
+
+// malformedPlanFix is the actionable suffix shared by every
+// planStepsWellFormed error: the only correct recovery from a malformed plan
+// is to publish a fresh, valid one.
+const malformedPlanFix = "re-declare the plan with declare_plan (every task needs a unique non-empty id, summary, description)"
+
+// planStepsWellFormed verifies that every plan step has a non-empty, unique
+// ID. Execute keys its local delegation registry, dependency resolution, and
+// result bookkeeping off step IDs, so empty or duplicate IDs corrupt the run
+// (two empty IDs collide inside the registry with a cryptic error). Plans
+// published through declare_plan are validated there; this preflight guards
+// Execute against plans that bypassed that validation — restored plans from
+// previous sessions, legacy blackboard data. Step numbers in the errors are
+// 1-based declaration positions. The messages carry no "execute_plan:"
+// prefix: the execute_plan tool wrapper prepends one when surfacing the error
+// to the model.
+func planStepsWellFormed(steps []orchestration.PlanStep) error {
+	seen := make(map[string]int, len(steps))
+	for i, step := range steps {
+		if step.ID == "" {
+			return fmt.Errorf("malformed plan: step %d has an empty id — %s", i+1, malformedPlanFix)
+		}
+		if first, dup := seen[step.ID]; dup {
+			return fmt.Errorf("malformed plan: steps %d and %d share id %q — %s", first+1, i+1, step.ID, malformedPlanFix)
+		}
+		seen[step.ID] = i
+	}
+	return nil
 }
 
 // forcedRerunSet computes the set of step IDs that must re-run when explicit
@@ -1994,11 +2035,21 @@ type conductorPublisher struct {
 func (p *conductorPublisher) Publish(ctx context.Context, tasks []tools.PlanTaskInput) (string, error) {
 	plan := &orchestration.Plan{}
 	for _, t := range tasks {
+		// Normalize ids/dependencies exactly as validatePlanTasks matched
+		// them (TrimSpace): a padded id or depends_on entry that passed
+		// validation would otherwise be published verbatim and never match
+		// the registered step id at execution time.
+		deps := make([]string, 0, len(t.DependsOn))
+		for _, d := range t.DependsOn {
+			if trimmed := strings.TrimSpace(d); trimmed != "" {
+				deps = append(deps, trimmed)
+			}
+		}
 		plan.Steps = append(plan.Steps, orchestration.PlanStep{
-			ID:          t.ID,
+			ID:          strings.TrimSpace(t.ID),
 			Summary:     t.Summary,
 			Description: t.Description,
-			DependsOn:   append([]string(nil), t.DependsOn...),
+			DependsOn:   deps,
 			Agent:       t.Agent,
 		})
 	}

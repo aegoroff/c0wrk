@@ -21,7 +21,10 @@ func RandomSuffix() string {
 }
 
 // SerializePlan converts a Plan to markdown for user review.
-// Only Summary and Description are included; DependsOn, Profile, etc. are hidden.
+// Each step header carries the step ID (`# Step N (id): summary`) so the
+// human reviewer sees the identifiers that DependsOn references target and
+// empty or malformed IDs stand out. Only ID, Summary, and Description are
+// included; DependsOn, Profile, etc. are hidden.
 func SerializePlan(plan *orchestration.Plan) string {
 	if plan == nil || len(plan.Steps) == 0 {
 		return ""
@@ -33,7 +36,9 @@ func SerializePlan(plan *orchestration.Plan) string {
 		}
 		b.WriteString("# Step ")
 		b.WriteString(strconv.Itoa(i + 1))
-		b.WriteString(": ")
+		b.WriteString(" (")
+		b.WriteString(step.ID)
+		b.WriteString("): ")
 		b.WriteString(step.Summary)
 		b.WriteString("\n\n")
 		b.WriteString(step.Description)

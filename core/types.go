@@ -70,6 +70,13 @@ type Emitter interface {
 	// turn/budget telemetry, emitted mid-loop (after a non-terminal turn) so the
 	// frontend can show live progress toward the budget.
 	GoalProgress(data map[string]any)
+	// E2SState emits a dedicated e2s_state session event carrying the full
+	// execution-state snapshot (Σ map, turn, max turns, status) of an E2S-mode
+	// run. Like goal_status it is its OWN session event type — not the
+	// phase-discriminated `service` channel — so the frontend's Execution
+	// State panel subscription reliably reaches the e2s store. Emitted after
+	// every applied state patch.
+	E2SState(data map[string]any)
 	// ReplanFailed reports a failed replan attempt.
 	ReplanFailed(err error)
 	// SkillsActivated reports the skills matched and activated for the current task.
@@ -206,6 +213,7 @@ func (n *noopEmitter) Service(_ string)                                         
 func (n *noopEmitter) ServiceWithMeta(_ string, _ map[string]any)                   {}
 func (n *noopEmitter) GoalStatus(_ map[string]any)                                  {}
 func (n *noopEmitter) GoalProgress(_ map[string]any)                                {}
+func (n *noopEmitter) E2SState(_ map[string]any)                                    {}
 func (n *noopEmitter) ReplanFailed(_ error)                                         {}
 func (n *noopEmitter) SkillsActivated(_ []string)                                   {}
 func (n *noopEmitter) StepTodoUpdate(_ string, _ []agent.TodoItem)                  {}
@@ -274,4 +282,13 @@ type HandleOptions struct {
 	// defaults: any field > 0 / non-zero overrides the default; zero-valued
 	// fields fall back to the config default. Only meaningful when Goal is true.
 	GoalBudgetOverride *goal.GoalBudget
+
+	// E2S selects the explicit-execution-state mode (E2S). When true,
+	// HandleMessage dispatches to runE2SLoop instead of the route→Conductor
+	// flow: the run maintains an externalized state Σ that the model reads and
+	// patches each turn via the e2s_step meta-tool (bounded O(1) context), and
+	// actions dispatch through the tool registry with every security gate
+	// intact. Mutually exclusive with Goal — HandleMessage rejects both set
+	// with an explicit error rather than silently preferring one loop.
+	E2S bool
 }

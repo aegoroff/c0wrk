@@ -13,6 +13,8 @@ import type { ChatMessage, TokenInfo, CompactionAvailability } from '@/types/mod
  *                   with any /goal prefix the message text carries).
  * @param goalBudget Optional JSON budget override ({"max_turns":N});
  *                   empty = unlimited.
+ * @param e2s        Enable the explicit-execution-state (E2S) loop for the
+ *                   first message of a task. Mutually exclusive with goal.
  * @param reviewMode Marks the message as code review feedback the agent must
  *                   address (the system prompt gains a Code Review section).
  */
@@ -25,11 +27,16 @@ export async function sendMessage(
   reasoningOverride: string = '',
   goal: boolean = false,
   goalBudget: string = '',
+  e2s: boolean = false,
   reviewMode: boolean = false,
 ): Promise<void> {
   try {
     const app = getApp()
-    await app.SendMessage(sessionId, text, activeSkills, activeAgents, modelOverride, reasoningOverride, goal, goalBudget, reviewMode)
+    // Positional args must match the Go SendMessage binding EXACTLY
+    // (id, text, skills, agents, modelOverride, reasoning, goal, goalBudget,
+    // e2s, reviewMode) — a drift silently drops mode flags before they reach
+    // HandleOptions.
+    await app.SendMessage(sessionId, text, activeSkills, activeAgents, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode)
   } catch (err) {
     logger.error('Failed to send message:', err)
     throw err

@@ -18,7 +18,8 @@ type BuilderConfig struct {
 	MCP           BuilderMCPConfig
 	Orchestration BuilderOrchestrationConfig
 	GoalLoop      BuilderGoalLoopConfig
-	SmallLLM      BuilderSmallLLMConfig
+	SLM           BuilderSLMConfig
+	E2S           BuilderE2SConfig
 	ToolLimits    BuilderToolLimitsConfig
 	Timeouts      BuilderTimeoutsConfig
 	Proxy         proxy.Config
@@ -57,11 +58,11 @@ type BuilderConfig struct {
 // Small LLM profile
 // ---------------------------------------------------------------------------
 
-// BuilderSmallLLMConfig mirrors config.SmallLLMConfig for the subset of the
+// BuilderSLMConfig mirrors config.SLMConfig for the subset of the
 // profile that core consumes. core never imports backend/config, so values are
 // copied via ToBuilderConfig. Only the master toggle and the variants wired in
 // this step (Sampling, LoopHardening) are represented.
-type BuilderSmallLLMConfig struct {
+type BuilderSLMConfig struct {
 	// Enabled is the master toggle. When false every variant sub-toggle is
 	// ignored and behavior is identical to the un-profiled baseline.
 	Enabled bool
@@ -69,11 +70,11 @@ type BuilderSmallLLMConfig struct {
 	// EssentialTools narrows the conductor's advertised tool set to an
 	// always-present subset to reduce per-prompt schema overhead for small
 	// models.
-	EssentialTools BuilderSmallLLMEssentialConfig
+	EssentialTools BuilderSLMEssentialConfig
 
 	// Sampling overrides LLM sampling parameters (temperature, top_p,
 	// reasoning effort) for more deterministic, lower-effort generation.
-	Sampling BuilderSmallLLMSampling
+	Sampling BuilderSLMSampling
 
 	// LoopHardening tightens the executor circuit-breaker thresholds so a
 	// small model that repeats itself or makes no progress is caught sooner.
@@ -81,25 +82,25 @@ type BuilderSmallLLMConfig struct {
 
 	// Context applies aggressive context management: tighter compaction,
 	// stricter tool-output pruning, and a larger output token reserve.
-	Context BuilderSmallLLMContext
+	Context BuilderSLMContext
 
 	// SystemPrompt applies prompt-simplification variants (currently the Lite
 	// core-directive swap) to shrink the system prompt injected for a small
 	// model. When Lite is active, buildSystemPromptWith trades the verbose
 	// OrchestratorSystem directive for the compact OrchestratorSystemLite.
-	SystemPrompt BuilderSmallLLMSystemPromptConfig
+	SystemPrompt BuilderSLMSystemPromptConfig
 }
 
-// BuilderSmallLLMSystemPromptConfig holds the prompt-simplification variant
+// BuilderSLMSystemPromptConfig holds the prompt-simplification variant
 // overrides for the small-LLM profile. Lite is the variant master toggle (it
 // mirrors config.SystemPromptConfig, which has no separate Enabled field, so
 // Enabled is not duplicated here). Lite swaps the core directive, FewShot
 // appends worked ReAct examples, ReasoningScaffold appends the
 // structured-thought template. Each is only honored when the variant is active
-// (master SmallLLM.Enabled on AND Lite on); FewShot and ReasoningScaffold
+// (master SLM.Enabled on AND Lite on); FewShot and ReasoningScaffold
 // additionally require Lite, since the examples and scaffold are tailored to
 // the lite directive.
-type BuilderSmallLLMSystemPromptConfig struct {
+type BuilderSLMSystemPromptConfig struct {
 	// Lite swaps the verbose OrchestratorSystem core directive for the compact
 	// OrchestratorSystemLite directive. The shared sections (family overlay,
 	// verification mandate, injection defense, workspace, env, AGENTS.md,
@@ -115,12 +116,12 @@ type BuilderSmallLLMSystemPromptConfig struct {
 	ReasoningScaffold bool
 }
 
-// BuilderSmallLLMSampling holds the sampling-variant overrides. Every
+// BuilderSLMSampling holds the sampling-variant overrides. Every
 // parameter uses zero as the "not set" sentinel: an unset field inherits the
 // per-family vendor preset (prompt.DefaultSampling) instead of clobbering it,
 // so enabling the variant with no explicit values is a behavioral no-op.
-type BuilderSmallLLMSampling struct {
-	// Enabled gates this variant (in addition to the master SmallLLM.Enabled).
+type BuilderSLMSampling struct {
+	// Enabled gates this variant (in addition to the master SLM.Enabled).
 	Enabled bool
 
 	// Temperature sets generation temperature (lower = more deterministic).
@@ -160,7 +161,7 @@ type BuilderSmallLLMSampling struct {
 // BuilderLoopHardening holds the circuit-breaker tightening overrides. Only
 // the thresholds present here are overridden; all others keep their baseline.
 type BuilderLoopHardening struct {
-	// Enabled gates this variant (in addition to the master SmallLLM.Enabled).
+	// Enabled gates this variant (in addition to the master SLM.Enabled).
 	Enabled bool
 
 	RepeatNudgeThreshold         int
@@ -170,9 +171,9 @@ type BuilderLoopHardening struct {
 	SameToolRepeatNudgeThreshold int
 }
 
-// BuilderSmallLLMCompaction holds the compaction-tightening overrides. Zero
+// BuilderSLMCompaction holds the compaction-tightening overrides. Zero
 // values mean "do not override" — the executor baseline is kept for that knob.
-type BuilderSmallLLMCompaction struct {
+type BuilderSLMCompaction struct {
 	// KeepLast overrides the executor sliding-window keep-last count.
 	KeepLast int
 
@@ -183,15 +184,15 @@ type BuilderSmallLLMCompaction struct {
 	TriggerPercent int
 }
 
-// BuilderSmallLLMContext holds the aggressive context-management overrides:
+// BuilderSLMContext holds the aggressive context-management overrides:
 // tighter compaction, stricter tool-output pruning, larger output token
 // reserve. Applied via applyContextManagement.
-type BuilderSmallLLMContext struct {
-	// Enabled gates this variant (in addition to the master SmallLLM.Enabled).
+type BuilderSLMContext struct {
+	// Enabled gates this variant (in addition to the master SLM.Enabled).
 	Enabled bool
 
 	// Compaction overrides the executor compaction knobs.
-	Compaction BuilderSmallLLMCompaction
+	Compaction BuilderSLMCompaction
 
 	// ToolOutputKeepLastN overrides the executor tool-output pruning depth.
 	ToolOutputKeepLastN int
@@ -200,10 +201,10 @@ type BuilderSmallLLMContext struct {
 	OutputTokenReserve int
 }
 
-// BuilderSmallLLMEssentialConfig holds the always-present-tool-set narrowing
+// BuilderSLMEssentialConfig holds the always-present-tool-set narrowing
 // settings for the essential-tools variant.
-type BuilderSmallLLMEssentialConfig struct {
-	// Enabled gates this variant (in addition to the master SmallLLM.Enabled).
+type BuilderSLMEssentialConfig struct {
+	// Enabled gates this variant (in addition to the master SLM.Enabled).
 	Enabled bool
 
 	// AlwaysPresent is the allow-list of tool names always exposed when this
@@ -507,6 +508,30 @@ type BuilderOrchestrationConfig struct {
 // BuilderGoalLoopConfig holds goal-loop settings.
 type BuilderGoalLoopConfig struct {
 	Verification string // "independent" (default) | "off"
+}
+
+// BuilderE2SConfig mirrors config.E2SConfig for the subset core consumes. core
+// never imports backend/config, so the values are copied via ToBuilderConfig,
+// where Enabled is mapped from the experimental gate (fail-closed). A zero
+// value means "disabled with loop defaults" — core falls back to the core/e2s
+// Config defaults for every numeric field.
+type BuilderE2SConfig struct {
+	// Enabled is the effective availability of the E2S execution mode
+	// (experimental.enabled). When false the mode is rejected fail-closed; the
+	// numeric fields below are then inert.
+	Enabled bool
+	// MaxSteps caps the number of turns (patch+action cycles) per run.
+	MaxSteps int
+	// StateByteLimit caps the JSON-encoded size of Σ in bytes.
+	StateByteLimit int
+	// PatchRetries bounds the corrective re-requests for a rejected patch.
+	PatchRetries int
+	// MaxObservationChars caps the per-turn observation fed back to the model.
+	MaxObservationChars int
+	// RepeatNudgeThreshold / RepeatAbortThreshold are the anti-spin
+	// thresholds (identical consecutive actions before a nudge / an abort).
+	RepeatNudgeThreshold int
+	RepeatAbortThreshold int
 }
 
 // ---------------------------------------------------------------------------

@@ -96,6 +96,17 @@ Conductor
   ▼
 declare_plan.Execute(ctx, input)
   │
+  ├─ (registry Gate 1, before Execute): structural input validation —
+  │    sdktools.ValidateToolInput checks the whole call against the tool's
+  │    JSON schema, recursively into tasks[i] objects (a missing or
+  │    mistyped id surfaces as a "tasks[2].id" violation with the valid
+  │    parameters listed). This gate runs for system-group tools too —
+  │    it precedes the system-group bypass in the pipeline.
+  ├─ validatePlanTasks(tasks): semantic checks the schema cannot express —
+  │    every task needs a non-empty id, summary, description; ids must be
+  │    unique; every depends_on entry must reference a declared id. All
+  │    violations are reported at once; on failure returns an ErrorResult
+  │    BEFORE any persistence/blackboard/approval side effect.
   ├─ Resolve PlanPublisher from ctx (core's conductorPublisher)
   ├─ publisher.Publish(ctx, tasks):
   │    ├─ Build a Plan from the input tasks (PlanStep incl. optional Agent field)
@@ -133,6 +144,10 @@ execute_plan.Execute(ctx, input)
   ├─ Read PlanStepExecutor from ctx
   ├─ executor.Execute(ctx, input.Steps):
   │    ├─ Read Plan from blackboard (GetPlan)
+  │    ├─ Preflight: planStepsWellFormed — every step needs a non-empty,
+  │    │  unique id (guards restored/legacy plans that bypassed declare_plan
+  │    │  validation). On failure returns an actionable ErrorResult pointing
+  │    │  at declare_plan; nothing is registered or dispatched.
   │    ├─ Build a local DelegationRegistry for dependency resolution
   │    ├─ Wave loop (DAG-ordered):
   │    │    ├─ Find ready steps (all DependsOn completed)
