@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/core"
@@ -2154,16 +2155,23 @@ func TestUpdateSLMProfile_ZeroSentinelsAndDisabledVariants(t *testing.T) {
 }
 
 // TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched forces the store
-// write to fail (read-only agent dir) and verifies nothing changed.
+// write to fail and verifies nothing changed. The store persists with an
+// atomic temp-file-then-rename (see config.SaveCustomSLMProfiles), so
+// occupying that temp sibling with a directory makes os.WriteFile fail on
+// every platform. Making the agent dir read-only via os.Chmod cannot: on
+// Windows the read-only attribute does not block creating files inside a
+// directory, so the write would silently succeed.
 func TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 	active := activateCustomSLMProfile(t, f)
 	before := slmStoredProfile(t, f, active.ID)
 
-	if err := os.Chmod(f.agentDir, 0o500); err != nil {
-		t.Skipf("cannot make the agent dir read-only: %v", err)
+	// Block the atomic write: a directory at the temp path makes the
+	// temp-file creation fail before it can be renamed into place.
+	tmpPath := config.SLMProfilesPath(f.agentDir) + ".tmp"
+	if err := os.Mkdir(tmpPath, 0o755); err != nil {
+		t.Fatalf("cannot occupy the store temp path %q: %v", tmpPath, err)
 	}
-	defer func() { _ = os.Chmod(f.agentDir, 0o700) }()
 
 	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err == nil {
 		t.Fatal("expected error when the store write fails")
@@ -2171,7 +2179,10 @@ func TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched(t *testing.T) {
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0 (nothing was applied)", mock.rebuildRouterCalls)
 	}
-	_ = before
+	after := slmStoredProfile(t, f, active.ID)
+	if diff := cmp.Diff(before, after); diff != "" {
+		t.Errorf("failed store write changed the persisted profile (-before +after):\n%s", diff)
+	}
 }
 
 // --- DeleteSLMProfile ---
