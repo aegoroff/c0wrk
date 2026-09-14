@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { ChatInputToolbar } from './ChatInputToolbar'
+import { GOAL_BLOCKED_BY_MODEL_PROFILES_REASON } from '@/lib/goalGate'
 import type { ChatInputController } from '@/hooks/useChatInputController'
 import { useInputModeStore } from '@/stores/inputModeStore'
 
@@ -38,6 +39,14 @@ vi.mock('@/hooks/useAttachmentsInput', () => ({
 // same default the store latches in these tests).
 vi.mock('@/hooks/useExperimentalFeatures', () => ({
   useExperimentalFeatures: () => false,
+}))
+
+// The toolbar consults the Model Profiles goal gate through this hook, whose real
+// implementation also fetches the config via the Wails bindings (unavailable in
+// jsdom). Expose a mutable flag so each test drives the blocked/unblocked state.
+const modelProfilesGate = vi.hoisted(() => ({ blocked: false }))
+vi.mock('@/hooks/useModelProfilesGate', () => ({
+  useModelProfilesGate: () => modelProfilesGate.blocked,
 }))
 
 function makeController(overrides: Partial<ChatInputController>): ChatInputController {
@@ -113,6 +122,7 @@ function goalTrigger(): HTMLButtonElement {
 
 beforeEach(() => {
   useInputModeStore.setState({ goalEnabled: false })
+  modelProfilesGate.blocked = false
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -186,5 +196,32 @@ describe('ChatInputToolbar resume lock during attachment uploads', () => {
     renderToolbar({ paused: true, showCancel: true })
     expect(resumeButton().disabled).toBe(false)
     expect(resumeButton().title).toBe('Resume task')
+  })
+})
+
+describe('ChatInputToolbar goal block under the Model Profiles gate', () => {
+  it('disables the goal toggle and shows the reason hint while blocked', () => {
+    modelProfilesGate.blocked = true
+    renderToolbar()
+    expect(goalTrigger().disabled).toBe(true)
+    expect(goalTrigger().getAttribute('title')).toBe(GOAL_BLOCKED_BY_MODEL_PROFILES_REASON)
+    const hint = container.querySelector('[data-testid="goal-blocked-hint"]')
+    expect(hint).not.toBeNull()
+    expect(hint?.textContent).toBe(GOAL_BLOCKED_BY_MODEL_PROFILES_REASON)
+  })
+
+  it('auto-resets an armed goal toggle when the gate blocks', () => {
+    act(() => {
+      useInputModeStore.setState({ goalEnabled: true })
+    })
+    modelProfilesGate.blocked = true
+    renderToolbar()
+    expect(useInputModeStore.getState().goalEnabled).toBe(false)
+  })
+
+  it('leaves the goal toggle enabled and hides the hint when not blocked', () => {
+    renderToolbar()
+    expect(goalTrigger().disabled).toBe(false)
+    expect(container.querySelector('[data-testid="goal-blocked-hint"]')).toBeNull()
   })
 })

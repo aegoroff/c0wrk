@@ -2,6 +2,11 @@
 
 All notable changes to **c0wrk**. Dates follow the tag date.
 
+## Unreleased
+
+### Changed
+- **"Small LLM" / "SLM" renamed to "Model Profiles"** — the tuning-profile feature is renamed across every surface. The old name claimed the models were "small", but the catalog targets 10–35B models (local / mid-size) while the industry reserves "SLM" for sub-10B — so the label mis-described its own audience. The config section becomes `model_profiles:` (`model_profiles.enabled` / `model_profiles.active_profile`), custom profiles move to `~/.c0wrk/model-profiles.yaml`, Go identifiers/packages/files become `ModelProfile*` / `core/modelprofiles` / `model_profiles*.go`, the RPCs become `GetModelProfiles` / `CreateModelProfile` / `UpdateModelProfile` / `DeleteModelProfile` / `SelectModelProfile` / `SetModelProfilesEnabled`, the `agent_metrics` block key becomes `model_profiles` (the frontend still accepts the legacy `slm` / `small_llm` keys on read), and the settings tab reads "Model Profiles". This is a deliberate clean break for the on-disk config and profile store — a legacy `slm:` section and an old `slm-profiles.yaml` are ignored (sanctioned reset migration, as with the earlier `small_llm` → `slm` switch), so custom profiles must be re-created. See [ADR-043](./specs/decisions/043-model-profiles-rename.md).
+
 ## v0.8.0 — 2026-09-12
 
 ### Added
@@ -108,7 +113,7 @@ All notable changes to **c0wrk**. Dates follow the tag date.
 - **Terminal environment configuration** — every embedded terminal shell gets `TERM_PROGRAM=c0wrk` so rc files can detect the in-app terminal and skip behaviors like tmux auto-attach, and a new `terminal.env` config section defines extra environment variables with `${VAR}` expansion. See [ADR-029](./specs/decisions/029-terminal-env-conventions.md).
 - **Vector-index tuning knobs** — `vector_index` gains `embedding_batch_size`, `prep_workers`, `debounce_ms`, `chunk_overlap`, and `search_wait_timeout_ms`, all defaulting to the historical values. Indexing is faster (batched embedding, parallel file preparation, a stat-based skip for unchanged files), search readiness waits are bounded instead of blocking on a stuck index, and chunker-config changes re-index affected files automatically.
 - **Session-pinned safety judge** — each session's Smart Approve judge is bound to that session's own provider/model instead of the global default, so a default-model change can no longer strand a session's judge on a foreign or unreachable provider (which fail-safed into confirmation floods). See [ADR-028](./specs/decisions/028-session-pinned-judge.md).
-- **Small-LLM profile retune** — a new `presence_penalty` sampling knob (validated [0, 2], inherit-by-default), an unset `reasoning_effort` now seeds "medium" (cutting thinking-token spend 60–90% on qwen thinking models), and the context variant's output reserve default rises to 16384. Every default is backed by an [external-evidence review](./docs/development/slm-defaults-research.md).
+- **Small-LLM profile retune** — a new `presence_penalty` sampling knob (validated [0, 2], inherit-by-default), an unset `reasoning_effort` now seeds "medium" (cutting thinking-token spend 60–90% on qwen thinking models), and the context variant's output reserve default rises to 16384. Every default is backed by an [external-evidence review](./docs/development/model-profiles-defaults-research.md).
 - **Per-session input state** — chat drafts, staged attachments, and optimize/send errors are keyed by session, and the git commit box by project: text typed in one session no longer vanishes — or lands in another — on a switch.
 - **Optimistic attachment chips** — staging an attachment (picker, drop, paste) shows a cancellable spinner chip immediately instead of waiting silently for the backend conversion.
 - **Themable settings comboboxes** — native `<select>` popups are replaced by a design-token combobox that renders correctly on every platform and inside modal dialogs.

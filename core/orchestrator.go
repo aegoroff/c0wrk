@@ -19,8 +19,8 @@ import (
 
 	"github.com/v0lka/c0wrk/core/goal"
 	"github.com/v0lka/c0wrk/core/markitdown"
+	"github.com/v0lka/c0wrk/core/modelprofiles"
 	"github.com/v0lka/c0wrk/core/research"
-	"github.com/v0lka/c0wrk/core/slm"
 	"github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
 	"github.com/v0lka/sp4rk/agent/reflector"
@@ -114,9 +114,9 @@ type injectionDefenseKeyType struct{}
 // whether to include the injection defense prompt text.
 var InjectionDefenseKey = injectionDefenseKeyType{}
 
-// slmPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
+// modelProfilesPromptProfile carries the model-profile SystemPrompt sub-toggle flags
 // from prepareRequestContext to buildSystemPromptWith. It is stored under
-// SLMLiteKey (a presence flag, like PlanModeKey): when present AND Lite
+// ModelProfilesLiteKey (a presence flag, like PlanModeKey): when present AND Lite
 // is set, buildSystemPromptWith swaps the verbose OrchestratorSystem core
 // directive for the compact OrchestratorSystemLite directive, and
 // conditionally appends the reasoning scaffold (ReasoningScaffold) and the
@@ -124,55 +124,55 @@ var InjectionDefenseKey = injectionDefenseKeyType{}
 // only honored when Lite is active, since both are tailored to the lite
 // directive's style. The injection-defense and verification sections are
 // appended UNCHANGED in both modes (strict constraint).
-type slmPromptProfile struct {
+type modelProfilesPromptProfile struct {
 	Lite              bool
 	FewShot           bool
 	ReasoningScaffold bool
 }
 
-// slmLiteKeyType is the context key for the small-LLM SystemPrompt
+// modelProfilesLiteKeyType is the context key for the model-profile SystemPrompt
 // profile. Its presence signals the variant is active; the carried value is a
-// slmPromptProfile with the sub-toggle flags.
-type slmLiteKeyType struct{}
+// modelProfilesPromptProfile with the sub-toggle flags.
+type modelProfilesLiteKeyType struct{}
 
-// SLMLiteKey is the context key signaling the small-LLM lite prompt profile.
-var SLMLiteKey = slmLiteKeyType{}
+// ModelProfilesLiteKey is the context key signaling the model-profile lite prompt profile.
+var ModelProfilesLiteKey = modelProfilesLiteKeyType{}
 
-// WithSLMLite returns a context carrying SLMLiteKey with the full
+// WithModelProfilesLite returns a context carrying ModelProfilesLiteKey with the full
 // profile (lite directive + few-shot examples + reasoning scaffold). It is a
-// test/fixture convenience; production wiring uses withSLMPromptProfile
+// test/fixture convenience; production wiring uses withModelProfilesPromptProfile
 // to carry the actual config-derived flags.
-func WithSLMLite(ctx context.Context) context.Context {
-	return withSLMPromptProfile(ctx, slmPromptProfile{
+func WithModelProfilesLite(ctx context.Context) context.Context {
+	return withModelProfilesPromptProfile(ctx, modelProfilesPromptProfile{
 		Lite:              true,
 		FewShot:           true,
 		ReasoningScaffold: true,
 	})
 }
 
-// withSLMPromptProfile returns a context carrying the small-LLM prompt
-// profile under SLMLiteKey. This is the production entry point used by
+// withModelProfilesPromptProfile returns a context carrying the model-profile prompt
+// profile under ModelProfilesLiteKey. This is the production entry point used by
 // prepareRequestContext; it carries the config-derived sub-toggle flags so
 // buildSystemPromptWith can gate the lite directive, few-shot examples, and
 // reasoning scaffold independently.
-func withSLMPromptProfile(ctx context.Context, p slmPromptProfile) context.Context {
-	return context.WithValue(ctx, SLMLiteKey, p)
+func withModelProfilesPromptProfile(ctx context.Context, p modelProfilesPromptProfile) context.Context {
+	return context.WithValue(ctx, ModelProfilesLiteKey, p)
 }
 
-// slmLiteFromCtx reports whether the small-LLM lite prompt profile is
+// modelProfilesLiteFromCtx reports whether the model-profile lite prompt profile is
 // active for this run (the variant is enabled and Lite is on). Used by
 // buildSystemPromptWith to decide whether to swap in the compact
 // OrchestratorSystemLite directive.
-func slmLiteFromCtx(ctx context.Context) bool {
-	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
+func modelProfilesLiteFromCtx(ctx context.Context) bool {
+	p, ok := ctx.Value(ModelProfilesLiteKey).(modelProfilesPromptProfile)
 	return ok && p.Lite
 }
 
-// slmPromptProfileFromCtx returns the carried small-LLM prompt profile
+// modelProfilesPromptProfileFromCtx returns the carried model-profile prompt profile
 // and whether one is present. Used by buildSystemPromptWith to read the
 // FewShot and ReasoningScaffold sub-toggle flags.
-func slmPromptProfileFromCtx(ctx context.Context) (slmPromptProfile, bool) {
-	p, ok := ctx.Value(SLMLiteKey).(slmPromptProfile)
+func modelProfilesPromptProfileFromCtx(ctx context.Context) (modelProfilesPromptProfile, bool) {
+	p, ok := ctx.Value(ModelProfilesLiteKey).(modelProfilesPromptProfile)
 	return p, ok
 }
 
@@ -184,7 +184,7 @@ type OrchestratorConfig struct {
 	MaxDependencyContextChars int    // max chars for dependency context in delegation tasks (default: 8000)
 	Model                     string // active model name for ModelRegistry.Resolve()
 
-	// Compaction carries the full executor compaction settings (Small-LLM
+	// Compaction carries the full executor compaction settings (Model Profiles
 	// context-management overrides already applied by the builder). It feeds
 	// manual conversation-history compaction (CompactConversationHistory);
 	// the per-executor strategies are built from the same values inside
@@ -233,12 +233,12 @@ type OrchestratorConfig struct {
 	// disables it so the loop relies solely on the agent's own verdict.
 	GoalLoop GoalLoopSettings
 
-	// SLM holds the small-LLM optimization settings. When Enabled, the
+	// ModelProfiles holds the model-profile optimization settings. When Enabled, the
 	// profile activates variant behaviors (essential-tools narrowing, prompt
 	// lite swap, loop hardening, sampling) — each variant independently gated
 	// by BOTH the master Enabled toggle and its own sub-toggle
 	// (defense-in-depth). Inert when the master toggle is disabled.
-	SLM SLMSettings
+	ModelProfiles ModelProfilesSettings
 
 	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
 	// the effective availability of the mode (experimental.enabled, mapped by
@@ -262,31 +262,31 @@ type GoalLoopSettings struct {
 	Verification string
 }
 
-// SLMSettings is the runtime mirror of BuilderSLMConfig, carrying
-// the small-LLM variant configuration to the orchestrator. The master Enabled
+// ModelProfilesSettings is the runtime mirror of BuilderModelProfilesConfig, carrying
+// the model-profile variant configuration to the orchestrator. The master Enabled
 // toggle gates every variant (defense-in-depth): when false, no variant
 // activates regardless of its sub-toggle.
-type SLMSettings struct {
+type ModelProfilesSettings struct {
 	Enabled        bool
-	EssentialTools SLMEssentialSettings
-	SystemPrompt   SLMSystemPromptSettings
+	EssentialTools ModelProfilesEssentialSettings
+	SystemPrompt   ModelProfilesSystemPromptSettings
 	// LoopHardening carries the circuit-breaker tightening overrides. The
 	// executor applies them to its circuit breaker at builder level; the E2S
 	// loop (which has no executor) applies the RepeatNudgeThreshold override
 	// to its anti-spin nudge — the same concept under the same profile gate.
-	LoopHardening SLMLoopHardeningSettings
+	LoopHardening ModelProfilesLoopHardeningSettings
 }
 
-// SLMLoopHardeningSettings is the orchestrator-level projection of the
+// ModelProfilesLoopHardeningSettings is the orchestrator-level projection of the
 // loop-hardening thresholds the E2S path consumes. Zero values mean "keep
 // the configured/baseline threshold" (mirroring applyLoopHardening).
-type SLMLoopHardeningSettings struct {
+type ModelProfilesLoopHardeningSettings struct {
 	Enabled              bool
 	RepeatNudgeThreshold int
 }
 
-// SLMEssentialSettings holds the always-present tool-set narrowing settings.
-type SLMEssentialSettings struct {
+// ModelProfilesEssentialSettings holds the always-present tool-set narrowing settings.
+type ModelProfilesEssentialSettings struct {
 	Enabled bool
 	// AlwaysPresent is the user-pinned list of tool names always exposed when
 	// this variant is active, regardless of routing. Protected orchestration
@@ -299,12 +299,12 @@ type SLMEssentialSettings struct {
 	CompactDescriptions bool
 }
 
-// SLMSystemPromptSettings holds the prompt-simplification variant
+// ModelProfilesSystemPromptSettings holds the prompt-simplification variant
 // settings. Lite is the variant master toggle (there is no separate Enabled —
 // it mirrors config.SystemPromptConfig, where Lite itself gates the variant).
 // FewShot and ReasoningScaffold are independent sub-toggles only honored when
 // Lite is active.
-type SLMSystemPromptSettings struct {
+type ModelProfilesSystemPromptSettings struct {
 	Lite bool
 	// FewShot appends the worked-example ReAct block (requires Lite).
 	FewShot bool
@@ -369,6 +369,18 @@ type Orchestrator struct {
 	// pointer is swapped atomically so a toggle is safe against an in-flight
 	// HandleMessage / E2S loop.
 	e2sSettingsOverride atomic.Pointer[E2SSettings]
+
+	// modelProfilesSettingsOverride, when set, supersedes config.ModelProfiles for the effective
+	// model-profile settings. config is immutable after Build, so a runtime ModelProfiles
+	// change (master toggle, profile switch, essential-tools variant flip —
+	// all reach the app through applyModelProfilesChange / UpdateExperimentalFeatures)
+	// cannot mutate it directly: it stores the refreshed settings here via
+	// SetModelProfilesSettings and every reader goes through modelProfilesSettings(). Without
+	// this, an already-built orchestrator would keep the stale build-time
+	// snapshot until an app restart — the exact problem SetE2SSettings solves
+	// for the E2S gate. The pointer is swapped atomically so a toggle is safe
+	// against an in-flight HandleMessage / Resume.
+	modelProfilesSettingsOverride atomic.Pointer[ModelProfilesSettings]
 
 	// historyMu guards conversationHistory against cross-goroutine access.
 	// Writers run on the request goroutine (the recordConversationOutcome /
@@ -1113,6 +1125,19 @@ func (o *Orchestrator) logDebug(msg string, args ...any) {
 func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, routing *router.RoutingDecision, plansDir string, resumeSteps []agent.Step, goalState *goal.GoalState, nudge string) (result *HandleResult, err error) {
 	o.logDebug("orchestrator: resume started", "resumeSteps", len(resumeSteps), "nudge", nudge != "")
 
+	// Model Profiles goal guard on the resume path: a paused non-terminal goal must
+	// not re-enter the goal loop while the essential-tools narrowing is active
+	// (see ErrGoalBlockedByModelProfiles). Mirrors HandleMessage's goal branch for
+	// resumed goals. Checked before ANY side effect — including the auto-resume
+	// wave below (resumePausedWork), which otherwise relaunches paused delegates
+	// and plan steps — so a direct Resume caller hits the same wall the API
+	// enforces earlier (see FrontendAPI.goalResumeBlockedByModelProfiles and
+	// Manager.ResumeTask). Plain and E2S resumes carry a nil/terminal goalState
+	// and are unaffected.
+	if goalState != nil && !goalState.Status.IsTerminal() && o.modelProfilesEssentialToolsEnabled() {
+		return nil, ErrGoalBlockedByModelProfiles
+	}
+
 	// One-shot resume-compaction request: when the user selected a compaction
 	// strategy for this resume (manual compaction of a paused task), the
 	// backend armed it via RequestResumeCompaction before re-entering here.
@@ -1147,6 +1172,13 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	// conversion, so a model switched while the task was paused applies to
 	// documents read after resume. Nil-safe no-op.
 	ctx = markitdown.WithVisionResolver(ctx, o.visionResolver)
+
+	// Model Profiles prompt profile on the resume path, mirroring
+	// prepareRequestContext. Without this the resumed run — including a
+	// resumed goal's independent verifier, a specialized pass assembled by
+	// buildSpecializedSystemPromptWithLite — would miss the Lite swap the
+	// fresh path applied (see applyModelProfilesPromptProfile).
+	ctx = o.applyModelProfilesPromptProfile(ctx)
 
 	// Wire emitter into restored PersistentBlackboard so persistence warnings
 	// are surfaced to the user (the backend creates the BB without an emitter).
@@ -2243,6 +2275,27 @@ func (o *Orchestrator) e2sSettings() E2SSettings {
 	return o.config.E2S
 }
 
+// SetModelProfilesSettings replaces the effective model-profile settings. It exists for
+// runtime config changes (the master toggle, a profile switch, or the
+// essential-tools variant flip) that must reach orchestrators built before
+// the change: OrchestratorConfig is immutable after Build, so the refreshed
+// settings are stored in an atomic override (modelProfilesSettingsOverride) that
+// modelProfilesSettings reads. Mirrors SetE2SSettings. It is safe to call while a task
+// runs — the override is swapped atomically and read once per request.
+func (o *Orchestrator) SetModelProfilesSettings(settings ModelProfilesSettings) {
+	o.modelProfilesSettingsOverride.Store(&settings)
+}
+
+// modelProfilesSettings returns the effective model-profile settings: the runtime override
+// when a config change has refreshed them, otherwise the build-time config
+// snapshot.
+func (o *Orchestrator) modelProfilesSettings() ModelProfilesSettings {
+	if p := o.modelProfilesSettingsOverride.Load(); p != nil {
+		return *p
+	}
+	return o.config.ModelProfiles
+}
+
 // ApplyRequestOverrides applies per-request model and reasoning-effort
 // overrides to all LLM-calling components (router, reflector, the direct LLM
 // caller, and config.Model for metadata resolution). It is the shared step 0
@@ -2723,6 +2776,20 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// blackboard is restored and the agent runs the goal loop on the inherited
 	// facts/history, deriving a fresh goal from the new message.
 	if opts.Goal {
+		// Goal mode is refused while the Model Profiles essential-tools narrowing is
+		// active. The narrowing is applied only on the non-goal Conductor path
+		// and the E2S branch — both run after this early return — so it never
+		// narrows a goal run today; the two are declared mutually exclusive so
+		// the toggle cannot be a silent no-op in goal mode. If the narrowing
+		// were ever applied to a goal run it would hide the goal-loop tooling
+		// (propose_goal, declare_goal_status, declare_verification) and make
+		// the loop unrunnable. Refuse BEFORE the continuation reactivation
+		// side effect. The frontend API and the session manager reject this
+		// even earlier with a user-facing message; the sentinel keeps the
+		// invariant for direct callers.
+		if o.modelProfilesEssentialToolsEnabled() {
+			return nil, ErrGoalBlockedByModelProfiles
+		}
 		// Commit point for a goal continuation: the restored task is
 		// reactivated only now (see reactivateContinuationTask) — a failure
 		// before this point (e.g. blackboard restore) leaves the anchor's
@@ -2773,7 +2840,7 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		pbb.SetRouting(routing)
 	}
 
-	// Small-LLM essential-tools filter: when enabled, narrow the conductor's
+	// Model Profiles essential-tools filter: when enabled, narrow the conductor's
 	// tool set ONCE here (before the ReAct loop starts) to reduce per-prompt
 	// schema overhead. Goal mode is the only documented exception: it returns
 	// early above (runGoalLoop), before this point, so the goal-mode tool set
@@ -2789,7 +2856,7 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// directive — the delegate tool must survive narrowing or the directive
 	// would reference a tool the model cannot call. Without mentions the
 	// helper returns nil and the filter behaves exactly as before.
-	availableTools = o.applySLMToolFilter(availableTools, slmAgentGuaranteedTools(ctx)...)
+	availableTools = o.applyModelProfilesToolFilter(availableTools, modelProfilesAgentGuaranteedTools(ctx)...)
 
 	// Truncate conversation history to the configured window so long
 	// sessions don't overflow the Conductor's context. The most recent
@@ -2852,11 +2919,11 @@ func (o *Orchestrator) disabledToolNames() map[string]bool {
 
 // delegateToolName is the conductor-only delegation channel. It is normally a
 // narrowable orchestration tool, but becomes turn-scoped guaranteed whenever
-// the user explicitly requested subagents (see slmAgentGuaranteedTools).
+// the user explicitly requested subagents (see modelProfilesAgentGuaranteedTools).
 const delegateToolName = "delegate"
 
-// slmAgentGuaranteedTools returns the extra tool names that must join the
-// small-LLM guaranteed set for THIS turn, derived from the request context
+// modelProfilesAgentGuaranteedTools returns the extra tool names that must join the
+// model-profile guaranteed set for THIS turn, derived from the request context
 // populated by enrichAgentContext. When the user explicitly requested
 // subagents (#agent mentions → WithUserAgents), the Conductor's system prompt
 // renders a "## Requested Subagents" directive instructing it to delegate —
@@ -2865,15 +2932,15 @@ const delegateToolName = "delegate"
 // the MCP-sourced class: without an explicit request the helper returns nil
 // and delegate keeps its default semantics (a conductor-only tool excluded
 // by the narrowing). Static config validation is unaffected.
-func slmAgentGuaranteedTools(ctx context.Context) []string {
+func modelProfilesAgentGuaranteedTools(ctx context.Context) []string {
 	if len(UserAgentsFromContext(ctx)) > 0 {
 		return []string{delegateToolName}
 	}
 	return nil
 }
 
-// applySLMToolFilter narrows the conductor's available-tool set when the
-// small-LLM profile is active. It delegates to slm.SelectTools, which
+// applyModelProfilesToolFilter narrows the conductor's available-tool set when the
+// model-profile profile is active. It delegates to modelprofiles.SelectTools, which
 // unions the user's always-present list, the protected orchestration tools
 // (finish + memory + ask_user), and every MCP-sourced tool — a static
 // selection with no quantitative budget and no router matching. It runs
@@ -2882,29 +2949,40 @@ func slmAgentGuaranteedTools(ctx context.Context) []string {
 // never narrowed (HandleMessage returns before either call site).
 //
 // The optional extraGuaranteed names are turn-scoped guaranteed tools passed
-// by the caller (see slmAgentGuaranteedTools): currently the delegate
+// by the caller (see modelProfilesAgentGuaranteedTools): currently the delegate
 // tool when the request explicitly asks for subagents. Like the MCP class,
 // the guarantee is scoped to this call and never part of static config
 // validation.
 //
 // When the profile is OFF (the default), it returns the tools untouched — zero
 // behavior change.
-func (o *Orchestrator) applySLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
-	sc := o.config.SLM
+func (o *Orchestrator) applyModelProfilesToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
+	sc := o.modelProfilesSettings()
 	// Master toggle AND the essential-tools variant must both be enabled.
 	// When either is off, return the input untouched (zero behavior change).
-	if !o.slmEssentialToolsEnabled() {
+	if !o.modelProfilesEssentialToolsEnabled() {
 		return in
 	}
 
-	filtered := slm.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
-	return slm.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
+	filtered := modelprofiles.SelectTools(in, sc.EssentialTools.AlwaysPresent, extraGuaranteed...)
+	return modelprofiles.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
 }
 
-// slmEssentialToolsEnabled reports whether the small-LLM profile's
+// modelProfilesEssentialToolsEnabled reports whether the model-profile profile's
 // essential-tools narrowing is active: master toggle AND the essential-tools
-// variant both on.
-func (o *Orchestrator) slmEssentialToolsEnabled() bool {
-	sc := o.config.SLM
+// variant both on. Reads the effective settings (the runtime override when a
+// config change refreshed them), so a runtime toggle is honored without an
+// app restart.
+func (o *Orchestrator) modelProfilesEssentialToolsEnabled() bool {
+	sc := o.modelProfilesSettings()
 	return sc.Enabled && sc.EssentialTools.Enabled
+}
+
+// ModelProfilesNarrowingEnabled is the exported accessor for modelProfilesEssentialToolsEnabled.
+// The session manager uses it to pre-check a resume against the same fresh
+// effective settings the orchestrator's goal guard reads (see
+// Manager.ResumeTask) — so the frontend API's pre-flight and the manager's
+// choke point agree with the orchestrator's invariant.
+func (o *Orchestrator) ModelProfilesNarrowingEnabled() bool {
+	return o.modelProfilesEssentialToolsEnabled()
 }

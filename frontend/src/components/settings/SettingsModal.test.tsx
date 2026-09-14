@@ -23,6 +23,7 @@ vi.mock('@/api/config', () => ({
 import { SettingsModal } from './SettingsModal'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useExperimentalStore } from '@/stores/experimentalStore'
 
 let container: HTMLDivElement
 let root: Root
@@ -297,5 +298,34 @@ describe('SettingsModal Appearance tab', () => {
     expect(content).not.toBeNull()
     expect(content!.className).toContain('custom-scrollbar')
     expect(content!.className).toContain('pr-2')
+  })
+})
+
+describe('SettingsModal Model Profiles tab (independent of the experimental switch)', () => {
+  /** Tab labels in the settings tab strip, in DOM order. */
+  function tabLabels(): string[] {
+    return Array.from(
+      document.body.querySelectorAll<HTMLElement>('[data-slot="tabs-trigger"]'),
+    ).map((t) => (t.textContent ?? '').trim())
+  }
+
+  // ADR-044: the tab graduated out of the experimental gate. It must be
+  // present whether the switch is off (the state that used to hide it) or on.
+  it('always renders the Model Profiles tab, with the switch off and on', async () => {
+    await act(async () => {
+      useExperimentalStore.setState({ enabled: false, loaded: true })
+      useSettingsStore.setState({ open: true, activeTab: 'general' })
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    expect(tabLabels()).toContain('Model Profiles')
+
+    await act(async () => {
+      useExperimentalStore.setState({ enabled: true, loaded: true })
+    })
+    await flush()
+
+    expect(tabLabels()).toContain('Model Profiles')
   })
 })

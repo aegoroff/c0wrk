@@ -3,7 +3,7 @@
 //
 // The research pseudo-path (c0wrk:research) renders the ResearchWorkspace
 // unconditionally — RESEARCH is not gated on the experimental-features
-// switch (which now controls only the Small-LLM profile), so the workspace
+// switch (which now controls only the E2S execution mode), so the workspace
 // must render even while that switch is off.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'

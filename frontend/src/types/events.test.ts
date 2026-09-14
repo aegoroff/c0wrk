@@ -64,7 +64,7 @@ describe('isAgentMetricsData', () => {
         steps: 12,
         output_tokens: 3400,
         invalid_tool_calls: 2,
-        slm: { enabled: true, variants: ['essential_tools', 'sampling'] },
+        model_profiles: { enabled: true, variants: ['essential_tools', 'sampling'] },
     }
 
     it('accepts a valid payload', () => {
@@ -72,17 +72,17 @@ describe('isAgentMetricsData', () => {
     })
 
     it('accepts a payload with an empty variants array (profile off)', () => {
-        expect(isAgentMetricsData({ ...valid, slm: { enabled: false, variants: [] } })).toBe(true)
+        expect(isAgentMetricsData({ ...valid, model_profiles: { enabled: false, variants: [] } })).toBe(true)
     })
 
     it('accepts a payload carrying the active profile identity', () => {
-        expect(isAgentMetricsData({ ...valid, slm: { enabled: true, profile: 'qwen3.8-27b', profile_kind: 'predefined', variants: [] } })).toBe(true)
-        expect(isAgentMetricsData({ ...valid, slm: { enabled: true, profile: 'my-tuned', profile_kind: 'custom', variants: ['sampling'] } })).toBe(true)
+        expect(isAgentMetricsData({ ...valid, model_profiles: { enabled: true, profile: 'qwen3.8-27b', profile_kind: 'predefined', variants: [] } })).toBe(true)
+        expect(isAgentMetricsData({ ...valid, model_profiles: { enabled: true, profile: 'my-tuned', profile_kind: 'custom', variants: ['sampling'] } })).toBe(true)
     })
 
     it('rejects malformed profile identity fields', () => {
-        expect(isAgentMetricsData({ ...valid, slm: { ...valid.slm, profile: 42 } })).toBe(false)
-        expect(isAgentMetricsData({ ...valid, slm: { ...valid.slm, profile_kind: 'builtin' } })).toBe(false)
+        expect(isAgentMetricsData({ ...valid, model_profiles: { ...valid.model_profiles, profile: 42 } })).toBe(false)
+        expect(isAgentMetricsData({ ...valid, model_profiles: { ...valid.model_profiles, profile_kind: 'builtin' } })).toBe(false)
     })
 
     it('rejects null/undefined/string', () => {
@@ -111,19 +111,19 @@ describe('isAgentMetricsData', () => {
         expect(isAgentMetricsData({ ...valid, invalid_tool_calls: undefined })).toBe(false)
     })
 
-    it('rejects malformed slm block', () => {
-        expect(isAgentMetricsData({ ...valid, slm: { enabled: 'yes' } })).toBe(false)
-        expect(isAgentMetricsData({ ...valid, slm: undefined })).toBe(false)
+    it('rejects malformed model_profiles block', () => {
+        expect(isAgentMetricsData({ ...valid, model_profiles: { enabled: 'yes' } })).toBe(false)
+        expect(isAgentMetricsData({ ...valid, model_profiles: undefined })).toBe(false)
     })
 
     it('accepts the pre-rename small_llm container key (legacy persisted rows)', () => {
-        const { slm, ...rest } = valid
-        expect(isAgentMetricsData({ ...rest, small_llm: slm })).toBe(true)
+        const { model_profiles, ...rest } = valid
+        expect(isAgentMetricsData({ ...rest, small_llm: model_profiles })).toBe(true)
     })
 
-    it('prefers the current slm key when both keys are present', () => {
-        const { slm, ...rest } = valid
-        expect(isAgentMetricsData({ ...rest, slm, small_llm: { enabled: 'yes' } })).toBe(true)
+    it('prefers the current model_profiles key when both keys are present', () => {
+        const { model_profiles, ...rest } = valid
+        expect(isAgentMetricsData({ ...rest, model_profiles, small_llm: { enabled: 'yes' } })).toBe(true)
     })
 })
 
@@ -136,7 +136,7 @@ describe('normalizeAgentMetricsData', () => {
         steps: 12,
         output_tokens: 3400,
         invalid_tool_calls: 2,
-        slm: { enabled: true, variants: ['essential_tools', 'sampling'] },
+        model_profiles: { enabled: true, variants: ['essential_tools', 'sampling'] },
     }
 
     it('returns the payload unchanged when all fields are present', () => {
@@ -165,16 +165,16 @@ describe('normalizeAgentMetricsData', () => {
     })
 
     it('carries well-formed profile identity fields through', () => {
-        const withProfile = { ...full, slm: { enabled: true, profile: 'my-tuned', profile_kind: 'custom', variants: full.slm.variants } }
+        const withProfile = { ...full, model_profiles: { enabled: true, profile: 'my-tuned', profile_kind: 'custom', variants: full.model_profiles.variants } }
         expect(normalizeAgentMetricsData(withProfile)).toEqual(withProfile)
     })
 
     it('drops malformed profile identity fields instead of failing the row', () => {
-        const malformed = { ...full, slm: { enabled: true, profile: 42, profile_kind: 'builtin', variants: full.slm.variants } }
+        const malformed = { ...full, model_profiles: { enabled: true, profile: 42, profile_kind: 'builtin', variants: full.model_profiles.variants } }
         const got = normalizeAgentMetricsData(malformed)
-        expect(got?.slm.profile).toBeUndefined()
-        expect(got?.slm.profile_kind).toBeUndefined()
-        expect(got?.slm.enabled).toBe(true)
+        expect(got?.model_profiles.profile).toBeUndefined()
+        expect(got?.model_profiles.profile_kind).toBeUndefined()
+        expect(got?.model_profiles.enabled).toBe(true)
         expect(got?.steps).toBe(full.steps)
     })
 
@@ -186,11 +186,11 @@ describe('normalizeAgentMetricsData', () => {
     })
 
     it('normalizes a legacy row that still uses the small_llm container key', () => {
-        const { slm, ...rest } = full
-        const legacy = { ...rest, small_llm: slm }
+        const { model_profiles, ...rest } = full
+        const legacy = { ...rest, small_llm: model_profiles }
         const got = normalizeAgentMetricsData(legacy)
         expect(got).toBeDefined()
-        expect(got?.slm).toEqual({ enabled: true, variants: full.slm.variants })
+        expect(got?.model_profiles).toEqual({ enabled: true, variants: full.model_profiles.variants })
         expect(got?.steps).toBe(full.steps)
     })
 })

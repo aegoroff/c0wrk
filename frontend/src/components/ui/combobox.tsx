@@ -162,7 +162,7 @@ export function Combobox({
                 align="start"
                 sideOffset={6}
                 collisionPadding={16}
-                // Full registry descriptions (the Small-LLM picker) can run to
+                // Full registry descriptions (the Model Profiles picker) can run to
                 // several hundred characters; without a cap the body-portaled
                 // tooltip is simply clipped by the window and the tail becomes
                 // unreadable. Cap and scroll it like every other long-content

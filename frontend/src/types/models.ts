@@ -396,12 +396,28 @@ export interface ConfigResponse {
   proxy: ProxySettingsResponse
   /** Optional to keep existing typed mocks/test fixtures compatible. */
   experimental?: ConfigExperimentalResponse
+  /**
+   * Effective (resolved) Model Profiles profile gate. Optional so existing typed
+   * mocks/test fixtures — which predate the field — stay compatible; a payload
+   * without it is treated as "ModelProfiles off".
+   */
+  model_profiles?: ConfigModelProfilesResponse
 }
 
-/** Master experimental-features switch (all-or-nothing). It is also the sole
- *  availability gate for the E2S execution mode. */
+/** Experimental-features switch (all-or-nothing). Its sole availability gate is
+ *  the E2S execution mode; Model Profiles is NOT gated by this switch. */
 export interface ConfigExperimentalResponse {
   enabled: boolean
+}
+
+/** Effective (resolved) Model Profiles profile state exposed by GetConfig — mirrors
+ *  the backend's ModelProfilesSettingsResponse, NOT the raw persisted `model_profiles:` section.
+ *  `enabled` is the resolved master toggle (config `model_profiles.enabled`);
+ *  `essential_tools_enabled` is the resolved essential-tools
+ *  variant sub-toggle. Both are false when the config is not yet loaded. */
+export interface ConfigModelProfilesResponse {
+  enabled: boolean
+  essential_tools_enabled: boolean
 }
 
 export interface ProviderConfigRequest {
@@ -518,27 +534,27 @@ export interface SecuritySettingsResponse {
   execute_blacklist_defaults?: string[]
 }
 
-// --- Small LLM profiles ---
-// Wire types for the profile CRUD API (GetSLMProfiles / CreateSLMProfile /
-// UpdateSLMProfile / DeleteSLMProfile / SelectSLMProfile). The SLMEssentialTools /
-// SLMSystemPrompt / SLMSampling / SLMLoopHardening / SLMContext interfaces below
+// --- Model Profiles profiles ---
+// Wire types for the profile CRUD API (GetModelProfiles / CreateModelProfile /
+// UpdateModelProfile / DeleteModelProfile / SelectModelProfile). The ModelProfilesEssentialTools /
+// ModelProfilesSystemPrompt / ModelProfilesSampling / ModelProfilesLoopHardening / ModelProfilesContext interfaces below
 // double as the form views used by the settings sections.
 
 /** One pin-able built-in tool with its registry description (tooltip text). */
-export interface SLMBuiltinTool {
+export interface ModelProfilesBuiltinTool {
   name: string
   description: string
 }
 
 /** A workflow cluster of built-in tools pinned together as one atomic entry. */
-export interface SLMToolGroup {
+export interface ModelProfilesToolGroup {
   id: string
   title: string
   description: string
   tools: string[]
 }
 
-export interface SLMEssentialTools {
+export interface ModelProfilesEssentialTools {
   enabled: boolean
   always_present: string[]
   /** Replace builtin tool descriptions with one-line compact variants. */
@@ -559,22 +575,22 @@ export interface SLMEssentialTools {
    * which the backend unions the protected set) before offering an entry.
    * Ignored on write.
    */
-  builtin_tools: SLMBuiltinTool[]
+  builtin_tools: ModelProfilesBuiltinTool[]
   /**
    * Read-only: workflow clusters (plan, subagents) whose members are pinned
    * together. The picker offers each as one atomic entry and renders the
    * cluster description + member list in its hover tooltip; ignored on write.
    */
-  tool_groups: SLMToolGroup[]
+  tool_groups: ModelProfilesToolGroup[]
 }
 
-export interface SLMSystemPrompt {
+export interface ModelProfilesSystemPrompt {
   lite: boolean
   few_shot: boolean
   reasoning_scaffold: boolean
 }
 
-export interface SLMSampling {
+export interface ModelProfilesSampling {
   enabled: boolean
   temperature: number
   top_p: number
@@ -585,7 +601,7 @@ export interface SLMSampling {
   reasoning_effort: string
 }
 
-export interface SLMLoopHardening {
+export interface ModelProfilesLoopHardening {
   enabled: boolean
   repeat_nudge_threshold: number
   parse_error_abort_threshold: number
@@ -595,7 +611,7 @@ export interface SLMLoopHardening {
 }
 
 /** Context-management variant: aggressive compaction/pruning/reserve tuning. */
-export interface SLMContext {
+export interface ModelProfilesContext {
   enabled: boolean
   compaction: {
     keep_last: number
@@ -607,52 +623,52 @@ export interface SLMContext {
 }
 
 /** Profile origin: shipped catalog entries are read-only, custom ones are user-created. */
-export type SLMProfileKind = 'predefined' | 'custom'
+export type ModelProfileKind = 'predefined' | 'custom'
 
 /** One catalog profile: stable id, display name, kind, and the 25 knob values. */
-export interface SLMProfile {
+export interface ModelProfile {
   id: string
   name: string
-  kind: SLMProfileKind
-  values: SLMProfileValues
+  kind: ModelProfileKind
+  values: ModelProfileValues
 }
 
-/** The 25 knob values of one profile (the master enabled toggle is config.yaml's slm.enabled, not a profile value). */
-export interface SLMProfileValues {
-  essential_tools: SLMEssentialToolsValues
-  system_prompt: SLMSystemPrompt
-  sampling: SLMSampling
-  loop_hardening: SLMLoopHardening
-  context: SLMContext
+/** The 25 knob values of one profile (the master enabled toggle is config.yaml's model_profiles.enabled, not a profile value). */
+export interface ModelProfileValues {
+  essential_tools: ModelProfilesEssentialToolsValues
+  system_prompt: ModelProfilesSystemPrompt
+  sampling: ModelProfilesSampling
+  loop_hardening: ModelProfilesLoopHardening
+  context: ModelProfilesContext
 }
 
-/** Value part of the always-present variant (the picker universe lives on SLMProfilesResponse). */
-export interface SLMEssentialToolsValues {
+/** Value part of the always-present variant (the picker universe lives on ModelProfilesResponse). */
+export interface ModelProfilesEssentialToolsValues {
   enabled: boolean
   always_present: string[]
   compact_descriptions: boolean
 }
 
-/** Partial update for updateSLMProfile: absent fields keep their stored value. */
-export interface SLMProfileUpdateRequest {
+/** Partial update for updateModelProfile: absent fields keep their stored value. */
+export interface ModelProfileUpdateRequest {
   name?: string
-  config?: SLMProfileValues
+  config?: ModelProfileValues
 }
 
-/** The profile catalog view returned by GetSLMProfiles. */
-export interface SLMProfilesResponse {
-  /** Master Small-LLM toggle (config.yaml slm.enabled) reported verbatim — it
+/** The profile catalog view returned by GetModelProfiles. */
+export interface ModelProfilesResponse {
+  /** Master Model Profiles toggle (config.yaml model_profiles.enabled) reported verbatim — it
    *  is NOT a value of any profile. False when config is not yet initialized. */
   enabled: boolean
-  profiles: SLMProfile[]
+  profiles: ModelProfile[]
   /** Stored active profile id (verbatim, may dangle; warnings explain the fallback). */
   active_id: string
   /** Normalized default-model match against the predefined slugs; null when nothing matches. */
   suggested_profile_id: string | null
   /** Read-only picker universe (every registered built-in that is neither MCP-sourced nor goal-mode-only), sorted by name. */
-  builtin_tools: SLMBuiltinTool[]
+  builtin_tools: ModelProfilesBuiltinTool[]
   /** Workflow clusters offered as atomic picker entries. */
-  tool_groups: SLMToolGroup[]
+  tool_groups: ModelProfilesToolGroup[]
   /** Orchestration tools the backend always keeps (rendered as locked chips). */
   protected_tools: string[]
   /** Store/resolver warnings plus one-shot notices. */

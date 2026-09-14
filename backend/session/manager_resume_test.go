@@ -12,6 +12,7 @@ import (
 
 	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/e2s"
+	"github.com/v0lka/c0wrk/core/goal"
 	"github.com/v0lka/c0wrk/core/prompts"
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/agent"
@@ -81,6 +82,7 @@ type resumeTaskStore struct {
 	mu              sync.Mutex
 	task            *TaskRecord
 	trajectory      json.RawMessage
+	goalState       json.RawMessage
 	loadTrajCalls   int
 	completedCalls  int
 	reactivateCalls int
@@ -109,11 +111,20 @@ func (s *resumeTaskStore) LoadTask(_ context.Context, _ string) (*TaskRecord, er
 	return &cp, nil
 }
 
+// LoadTrajectory returns the canned trajectory, or (nil, nil) when unset.
 func (s *resumeTaskStore) LoadTrajectory(_ context.Context, _ string) (json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loadTrajCalls++
 	return s.trajectory, nil
+}
+
+// LoadGoalState returns the canned goal-loop state, or (nil, nil) when unset —
+// the adapter treats that as "no goal" (a plain resume).
+func (s *resumeTaskStore) LoadGoalState(_ context.Context, _ string) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.goalState, nil
 }
 
 func (s *resumeTaskStore) CompleteTask(_ context.Context, _, _ string, _ int) error {
@@ -764,6 +775,110 @@ func TestManager_ResumeTask_ArchivedRejected(t *testing.T) {
 	store.mu.Unlock()
 	if loads != 0 {
 		t.Errorf("ResumeTask should not consult the task store for an archived session, loadTrajCalls=%d", loads)
+	}
+}
+
+// TestResumeTask_PausedGoalBlockedByModelProfilesNarrowing verifies the manager-level
+// choke point for the paused-goal × narrowing exclusion: resuming a paused
+// non-terminal goal while the Model Profiles essential-tools narrowing is active is
+// refused with core.ErrGoalBlockedByModelProfiles BEFORE any side effect — so the task row
+// stays 'paused' (never flipped to in_progress) and the session is not
+// activated. This is what keeps a later plain message on the nudge-resume path
+// instead of degrading into a plain continuation with the goal tools stripped.
+func TestResumeTask_PausedGoalBlockedByModelProfilesNarrowing(t *testing.T) {
+	gsJSON, err := json.Marshal(&goal.GoalState{
+		Condition:    "ship the feature",
+		VerifyClause: "go test ./...",
+		Status:       goal.StatusActive,
+		CreatedAt:    time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("marshal goal state: %v", err)
+	}
+	store := &resumeTaskStore{
+		task:      &TaskRecord{ID: "task-goal-guard", SessionID: "ignored", OriginalRequest: "goal", Status: "paused"},
+		goalState: gsJSON,
+	}
+	eventChan := make(chan Event, 100)
+	mgr := NewManager(functionalOrchestratorFactory(&finishLLM{answer: "should-not-run"}), func(e Event) { eventChan <- e }, t.TempDir())
+	t.Cleanup(mgr.Shutdown) // close handles before TempDir cleanup (Windows)
+	mgr.SetTaskStore(store)
+
+	info, err := mgr.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	store.mu.Lock()
+	store.task.SessionID = info.ID
+	store.mu.Unlock()
+
+	sess, ok := mgr.GetSession(info.ID)
+	if !ok || sess == nil || sess.orchestrator == nil {
+		t.Fatal("session/orchestrator not available after CreateSession")
+	}
+	// Arm the narrowing on the live orchestrator — the runtime path that
+	// SetModelProfilesSettings represents (a settings toggle), leaving the persisted goal
+	// row non-terminal.
+	sess.orchestrator.SetModelProfilesSettings(core.ModelProfilesSettings{Enabled: true, EssentialTools: core.ModelProfilesEssentialSettings{Enabled: true}})
+	drainEvents(eventChan)
+
+	if err = mgr.ResumeTask(context.Background(), info.ID, "", "", ""); !errors.Is(err, core.ErrGoalBlockedByModelProfiles) {
+		t.Fatalf("ResumeTask error = %v, want core.ErrGoalBlockedByModelProfiles", err)
+	}
+
+	// No side effect: the row must not have been flipped to in_progress, and the
+	// session must not be active.
+	store.mu.Lock()
+	reactivated := store.reactivateCalls
+	status := store.task.Status
+	store.mu.Unlock()
+	if reactivated != 0 {
+		t.Errorf("ReactivateTask called %d times, want 0 — the guard must precede it", reactivated)
+	}
+	if status != "paused" {
+		t.Errorf("task status = %q, want %q (a blocked resume must leave the row resumable)", status, "paused")
+	}
+	sess.mu.Lock()
+	active := sess.active
+	sess.mu.Unlock()
+	if active {
+		t.Error("session must not be activated by a blocked resume")
+	}
+	// The row still reads as a paused unfinished task, so the next plain message
+	// re-enters the nudge-resume path (not tryContinueInterruptedTask).
+	if !mgr.hasPausedUnfinishedTask(info.ID) {
+		t.Error("task should still read as a paused unfinished task after the block")
+	}
+}
+
+// TestManager_SetModelProfilesSettings_PushesToLiveOrchestrators verifies the runtime ModelProfiles
+// push (Issue 1): a live session's already-built orchestrator picks up the
+// refreshed settings, so a narrowing toggled after the session was built takes
+// effect — and is cleared again — without a rebuild.
+func TestManager_SetModelProfilesSettings_PushesToLiveOrchestrators(t *testing.T) {
+	eventChan := make(chan Event, 100)
+	mgr := NewManager(functionalOrchestratorFactory(&finishLLM{answer: "x"}), func(e Event) { eventChan <- e }, t.TempDir())
+	t.Cleanup(mgr.Shutdown)
+	info, err := mgr.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	sess, ok := mgr.GetSession(info.ID)
+	if !ok || sess.orchestrator == nil {
+		t.Fatal("session/orchestrator not available after CreateSession")
+	}
+	if sess.orchestrator.ModelProfilesNarrowingEnabled() {
+		t.Fatal("precondition: narrowing must be off at build time")
+	}
+
+	mgr.SetModelProfilesSettings(core.ModelProfilesSettings{Enabled: true, EssentialTools: core.ModelProfilesEssentialSettings{Enabled: true}})
+	if !sess.orchestrator.ModelProfilesNarrowingEnabled() {
+		t.Fatal("SetModelProfilesSettings did not reach the already-built orchestrator")
+	}
+
+	mgr.SetModelProfilesSettings(core.ModelProfilesSettings{})
+	if sess.orchestrator.ModelProfilesNarrowingEnabled() {
+		t.Fatal("SetModelProfilesSettings did not clear the narrowing on the live orchestrator")
 	}
 }
 

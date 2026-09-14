@@ -34,6 +34,7 @@ Zustand stores provide normalized, reactive state management. Each store owns on
 - `frontend/src/stores/e2sStore.ts`
 - `frontend/src/stores/researchStore.ts`
 - `frontend/src/stores/terminalRegistryStore.ts`
+- `frontend/src/stores/modelProfilesGateStore.ts`
 
 ## Store Catalog
 
@@ -63,10 +64,11 @@ Zustand stores provide normalized, reactive state management. Each store owns on
 | `themeStore`         | Active UI theme (`dark` / `light`); `setTheme` writes `<html data-theme>` instantly so the palette applies without a restart. Re-read pre-paint in `main.tsx` to avoid FOUC. | localStorage |
 | `soundStore`         | Master toggle for sound notifications; tones are synthesized in the webview via the Web Audio API (`lib/sound.ts`), so the `enabled` preference is the only persisted state | localStorage |
 | `updateStore`        | Self-update UI state machine (`phase`, release `info`, `currentVersion`, download `progress`, `errorMessage`, `isChecking`, `isDownloading`); transitions driven by `useUpdateChecker` from global `update:*` events; exposes per-primitive selector hooks (`useUpdatePhase`, `useUpdateProgress`, …). Transient — not persisted. | No           |
-| `experimentalStore`  | Master Experimental Features gate from runtime config (`experimental.enabled`) — the SOLE gate for the Small-LLM profile (its settings tab hides when off) and the E2S execution mode (its per-message toolbar toggle hides when off); `lib/e2sGate.ts` composes this switch with the armed toggle for the fail-closed E2S send gate. The `enabled` switch is loaded from `GetConfig`, retried on `backend:ready`/`config:updated` until latched, updated in place from Settings | No           |
+| `experimentalStore`  | Master Experimental Features gate from runtime config (`experimental.enabled`) — the gate for the E2S execution mode (its per-message toolbar toggle hides when off); Model Profiles and RESEARCH mode are not gated by it. `lib/e2sGate.ts` composes this switch with the armed toggle for the fail-closed E2S send gate. The `enabled` switch is loaded from `GetConfig`, retried on `backend:ready`/`config:updated` until latched, updated in place from Settings | No           |
 | `e2sStore`           | Per-session E2S execution-state Σ snapshots from `e2s_state` events (the backend owns the merge — the store keeps the latest full Σ and replaces it outright; cleared on session switch/delete) | No           |
 | `researchStore`      | Research status, hypothesis graph, metrics, and report for the active project (guarded by `projectId` against stale fetches); the workspace DAG selection (`selectedHypothesisId`, stamped with its R-NNN and never silently rebound across active-project transitions); the dashboard's current card (`activeHypothesisId` + `activeHypothesisResearchId` — an auto-repairing cursor that every `loadStatus`/`loadGraph` reconciles against the active research: a card that no longer resolves, an empty front, or a cross-project load falls back to the active front's leading hypothesis, `active_front[0]` else null); the recommended next step (fetched scoped to the current card via `selectActiveHypothesisId` — `''` means the project-level recommendation); and the persisted research/card pins mirrored from the status payload (`pinnedResearch`/`pinnedHypotheses`, updated by `loadStatus`, preserved by `loadGraph`) | No           |
 | `terminalRegistryStore` | App-lifetime per-session terminal instances (insertion-ordered session IDs + readiness set; removed only on explicit session/project deletion) | No           |
+| `modelProfilesGateStore`       | Frontend mirror of the Model Profiles goal gate — `{enabled, essentialToolsEnabled, loaded}` latched from `GetConfig`'s `ConfigResponse.model_profiles`; the goal toggle reads `isGoalBlockedByModelProfiles()` (`loaded && enabled && essentialToolsEnabled`, composed in `lib/goalGate.ts`). Fail-safe while unloaded (an unknown gate never blocks); refetched by `useModelProfilesGate` on `backend:ready`/`config:updated`. See [../model-profiles.md](../model-profiles.md#goal-mode-gate-goalblocked) | No           |
 
 ### Per-Project Persisted Tabs (workspace panel + Git panel)
 

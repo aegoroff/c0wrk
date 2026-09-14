@@ -5,14 +5,14 @@ import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
 import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { logger } from '@/lib/logger'
-import { Toggle } from './SLMControls'
+import { Toggle } from './ModelProfilesControls'
 
 /**
- * General-tab control for the master experimental-features switch. The switch
- * gates every experimental feature: the Small-LLM settings tab and the E2S
- * explicit-state execution mode. When disabled, the Small-LLM tab is hidden and
- * the profile treated as off, and the per-message E2S control is hidden (and
- * disarmed). RESEARCH mode is always available and is unaffected by this toggle.
+ * General-tab control for the experimental-features switch. The switch gates
+ * the E2S explicit-state execution mode: while disabled the per-message E2S
+ * control is hidden and disarmed. Model Profiles is a first-class settings tab
+ * and is not affected by this switch. RESEARCH mode is always available and is
+ * unaffected by this toggle.
  */
 export function ExperimentalSettings() {
   const enabled = useExperimentalFeatures()
@@ -48,7 +48,7 @@ export function ExperimentalSettings() {
         onChange={handleChange}
         disabled={!loaded || saving}
         label={enabled ? 'Enabled' : 'Disabled'}
-        description="Enable experimental features (the Small-LLM settings tab and the E2S execution mode). When disabled, both are hidden and treated as off. RESEARCH mode is always available."
+        description="Enable experimental features (the E2S execution mode). When disabled, the E2S control is hidden and treated as off. Model Profiles and RESEARCH mode are always available."
       />
     </div>
   )

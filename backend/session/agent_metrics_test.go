@@ -19,7 +19,7 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 	var emitted []Event
 	emitter := NewEventEmitter("sess-1", func(evt Event) { emitted = append(emitted, evt) })
 
-	emitter.SetSLMProfile(SLMMetaInfo{
+	emitter.SetModelProfile(ModelProfilesMetaInfo{
 		Enabled:     true,
 		Profile:     "qwen3.8-27b",
 		ProfileKind: "predefined",
@@ -55,7 +55,7 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 		Aborts:       AgentMetricsCounters{SameTool: 1, Fruitless: 1, Parse: 1, Truncation: 1},
 		Steps:        3,
 		OutputTokens: 1200,
-		SLM: SLMMetaInfo{
+		ModelProfiles: ModelProfilesMetaInfo{
 			Enabled:     true,
 			Profile:     "qwen3.8-27b",
 			ProfileKind: "predefined",
@@ -82,13 +82,13 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 	}
 
 	// Counters reset after emission: the next task run starts from zero
-	// (the session-level small-LLM profile — including its identity — and
+	// (the session-level model-profile profile — including its identity — and
 	// token totals persist).
 	next := emitter.EmitAgentMetrics("failed")
 	wantNext := AgentMetricsData{
 		Finish:       "failed",
 		OutputTokens: 1200,
-		SLM: SLMMetaInfo{
+		ModelProfiles: ModelProfilesMetaInfo{
 			Enabled:     true,
 			Profile:     "qwen3.8-27b",
 			ProfileKind: "predefined",
@@ -100,57 +100,57 @@ func TestAgentMetrics_ExecutorDiagnosticsToPayload(t *testing.T) {
 	}
 }
 
-// TestAgentMetrics_CollectedWithoutSLMProfile verifies the acceptance
-// criterion that metrics are collected even when the small-LLM profile is
+// TestAgentMetrics_CollectedWithoutModelProfile verifies the acceptance
+// criterion that metrics are collected even when the model-profile profile is
 // disabled: the aggregator is part of the common session layer, not gated by
 // the profile.
-func TestAgentMetrics_CollectedWithoutSLMProfile(t *testing.T) {
+func TestAgentMetrics_CollectedWithoutModelProfile(t *testing.T) {
 	emitter := NewEventEmitter("sess-2", func(Event) {})
 
-	// No SetSLMProfile call — the profile was never enabled.
+	// No SetModelProfile call — the profile was never enabled.
 	emitter.ExecutorDiagnostic(1, "parse_error_nudge", nil)
 	emitter.StepStart(1)
 
 	got := emitter.EmitAgentMetrics("cancelled")
 	if got.ParseErrors != 1 || got.Nudges.Parse != 1 || got.Steps != 1 {
-		t.Fatalf("metrics must be collected with the small-LLM profile off: %+v", got)
+		t.Fatalf("metrics must be collected with the model-profile profile off: %+v", got)
 	}
-	if got.SLM.Enabled {
-		t.Fatalf("slm.enabled must be false when the profile is off: %+v", got.SLM)
+	if got.ModelProfiles.Enabled {
+		t.Fatalf("model_profiles.enabled must be false when the profile is off: %+v", got.ModelProfiles)
 	}
-	if len(got.SLM.Variants) != 0 {
-		t.Fatalf("slm.variants must be empty when the profile is off: %+v", got.SLM)
+	if len(got.ModelProfiles.Variants) != 0 {
+		t.Fatalf("model_profiles.variants must be empty when the profile is off: %+v", got.ModelProfiles)
 	}
-	if got.SLM.Profile != "" || got.SLM.ProfileKind != "" {
-		t.Fatalf("slm.profile/profile_kind must be empty when no profile was recorded: %+v", got.SLM)
+	if got.ModelProfiles.Profile != "" || got.ModelProfiles.ProfileKind != "" {
+		t.Fatalf("model_profiles.profile/profile_kind must be empty when no profile was recorded: %+v", got.ModelProfiles)
 	}
 }
 
-// TestSLMProfileFromConfig verifies the config → metrics-meta mapping:
+// TestModelProfileFromConfig verifies the config → metrics-meta mapping:
 // every variant sub-toggle counts only when BOTH the master toggle and the
-// sub-toggle are on (mirroring ApplySLM semantics), and the active
+// sub-toggle are on (mirroring ApplyModelProfiles semantics), and the active
 // profile's identity (id + kind) is carried regardless of the master
 // toggle — which profile is active is independent of variant activation.
-func TestSLMProfileFromConfig(t *testing.T) {
-	enabled := config.SLMConfig{
+func TestModelProfileFromConfig(t *testing.T) {
+	enabled := config.ModelProfilesConfig{
 		EssentialTools: config.EssentialToolsConfig{Enabled: true},
 		SystemPrompt:   config.SystemPromptConfig{Lite: true, FewShot: true},
-		Sampling:       config.SLMSamplingConfig{Enabled: true},
+		Sampling:       config.ModelProfilesSamplingConfig{Enabled: true},
 	}
-	entry := config.SLMProfile{ID: "qwen3.8-27b", Kind: config.SLMProfileKindPredefined}
+	entry := config.ModelProfile{ID: "qwen3.8-27b", Kind: config.ModelProfileKindPredefined}
 
 	// Master toggle off → whole profile reported as disabled, no variants,
 	// but the active profile identity is still reported.
 	off := enabled
 	off.Enabled = false
-	if info := slmProfileFromConfig(off, entry); info.Enabled || len(info.Variants) != 0 {
+	if info := modelProfileFromConfig(off, entry); info.Enabled || len(info.Variants) != 0 {
 		t.Fatalf("master toggle off must disable the whole profile: %+v", info)
 	} else if info.Profile != "qwen3.8-27b" || info.ProfileKind != "predefined" {
 		t.Fatalf("profile identity must be reported even when disabled: %+v", info)
 	}
 
 	// A zero profile entry (no profile ever resolved) → no identity fields.
-	if info := slmProfileFromConfig(off, config.SLMProfile{}); info.Profile != "" || info.ProfileKind != "" {
+	if info := modelProfileFromConfig(off, config.ModelProfile{}); info.Profile != "" || info.ProfileKind != "" {
 		t.Fatalf("zero profile entry must yield empty identity fields: %+v", info)
 	}
 
@@ -158,7 +158,7 @@ func TestSLMProfileFromConfig(t *testing.T) {
 	on := enabled
 	on.Enabled = true
 	on.LoopHardening = config.LoopHardeningConfig{Enabled: true}
-	on.Context = config.SLMContextConfig{Enabled: true}
+	on.Context = config.ModelProfilesContextConfig{Enabled: true}
 	want := []string{
 		"essential_tools",
 		"system_prompt_lite",
@@ -167,42 +167,42 @@ func TestSLMProfileFromConfig(t *testing.T) {
 		"loop_hardening",
 		"context",
 	}
-	info := slmProfileFromConfig(on, entry)
+	info := modelProfileFromConfig(on, entry)
 	if !info.Enabled || !reflect.DeepEqual(info.Variants, want) {
 		t.Fatalf("variant mapping mismatch:\n got: %+v\nwant: %v", info.Variants, want)
 	}
 
 	// ReasoningScaffold is reported only when its parent Lite variant is on.
-	scaffoldOnly := config.SLMConfig{
+	scaffoldOnly := config.ModelProfilesConfig{
 		Enabled:      true,
 		SystemPrompt: config.SystemPromptConfig{ReasoningScaffold: true},
 	}
-	info = slmProfileFromConfig(scaffoldOnly, entry)
+	info = modelProfileFromConfig(scaffoldOnly, entry)
 	if !reflect.DeepEqual(info.Variants, []string{}) {
 		t.Fatalf("reasoning scaffold without lite must not be reported: %+v", info.Variants)
 	}
 }
 
-// TestManager_SetSLMProfile_AnnotatesAgentMetrics verifies the acceptance
+// TestManager_SetModelProfile_AnnotatesAgentMetrics verifies the acceptance
 // criterion at the manager level: a session created while a profile is
 // active emits agent_metrics annotated with the active profile's id and
 // kind (predefined|custom), and the annotation reaches the manager's event
 // sink — the wire consumers (frontend handler, event persister) see the
 // same payload.
-func TestManager_SetSLMProfile_AnnotatesAgentMetrics(t *testing.T) {
+func TestManager_SetModelProfile_AnnotatesAgentMetrics(t *testing.T) {
 	manager, eventChan, _ := testManager(t)
 
 	// A custom profile active with the master toggle on, resolved the way
-	// the backend resolves slm.active_profile (see backend.activeSLMProfile).
-	entry, err := config.NewSLMProfile("my-tuned", "My Tuned", config.SLMProfileKindCustom, config.SLMProfileConfig{})
+	// the backend resolves model_profiles.active_profile (see backend.activeModelProfile).
+	entry, err := config.NewModelProfile("my-tuned", "My Tuned", config.ModelProfileKindCustom, config.ModelProfileConfig{})
 	if err != nil {
-		t.Fatalf("NewSLMProfile: %v", err)
+		t.Fatalf("NewModelProfile: %v", err)
 	}
-	resolved := config.SLMConfig{
+	resolved := config.ModelProfilesConfig{
 		Enabled:        true,
 		EssentialTools: config.EssentialToolsConfig{Enabled: true},
 	}
-	manager.SetSLMProfile(resolved, entry)
+	manager.SetModelProfile(resolved, entry)
 
 	info, err := manager.CreateSession(testProjectID, testWorkspacePath(t))
 	if err != nil {
@@ -216,19 +216,19 @@ func TestManager_SetSLMProfile_AnnotatesAgentMetrics(t *testing.T) {
 	}
 	got := sess.emitter.EmitAgentMetrics("full")
 
-	wantMeta := SLMMetaInfo{
+	wantMeta := ModelProfilesMetaInfo{
 		Enabled:     true,
 		Profile:     "my-tuned",
 		ProfileKind: "custom",
 		Variants:    []string{"essential_tools"},
 	}
-	if !reflect.DeepEqual(got.SLM, wantMeta) {
-		t.Fatalf("agent_metrics slm meta mismatch:\n got: %+v\nwant: %+v", got.SLM, wantMeta)
+	if !reflect.DeepEqual(got.ModelProfiles, wantMeta) {
+		t.Fatalf("agent_metrics modelProfiles meta mismatch:\n got: %+v\nwant: %+v", got.ModelProfiles, wantMeta)
 	}
 
 	// The emitted event (the wire payload) carries the same profile fields.
 	evt := <-eventChan
-	if data, ok := evt.Data.(AgentMetricsData); !ok || !reflect.DeepEqual(data.SLM, wantMeta) {
+	if data, ok := evt.Data.(AgentMetricsData); !ok || !reflect.DeepEqual(data.ModelProfiles, wantMeta) {
 		t.Fatalf("emitted agent_metrics event must carry the profile fields: %+v", evt.Data)
 	}
 }
@@ -238,17 +238,17 @@ func TestManager_SetSLMProfile_AnnotatesAgentMetrics(t *testing.T) {
 // profile serialize exactly like the pre-profile shape — consumers that do
 // not know the fields keep working.
 func TestAgentMetrics_ProfileFieldsWireCompat(t *testing.T) {
-	raw, err := json.Marshal(AgentMetricsData{Finish: "full", SLM: slmInfoSnapshot(SLMMetaInfo{})})
+	raw, err := json.Marshal(AgentMetricsData{Finish: "full", ModelProfiles: modelProfilesInfoSnapshot(ModelProfilesMetaInfo{})})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if strings.Contains(string(raw), "profile") {
-		t.Fatalf("unset profile fields must be omitted from the wire payload: %s", raw)
+	if strings.Contains(string(raw), `"profile":`) || strings.Contains(string(raw), `"profile_kind":`) {
+		t.Fatalf("unset profile identity fields must be omitted from the wire payload: %s", raw)
 	}
 
 	withProfile, err := json.Marshal(AgentMetricsData{
-		Finish: "full",
-		SLM:    SLMMetaInfo{Enabled: true, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
+		Finish:        "full",
+		ModelProfiles: ModelProfilesMetaInfo{Enabled: true, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -279,7 +279,7 @@ func TestEventPersister_AgentMetricsPersistedAsStatus(t *testing.T) {
 			Aborts:           AgentMetricsCounters{Truncation: 1},
 			Steps:            3,
 			OutputTokens:     42,
-			SLM:              SLMMetaInfo{Enabled: false, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
+			ModelProfiles:    ModelProfilesMetaInfo{Enabled: false, Profile: "my-tuned", ProfileKind: "custom", Variants: []string{}},
 		},
 	})
 

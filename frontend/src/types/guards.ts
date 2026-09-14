@@ -13,12 +13,12 @@ import type {
     MCPServerStatus,
     SecuritySettingsResponse,
     BlackboardState,
-    SLMProfile,
-    SLMProfileKind,
-    SLMProfileValues,
-    SLMProfilesResponse,
-    SLMBuiltinTool,
-    SLMToolGroup,
+    ModelProfile,
+    ModelProfileKind,
+    ModelProfileValues,
+    ModelProfilesResponse,
+    ModelProfilesBuiltinTool,
+    ModelProfilesToolGroup,
 } from './models'
 
 export function isObj(v: unknown): v is Record<string, unknown> {
@@ -106,11 +106,11 @@ function isString(v: unknown): v is string {
     return typeof v === 'string'
 }
 
-function isSLMBuiltinTool(v: unknown): v is SLMBuiltinTool {
+function isModelProfilesBuiltinTool(v: unknown): v is ModelProfilesBuiltinTool {
     return isObj(v) && typeof v.name === 'string' && typeof v.description === 'string'
 }
 
-function isSLMToolGroup(v: unknown): v is SLMToolGroup {
+function isModelProfilesToolGroup(v: unknown): v is ModelProfilesToolGroup {
     return isObj(v)
         && typeof v.id === 'string'
         && typeof v.title === 'string'
@@ -118,7 +118,7 @@ function isSLMToolGroup(v: unknown): v is SLMToolGroup {
         && isArrayOf(v.tools, isString)
 }
 
-export function isSLMProfileKind(v: unknown): v is SLMProfileKind {
+export function isModelProfileKind(v: unknown): v is ModelProfileKind {
     return v === 'predefined' || v === 'custom'
 }
 
@@ -128,7 +128,7 @@ export function isSLMProfileKind(v: unknown): v is SLMProfileKind {
  * must be rejected — the settings form writes whole sections back and would
  * otherwise corrupt the profile with undefined fields.
  */
-export function isSLMProfileValues(v: unknown): v is SLMProfileValues {
+export function isModelProfileValues(v: unknown): v is ModelProfileValues {
     if (!isObj(v)) return false
     const et = v.essential_tools
     const sp = v.system_prompt
@@ -164,27 +164,27 @@ export function isSLMProfileValues(v: unknown): v is SLMProfileValues {
         && typeof ctx.output_token_reserve === 'number'
 }
 
-export function isSLMProfile(v: unknown): v is SLMProfile {
+export function isModelProfile(v: unknown): v is ModelProfile {
     return isObj(v)
         && typeof v.id === 'string'
         && typeof v.name === 'string'
-        && isSLMProfileKind(v.kind)
-        && isSLMProfileValues(v.values)
+        && isModelProfileKind(v.kind)
+        && isModelProfileValues(v.values)
 }
 
 /**
- * Validates the GetSLMProfiles response. The backend guarantees non-nil
+ * Validates the GetModelProfiles response. The backend guarantees non-nil
  * slices (JSON [], never null) for every list field and always emits
  * suggested_profile_id (string or JSON null), so strict checks are safe.
  */
-export function isSLMProfilesResponse(v: unknown): v is SLMProfilesResponse {
+export function isModelProfilesResponse(v: unknown): v is ModelProfilesResponse {
     if (!isObj(v)) return false
-    return isArrayOf(v.profiles, isSLMProfile)
+    return isArrayOf(v.profiles, isModelProfile)
         && typeof v.enabled === 'boolean'
         && typeof v.active_id === 'string'
         && (v.suggested_profile_id === null || typeof v.suggested_profile_id === 'string')
-        && isArrayOf(v.builtin_tools, isSLMBuiltinTool)
-        && isArrayOf(v.tool_groups, isSLMToolGroup)
+        && isArrayOf(v.builtin_tools, isModelProfilesBuiltinTool)
+        && isArrayOf(v.tool_groups, isModelProfilesToolGroup)
         && isArrayOf(v.protected_tools, isString)
         && isArrayOf(v.warnings, isString)
 }

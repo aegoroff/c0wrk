@@ -146,12 +146,12 @@ type Config struct {
 	// back to the default.
 	PatchRetries int
 	// ReasoningEffort, when non-empty, is passed through to every
-	// ChatRequest (the per-message override / Small-LLM sampling profile
+	// ChatRequest (the per-message override / Model Profiles sampling profile
 	// value the host resolved) — mirroring the executor's per-run
 	// SetReasoningEffort. Empty = the provider default.
 	ReasoningEffort string
 	// SystemPrompt, when non-empty, replaces the compiled-in
-	// prompts.E2SSystem core directive (the Small-LLM Lite swap: the host
+	// prompts.E2SSystem core directive (the Model Profiles Lite swap: the host
 	// passes prompts.E2SSystemLite when the profile's prompt variant is
 	// active). Empty = prompts.E2SSystem.
 	SystemPrompt string

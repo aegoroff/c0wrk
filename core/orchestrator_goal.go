@@ -20,6 +20,22 @@ import (
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
 
+// ErrGoalBlockedByModelProfiles is returned when a goal request — a fresh one
+// (HandleMessage with HandleOptions.Goal) or a resumed one (a paused goal
+// re-entering Resume / resumeGoalLoop) — is attempted while the Model Profiles
+// essential-tools narrowing is active (see modelProfilesEssentialToolsEnabled). The
+// narrowing is applied only on the non-goal Conductor path and the E2S branch
+// (both run after goal mode's early return), so it never narrows a goal run
+// today; the two are declared mutually exclusive so the toggle cannot be a
+// silent no-op in goal mode. If the narrowing were applied to a goal run it
+// would hide the goal-loop tooling (propose_goal, declare_goal_status,
+// declare_verification) and make the loop unrunnable. Rather than enter an
+// unrunnable (or silently-degraded) loop, goal mode is refused. The frontend
+// API and the session manager reject such requests earlier with a user-facing
+// message; this sentinel keeps the invariant enforceable when the orchestrator
+// is driven directly and is the unit-test contract.
+var ErrGoalBlockedByModelProfiles = errors.New("goal mode is unavailable while the Model Profiles essential-tools profile is active")
+
 // deriveGoal runs a full-context Conductor pass whose only job is to derive a
 // crisp {condition, verify} goal from the user's message and submit it for
 // user sign-off via propose_goal. It reuses the entire Conductor toolset
@@ -70,7 +86,8 @@ func (o *Orchestrator) deriveGoal(
 	// RunConductor — derivation is a Conductor run with a different instruction
 	// set, not a separate engine.
 	deps.systemPromptOverride = func(ctx context.Context, msg string, modelMeta llm.ModelMetadata) string {
-		return buildSpecializedSystemPrompt(ctx, msg, modelMeta, prompts.GoalDerivation)
+		return buildSpecializedSystemPromptWithLite(ctx, msg, modelMeta,
+			prompts.GoalDerivation, prompts.GoalDerivationLite)
 	}
 	// Bound the derivation loop independently of routing complexity.
 	deps.resumeSteps = nil // derivation never resumes from a checkpoint
@@ -311,13 +328,15 @@ func (o *Orchestrator) runGoalLoop(
 		pbb.SetRouting(routing)
 	}
 
-	// NOTE: the small-LLM essential-tools filter is NOT applied in goal mode.
+	// NOTE: the model-profile essential-tools filter is NOT applied in goal mode.
 	// Its call sites are HandleMessage's non-goal Conductor path and the E2S
 	// branch, both of which run AFTER the goal-mode early return above. Goal
 	// mode deliberately keeps the full tool set (the goal-loop tools,
 	// including the verifier-required declare_verification, would otherwise be
-	// dropped by SelectTools). The lite prompt profile IS still honored here
-	// via prepareRequestContext.
+	// dropped by SelectTools). The lite prompt profile IS still honored here:
+	// HandleMessage and Resume both carry it into ctx via
+	// applyModelProfilesPromptProfile, so the derivation and verification passes opt
+	// into the Lite swap on a fresh run AND on a resumed one.
 
 	// Derive the goal. On error/cancel, surface the conductor message as the
 	// output so the user sees their request acknowledged, not an empty result.
@@ -419,6 +438,16 @@ func (o *Orchestrator) resumeGoalLoop(
 	nudge string,
 	forceCompactionStrategy string,
 ) (*HandleResult, error) {
+	// Defense-in-depth: a paused goal must not be re-entered while the
+	// Model Profiles essential-tools narrowing is active — goal mode and the
+	// narrowing are mutually exclusive (see ErrGoalBlockedByModelProfiles). The frontend
+	// API and the session manager reject such a resume before dispatching (and
+	// Orchestrator.Resume rejects it before its auto-resume wave), but driving
+	// resumeGoalLoop directly must hit the same wall. No side effect here (no
+	// status mutation, no turn runner).
+	if o.modelProfilesEssentialToolsEnabled() {
+		return nil, ErrGoalBlockedByModelProfiles
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -1289,17 +1318,26 @@ func (o *Orchestrator) defaultGoalVerifier(
 	// Both directives share the {goal_condition}/{goal_verify_clause}/
 	// {reported_evidence}/{shell_tool} placeholder set, resolved by
 	// GoalVerificationSubstitute.
-	directiveText := prompts.GoalVerification
 	verifierTools := verifierToolFilter(availableTools, deps.disabledTools)
 	if gs.VerificationMode == goal.VerificationModeReDerivation {
-		directiveText = prompts.GoalReDerivation
 		verifierTools = verifierReDerivationToolFilter(availableTools, deps.disabledTools)
 	}
-	directive := prompts.GoalVerificationSubstitute(
-		directiveText, gs.Condition, gs.VerifyClause, renderReportedEvidence(verdict),
+	// Directive selection goes through the prompts layer's single mode→directive
+	// mapping (GoalVerificationDirectiveByMode and its Lite counterpart), so the
+	// verbose and Lite branches can never drift apart.
+	evidence := renderReportedEvidence(verdict)
+	directive := prompts.GoalVerificationDirectiveByMode(
+		gs.VerificationMode, gs.Condition, gs.VerifyClause, evidence,
+	)
+	// Lite counterpart of the directive, resolved through the same placeholder
+	// set. buildSpecializedSystemPromptWithLite swaps to it only when the
+	// model-profile Lite profile is active; otherwise it is ignored and the verbose
+	// directive above is used verbatim.
+	liteDirective := prompts.GoalVerificationLiteDirectiveByMode(
+		gs.VerificationMode, gs.Condition, gs.VerifyClause, evidence,
 	)
 	deps.systemPromptOverride = func(ctx context.Context, msg string, modelMeta llm.ModelMetadata) string {
-		return buildSpecializedSystemPrompt(ctx, msg, modelMeta, directive)
+		return buildSpecializedSystemPromptWithLite(ctx, msg, modelMeta, directive, liteDirective)
 	}
 
 	// Inject a fresh sink so this pass's outcome is captured in isolation.

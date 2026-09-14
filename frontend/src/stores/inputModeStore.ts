@@ -58,6 +58,14 @@ interface InputModeActions {
   setSelectedReasoning: (value: string | null) => void
   /** Toggle goal mode for the next sent message. Enabling it disables E2S. */
   setGoalEnabled: (enabled: boolean) => void
+  /**
+   * Disarm goal mode because the Model Profiles feature has made it unavailable
+   * (master toggle AND essential-tools variant both on — see lib/goalGate).
+   * Idempotent (a no-op when goal mode is already off). Mirrors the E2S
+   * disarm: a gate closing must clear any stale arming rather than leave a
+   * toggle armed that the backend would refuse.
+   */
+  disarmGoal: () => void
   /** Set the goal budget override for the next sent message (JSON or empty). */
   setGoalBudget: (budget: string) => void
   /**
@@ -119,6 +127,9 @@ export const useInputModeStore = create<InputModeState & InputModeActions>()(
         // exactly one may be armed at a time.
         enabled ? { goalEnabled: true, e2sEnabled: false } : { goalEnabled: false },
       ),
+      disarmGoal: () => {
+        if (get().goalEnabled) set({ goalEnabled: false })
+      },
       setGoalBudget: (budget) => set({ goalBudget: budget }),
       setE2sEnabled: (enabled) => set(
         enabled ? { e2sEnabled: true, goalEnabled: false } : { e2sEnabled: false },

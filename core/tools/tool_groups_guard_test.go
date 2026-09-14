@@ -3,7 +3,7 @@ package tools
 import (
 	"testing"
 
-	"github.com/v0lka/c0wrk/core/slm"
+	"github.com/v0lka/c0wrk/core/modelprofiles"
 )
 
 // TestToolGroupCatalogMembersAreRegistered guards against catalog drift: every
@@ -22,7 +22,7 @@ func TestToolGroupCatalogMembersAreRegistered(t *testing.T) {
 		registered[d.Name] = struct{}{}
 	}
 
-	for _, g := range slm.ToolGroupCatalog() {
+	for _, g := range modelprofiles.ToolGroupCatalog() {
 		for _, name := range g.Tools {
 			if _, ok := registered[name]; !ok {
 				t.Errorf("cluster %q lists %q, which is not a registered built-in tool", g.ID, name)

@@ -18,61 +18,57 @@ func derefBool(b *bool) bool {
 	return *b
 }
 
-// loadSLMCatalog loads the full small-LLM profile catalog (predefined ∪
+// loadModelProfilesCatalog loads the full model-profile profile catalog (predefined ∪
 // custom), logging store-level warnings. Callers that must surface warnings
-// in the UI instead (config load time) use config.LoadSLMCatalog directly —
+// in the UI instead (config load time) use config.LoadModelProfilesCatalog directly —
 // see config.ResolveAndLoad.
-func loadSLMCatalog(agentDir string, log *slog.Logger) []config.SLMProfile {
-	catalog, warnings := config.LoadSLMCatalog(agentDir)
+func loadModelProfilesCatalog(agentDir string, log *slog.Logger) []config.ModelProfile {
+	catalog, warnings := config.LoadModelProfilesCatalog(agentDir)
 	if log != nil {
 		for _, w := range warnings {
-			log.Warn("small-LLM profile warning", "warning", w)
+			log.Warn("model-profile profile warning", "warning", w)
 		}
 	}
 	return catalog
 }
 
-// effectiveSLMConfig resolves the persisted `slm:` section against the given
-// profile catalog (predefined ∪ custom — see config.LoadSLMCatalog) and
-// returns the runtime profile with the master toggle forced off when
-// experimental features are disabled. The stored profile choice is preserved
-// (only the effective master toggle flips), so re-enabling experimental
-// features restores the prior profile. Resolution warnings are returned for
+// effectiveModelProfilesConfig resolves the persisted `model_profiles:` section against the given
+// profile catalog (predefined ∪ custom — see config.LoadModelProfilesCatalog) and
+// returns the effective runtime profile. Model Profiles is NOT gated by the
+// experimental-features switch: the master toggle (model_profiles.enabled) is
+// the only switch and is carried through verbatim, so the effective profile is
+// exactly what the operator persisted. Resolution warnings are returned for
 // the caller to surface (load time) or log (runtime re-resolves).
-func effectiveSLMConfig(cfg *config.Config, slmCatalog []config.SLMProfile) (profile config.SLMConfig, warnings []string) {
-	profile, warnings = config.ResolveSLMConfig(cfg.SLM, slmCatalog)
-	if !cfg.Experimental.Enabled {
-		profile.Enabled = false
-	}
-	return profile, warnings
+func effectiveModelProfilesConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProfile) (profile config.ModelProfilesConfig, warnings []string) {
+	return config.ResolveModelProfilesConfig(cfg.ModelProfiles, modelProfilesCatalog)
 }
 
-// activeSLMProfile returns the catalog entry the persisted `slm:` section
-// resolves to, applying the same soft fallback config.ResolveSLMConfig uses
+// activeModelProfile returns the catalog entry the persisted `model_profiles:` section
+// resolves to, applying the same soft fallback config.ResolveModelProfilesConfig uses
 // for the effective values: an empty or dangling active_profile id falls
 // back to the model-agnostic "generic" profile. The entry identifies the
 // active profile (id + kind) for agent_metrics annotation — reported even
 // when the master toggle is off. The zero entry is returned only when even
 // "generic" is missing from the catalog (never the case with the shipped
 // predefined catalog); the metrics meta then carries no profile fields.
-func activeSLMProfile(persist config.SLMPersistConfig, catalog []config.SLMProfile) config.SLMProfile {
+func activeModelProfile(persist config.ModelProfilesPersistConfig, catalog []config.ModelProfile) config.ModelProfile {
 	id := persist.ActiveProfile
 	if id == "" {
-		id = config.SLMGenericProfileID
+		id = config.ModelProfilesGenericProfileID
 	}
-	if p, ok := config.FindSLMProfile(catalog, id); ok {
+	if p, ok := config.FindModelProfile(catalog, id); ok {
 		return p
 	}
-	generic, _ := config.FindSLMProfile(catalog, config.SLMGenericProfileID)
+	generic, _ := config.FindModelProfile(catalog, config.ModelProfilesGenericProfileID)
 	return generic
 }
 
 // ToBuilderConfig converts a *config.Config into a *core.BuilderConfig.
 // This is the single conversion point so that core never imports backend/config.
-// slmCatalog is the profile catalog (predefined ∪ custom) used to resolve the
-// effective small-LLM profile; callers that have an agent dir should build it
-// via config.LoadSLMCatalog so custom profiles apply without a restart.
-func ToBuilderConfig(cfg *config.Config, slmCatalog []config.SLMProfile) *core.BuilderConfig {
+// modelProfilesCatalog is the profile catalog (predefined ∪ custom) used to resolve the
+// effective model-profile profile; callers that have an agent dir should build it
+// via config.LoadModelProfilesCatalog so custom profiles apply without a restart.
+func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProfile) *core.BuilderConfig {
 	// Build provider configs map from all enabled providers.
 	allProviders := cfg.LLM.GetAllProviderConfigs()
 	providerConfigs := make(map[string]core.BuilderProviderConfig, len(allProviders))
@@ -147,10 +143,10 @@ func ToBuilderConfig(cfg *config.Config, slmCatalog []config.SLMProfile) *core.B
 	// (fail-closed). The section's numeric knobs are always seeded so tuning
 	// never requires a rebuild.
 	//
-	// The small-LLM profile is resolved from the active profile in the
-	// catalog (the experimental gate is folded in by effectiveSLMConfig;
-	// resolution warnings are surfaced at load time, not here).
-	slm, _ := effectiveSLMConfig(cfg, slmCatalog)
+	// The model-profile profile is resolved from the active profile in the
+	// catalog (resolution warnings are surfaced at load time, not here). It is
+	// not gated by the experimental-features switch.
+	modelProfiles, _ := effectiveModelProfilesConfig(cfg, modelProfilesCatalog)
 	return &core.BuilderConfig{
 		LLM: core.BuilderLLMConfig{
 			DefaultModel:    cfg.LLM.DefaultModel,
@@ -269,44 +265,44 @@ func ToBuilderConfig(cfg *config.Config, slmCatalog []config.SLMProfile) *core.B
 			RepeatNudgeThreshold: cfg.E2S.RepeatNudgeThreshold,
 			RepeatAbortThreshold: cfg.E2S.RepeatAbortThreshold,
 		},
-		SLM: core.BuilderSLMConfig{
-			Enabled: slm.Enabled,
-			EssentialTools: core.BuilderSLMEssentialConfig{
-				Enabled:             slm.EssentialTools.Enabled,
-				AlwaysPresent:       slm.EssentialTools.AlwaysPresent,
-				CompactDescriptions: slm.EssentialTools.CompactDescriptions,
+		ModelProfiles: core.BuilderModelProfilesConfig{
+			Enabled: modelProfiles.Enabled,
+			EssentialTools: core.BuilderModelProfilesEssentialConfig{
+				Enabled:             modelProfiles.EssentialTools.Enabled,
+				AlwaysPresent:       modelProfiles.EssentialTools.AlwaysPresent,
+				CompactDescriptions: modelProfiles.EssentialTools.CompactDescriptions,
 			},
-			Sampling: core.BuilderSLMSampling{
-				Enabled:           slm.Sampling.Enabled,
-				Temperature:       slm.Sampling.Temperature,
-				TopP:              slm.Sampling.TopP,
-				TopK:              slm.Sampling.TopK,
-				RepetitionPenalty: slm.Sampling.RepetitionPenalty,
-				PresencePenalty:   slm.Sampling.PresencePenalty,
-				ReasoningEffort:   slm.Sampling.ReasoningEffort,
+			Sampling: core.BuilderModelProfilesSampling{
+				Enabled:           modelProfiles.Sampling.Enabled,
+				Temperature:       modelProfiles.Sampling.Temperature,
+				TopP:              modelProfiles.Sampling.TopP,
+				TopK:              modelProfiles.Sampling.TopK,
+				RepetitionPenalty: modelProfiles.Sampling.RepetitionPenalty,
+				PresencePenalty:   modelProfiles.Sampling.PresencePenalty,
+				ReasoningEffort:   modelProfiles.Sampling.ReasoningEffort,
 			},
 			LoopHardening: core.BuilderLoopHardening{
-				Enabled:                      slm.LoopHardening.Enabled,
-				RepeatNudgeThreshold:         slm.LoopHardening.RepeatNudgeThreshold,
-				ParseErrorAbortThreshold:     slm.LoopHardening.ParseErrorAbortThreshold,
-				FruitlessNudgeThreshold:      slm.LoopHardening.FruitlessNudgeThreshold,
-				FruitlessAbortThreshold:      slm.LoopHardening.FruitlessAbortThreshold,
-				SameToolRepeatNudgeThreshold: slm.LoopHardening.SameToolRepeatNudgeThreshold,
+				Enabled:                      modelProfiles.LoopHardening.Enabled,
+				RepeatNudgeThreshold:         modelProfiles.LoopHardening.RepeatNudgeThreshold,
+				ParseErrorAbortThreshold:     modelProfiles.LoopHardening.ParseErrorAbortThreshold,
+				FruitlessNudgeThreshold:      modelProfiles.LoopHardening.FruitlessNudgeThreshold,
+				FruitlessAbortThreshold:      modelProfiles.LoopHardening.FruitlessAbortThreshold,
+				SameToolRepeatNudgeThreshold: modelProfiles.LoopHardening.SameToolRepeatNudgeThreshold,
 			},
-			SystemPrompt: core.BuilderSLMSystemPromptConfig{
-				Lite:              slm.SystemPrompt.Lite,
-				FewShot:           slm.SystemPrompt.FewShot,
-				ReasoningScaffold: slm.SystemPrompt.ReasoningScaffold,
+			SystemPrompt: core.BuilderModelProfilesSystemPromptConfig{
+				Lite:              modelProfiles.SystemPrompt.Lite,
+				FewShot:           modelProfiles.SystemPrompt.FewShot,
+				ReasoningScaffold: modelProfiles.SystemPrompt.ReasoningScaffold,
 			},
-			Context: core.BuilderSLMContext{
-				Enabled: slm.Context.Enabled,
-				Compaction: core.BuilderSLMCompaction{
-					KeepLast:       slm.Context.Compaction.KeepLast,
-					BlockSize:      slm.Context.Compaction.BlockSize,
-					TriggerPercent: slm.Context.Compaction.TriggerPercent,
+			Context: core.BuilderModelProfilesContext{
+				Enabled: modelProfiles.Context.Enabled,
+				Compaction: core.BuilderModelProfilesCompaction{
+					KeepLast:       modelProfiles.Context.Compaction.KeepLast,
+					BlockSize:      modelProfiles.Context.Compaction.BlockSize,
+					TriggerPercent: modelProfiles.Context.Compaction.TriggerPercent,
 				},
-				ToolOutputKeepLastN: slm.Context.ToolOutputKeepLastN,
-				OutputTokenReserve:  slm.Context.OutputTokenReserve,
+				ToolOutputKeepLastN: modelProfiles.Context.ToolOutputKeepLastN,
+				OutputTokenReserve:  modelProfiles.Context.OutputTokenReserve,
 			},
 		},
 		ToolLimits: core.BuilderToolLimitsConfig{

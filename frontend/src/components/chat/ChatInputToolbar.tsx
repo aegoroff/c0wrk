@@ -1,7 +1,10 @@
+import { useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Play, Pause, Square, MessageSquare, Terminal, Sparkles, Loader2, FolderPlus, Paperclip } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { GOAL_BLOCKED_BY_MODEL_PROFILES_REASON } from '@/lib/goalGate'
 import type { ChatInputController } from '@/hooks/useChatInputController'
+import { useModelProfilesGate } from '@/hooks/useModelProfilesGate'
 import { ModelCombobox } from './ModelCombobox'
 import { ReasoningCombobox } from './ReasoningCombobox'
 import { GoalToggle } from './GoalToggle'
@@ -51,6 +54,22 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
 
   // Budget selector is only meaningful when goal mode is enabled.
   const goalEnabled = useInputModeStore((s) => s.goalEnabled)
+
+  // Goal mode is unavailable while the Model Profiles profile's essential-tools
+  // variant is active: the narrowing is applied only to the non-goal Conductor
+  // path and the E2S branch (both run after goal mode's early return), so it
+  // never narrows a goal run; if it were applied to a goal run it would hide
+  // the goal-loop tooling (propose_goal, declare_goal_status,
+  // declare_verification) and make the loop unrunnable.
+  // `useModelProfilesGate` is the reactive form of lib/goalGate's authoritative rule;
+  // while it reports blocked we lock the goal toggle and explain why, and we
+  // disarm any stale goal arming (the same "gate closed → clear the toggle"
+  // discipline as the E2S disarm in useExperimentalFeatures).
+  const goalBlocked = useModelProfilesGate()
+  const disarmGoal = useInputModeStore((s) => s.disarmGoal)
+  useEffect(() => {
+    if (goalBlocked) disarmGoal()
+  }, [goalBlocked, disarmGoal])
 
   // Per-message selectors (model / reasoning / goal / budget) lock while the
   // session is mid-task: running (taskActive), waiting for the cooperative
@@ -122,6 +141,20 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
       {blockingMessage && mode === 'chat' && (
         <span className="text-xs italic text-muted-foreground">{blockingMessage}</span>
       )}
+      {goalBlocked && mode === 'chat' && (
+        // Inline reason for the disabled goal toggle (mirrors blockingMessage):
+        // names both WHY goal mode is locked and HOW to re-enable it. Truncated
+        // with the full text in the title so a long explanation cannot stretch
+        // the toolbar.
+        <span
+          className="text-xs italic text-warning truncate max-w-[320px]"
+          title={GOAL_BLOCKED_BY_MODEL_PROFILES_REASON}
+          role="status"
+          data-testid="goal-blocked-hint"
+        >
+          {GOAL_BLOCKED_BY_MODEL_PROFILES_REASON}
+        </span>
+      )}
       {mode === 'chat' && (
         <>
           <div className="w-px h-4 bg-border mx-1" />
@@ -134,7 +167,7 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
             <ModelCombobox disabled={selectorsLocked} />
             <ReasoningCombobox disabled={selectorsLocked} />
             <div className="w-px h-4 bg-border mx-1" />
-            <GoalToggle disabled={selectorsLocked} />
+            <GoalToggle disabled={selectorsLocked} blocked={goalBlocked} />
             {/* E2S renders itself only while the experimental gate is on
                 (see E2SToggle) — no extra gating here. */}
             <E2SToggle disabled={selectorsLocked} />

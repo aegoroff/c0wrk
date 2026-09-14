@@ -4,7 +4,7 @@
 // ExecutorDiagnostic events (same_tool_repeat_nudge, fruitless_abort, …).
 // metricsState taps that stream — plus step and token accounting — and
 // aggregates it into the "agent_metrics" payload emitted on task finish or
-// abort, so the effect of Small-LLM (and any other) profiles can be measured
+// abort, so the effect of Model Profiles (and any other) profiles can be measured
 // against data instead of impressions.
 package session
 
@@ -26,7 +26,7 @@ type metricsState struct {
 	nudges           AgentMetricsCounters
 	aborts           AgentMetricsCounters
 	steps            int
-	slm              SLMMetaInfo
+	modelProfiles    ModelProfilesMetaInfo
 }
 
 // observeDiagnostic maps an executor diagnostic event name onto the counters.
@@ -84,11 +84,11 @@ func (m *metricsState) observeToolResult(isError bool, content string) {
 	m.invalidToolCalls++
 }
 
-// setSLM snapshots the Small-LLM profile the session runs under.
-func (m *metricsState) setSLM(info SLMMetaInfo) {
+// setModelProfiles snapshots the Model Profiles profile the session runs under.
+func (m *metricsState) setModelProfiles(info ModelProfilesMetaInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.slm = info
+	m.modelProfiles = info
 }
 
 // snapshot renders the accumulated counters as the "agent_metrics" payload
@@ -105,7 +105,7 @@ func (m *metricsState) snapshot(finish string, outputTokens int) AgentMetricsDat
 		Aborts:           m.aborts,
 		Steps:            m.steps,
 		OutputTokens:     outputTokens,
-		SLM:              slmInfoSnapshot(m.slm),
+		ModelProfiles:    modelProfilesInfoSnapshot(m.modelProfiles),
 	}
 	m.parseErrors = 0
 	m.invalidToolCalls = 0
@@ -115,12 +115,12 @@ func (m *metricsState) snapshot(finish string, outputTokens int) AgentMetricsDat
 	return data
 }
 
-// slmInfoSnapshot copies the stored profile, normalizing a nil variant
+// modelProfilesInfoSnapshot copies the stored profile, normalizing a nil variant
 // list to an empty slice so it serializes as [] rather than null.
-func slmInfoSnapshot(info SLMMetaInfo) SLMMetaInfo {
+func modelProfilesInfoSnapshot(info ModelProfilesMetaInfo) ModelProfilesMetaInfo {
 	variants := make([]string, len(info.Variants))
 	copy(variants, info.Variants)
-	return SLMMetaInfo{
+	return ModelProfilesMetaInfo{
 		Enabled:     info.Enabled,
 		Profile:     info.Profile,
 		ProfileKind: info.ProfileKind,
@@ -128,7 +128,7 @@ func slmInfoSnapshot(info SLMMetaInfo) SLMMetaInfo {
 	}
 }
 
-// slmProfileFromConfig derives the Small-LLM profile snapshot a session
+// modelProfileFromConfig derives the Model Profiles profile snapshot a session
 // runs under. The profile entry identifies the active profile (id + kind)
 // and is reported regardless of the master toggle — which profile is active
 // is independent of whether its optimizations are applied. Variants lists
@@ -137,8 +137,8 @@ func slmInfoSnapshot(info SLMMetaInfo) SLMMetaInfo {
 // applies them. Works regardless of whether the profile is enabled:
 // metrics collection is a common layer, the profile only annotates the
 // payload.
-func slmProfileFromConfig(cfg config.SLMConfig, profile config.SLMProfile) SLMMetaInfo {
-	info := SLMMetaInfo{
+func modelProfileFromConfig(cfg config.ModelProfilesConfig, profile config.ModelProfile) ModelProfilesMetaInfo {
+	info := ModelProfilesMetaInfo{
 		Enabled:     cfg.Enabled,
 		Profile:     profile.ID,
 		ProfileKind: string(profile.Kind),

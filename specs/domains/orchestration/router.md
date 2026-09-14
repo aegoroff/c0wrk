@@ -29,7 +29,7 @@ The `mode` field from the prior pipeline is removed (the Conductor decides execu
 
 ### Tool Matching (not used — removed)
 
-c0wrk does **not** use the sp4rk router's semantic tool matching: `coreRouter.SetToolMatching` is never called, so the `TOOL-MATCHING` and `JSON-OUTPUT-SCHEMA` prompt placeholders resolve to empty/default content and the routing output carries no `matched_tools` field. The SLM essential-tools narrowing is a static selection over the profile's pins, the protected tools, and every MCP tool (see [../slm.md](../slm.md) and [ADR-035](../../decisions/035-remove-small-llm-tool-budget.md)); `RoutingDecision.MatchedTools` exists on the sp4rk type but stays empty and unconsumed.
+c0wrk does **not** use the sp4rk router's semantic tool matching: `coreRouter.SetToolMatching` is never called, so the `TOOL-MATCHING` and `JSON-OUTPUT-SCHEMA` prompt placeholders resolve to empty/default content and the routing output carries no `matched_tools` field. The Model Profiles essential-tools narrowing is a static selection over the profile's pins, the protected tools, and every MCP tool (see [../model-profiles.md](../model-profiles.md) and [ADR-035](../../decisions/035-remove-small-llm-tool-budget.md)); `RoutingDecision.MatchedTools` exists on the sp4rk type but stays empty and unconsumed.
 
 ### Domain → Compaction Strategy (c0wrk consumption)
 
@@ -71,7 +71,7 @@ In No Project (CHAT) mode, `SetNoProjectMode()` disables only `semantic_search` 
 
 - LLM call failure → return error (no fallback routing)
 - JSON parse failure → one retry with repair prompt asking the LLM to fix its JSON
-- Second parse failure → return error — except when the Small-LLM essential-tools variant is enabled: the orchestrator then continues with a default routing decision (`RoutingDecision{Domain: general, Complexity: defaultResumeComplexity}`, logged/emitted "Routing fallback: unparseable routing JSON — continuing with default routing") and the essential-tools filter still applies its static selection (the tool set is never re-expanded to the full registry). The unprofiled path errors as documented.
+- Second parse failure → return error — except when the Model Profiles essential-tools variant is enabled: the orchestrator then continues with a default routing decision (`RoutingDecision{Domain: general, Complexity: defaultResumeComplexity}`, logged/emitted "Routing fallback: unparseable routing JSON — continuing with default routing") and the essential-tools filter still applies its static selection (the tool set is never re-expanded to the full registry). The unprofiled path errors as documented.
 
 (Validation rules — domain clamping, complexity range, skill dedup — are engine behavior; see the sp4rk router spec.)
 
@@ -90,5 +90,5 @@ In No Project (CHAT) mode, `SetNoProjectMode()` disables only `semantic_search` 
 - [README.md](README.md) — orchestration overview
 - [conductor.md](conductor.md) — routing decision feeds the Conductor
 - [../memory/compaction.md](../memory/compaction.md) — domain → strategy mapping
-- [../slm.md](../slm.md) — essential-tools narrowing applies a static tool selection; router tool matching is not used
+- [../model-profiles.md](../model-profiles.md) — essential-tools narrowing applies a static tool selection; router tool matching is not used
 - [../../decisions/012-conductor-orchestration-pipeline.md](../../decisions/012-conductor-orchestration-pipeline.md) — rationale for removing mode/clarification

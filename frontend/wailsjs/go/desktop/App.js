@@ -98,12 +98,12 @@ export function CreateHypothesis(arg1, arg2) {
   return window['go']['desktop']['App']['CreateHypothesis'](arg1, arg2);
 }
 
-export function CreateProject(arg1, arg2) {
-  return window['go']['desktop']['App']['CreateProject'](arg1, arg2);
+export function CreateModelProfile(arg1, arg2) {
+  return window['go']['desktop']['App']['CreateModelProfile'](arg1, arg2);
 }
 
-export function CreateSLMProfile(arg1, arg2) {
-  return window['go']['desktop']['App']['CreateSLMProfile'](arg1, arg2);
+export function CreateProject(arg1, arg2) {
+  return window['go']['desktop']['App']['CreateProject'](arg1, arg2);
 }
 
 export function CreateSession() {
@@ -120,6 +120,10 @@ export function DeleteBookmark(arg1, arg2) {
 
 export function DeleteBranch(arg1, arg2) {
   return window['go']['desktop']['App']['DeleteBranch'](arg1, arg2);
+}
+
+export function DeleteModelProfile(arg1) {
+  return window['go']['desktop']['App']['DeleteModelProfile'](arg1);
 }
 
 export function DeleteProject(arg1) {
@@ -140,10 +144,6 @@ export function DeleteResearch(arg1, arg2) {
 
 export function DeleteReviewComment(arg1) {
   return window['go']['desktop']['App']['DeleteReviewComment'](arg1);
-}
-
-export function DeleteSLMProfile(arg1) {
-  return window['go']['desktop']['App']['DeleteSLMProfile'](arg1);
 }
 
 export function DeleteSession(arg1) {
@@ -290,6 +290,10 @@ export function GetModelConfig(arg1) {
   return window['go']['desktop']['App']['GetModelConfig'](arg1);
 }
 
+export function GetModelProfiles() {
+  return window['go']['desktop']['App']['GetModelProfiles']();
+}
+
 export function GetPendingActions(arg1) {
   return window['go']['desktop']['App']['GetPendingActions'](arg1);
 }
@@ -324,10 +328,6 @@ export function GetReview(arg1) {
 
 export function GetReviewDiff() {
   return window['go']['desktop']['App']['GetReviewDiff']();
-}
-
-export function GetSLMProfiles() {
-  return window['go']['desktop']['App']['GetSLMProfiles']();
 }
 
 export function GetSecuritySettings() {
@@ -590,8 +590,8 @@ export function SearchVectorStore(arg1) {
   return window['go']['desktop']['App']['SearchVectorStore'](arg1);
 }
 
-export function SelectSLMProfile(arg1) {
-  return window['go']['desktop']['App']['SelectSLMProfile'](arg1);
+export function SelectModelProfile(arg1) {
+  return window['go']['desktop']['App']['SelectModelProfile'](arg1);
 }
 
 export function SendMessage(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10) {
@@ -614,16 +614,16 @@ export function SetModelConfig(arg1, arg2) {
   return window['go']['desktop']['App']['SetModelConfig'](arg1, arg2);
 }
 
+export function SetModelProfilesEnabled(arg1) {
+  return window['go']['desktop']['App']['SetModelProfilesEnabled'](arg1);
+}
+
 export function SetResearchPinned(arg1, arg2, arg3) {
   return window['go']['desktop']['App']['SetResearchPinned'](arg1, arg2, arg3);
 }
 
 export function SetReviewStatus(arg1, arg2) {
   return window['go']['desktop']['App']['SetReviewStatus'](arg1, arg2);
-}
-
-export function SetSLMEnabled(arg1) {
-  return window['go']['desktop']['App']['SetSLMEnabled'](arg1);
 }
 
 export function SetUpdateSettings(arg1) {
@@ -718,12 +718,12 @@ export function UpdateMCPServers(arg1) {
   return window['go']['desktop']['App']['UpdateMCPServers'](arg1);
 }
 
-export function UpdateProxySettings(arg1) {
-  return window['go']['desktop']['App']['UpdateProxySettings'](arg1);
+export function UpdateModelProfile(arg1, arg2) {
+  return window['go']['desktop']['App']['UpdateModelProfile'](arg1, arg2);
 }
 
-export function UpdateSLMProfile(arg1, arg2) {
-  return window['go']['desktop']['App']['UpdateSLMProfile'](arg1, arg2);
+export function UpdateProxySettings(arg1) {
+  return window['go']['desktop']['App']['UpdateProxySettings'](arg1);
 }
 
 export function UpdateSearchSettings(arg1) {

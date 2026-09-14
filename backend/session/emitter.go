@@ -1132,13 +1132,13 @@ func (e *EventEmitter) SkillsActivated(skillNames []string) {
 	})
 }
 
-// SetSLMProfile snapshots the Small-LLM profile state the session runs
+// SetModelProfile snapshots the Model Profiles profile state the session runs
 // under — including the active profile's id and kind — it annotates the
 // "agent_metrics" payload so measurements can be grouped by active
 // optimization variants. Metrics are collected regardless — an unset
 // profile just reports enabled=false with no variants and no profile fields.
-func (e *EventEmitter) SetSLMProfile(info SLMMetaInfo) {
-	e.metrics.setSLM(info)
+func (e *EventEmitter) SetModelProfile(info ModelProfilesMetaInfo) {
+	e.metrics.setModelProfiles(info)
 }
 
 // EmitAgentMetrics emits the "agent_metrics" event carrying the accumulated

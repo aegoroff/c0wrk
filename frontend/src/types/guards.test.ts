@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { isSLMProfile, isSLMProfileKind, isSLMProfilesResponse } from './guards'
-import type { SLMProfilesResponse } from './models'
+import { isModelProfile, isModelProfileKind, isModelProfilesResponse } from './guards'
+import type { ModelProfilesResponse } from './models'
 
-// Canonical GetSLMProfiles wire payload (mirrors backend/api_types.go):
+// Canonical GetModelProfiles wire payload (mirrors backend/api_types.go):
 // every field the backend serializes is present, lists are [] (never null),
 // suggested_profile_id is null when no predefined profile matches.
-const baseResponse: SLMProfilesResponse = {
+const baseResponse: ModelProfilesResponse = {
   enabled: false,
   profiles: [
     {
@@ -110,22 +110,22 @@ function at<T>(arr: readonly T[], i: number): T {
   return v
 }
 
-function mutated(fn: (r: SLMProfilesResponse) => void): unknown {
+function mutated(fn: (r: ModelProfilesResponse) => void): unknown {
   const clone = structuredClone(baseResponse)
   fn(clone)
   return clone
 }
 
-describe('isSLMProfilesResponse', () => {
+describe('isModelProfilesResponse', () => {
   it('accepts a canonical payload', () => {
-    expect(isSLMProfilesResponse(mutated(() => {}))).toBe(true)
+    expect(isModelProfilesResponse(mutated(() => {}))).toBe(true)
   })
 
   it('accepts a string suggested_profile_id', () => {
     const payload = mutated((r) => {
       r.suggested_profile_id = 'qwen3'
     })
-    expect(isSLMProfilesResponse(payload)).toBe(true)
+    expect(isModelProfilesResponse(payload)).toBe(true)
   })
 
   it('accepts an empty catalog with empty picker universe', () => {
@@ -137,16 +137,16 @@ describe('isSLMProfilesResponse', () => {
       r.protected_tools = []
       r.warnings = []
     })
-    expect(isSLMProfilesResponse(payload)).toBe(true)
+    expect(isModelProfilesResponse(payload)).toBe(true)
   })
 
   it('rejects non-object payloads', () => {
     for (const bad of [null, undefined, 42, 'profiles', true, [], [baseResponse]]) {
-      expect(isSLMProfilesResponse(bad)).toBe(false)
+      expect(isModelProfilesResponse(bad)).toBe(false)
     }
   })
 
-  const malformed: Array<[label: string, mutate: (r: SLMProfilesResponse) => void]> = [
+  const malformed: Array<[label: string, mutate: (r: ModelProfilesResponse) => void]> = [
     ['missing profiles key', (r) => delete (r as { profiles?: unknown }).profiles],
     ['profiles not an array', (r) => ((r as { profiles?: unknown }).profiles = {})],
     [
@@ -266,14 +266,14 @@ describe('isSLMProfilesResponse', () => {
 
   for (const [label, mutate] of malformed) {
     it(`rejects ${label}`, () => {
-      expect(isSLMProfilesResponse(mutated(mutate))).toBe(false)
+      expect(isModelProfilesResponse(mutated(mutate))).toBe(false)
     })
   }
 })
 
-describe('isSLMProfile', () => {
+describe('isModelProfile', () => {
   it('accepts a well-formed profile', () => {
-    expect(isSLMProfile(structuredClone(at(baseResponse.profiles, 1)))).toBe(true)
+    expect(isModelProfile(structuredClone(at(baseResponse.profiles, 1)))).toBe(true)
   })
 
   it('rejects a profile whose second element is malformed', () => {
@@ -281,18 +281,18 @@ describe('isSLMProfile', () => {
     const payload = mutated((r) => {
       ((at(r.profiles, 1).values.sampling as { temperature?: unknown }).temperature = undefined)
     })
-    const resp = payload as SLMProfilesResponse
-    expect(isSLMProfile(at(resp.profiles, 0))).toBe(true)
-    expect(isSLMProfile(at(resp.profiles, 1))).toBe(false)
+    const resp = payload as ModelProfilesResponse
+    expect(isModelProfile(at(resp.profiles, 0))).toBe(true)
+    expect(isModelProfile(at(resp.profiles, 1))).toBe(false)
   })
 })
 
-describe('isSLMProfileKind', () => {
+describe('isModelProfileKind', () => {
   it('accepts both kinds and rejects others', () => {
-    expect(isSLMProfileKind('predefined')).toBe(true)
-    expect(isSLMProfileKind('custom')).toBe(true)
+    expect(isModelProfileKind('predefined')).toBe(true)
+    expect(isModelProfileKind('custom')).toBe(true)
     for (const bad of ['system', '', 'PREDEFINED', undefined, null, 1]) {
-      expect(isSLMProfileKind(bad)).toBe(false)
+      expect(isModelProfileKind(bad)).toBe(false)
     }
   })
 })

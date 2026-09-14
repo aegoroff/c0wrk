@@ -12,21 +12,34 @@ import (
 
 // ConfigResponse is the typed response for GetConfig, with sanitized (masked) API keys.
 type ConfigResponse struct {
-	Loaded       bool                         `json:"loaded"`
-	LogLevel     string                       `json:"log_level"`
-	ConfigErrors []string                     `json:"config_errors"`
-	LLM          ConfigLLMResponse            `json:"llm"`
-	Search       ConfigSearchResp             `json:"search"`
-	Proxy        ProxySettingsResponse        `json:"proxy"`
-	Experimental ExperimentalSettingsResponse `json:"experimental"`
+	Loaded        bool                          `json:"loaded"`
+	LogLevel      string                        `json:"log_level"`
+	ConfigErrors  []string                      `json:"config_errors"`
+	LLM           ConfigLLMResponse             `json:"llm"`
+	Search        ConfigSearchResp              `json:"search"`
+	Proxy         ProxySettingsResponse         `json:"proxy"`
+	Experimental  ExperimentalSettingsResponse  `json:"experimental"`
+	ModelProfiles ModelProfilesSettingsResponse `json:"model_profiles"`
 }
 
 // ExperimentalSettingsResponse exposes the master experimental-features switch
 // to the settings UI. It carries no feature-specific state by design — the
 // switch is all-or-nothing and gates every experimental feature (currently the
-// Small-LLM profile and the E2S execution mode).
+// E2S execution mode). Model Profiles is NOT gated by this switch; it carries
+// its own manual master toggle (model_profiles.enabled).
 type ExperimentalSettingsResponse struct {
 	Enabled bool `json:"enabled"`
+}
+
+// ModelProfilesSettingsResponse exposes the EFFECTIVE (resolved) Model Profiles profile state
+// to the settings UI, not the raw persisted config. Enabled mirrors the
+// resolved master toggle (model_profiles.enabled, carried through verbatim — the
+// experimental-features switch does not affect it); EssentialToolsEnabled
+// mirrors the resolved essential-tools variant sub-toggle. Both are false when
+// the config is not loaded.
+type ModelProfilesSettingsResponse struct {
+	Enabled               bool `json:"enabled"`
+	EssentialToolsEnabled bool `json:"essential_tools_enabled"`
 }
 
 // ReasoningInfo holds native reasoning options for a model family.
@@ -217,29 +230,29 @@ type GroupPolicyResponse struct {
 	Blacklist []string `json:"blacklist"`
 }
 
-// SLMProfilesResponse is the small-LLM profile catalog view for the settings
+// ModelProfilesResponse is the model-profile profile catalog view for the settings
 // picker: every profile (predefined ∪ custom) with its 25 knob values, the
-// persisted active profile id (config.yaml slm.active_profile), the
+// persisted active profile id (config.yaml model_profiles.active_profile), the
 // suggested profile id (a normalized match of the default model name against
 // the predefined slugs; null when nothing matches), and the read-only picker
 // universe (builtin_tools / tool_groups) read from the live tool registry.
-type SLMProfilesResponse struct {
-	// Enabled is the global master toggle (config.yaml slm.enabled) reported
+type ModelProfilesResponse struct {
+	// Enabled is the global master toggle (config.yaml model_profiles.enabled) reported
 	// verbatim — it is NOT a value of any profile. False when config is not
 	// yet initialized.
 	Enabled bool `json:"enabled"`
 	// Profiles is the full catalog: predefined entries first (catalog order),
 	// then custom entries in store order. Always non-nil ([] not null).
-	Profiles []SLMProfileDTO `json:"profiles"`
+	Profiles []ModelProfileDTO `json:"profiles"`
 	// ActiveID is the STORED active profile id, reported verbatim — including
 	// a dangling id after an external store edit; the resolver then falls
 	// back to generic and says so in Warnings.
 	ActiveID string `json:"active_id"`
 	// SuggestedProfileID is nil (JSON null) when no predefined profile
 	// matches the default model name.
-	SuggestedProfileID *string          `json:"suggested_profile_id"`
-	BuiltinTools       []SLMBuiltinTool `json:"builtin_tools"`
-	ToolGroups         []SLMToolGroup   `json:"tool_groups"`
+	SuggestedProfileID *string                    `json:"suggested_profile_id"`
+	BuiltinTools       []ModelProfilesBuiltinTool `json:"builtin_tools"`
+	ToolGroups         []ModelProfilesToolGroup   `json:"tool_groups"`
 	// ProtectedTools lists the orchestration tools the backend always keeps
 	// regardless of any selection, so the UI can render them as locked chips.
 	ProtectedTools []string `json:"protected_tools"`
@@ -249,73 +262,73 @@ type SLMProfilesResponse struct {
 	Warnings []string `json:"warnings"`
 }
 
-// SLMProfileDTO is one catalog entry: stable id, display name, kind
+// ModelProfileDTO is one catalog entry: stable id, display name, kind
 // ("predefined"|"custom") and the profile's 25 knob values.
-type SLMProfileDTO struct {
-	ID     string           `json:"id"`
-	Name   string           `json:"name"`
-	Kind   string           `json:"kind"`
-	Values SLMProfileValues `json:"values"`
+type ModelProfileDTO struct {
+	ID     string             `json:"id"`
+	Name   string             `json:"name"`
+	Kind   string             `json:"kind"`
+	Values ModelProfileValues `json:"values"`
 }
 
-// SLMProfileValues carries the 25 knob values of one profile. The master
-// enabled toggle is NOT here: it is a config.yaml field (slm.enabled), not a
+// ModelProfileValues carries the 25 knob values of one profile. The master
+// enabled toggle is NOT here: it is a config.yaml field (model_profiles.enabled), not a
 // profile value.
-type SLMProfileValues struct {
-	EssentialTools SLMEssentialToolsValues `json:"essential_tools"`
-	SystemPrompt   SLMSystemPromptResp     `json:"system_prompt"`
-	Sampling       SLMSamplingResp         `json:"sampling"`
-	LoopHardening  SLMLoopHardeningResp    `json:"loop_hardening"`
-	Context        SLMContextResp          `json:"context"`
+type ModelProfileValues struct {
+	EssentialTools ModelProfilesEssentialToolsValues `json:"essential_tools"`
+	SystemPrompt   ModelProfilesSystemPromptResp     `json:"system_prompt"`
+	Sampling       ModelProfilesSamplingResp         `json:"sampling"`
+	LoopHardening  ModelProfilesLoopHardeningResp    `json:"loop_hardening"`
+	Context        ModelProfilesContextResp          `json:"context"`
 }
 
-// SLMEssentialToolsValues is the value part of the always-present
-// tool-subset variant (the picker universe lives on SLMProfilesResponse).
-type SLMEssentialToolsValues struct {
+// ModelProfilesEssentialToolsValues is the value part of the always-present
+// tool-subset variant (the picker universe lives on ModelProfilesResponse).
+type ModelProfilesEssentialToolsValues struct {
 	Enabled             bool     `json:"enabled"`
 	AlwaysPresent       []string `json:"always_present"`
 	CompactDescriptions bool     `json:"compact_descriptions"`
 }
 
-// SLMProfileUpdateRequest is the update payload for UpdateSLMProfile. Only
+// ModelProfileUpdateRequest is the update payload for UpdateModelProfile. Only
 // the two request-level fields are optional: nil Name keeps the stored display
 // name and nil Config keeps the stored values. A non-nil Config replaces the
 // WHOLE 25-knob value set (no per-section merge).
-type SLMProfileUpdateRequest struct {
-	Name   *string           `json:"name"`
-	Config *SLMProfileValues `json:"config"`
+type ModelProfileUpdateRequest struct {
+	Name   *string             `json:"name"`
+	Config *ModelProfileValues `json:"config"`
 }
 
-// SLMBuiltinTool describes one pin-able built-in tool for the
+// ModelProfilesBuiltinTool describes one pin-able built-in tool for the
 // always-present picker: its registry name plus the description the UI renders
 // in the entry's hover tooltip.
-type SLMBuiltinTool struct {
+type ModelProfilesBuiltinTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
-// SLMToolGroup describes a functional cluster of built-in tools offered
+// ModelProfilesToolGroup describes a functional cluster of built-in tools offered
 // as one atomic picker entry: picking the cluster pins every still-selectable
 // member at once. The UI renders Title and Description in the entry's tooltip
 // and lists Tools alongside them. Members are already restricted to the picker
 // universe reported in BuiltinTools.
-type SLMToolGroup struct {
+type ModelProfilesToolGroup struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	Tools       []string `json:"tools"`
 }
 
-// SLMSystemPromptResp is the prompt-simplification variant.
-type SLMSystemPromptResp struct {
+// ModelProfilesSystemPromptResp is the prompt-simplification variant.
+type ModelProfilesSystemPromptResp struct {
 	Lite              bool `json:"lite"`
 	FewShot           bool `json:"few_shot"`
 	ReasoningScaffold bool `json:"reasoning_scaffold"`
 }
 
-// SLMSamplingResp is the sampling-override variant. Zero numeric values
+// ModelProfilesSamplingResp is the sampling-override variant. Zero numeric values
 // mean "inherit the vendor preset" (not "send 0").
-type SLMSamplingResp struct {
+type ModelProfilesSamplingResp struct {
 	Enabled           bool    `json:"enabled"`
 	Temperature       float64 `json:"temperature"`
 	TopP              float64 `json:"top_p"`
@@ -325,8 +338,8 @@ type SLMSamplingResp struct {
 	ReasoningEffort   string  `json:"reasoning_effort"`
 }
 
-// SLMLoopHardeningResp is the tightened circuit-breaker variant.
-type SLMLoopHardeningResp struct {
+// ModelProfilesLoopHardeningResp is the tightened circuit-breaker variant.
+type ModelProfilesLoopHardeningResp struct {
 	Enabled                      bool `json:"enabled"`
 	RepeatNudgeThreshold         int  `json:"repeat_nudge_threshold"`
 	ParseErrorAbortThreshold     int  `json:"parse_error_abort_threshold"`
@@ -335,17 +348,17 @@ type SLMLoopHardeningResp struct {
 	SameToolRepeatNudgeThreshold int  `json:"same_tool_repeat_nudge_threshold"`
 }
 
-// SLMContextResp is the aggressive context-management variant.
-type SLMContextResp struct {
-	Enabled             bool              `json:"enabled"`
-	Compaction          SLMCompactionResp `json:"compaction"`
-	ToolOutputKeepLastN int               `json:"tool_output_keep_last_n"`
-	OutputTokenReserve  int               `json:"output_token_reserve"`
+// ModelProfilesContextResp is the aggressive context-management variant.
+type ModelProfilesContextResp struct {
+	Enabled             bool                        `json:"enabled"`
+	Compaction          ModelProfilesCompactionResp `json:"compaction"`
+	ToolOutputKeepLastN int                         `json:"tool_output_keep_last_n"`
+	OutputTokenReserve  int                         `json:"output_token_reserve"`
 }
 
-// SLMCompactionResp holds the compaction-tightening overrides of the
+// ModelProfilesCompactionResp holds the compaction-tightening overrides of the
 // context variant.
-type SLMCompactionResp struct {
+type ModelProfilesCompactionResp struct {
 	KeepLast       int `json:"keep_last"`
 	BlockSize      int `json:"block_size"`
 	TriggerPercent int `json:"trigger_percent"`

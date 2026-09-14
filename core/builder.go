@@ -83,8 +83,8 @@ type OrchestratorBuilder struct {
 	baseAgentDirs            []string     // resolved Subagent Profile directories shared across sessions (highest priority first)
 	proxyClient              *http.Client // proxy-configured HTTP client (nil = direct connection)
 
-	// Cached reasoning effort string. Empty unless seeded by the SLM
-	// sampling profile (applySLMPresets); per-request overrides flow
+	// Cached reasoning effort string. Empty unless seeded by the ModelProfiles
+	// sampling profile (applyModelProfilesPresets); per-request overrides flow
 	// through HandleOptions.ReasoningEffort → Orchestrator.SetReasoningEffort,
 	// which propagates to router, planner, reflector, and the sp4rk P&E engine.
 	reasoningEffort string
@@ -189,10 +189,10 @@ func NewOrchestratorBuilder(cfg *BuilderConfig, askUserFunc tools.AskUserFunc, p
 	// 2. Security policies (fast — synchronous)
 	b.applySecurityPolicies(cfg)
 
-	// 2a. SLM profile (fast — synchronous): caches the profile and seeds
+	// 2a. ModelProfiles profile (fast — synchronous): caches the profile and seeds
 	// the builder-level reasoning-effort default when the sampling variant is
 	// active. Per-request overrides still win via ApplyRequestOverrides.
-	b.applySLMPresets(cfg)
+	b.applyModelProfilesPresets(cfg)
 
 	// 3. Start slow initialization asynchronously.
 	// MCP gateway runs in its own goroutine (mcpDone), decoupled from initDone,
@@ -515,16 +515,16 @@ func (b *OrchestratorBuilder) Build(
 	// Resolve reasoning effort for step executors
 	reasoningEffort := b.reasoningEffort
 
-	// Small-LLM context-management override: tightens compaction, tool-output
+	// Model Profiles context-management override: tightens compaction, tool-output
 	// pruning, and the output token reserve when both the master toggle and the
 	// context variant are enabled (no-op otherwise).
-	exec := applyContextManagement(cfg.Executor, cfg.SLM)
+	exec := applyContextManagement(cfg.Executor, cfg.ModelProfiles)
 
 	// Build orchestrator config
 	orchConfig := OrchestratorConfig{
 		KeepFirst: exec.Compaction.SlidingWindow.KeepFirst,
 		KeepLast:  exec.Compaction.SlidingWindow.KeepLast,
-		// Full compaction settings (Small-LLM context overrides applied) for
+		// Full compaction settings (Model Profiles context overrides applied) for
 		// manual conversation-history compaction.
 		Compaction:                exec.Compaction,
 		MaxDependencyContextChars: cfg.Orchestration.MaxDependencyContextChars,
@@ -551,23 +551,7 @@ func (b *OrchestratorBuilder) Build(
 			RepeatNudgeThreshold: cfg.E2S.RepeatNudgeThreshold,
 			RepeatAbortThreshold: cfg.E2S.RepeatAbortThreshold,
 		},
-		SLM: SLMSettings{
-			Enabled: cfg.SLM.Enabled,
-			EssentialTools: SLMEssentialSettings{
-				Enabled:             cfg.SLM.EssentialTools.Enabled,
-				AlwaysPresent:       cfg.SLM.EssentialTools.AlwaysPresent,
-				CompactDescriptions: cfg.SLM.EssentialTools.CompactDescriptions,
-			},
-			SystemPrompt: SLMSystemPromptSettings{
-				Lite:              cfg.SLM.SystemPrompt.Lite,
-				FewShot:           cfg.SLM.SystemPrompt.FewShot,
-				ReasoningScaffold: cfg.SLM.SystemPrompt.ReasoningScaffold,
-			},
-			LoopHardening: SLMLoopHardeningSettings{
-				Enabled:              cfg.SLM.LoopHardening.Enabled,
-				RepeatNudgeThreshold: cfg.SLM.LoopHardening.RepeatNudgeThreshold,
-			},
-		},
+		ModelProfiles: ModelProfilesSettingsFromBuilderConfig(cfg.ModelProfiles),
 	}
 
 	// Create tool result cache (per-session lifetime).
@@ -600,10 +584,10 @@ func (b *OrchestratorBuilder) Build(
 		SameToolRepeatAbortThreshold: cfg.Executor.CircuitBreaker.SameToolRepeatAbortThreshold,
 		SameToolResultSizeDelta:      cfg.Executor.CircuitBreaker.SameToolResultSizeDelta,
 	}
-	// SLM loop hardening: when enabled, override the breaker thresholds
-	// with the tighter SLM values so a looping small model is caught
+	// ModelProfiles loop hardening: when enabled, override the breaker thresholds
+	// with the tighter ModelProfiles values so a looping small model is caught
 	// earlier. Thresholds absent from the profile keep their baseline.
-	circuitBreaker = applyLoopHardening(circuitBreaker, cfg.SLM)
+	circuitBreaker = applyLoopHardening(circuitBreaker, cfg.ModelProfiles)
 
 	// Logged LLM caller for step execution (wraps trackingCaller)
 	loggedLLM := agent.NewLoggingLLMCaller(trackingCaller, cfg.LLM.DefaultProviderName(), logger)
@@ -1798,10 +1782,10 @@ func (b *OrchestratorBuilder) buildRouter(ctx context.Context, cfg *BuilderConfi
 		})
 	}
 
-	// Small-LLM context-management override: keeps the router's token budget
+	// Model Profiles context-management override: keeps the router's token budget
 	// (safety margin, output reserve) in sync with the executor tightening
 	// applied in Build (no-op unless both toggles are enabled).
-	exec := applyContextManagement(cfg.Executor, cfg.SLM)
+	exec := applyContextManagement(cfg.Executor, cfg.ModelProfiles)
 
 	routerCfg := llm.RouterConfig{
 		Providers:           providers,
@@ -1812,7 +1796,7 @@ func (b *OrchestratorBuilder) buildRouter(ctx context.Context, cfg *BuilderConfi
 		OutputTokenReserve:  exec.OutputTokenReserve,
 		HTTPClient:          llmClient,
 		Logger:              b.logger,
-		SamplingFunc:        resolveSamplingFunc(cfg.SLM),
+		SamplingFunc:        resolveSamplingFunc(cfg.ModelProfiles),
 	}
 	llmRouter, err := llm.NewRouter(ctx, routerCfg, modelRegistry)
 	if err != nil {
@@ -2105,11 +2089,11 @@ func (b *OrchestratorBuilder) buildContextFactory(caller *llm.TrackingCaller, cf
 	summarizeCaller = agent.NewDumpCaller(summarizeCaller, dumpWriter, b.logger)
 	compactionEffort := b.reasoningEffort
 
-	// Small-LLM context-management override: tightens the compaction strategy
+	// Model Profiles context-management override: tightens the compaction strategy
 	// and tool-output pruning baselines when both the master toggle and the
 	// context variant are enabled. Per-step pruning overrides (below) still
 	// take precedence over the tightened baseline.
-	exec := applyContextManagement(cfg.Executor, cfg.SLM)
+	exec := applyContextManagement(cfg.Executor, cfg.ModelProfiles)
 
 	return func(systemPrompt string, modelMeta llm.ModelMetadata, compactionStrategy string, pruningOverrides ...orchestration.PruningOverride) ContextManager {
 		counter, err := llm.NewTokenCounter(modelMeta.TokenizerType)
@@ -2424,29 +2408,29 @@ func parseGroupPolicy(policy string) sdktools.ToolPolicy {
 	}
 }
 
-// applySLMPresets seeds the builder-level reasoning-effort default when
-// the SLM sampling variant is active. The remaining per-variant effects
+// applyModelProfilesPresets seeds the builder-level reasoning-effort default when
+// the ModelProfiles sampling variant is active. The remaining per-variant effects
 // (loop hardening, sampling temperature) are applied lazily in Build() and
 // buildRouter() via the pure helpers applyLoopHardening and
 // resolveSamplingFunc, which read the profile straight from the passed-in
 // *BuilderConfig. When the master toggle is off this is a no-op, so behavior
 // is identical to the un-profiled baseline.
-func (b *OrchestratorBuilder) applySLMPresets(cfg *BuilderConfig) {
+func (b *OrchestratorBuilder) applyModelProfilesPresets(cfg *BuilderConfig) {
 	// When the sampling variant is active and supplies a reasoning effort, use
 	// it as the builder-level default. Per-request overrides
 	// (HandleOptions.ReasoningEffort → ApplyRequestOverrides →
 	// SetReasoningEffort) still take precedence at request time.
-	if cfg.SLM.Enabled && cfg.SLM.Sampling.Enabled && cfg.SLM.Sampling.ReasoningEffort != "" {
-		b.reasoningEffort = cfg.SLM.Sampling.ReasoningEffort
+	if cfg.ModelProfiles.Enabled && cfg.ModelProfiles.Sampling.Enabled && cfg.ModelProfiles.Sampling.ReasoningEffort != "" {
+		b.reasoningEffort = cfg.ModelProfiles.Sampling.ReasoningEffort
 	}
 }
 
 // applyLoopHardening overrides circuit-breaker thresholds with the tighter
-// SLM loop-hardening values when the variant is enabled (and the master
+// ModelProfiles loop-hardening values when the variant is enabled (and the master
 // toggle is on). Only the thresholds present in the profile are overridden;
 // all others (RepeatAbortThreshold, TruncationAbortThreshold, etc.) keep their
 // baseline. When the variant is disabled the breaker is returned unchanged.
-func applyLoopHardening(cb agent.CircuitBreakerConfig, s BuilderSLMConfig) agent.CircuitBreakerConfig {
+func applyLoopHardening(cb agent.CircuitBreakerConfig, s BuilderModelProfilesConfig) agent.CircuitBreakerConfig {
 	if !s.Enabled || !s.LoopHardening.Enabled {
 		return cb
 	}
@@ -2462,11 +2446,11 @@ func applyLoopHardening(cb agent.CircuitBreakerConfig, s BuilderSLMConfig) agent
 // applyContextManagement tightens the executor's context-management knobs —
 // compaction (sliding-window keep-last, summarization block size, predictive
 // trigger), tool-output pruning depth, and the output token reserve — when the
-// SLM context variant is enabled (and the master toggle is on). Each knob
+// ModelProfiles context variant is enabled (and the master toggle is on). Each knob
 // is overridden independently: a zero value in the profile means "keep the
 // executor baseline" for that knob. When the variant is disabled the executor
 // config is returned byte-for-byte unchanged.
-func applyContextManagement(exec BuilderExecutorConfig, s BuilderSLMConfig) BuilderExecutorConfig {
+func applyContextManagement(exec BuilderExecutorConfig, s BuilderModelProfilesConfig) BuilderExecutorConfig {
 	if !s.Enabled || !s.Context.Enabled {
 		return exec
 	}
@@ -2491,7 +2475,7 @@ func applyContextManagement(exec BuilderExecutorConfig, s BuilderSLMConfig) Buil
 
 // resolveSamplingFunc returns the SamplingFunc for the LLM router. The
 // per-family vendor matrix preset (prompt.DefaultSampling) is always the
-// base. When the sampling variant is enabled (and the SLM master toggle
+// base. When the sampling variant is enabled (and the ModelProfiles master toggle
 // is on), only the fields the user set explicitly (non-zero) override the
 // preset; every unset field inherits the vendor value. A fully-unset profile
 // therefore reproduces the vendor preset exactly — enabling the variant alone
@@ -2502,7 +2486,7 @@ func applyContextManagement(exec BuilderExecutorConfig, s BuilderSLMConfig) Buil
 // because the llm package cannot import prompt (it would create an import
 // cycle through prompt's in-package tests). MaxTokens is deliberately not
 // forwarded: the router-level preset is sampling-only.
-func resolveSamplingFunc(s BuilderSLMConfig) llm.SamplingFunc {
+func resolveSamplingFunc(s BuilderModelProfilesConfig) llm.SamplingFunc {
 	override := s.Enabled && s.Sampling.Enabled
 	return func(family string) llm.SamplingDefaults {
 		c := prompt.DefaultSampling(family)
@@ -2517,7 +2501,7 @@ func resolveSamplingFunc(s BuilderSLMConfig) llm.SamplingFunc {
 			return d
 		}
 		// Zero means "not set" — inherit the vendor preset instead of
-		// clobbering it (see BuilderSLMSampling field docs).
+		// clobbering it (see BuilderModelProfilesSampling field docs).
 		if s.Sampling.Temperature > 0 {
 			d.Temperature = &s.Sampling.Temperature
 		}

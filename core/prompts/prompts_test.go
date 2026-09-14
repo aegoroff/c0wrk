@@ -17,8 +17,11 @@ func TestEmbeddedPrompts_NonEmpty(t *testing.T) {
 		{"OrchestratorPlanContext", OrchestratorPlanContext},
 		{"GoalMode", GoalMode},
 		{"GoalDerivation", GoalDerivation},
+		{"GoalDerivationLite", GoalDerivationLite},
 		{"GoalVerification", GoalVerification},
+		{"GoalVerificationLite", GoalVerificationLite},
 		{"GoalReDerivation", GoalReDerivation},
+		{"GoalReDerivationLite", GoalReDerivationLite},
 		{"ReflectorSystem", ReflectorSystem},
 		{"RouterSystem", RouterSystem},
 		{"VerificationMandate", VerificationMandate},
@@ -73,10 +76,13 @@ func TestEmbeddedPrompts_ContainExpectedKeywords(t *testing.T) {
 		{"PromptOptimizeExtract", PromptOptimizeExtract, []string{"translate", "keyword", "json"}},
 		{"PromptOptimizeRewrite", PromptOptimizeRewrite, []string{"optim", "prompt"}},
 		{"GoalDerivation", GoalDerivation, []string{"verification_mode", "executable", "re_derivation"}},
+		{"GoalDerivationLite", GoalDerivationLite, []string{"verification_mode", "executable", "re_derivation"}},
 		{"E2SSystem", E2SSystem, []string{"e2s_step", "state_patch", "finish"}},
 		{"E2SSystemLite", E2SSystemLite, []string{"e2s_step", "state_patch", "finish"}},
 		{"GoalVerification", GoalVerification, []string{"verify clause", "work product"}},
+		{"GoalVerificationLite", GoalVerificationLite, []string{"verify clause"}},
 		{"GoalReDerivation", GoalReDerivation, []string{"re-derivation", "delegate"}},
+		{"GoalReDerivationLite", GoalReDerivationLite, []string{"re-derivation", "delegate"}},
 	}
 
 	for _, tt := range tests {
@@ -190,6 +196,60 @@ func TestGoalVerificationDirectiveByMode(t *testing.T) {
 	}
 	if strings.Contains(out, "{reported_evidence}") || strings.Contains(out, "{shell_tool}") {
 		t.Errorf("re_derivation mode: unresolved placeholder remains, got: %s", out)
+	}
+}
+
+// TestGoalVerificationLiteDirectiveByMode covers the Lite counterpart of the
+// mode -> directive selection: the shared placeholder resolution, the mode
+// mapping, and the key property that the Lite variant differs from the verbose
+// one.
+func TestGoalVerificationLiteDirectiveByMode(t *testing.T) {
+	const (
+		cond     = "CONDITION-X7"
+		verify   = "VERIFY-Y7"
+		evidence = "EVIDENCE-Z7"
+	)
+
+	// Executable mode (and the empty default) -> lite executable directive.
+	for _, mode := range []string{"executable", ""} {
+		out := GoalVerificationLiteDirectiveByMode(mode, cond, verify, evidence)
+		if !strings.Contains(out, "Goal Verification Agent") {
+			t.Errorf("mode %q: expected lite executable directive signature, got: %s", mode, out)
+		}
+		if strings.Contains(out, "Re-derivation Mode") {
+			t.Errorf("mode %q: lite executable directive must not carry re-derivation signature", mode)
+		}
+		if out != GoalVerificationSubstitute(GoalVerificationLite, cond, verify, evidence) {
+			t.Errorf("mode %q: lite directive not selected/resolved as expected", mode)
+		}
+		if !strings.Contains(out, cond) || !strings.Contains(out, verify) || !strings.Contains(out, evidence) {
+			t.Errorf("mode %q: placeholders not resolved, got: %s", mode, out)
+		}
+		for _, ph := range []string{"{goal_condition}", "{goal_verify_clause}", "{reported_evidence}", "{shell_tool}"} {
+			if strings.Contains(out, ph) {
+				t.Errorf("mode %q: unresolved placeholder %s remains, got: %s", mode, ph, out)
+			}
+		}
+	}
+
+	// re_derivation mode -> lite re-derivation directive.
+	out := GoalVerificationLiteDirectiveByMode("re_derivation", cond, verify, evidence)
+	if !strings.Contains(out, "Re-derivation Mode") {
+		t.Errorf("re_derivation mode: expected lite re-derivation directive signature, got: %s", out)
+	}
+	if out != GoalVerificationSubstitute(GoalReDerivationLite, cond, verify, evidence) {
+		t.Errorf("re_derivation mode: lite directive not selected/resolved as expected")
+	}
+	for _, ph := range []string{"{goal_condition}", "{goal_verify_clause}", "{reported_evidence}", "{shell_tool}"} {
+		if strings.Contains(out, ph) {
+			t.Errorf("re_derivation mode: unresolved placeholder %s remains, got: %s", ph, out)
+		}
+	}
+
+	// The Lite directive must differ from the verbose directive.
+	if GoalVerificationLiteDirectiveByMode("executable", cond, verify, evidence) ==
+		GoalVerificationDirectiveByMode("executable", cond, verify, evidence) {
+		t.Error("lite executable directive is identical to the verbose one")
 	}
 }
 

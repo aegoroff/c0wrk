@@ -12,7 +12,7 @@ The orchestration domain coordinates the full lifecycle of a user request: class
 - `core/orchestrator_e2s.go` — E2S mode entry: runE2SLoop (context/launcher wiring, Σ persistence via `task_e2s_state`, resume checkpoints), hooks the `e2s_state` snapshots
 - `core/e2s/` — the E2S loop itself: the turn loop (`loop.go`), the `e2s_step` meta-tool + semantic anti-spin fingerprint (`steptool.go`), the Σ merge operator (`merge.go`), prompt composition (`prompt.go`), domain types (`types.go`) (see [../e2s.md](../e2s.md))
 - `core/conductor.go` — Conductor entry point: builds system prompt, tool set, launches `Executor.Run`
-- `core/slm/tools_filter.go` — pure tool-set narrowing for the SLM essential-tools variant (see [../slm.md](../slm.md))
+- `core/modelprofiles/tools_filter.go` — pure tool-set narrowing for the Model Profiles essential-tools variant (see [../model-profiles.md](../model-profiles.md))
 - `core/tools/delegate.go` — `delegate` tool (subagent launch with DAG + async)
 - `core/tools/declare_plan.go` — `declare_plan` tool (roadmap publish + approval gate)
 - `core/tools/reflect.go` — `reflect` tool (invokes Reflector on trajectory)
@@ -77,7 +77,7 @@ type OrchestratorConfig struct {
     AgentsMDSearchPaths         []string // extra AGENTS.md paths (global, c0wrk) read ahead of the workspace file
     ConductorHistoryWindow      int     // recent conversation messages injected into the Conductor context (default: 20)
     GoalLoop                    GoalLoopSettings // goal-loop settings: Verification gates the independent verifier turn ("independent" | "off"); see [../goal-mode.md](../goal-mode.md)
-    SLM                        SLMSettings // SLM profile (master toggle + essential-tools / system-prompt variants); see [../slm.md](../slm.md)
+    Model Profiles                        ModelProfilesSettings // model profile (master toggle + essential-tools / system-prompt variants); see [../model-profiles.md](../model-profiles.md)
 }
 
 // Routing result — domain, complexity, skills, and a clarification flag.
@@ -179,11 +179,11 @@ HandleMessage(ctx, message, sessionID, opts)
 │       (skills narrow the available toolset only — policy comes from
 │        security.groups, ADR-024; there is no skill policy layer)
 │
-├─ 4a. SLM essential-tools filter (Conductor path and E2S mode
+├─ 4a. Model Profiles essential-tools filter (Conductor path and E2S mode
 │     — never in goal mode):
-│     → When the SLM master toggle AND essential_tools.enabled (both
-│       from slm.enabled + the active profile's values), narrow the
-│       available tool set via slm.SelectTools (static union:
+│     → When the Model Profiles master toggle AND essential_tools.enabled (both
+│       from model_profiles.enabled + the active profile's values), narrow the
+│       available tool set via modelprofiles.SelectTools (static union:
 │       always-present + protected base + every MCP tool + turn-scoped
 │       guarantees; no budget, no router matching, no events emitted).
 │       No-op when the profile is off.
@@ -250,7 +250,7 @@ There is no `executionMode` toggle. The Conductor chooses its own granularity ba
 - When the assistant output contains tool-call syntax printed as text (failure-mode detected by `agent.DetectToolCallSyntaxInContent`), the history records a `HistoryNoteFailed(...)` note instead of the hallucinated text.
 - isNoProject: routing domain "code" is overridden to "general" after classification.
 - SetNoProjectMode(): disables code tools and adds extended bash command blacklist on the core tool registry.
-- SLM essential-tools filter: when active it runs exactly once per task on the Conductor path (before the ReAct loop) and inside the E2S branch (`runE2SWithState`), but never in goal mode; `finish` and the fact-memory / human-interaction tools always survive. The profile is strictly additive — every variant is inert when its master/sub-toggle is off. See [../slm.md](../slm.md).
+- Model Profiles essential-tools filter: when active it runs exactly once per task on the Conductor path (before the ReAct loop) and inside the E2S branch (`runE2SWithState`), but never in goal mode; `finish` and the fact-memory / human-interaction tools always survive. The profile is strictly additive — every variant is inert when its master/sub-toggle is off. See [../model-profiles.md](../model-profiles.md).
 
 ## Configuration
 
@@ -265,7 +265,7 @@ From `config.yaml` (via BuilderConfig → OrchestratorConfig):
 | `executor.compaction.thresholds.pre_warning_percent` | 75 | Context-fill % that triggers the pre-compaction store_fact nudge |
 | `security.agents_md_max_bytes` | 65536 | Cap on AGENTS.md content injected into prompts (0 = default; -1 = unlimited). Applies to the combined content of all AGENTS.md sources. |
 
-The SLM profiles (`slm.*` — knob values resolved from the active catalog profile) tune the Conductor for small/local models (tool-set narrowing, system-prompt Lite swap, sampling override, loop hardening, context management). The feature is strictly additive and defaults to off. See [../slm.md](../slm.md).
+The model profiles (`model_profiles.*` — knob values resolved from the active catalog profile) tune the Conductor for local / mid-size models (tool-set narrowing, system-prompt Lite swap, sampling override, loop hardening, context management). The feature is strictly additive and defaults to off. See [../model-profiles.md](../model-profiles.md).
 
 Not wired from `config.yaml` (hardcoded defaults in code):
 - `OrchestratorConfig.ConductorHistoryWindow` — default 20 (set in `NewOrchestrator`; not exposed as a config key).

@@ -136,7 +136,7 @@ export function useLifecycleEvents(sessionId: string | null): void {
     // --- agent_metrics ---
     // Aggregated per-run agent quality report emitted on task finish/abort:
     // parse errors, loop-detector nudges/aborts by kind, steps, output tokens
-    // and the active small-LLM profile. Stored alongside routing stats in
+    // and the active model profile. Stored alongside routing stats in
     // planStore.sessionStats and rendered in the ExecutionPanels stats row.
     cleanups.push(
       onSessionEvent(sessionId, 'agent_metrics', (data) => {
@@ -169,7 +169,7 @@ export function useLifecycleEvents(sessionId: string | null): void {
       }),
     )
 
-    // --- tools_assigned (removed): Small-LLM tool narrowing is silent and
+    // --- tools_assigned (removed): Model Profiles tool narrowing is silent and
     // deterministic — no per-task tool cards are surfaced in the chat.
 
     return () => cleanups.forEach(fn => fn())

@@ -1052,14 +1052,11 @@ orchestration:
 # ---------------------------------------------------------------------------
 # Master switch for features that are still under active development. It is
 # all-or-nothing: enabling it exposes every gated feature, disabling it hides
-# every gated feature and treats each as off. Disabling it also clears the
-# persisted Small-LLM master toggle (slm.enabled), so re-enabling the gate
-# never silently reactivates the profile. Gated features today:
-#   - the Small-LLM profile settings tab (slm.*)
+# every gated feature and treats each as off. Gated features today:
 #   - the E2S explicit-state execution mode (e2s.*)
 #
 # experimental:
-#   # Master switch. Default: false (Small-LLM profile and E2S mode off).
+#   # Master switch. Default: false (E2S mode off).
 #   enabled: false
 
 # ---------------------------------------------------------------------------
@@ -1127,10 +1124,10 @@ orchestration:
 #   auto_fetch_interval: "2m"
 
 # ---------------------------------------------------------------------------
-# Small-LLM Profile (slm)
+# Model Profiles (model_profiles)
 # ---------------------------------------------------------------------------
-# Optimizations applied when running on a "small" (low-capacity / cheaper)
-# LLM. Only TWO durable choices live in this section: the MANUAL-ONLY master
+# Optimizations applied when running on a local or mid-size (roughly 10–35B-
+# parameter) LLM. Only TWO durable choices live in this section: the MANUAL-ONLY master
 # toggle (no auto-detection; normally flipped from the Settings UI) and the
 # active profile id. The 25 variant knobs
 # (essential_tools, system_prompt, sampling, loop_hardening, context) are
@@ -1141,21 +1138,20 @@ orchestration:
 #     qwen3.6-35b-a3b, gemma-4-26b-a4b-it, gemma-4-31b-it, and the
 #     model-agnostic "generic" (read-only in the UI);
 #   - custom profiles are created/edited in the Settings UI and persisted to
-#     ~/.c0wrk/slm-profiles.yaml (create-from-base, edit values and name,
+#     ~/.c0wrk/model-profiles.yaml (create-from-base, edit values and name,
 #     delete; predefined profiles are read-only).
 #
-# A slm.active_profile that no longer resolves (e.g. a custom profile
+# A model_profiles.active_profile that no longer resolves (e.g. a custom profile
 # deleted by hand) falls back to "generic" with a load warning — it never
 # breaks the run. A LEGACY inline `small_llm:` section from an older
 # config.yaml is ignored at load and dropped by the next save (its knob
 # values do not migrate; the active profile's values apply instead).
 #
-# slm:
+# model_profiles:
 #   # Master toggle. When false every variant is ignored. Default: false.
-#   # Normally flipped from Settings → Small LLM (RPC SetSLMEnabled), which
-#   # writes this key — there is no need to edit the file. Enabling requires
-#   # the experimental gate (experimental.enabled); closing that gate resets
-#   # this value to false.
+#   # Normally flipped from Settings → Model Profiles (RPC
+#   # SetModelProfilesEnabled), which
+#   # writes this key — there is no need to edit the file.
 #   enabled: false
 #   # Active profile id. Default: "generic".
 #   active_profile: generic
