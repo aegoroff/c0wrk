@@ -24,6 +24,11 @@ import { Settings, Palette, Brain, Search, Shield, Info, Server, AlertTriangle, 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { hasDefaultModel } from '@/api/config'
 import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
+// The canonical app mark — the very same SVG Wails derives the bundled
+// appicon.png from, imported by URL so the About artwork can never drift
+// from the real icon. Served by the dev server via server.fs.allow in
+// vite.config.ts; hashed into dist/assets by production builds.
+import appIconUrl from '../../../../build/appicon.svg'
 
 /**
  * Shared classes for every tab's scroll container. `pr-2` keeps a small
@@ -260,9 +265,14 @@ export function SettingsModal() {
           <TabsContent value="about" className={TAB_CONTENT_CLASS}>
             <div className="space-y-4">
               <div className="flex items-center gap-3">
-                <div className="h-12 w-12 rounded-lg bg-primary/10 flex items-center justify-center">
-                  <span className="text-xl font-bold text-primary">c0</span>
-                </div>
+                {/* The brand artwork itself, mirroring the real app icon, so
+                    it deliberately bypasses theme tokens. */}
+                <img
+                  src={appIconUrl}
+                  alt=""
+                  aria-hidden="true"
+                  className="size-12 shrink-0"
+                />
                 <div>
                   <h3 className="font-semibold">c0wrk</h3>
                   <p className="text-sm text-muted-foreground">Desktop AI Coding Agent</p>
