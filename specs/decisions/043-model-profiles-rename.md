@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted → Partially supersedes [ADR-041](./041-slm-profiles.md) (the `SLM` nomenclature and the "Small LLM" user-facing tab label; the profile-catalog architecture itself stands unchanged)
+Accepted → Partially supersedes [ADR-041](./041-slm-profiles.md) (the `SLM` nomenclature and the "Small LLM" user-facing tab label; the profile-catalog architecture itself stands unchanged) → The experimental-gate coupling carried through this rename is partially superseded by [ADR-044](./044-model-profiles-out-of-experimental.md)
 
 ## Context
 

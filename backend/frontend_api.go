@@ -33,8 +33,8 @@ type FrontendAPI struct {
 	// ConfigResponse.model_profiles. Resolving it needs the profile catalog, which is
 	// read from disk, so caching keeps GetConfig a pure in-memory read (it runs
 	// on every settings open — see the GUARANTEE on collectAllModels). Seeded at
-	// construction and refreshed by refreshModelProfilesGateLocked at every ModelProfiles /
-	// experimental mutation. Guarded by configMu.
+	// construction and refreshed by refreshModelProfilesGateLocked at every Model Profiles
+	// mutation. Guarded by configMu.
 	modelProfilesGateResp ModelProfilesSettingsResponse
 	// modelProfilesNotices carries one-shot Model Profiles profile notices (e.g. "the
 	// active profile was deleted; switched to generic") for the NEXT
@@ -290,7 +290,7 @@ func NewFrontendAPI(cfg FrontendAPIConfig) *FrontendAPI {
 	}
 
 	// Seed the effective Model Profiles gate cache (ConfigResponse.model_profiles) so GetConfig
-	// stays a pure in-memory read. Every later ModelProfiles / experimental mutation
+	// stays a pure in-memory read. Every later Model Profiles mutation
 	// refreshes it via refreshModelProfilesGateLocked.
 	f.configMu.Lock()
 	f.refreshModelProfilesGateLocked()

@@ -48,8 +48,8 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
 		},
-		// The EFFECTIVE Model Profiles gate (the experimental gate folded into the
-		// master toggle by effectiveModelProfilesConfig), precomputed by
+		// The EFFECTIVE Model Profiles gate (the master toggle resolved against
+		// the active profile), precomputed by
 		// refreshModelProfilesGateLocked so this read path performs NO disk I/O — see the
 		// GUARANTEE on collectAllModels.
 		ModelProfiles: f.modelProfilesGateResp,
@@ -139,8 +139,8 @@ func (f *FrontendAPI) buildLLMResponse() ConfigLLMResponse {
 // settings open, and a model list containing an unknown model must not stall
 // the UI behind a network timeout. The only disk-backed datum GetConfig reports
 // — the effective Model Profiles gate (`ConfigResponse.model_profiles`) — is precomputed by
-// refreshModelProfilesGateLocked at construction and on each ModelProfiles / experimental mutation
-// (both under configMu), so the read path never reads the profile catalog.
+// refreshModelProfilesGateLocked at construction and on each Model Profiles mutation
+// (under configMu), so the read path never reads the profile catalog.
 //
 // Entries are keyed by composite (provider, model) so that two providers
 // exposing the same bare model name both appear — the frontend uses the
@@ -447,16 +447,9 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 
 // UpdateExperimentalFeatures toggles the master experimental-features switch
 // at runtime. It persists the change and rebuilds the LLM router so the
-// gated features (the Model Profiles profile and the E2S execution mode) take
-// effect for new sessions without
-// an app restart.
-//
-// Disabling experimental features also clears the persisted Model Profiles master
-// toggle (config.ModelProfiles.Enabled) in the same write, so re-enabling the gate later
-// does not silently reactivate the Model Profiles profile — the operator must opt
-// in again explicitly. The adapter gate in effectiveModelProfilesConfig is left
-// untouched and keeps forcing the effective profile off while experimental
-// features are disabled, as defense-in-depth against manual config.yaml edits.
+// gated features (the E2S execution mode) take effect for new sessions without
+// an app restart. Model Profiles is not gated by this switch, so this method
+// never touches its persisted master toggle (model_profiles.enabled).
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
@@ -466,48 +459,28 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	}
 
 	f.config.Experimental.Enabled = enabled
-	// Turning the gate off also drops the durable Model Profiles master toggle:
-	// leaving model_profiles.enabled true on disk would resurrect the profile on the next
-	// enable, contradicting the master-off state the operator just set.
-	if !enabled {
-		f.config.ModelProfiles.Enabled = false
-	}
 
 	if err := f.persistConfig(); err != nil {
 		f.log().Warn("failed to persist experimental features toggle", "error", err)
 	}
 
-	// Rebuild the LLM router so the Model Profiles profile (sampling overrides,
-	// essential-tools narrowing, context management) is applied or removed
-	// immediately. The same builder config carries the effective E2S settings,
-	// reused below to refresh the live orchestrators.
+	// Rebuild the LLM router so the E2S execution mode is applied or removed
+	// immediately. The builder config carries the effective E2S settings,
+	// reused below to refresh the live orchestrators. Model Profiles is not
+	// gated by this switch, so no Model Profiles state is recomputed or pushed.
 	builderCfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
-	// Recompute the cached effective gate GetConfig serves (this method runs
-	// under configMu.Lock): closing the gate forces the effective ModelProfiles off.
-	f.refreshModelProfilesGateLocked()
 	if b := f.builder(); b != nil {
 		if err := b.RebuildRouter(builderCfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after experimental-features toggle", "error", err)
 		}
 	}
 
-	// Keep the session manager's Model Profiles snapshot in sync so agent_metrics
-	// events created afterwards are annotated with the effective profile, and
-	// push the refreshed E2S gate onto already-built session orchestrators —
+	// Push the refreshed E2S gate onto already-built session orchestrators —
 	// otherwise the mode stays disabled there (stale config.E2S) until an app
 	// restart even though the live config now enables it.
 	if app := f.app; app != nil {
 		if mgr := app.Manager(); mgr != nil {
-			// Resolution warnings were surfaced at load time; the gate flip
-			// does not change the profile id.
-			modelProfilesCatalog := f.modelProfilesCatalog()
-			modelProfile, _ := effectiveModelProfilesConfig(f.config, modelProfilesCatalog)
-			mgr.SetModelProfile(modelProfile, activeModelProfile(f.config.ModelProfiles, modelProfilesCatalog))
 			mgr.SetE2SSettings(builderCfg.E2S)
-			// The experimental gate flips the effective ModelProfiles master toggle, so
-			// refresh the live orchestrators' ModelProfiles settings too (the goal guard
-			// reads them). Mirrors the E2S push above.
-			mgr.SetModelProfilesSettings(core.ModelProfilesSettingsFromBuilderConfig(builderCfg.ModelProfiles))
 		}
 	}
 
@@ -893,7 +866,7 @@ func (f *FrontendAPI) modelProfilesCatalog() []config.ModelProfile {
 // refreshModelProfilesGateLocked recomputes the cached effective Model Profiles gate reported
 // as ConfigResponse.model_profiles. Callers must hold configMu for WRITING. The profile
 // catalog (a disk read) is resolved only here — at construction and on the rare
-// ModelProfiles / experimental mutations — never on the GetConfig read path, which just
+// Model Profiles mutations — never on the GetConfig read path, which just
 // serves the cached value (keeping GetConfig a pure in-memory read, per the
 // GUARANTEE on collectAllModels).
 func (f *FrontendAPI) refreshModelProfilesGateLocked() {
@@ -910,9 +883,9 @@ func (f *FrontendAPI) refreshModelProfilesGateLocked() {
 
 // modelProfilesGoalBlocked reports whether goal mode must be refused because the
 // model-profile essential-tools narrowing is active: the master ModelProfiles toggle AND the
-// active profile's essential-tools variant both on, with the experimental gate
-// folded in (see effectiveModelProfilesConfig — the gate forces the effective toggle off
-// while experimental features are disabled). The profile is resolved against
+// active profile's essential-tools variant both on (Model Profiles is not gated
+// by the experimental-features switch, so the master toggle alone decides). The
+// profile is resolved against
 // the live catalog so a runtime profile switch takes effect without a restart.
 // Returns false when no config is loaded (fail-open, matching every other
 // runtime config read): a not-yet-loaded config must never block a request on
@@ -931,11 +904,11 @@ func (f *FrontendAPI) modelProfilesGoalBlocked() bool {
 	// modelProfilesCatalog() does file I/O (reads ~/.c0wrk/model-profiles.yaml) — load it
 	// OUTSIDE the config lock, then resolve the effective profile UNDER the
 	// read lock. Resolving under the lock is required for race-freedom:
-	// effectiveModelProfilesConfig reads cfg.ModelProfiles and cfg.Experimental, and the setters
-	// (SetModelProfilesEnabled / SelectModelProfile / UpdateExperimentalFeatures) mutate
-	// those SAME fields IN PLACE under the write lock, so reading them from a
-	// detached pointer would be a data race. (This is not a safe "config
-	// swap": the config is never swapped, only mutated.)
+	// effectiveModelProfilesConfig reads cfg.ModelProfiles, and the setters
+	// (SetModelProfilesEnabled / SelectModelProfile) mutate that SAME field IN
+	// PLACE under the write lock, so reading it from a detached pointer would be
+	// a data race. (This is not a safe "config swap": the config is never
+	// swapped, only mutated.)
 	catalog := f.modelProfilesCatalog()
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
@@ -1264,12 +1237,11 @@ func (f *FrontendAPI) SelectModelProfile(id string) error {
 }
 
 // SetModelProfilesEnabled toggles the global Model Profiles master switch (model_profiles.enabled) and
-// persists it to config.yaml. Enabling is gate-checked: the profile is an
-// experimental feature, so turning it ON requires experimental.enabled;
-// turning it OFF is always allowed (so the stored value can be cleared even
-// after the gate closes). A request matching the stored value is a no-op, and
-// a failed disk write rolls the in-memory value back so the rejected toggle is
-// indistinguishable from a rejected request.
+// persists it to config.yaml. The master toggle is the only switch — Model
+// Profiles is not gated by the experimental-features switch, so both turning it
+// on and off are always allowed. A request matching the stored value is a
+// no-op, and a failed disk write rolls the in-memory value back so the rejected
+// toggle is indistinguishable from a rejected request.
 func (f *FrontendAPI) SetModelProfilesEnabled(enabled bool) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
@@ -1279,9 +1251,6 @@ func (f *FrontendAPI) SetModelProfilesEnabled(enabled bool) error {
 	}
 	if f.configPath == "" {
 		return errors.New("config path not set")
-	}
-	if enabled && !f.config.Experimental.Enabled {
-		return errors.New("the model-profile profile is experimental and currently disabled — enable experimental features in settings to use it")
 	}
 	if f.config.ModelProfiles.Enabled == enabled {
 		return nil // already in the requested state — no state change

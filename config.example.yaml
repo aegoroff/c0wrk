@@ -1052,15 +1052,11 @@ orchestration:
 # ---------------------------------------------------------------------------
 # Master switch for features that are still under active development. It is
 # all-or-nothing: enabling it exposes every gated feature, disabling it hides
-# every gated feature and treats each as off. Disabling it also clears the
-# persisted Model Profiles master toggle (model_profiles.enabled), so
-# re-enabling the gate never silently reactivates the profile. Gated features
-# today:
-#   - the Model Profiles settings tab (model_profiles.*)
+# every gated feature and treats each as off. Gated features today:
 #   - the E2S explicit-state execution mode (e2s.*)
 #
 # experimental:
-#   # Master switch. Default: false (Model Profiles and E2S mode off).
+#   # Master switch. Default: false (E2S mode off).
 #   enabled: false
 
 # ---------------------------------------------------------------------------
@@ -1155,9 +1151,7 @@ orchestration:
 #   # Master toggle. When false every variant is ignored. Default: false.
 #   # Normally flipped from Settings → Model Profiles (RPC
 #   # SetModelProfilesEnabled), which
-#   # writes this key — there is no need to edit the file. Enabling requires
-#   # the experimental gate (experimental.enabled); closing that gate resets
-#   # this value to false.
+#   # writes this key — there is no need to edit the file.
 #   enabled: false
 #   # Active profile id. Default: "generic".
 #   active_profile: generic

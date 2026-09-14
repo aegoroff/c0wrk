@@ -43,7 +43,9 @@ type Config struct {
 	// ModelProfiles configures optimizations applied when running on a "small"
 	// (low-capacity / cheaper) LLM. Only the two durable operator choices are
 	// persisted here — the manual-only master toggle (no auto-detection) and
-	// the active profile id. The 25 variant knobs are NOT stored in
+	// the active profile id. Model Profiles is independent of the
+	// experimental-features switch: its own master toggle is the only switch.
+	// The 25 variant knobs are NOT stored in
 	// config.yaml: they are resolved at runtime from the active profile
 	// (predefined catalog ∪ custom store, see ResolveModelProfilesConfig). A legacy
 	// inline `small_llm:` section with the full knob set is ignored at load
@@ -56,15 +58,15 @@ type Config struct {
 	// where the model maintains an externalized state Σ that is patched and
 	// re-presented every turn (context bounded at O(1)) instead of replaying
 	// a growing transcript. The domain types and the validated merge operator
-	// live in core/e2s. The section is gated by experimental.enabled exactly
-	// like the Model Profiles profile: while the gate is off the section is
-	// ineffective (treated as disabled).
+	// live in core/e2s. The section is gated by experimental.enabled: while
+	// the gate is off the section is ineffective (treated as disabled).
 	E2S E2SConfig `yaml:"e2s"`
 
 	// Experimental gates features that are still under active development
-	// (currently the Model Profiles profile and the E2S execution mode) behind a
-	// single master switch. When disabled, every gated feature is treated as
-	// off. Default: off.
+	// (currently the E2S execution mode) behind a single master switch. Model
+	// Profiles is NOT gated by this switch — it carries its own manual master
+	// toggle (model_profiles.enabled). When disabled, every gated feature is
+	// treated as off. Default: off.
 	Experimental ExperimentalConfig `yaml:"experimental"`
 
 	// Updates configures the automatic "check for updates" subsystem that runs
@@ -820,12 +822,13 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 // ExperimentalConfig gates features that are still under active development
 // behind a single master switch. It is all-or-nothing by design: there is no
 // per-feature toggle, so enabling it exposes every gated feature and
-// disabling it treats each as off. Currently gated: the Model Profiles profile
-// (model_profiles.*) and the E2S execution mode (e2s.*).
+// disabling it treats each as off. Currently gated: the E2S execution mode
+// (e2s.*). Model Profiles (model_profiles.*) is NOT gated — it carries its own
+// manual master toggle.
 type ExperimentalConfig struct {
 	// Enabled is the master switch for the gated experimental features (the
-	// Model Profiles profile, the E2S execution mode). When false, every gated
-	// feature is treated as off regardless of its own toggles. Default: false.
+	// E2S execution mode). When false, every gated feature is treated as off
+	// regardless of its own toggles. Default: false.
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -868,10 +871,10 @@ func FindModelProfile(profiles []ModelProfile, id string) (ModelProfile, bool) {
 //   - an empty or unknown id → soft fallback to the model-agnostic "generic"
 //     profile plus one warning each — a stale id must never break the run.
 //
-// The master Enabled flag is carried over from the persist section verbatim
-// (the experimental gate is applied separately by the backend adapter, as
-// before). The returned struct owns its slices, so callers cannot mutate the
-// catalog through it.
+// The master Enabled flag is carried over from the persist section verbatim —
+// the master toggle is the only switch (Model Profiles is not gated by the
+// experimental-features switch). The returned struct owns its slices, so
+// callers cannot mutate the catalog through it.
 func ResolveModelProfilesConfig(persist ModelProfilesPersistConfig, catalog []ModelProfile) (resolved ModelProfilesConfig, warnings []string) {
 	var profile ModelProfile
 	if id := persist.ActiveProfile; id != "" {

@@ -43,8 +43,8 @@ const GENERIC_PROFILE_ID = 'generic'
  * Rename/Delete. The suggestion banner never auto-applies — Apply is an
  * explicit select, Hide dismisses until the suggested profile changes (a
  * default-model switch) or the app restarts. Neither the profile actions nor
- * this master toggle ever touch the master experimental gate: that lives on the
- * General tab and is updated only through updateExperimentalFeatures.
+ * this master toggle ever touch the experimental-features switch: that lives on
+ * the General tab and controls only the E2S execution mode.
  */
 export function ModelProfilesSettings() {
   const [resp, setResp] = useState<ModelProfilesResponse | null>(null)
@@ -161,10 +161,9 @@ export function ModelProfilesSettings() {
 
   /**
    * Master switch (config.yaml model_profiles.enabled): persist + apply, then reload the
-   * catalog so the profile UI reflects the new state. On failure (e.g. the
-   * backend's experimental gate is off) the error is surfaced and the toggle
-   * reverts. This NEVER touches the experimental gate — that is
-   * updateExperimentalFeatures, owned by the General tab.
+   * catalog so the profile UI reflects the new state. On failure the error is
+   * surfaced and the toggle reverts. This NEVER touches the experimental-features
+   * switch — that gates only E2S and is owned by the General tab.
    */
   const handleToggleEnabled = async (next: boolean) => {
     if (busy) return
@@ -248,8 +247,8 @@ export function ModelProfilesSettings() {
   const enabled = resp.enabled
 
   // Master toggle (config.yaml model_profiles.enabled): the first element, always visible.
-  // It gates the whole profile UI below. This is NOT the experimental gate — it
-  // never calls updateExperimentalFeatures (that lives on the General tab).
+  // It gates the whole profile UI below. This is NOT the experimental-features
+  // switch, which gates only E2S and lives on the General tab.
   const masterToggle = (
     <div className="flex flex-col gap-2 p-4 rounded-lg border border-border bg-card/50">
       <Toggle

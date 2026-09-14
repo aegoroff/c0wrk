@@ -13,7 +13,7 @@ Model Profiles are the tuning mechanism for running the Conductor against a loca
 - `backend/config/paths.go` — `ModelProfilesPath(agentDir)` → `<agentDir>/model-profiles.yaml` (the only path constructor for the store)
 - `backend/config/config.go` — `ModelProfilesPersistConfig` (the two persisted `model_profiles:` fields), runtime `ModelProfilesConfig` + sub-configs (`EssentialToolsConfig`, `SystemPromptConfig`, `ModelProfilesSamplingConfig`, `LoopHardeningConfig`, `ModelProfilesContextConfig`), the resolver `ResolveModelProfilesConfig`, `LoadModelProfilesCatalog` (predefined ∪ custom), `FindModelProfile`
 - `backend/config/defaults.go` — `defaultModelProfilesAlwaysPresent` (the 17-tool default pin list shared by every predefined profile); `ApplyDefaults` seeds `model_profiles.active_profile = "generic"` (the 25 knobs are no longer seeded here — their defaults live in the predefined catalog)
-- `backend/configadapter.go` — `ToBuilderConfig(cfg, modelProfilesCatalog)` (core never imports `backend/config`), `effectiveModelProfilesConfig` (applies the experimental gate), `activeModelProfile` (identity for metrics, generic fallback)
+- `backend/configadapter.go` — `ToBuilderConfig(cfg, modelProfilesCatalog)` (core never imports `backend/config`), `effectiveModelProfilesConfig` (resolves the persisted `model_profiles:` section against the catalog — no experimental gate), `activeModelProfile` (identity for metrics, generic fallback)
 - `core/builderconfig.go` — `BuilderModelProfilesConfig` + sub-structs (the core-layer mirror)
 - `core/builder.go` — `applyModelProfilesPresets` (seeds the builder-level reasoning-effort default from the profile's explicit value), `applyLoopHardening` (overrides circuit-breaker thresholds), `applyContextManagement` (overrides compaction/pruning/reserve on the executor config), `resolveSamplingFunc` (overrides router sampling)
 - `core/modelprofiles/tools_filter.go` — pure, deterministic `SelectTools` (with turn-scoped `extraGuaranteed` names) + `ProtectedToolNames` (static tool-set assembly)
@@ -102,14 +102,14 @@ The effective 25 knobs come from the **active profile** in the catalog — never
 - a known id (predefined ∪ custom) → that profile's values (cloned — the catalog is never mutated), with `Enabled` passed through from `model_profiles.enabled`;
 - an empty or dangling `model_profiles.active_profile` (e.g. a custom profile deleted by hand) → **soft fallback to `generic`** plus exactly one warning — the run never breaks. The settings UI mirrors the same semantics: a dangling active id renders the effective `generic` values read-only behind an "active profile not found" banner.
 
-The experimental-features master switch (`experimental.enabled`) gates the whole feature at the `ToBuilderConfig` boundary: when off, the builder sees `Enabled = false` regardless of the stored `model_profiles.enabled`. The gate and the master toggle are coupled **one-way**: closing the gate also persists `model_profiles.enabled = false` in the same write, so re-enabling experimental features does NOT resurrect the profile — the operator must turn it back on explicitly; and the Model Profiles tab can never touch the experimental gate (which lives on the General tab). The master `model_profiles.enabled` toggle is otherwise managed from the Model Profiles settings UI via the `SetModelProfilesEnabled` RPC (persisted to `config.yaml`, applied through `applyModelProfilesChange`).
+Model Profiles graduated out of the experimental gate ([ADR-044](../decisions/044-model-profiles-out-of-experimental.md)): the master `model_profiles.enabled` toggle is the ONLY switch, and it is carried through the `ToBuilderConfig` boundary verbatim, so the effective profile is exactly what the operator persisted. The feature is not touched by `experimental.enabled` (which now gates only the E2S execution mode), and the Model Profiles settings tab is always visible. The master toggle is managed from the Model Profiles settings UI via the `SetModelProfilesEnabled` RPC (persisted to `config.yaml`, applied through `applyModelProfilesChange`).
 
 ### Active-profile lifecycle
 
 - `SelectModelProfile(id)` — makes a catalog profile active; persisted to `model_profiles.active_profile` (in-memory rollback on a failed write); no-op when already active.
 - `UpdateModelProfile(id, {name?, config?})` — custom only; partial update (nil fields keep stored values); validated before any write, so an invalid payload produces no partial store write.
 - `DeleteModelProfile(id)` — custom only; deleting the **active** profile first persists `model_profiles.active_profile = "generic"` and reports the switch as a one-shot notice on the next `GetModelProfiles`.
-- `SetModelProfilesEnabled(enabled)` — flips the master `model_profiles.enabled` toggle, persisted to `config.yaml` (in-memory rollback on a failed write). Enabling fails closed while `experimental.enabled` is off; disabling is always allowed; a set matching the stored value is a no-op. Closing the gate via `UpdateExperimentalFeatures(false)` also persists `model_profiles.enabled = false` (see the gate note above).
+- `SetModelProfilesEnabled(enabled)` — flips the master `model_profiles.enabled` toggle, persisted to `config.yaml` (in-memory rollback on a failed write). Both enabling and disabling are always allowed (the toggle is the feature's only switch — Model Profiles is not gated by `experimental.enabled`); a set matching the stored value is a no-op.
 - Every mutation (profile CRUD and `SetModelProfilesEnabled`) funnels through `applyModelProfilesChange()`: `config:updated` emit + router rebuild + `SetModelProfile`, so a change takes effect for new sessions without an app restart.
 
 ### Suggested profile
@@ -153,11 +153,10 @@ Goal mode and the essential-tools narrowing are mutually exclusive:
 
 ```
 goalBlocked = ModelProfiles.Enabled && EssentialTools.Enabled
-            (the resolved form of `model_profiles.enabled && essential_tools.enabled`,
-             experimental gate already folded into ModelProfiles.Enabled)
+            (the resolved form of `model_profiles.enabled && essential_tools.enabled`)
 ```
 
-`ModelProfiles.Enabled` is the **effective** master toggle (the experimental gate already folded in by `effectiveModelProfilesConfig`, so closing the gate also clears it) and `EssentialTools.Enabled` is the active profile's essential-tools variant sub-toggle. The two operands are DISTINCT and both must hold: master-on with the variant off leaves the tool set untouched, so goal mode stays available. `goalBlocked` is therefore a property of the RESOLVED configuration (not the raw persisted `model_profiles:` section) and tracks a runtime profile switch — the catalog is re-read, so a `SelectModelProfile` / `SetModelProfilesEnabled` takes effect without a restart.
+`ModelProfiles.Enabled` is the **resolved** master toggle (carried through verbatim from `model_profiles.enabled` by `effectiveModelProfilesConfig`; Model Profiles is not gated by the experimental switch) and `EssentialTools.Enabled` is the active profile's essential-tools variant sub-toggle. The two operands are DISTINCT and both must hold: master-on with the variant off leaves the tool set untouched, so goal mode stays available. `goalBlocked` is therefore a property of the RESOLVED configuration (not the raw persisted `model_profiles:` section) and tracks a runtime profile switch — the catalog is re-read, so a `SelectModelProfile` / `SetModelProfilesEnabled` takes effect without a restart.
 
 The narrowing applies only to the non-goal Conductor path and the E2S branch (both run after goal mode's early return), so it never narrows a goal run; if it were applied to a goal run it would hide the goal-loop tooling (`propose_goal`, `declare_goal_status`, `declare_verification`) and make the loop unrunnable — which is why goal mode is refused while the narrowing is active. Refusing the request is honest where entering an unrunnable loop is not. Enforcement is defense-in-depth:
 
@@ -229,7 +228,7 @@ config.yaml `model_profiles:` (enabled, active_profile)   ~/.c0wrk/model-profile
     known id → profile values | empty/dangling → generic + 1 warning
                         ▼
 backend/configadapter.go: ToBuilderConfig(cfg, catalog)
-  (experimental gate: off ⇒ Enabled = false)
+  (master toggle carried through verbatim; no experimental gate)
   → core.BuilderModelProfilesConfig
                         ▼
 core/builder.go: NewOrchestratorBuilder
@@ -259,7 +258,7 @@ backend/session: Manager.SetModelProfile(effective cfg, active profile)
 ## Invariants
 
 - The master `model_profiles.enabled` toggle (managed from the Model Profiles settings UI via `SetModelProfilesEnabled`, persisted to `config.yaml`) gates every variant; when it is off, behavior is identical to the un-profiled baseline (zero behavior change at every variant's call site).
-- The experimental-features master switch (`experimental.enabled`) gates the whole feature at the `ToBuilderConfig` boundary: when off, the builder sees `Enabled = false` regardless of the stored `model_profiles.enabled`, so the feature is inert for every session. The gate couples one-way with the master toggle: closing the gate also persists `model_profiles.enabled = false` (no silent reactivation on re-enable), while the Model Profiles UI can never touch the gate.
+- Model Profiles is NOT gated by the experimental-features switch (`experimental.enabled`, which gates only the E2S execution mode): the master `model_profiles.enabled` toggle is the sole switch, carried through the `ToBuilderConfig` boundary verbatim, and the Model Profiles settings tab is always visible. The two switches are independent in both directions — neither the experimental toggle nor any Model Profiles control alters the other's persisted value.
 - Each variant is independently gated by BOTH the master toggle and its own sub-toggle **in the active profile's values** (defense-in-depth) — except `system_prompt`, whose sole profile-side gate is `lite` (it carries no separate `Enabled` field).
 - `config.yaml` persists exactly two Model Profiles fields — `model_profiles.enabled` and `model_profiles.active_profile`; the 25 knob values always come from a catalog profile. A legacy inline `small_llm:` section is ignored at load and dropped by the next save (sanctioned reset migration — knob values do not carry over).
 - Predefined profiles are read-only everywhere (catalog construction, store save, RPC mutations); a custom profile is always born as a duplicate of a catalog profile.
@@ -286,7 +285,7 @@ Only two keys are persisted in `config.yaml` (the authoritative reference is `co
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `model_profiles.enabled` | false | Master toggle. Manual only — no auto-detection. Normally flipped from the Settings → Model Profiles master switch via `SetModelProfilesEnabled` (persisted here); enabling requires `experimental.enabled`, and closing that gate resets it to false. |
+| `model_profiles.enabled` | false | Master toggle. Manual only — no auto-detection; the feature's only switch (Model Profiles is not gated by `experimental.enabled`). Normally flipped from the Settings → Model Profiles master switch via `SetModelProfilesEnabled` (persisted here). |
 | `model_profiles.active_profile` | `generic` | Id of the profile whose 25 knob values form the effective runtime configuration. Empty/dangling → soft fallback to `generic` + load warning. |
 
 The 25 knob values live in profile entries (`essential_tools.*`, `system_prompt.*`, `sampling.*`, `loop_hardening.*`, `context.*` inside each profile's `config`) — predefined ones in the compiled catalog, custom ones in `~/.c0wrk/model-profiles.yaml`. Their semantics, ranges, and per-profile defaults are documented in the Variants section above and in [docs/development/model-profiles-defaults-research.md](../../docs/development/model-profiles-defaults-research.md); range validation runs at every write boundary regardless of toggles.
@@ -315,4 +314,5 @@ The catalog and the master toggle are managed at runtime via the settings UI: `G
 - [../decisions/022-small-llm-profile.md](../decisions/022-small-llm-profile.md) — the original variant-and-master-toggle design (inline-knob storage; superseded by ADR-041's catalog model)
 - [../decisions/035-remove-small-llm-tool-budget.md](../decisions/035-remove-small-llm-tool-budget.md) — removal of the `max_tools` budget, router tool matching, and the tool chat cards
 - [../decisions/041-slm-profiles.md](../decisions/041-slm-profiles.md) — the profile-catalog model: predefined/custom profiles, `model-profiles.yaml`, reset migration, Model Profiles nomenclature
+- [../decisions/044-model-profiles-out-of-experimental.md](../decisions/044-model-profiles-out-of-experimental.md) — graduation out of the experimental gate: the master `model_profiles.enabled` toggle is the feature's only switch
 - [../../docs/development/model-profiles-defaults-research.md](../../docs/development/model-profiles-defaults-research.md) — external-evidence review behind every profile default; the evidence base for the `medium` reasoning-effort default, the 16384 output-token reserve, `presence_penalty`, and the 10–20-tool selection-accuracy guidance

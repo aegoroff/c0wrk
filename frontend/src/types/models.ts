@@ -404,16 +404,16 @@ export interface ConfigResponse {
   model_profiles?: ConfigModelProfilesResponse
 }
 
-/** Master experimental-features switch (all-or-nothing). It is also the sole
- *  availability gate for the E2S execution mode. */
+/** Experimental-features switch (all-or-nothing). Its sole availability gate is
+ *  the E2S execution mode; Model Profiles is NOT gated by this switch. */
 export interface ConfigExperimentalResponse {
   enabled: boolean
 }
 
 /** Effective (resolved) Model Profiles profile state exposed by GetConfig — mirrors
  *  the backend's ModelProfilesSettingsResponse, NOT the raw persisted `model_profiles:` section.
- *  `enabled` is the resolved master toggle (forced false while the experimental
- *  gate is off); `essential_tools_enabled` is the resolved essential-tools
+ *  `enabled` is the resolved master toggle (config `model_profiles.enabled`);
+ *  `essential_tools_enabled` is the resolved essential-tools
  *  variant sub-toggle. Both are false when the config is not yet loaded. */
 export interface ConfigModelProfilesResponse {
   enabled: boolean

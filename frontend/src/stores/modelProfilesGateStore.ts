@@ -6,8 +6,8 @@ import { create } from 'zustand'
  * block that the ModelProfiles profile implies.
  *
  * This store carries THREE facts, not one:
- *   - `enabled` — the resolved Model Profiles master toggle (config `model_profiles.enabled`,
- *     already folded with the experimental gate by the backend).
+ *   - `enabled` — the resolved Model Profiles master toggle (config
+ *     `model_profiles.enabled`).
  *   - `essentialToolsEnabled` — the resolved essential-tools variant
  *     sub-toggle. When on, goal mode is refused: the narrowing is applied only
  *     to the non-goal Conductor path and the E2S branch (both run after goal

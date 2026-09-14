@@ -23,7 +23,6 @@ import { ExperimentalSettings } from './ExperimentalSettings'
 import { Settings, Palette, Brain, Search, Shield, Info, Server, AlertTriangle, X, Gauge } from 'lucide-react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { hasDefaultModel } from '@/api/config'
-import { useExperimentalFeatures } from '@/hooks/useExperimentalFeatures'
 // The canonical app mark — the very same SVG Wails derives the bundled
 // appicon.png from, imported by URL so the About artwork can never drift
 // from the real icon. Served by the dev server via server.fs.allow in
@@ -49,16 +48,6 @@ export function SettingsModal() {
   const [currentDefaultModel, setCurrentDefaultModel] = useState('')
   const checkingRef = useRef(false)
   const prevOpenRef = useRef(open)
-  const experimentalEnabled = useExperimentalFeatures()
-
-  // If the experimental switch is turned off while the Model Profiles tab is
-  // active, fall back to General — the tab itself is hidden and must never
-  // remain the active (rendered) content.
-  useEffect(() => {
-    if (!experimentalEnabled && activeTab === 'model-profiles') {
-      setActiveTab('general')
-    }
-  }, [experimentalEnabled, activeTab, setActiveTab])
 
   useEffect(() => {
     if (open && !prevOpenRef.current) {
@@ -183,12 +172,12 @@ export function SettingsModal() {
               <Brain className="h-4 w-4" />
               <span className="hidden sm:inline text-xs">LLM</span>
             </TabsTrigger>
-            {experimentalEnabled && (
-              <TabsTrigger value="model-profiles" className="flex-initial min-w-0 gap-1">
-                <Gauge className="h-4 w-4" />
-                <span className="hidden sm:inline text-xs">Model Profiles</span>
-              </TabsTrigger>
-            )}
+            {/* Model Profiles is a first-class settings tab, independent of the
+                experimental-features switch (that gate covers only E2S). */}
+            <TabsTrigger value="model-profiles" className="flex-initial min-w-0 gap-1">
+              <Gauge className="h-4 w-4" />
+              <span className="hidden sm:inline text-xs">Model Profiles</span>
+            </TabsTrigger>
             <TabsTrigger value="search" className="flex-initial min-w-0 gap-1">
               <Search className="h-4 w-4" />
               <span className="hidden sm:inline text-xs">Search</span>
@@ -239,11 +228,9 @@ export function SettingsModal() {
             <LLMSettings onSettingsSaved={handleSettingsSaved} onDefaultModelChange={handleDefaultModelChange} />
           </TabsContent>
 
-          {experimentalEnabled && (
-            <TabsContent value="model-profiles" className={TAB_CONTENT_CLASS}>
-              <ModelProfilesSettings />
-            </TabsContent>
-          )}
+          <TabsContent value="model-profiles" className={TAB_CONTENT_CLASS}>
+            <ModelProfilesSettings />
+          </TabsContent>
 
           <TabsContent value="search" className={TAB_CONTENT_CLASS}>
             <SearchSettings />

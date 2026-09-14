@@ -176,9 +176,9 @@ export async function getModelProfiles(): Promise<ModelProfilesResponse> {
 
 /**
  * Toggle the manual-only Model Profiles master switch (config.yaml model_profiles.enabled).
- * Enabling requires the experimental gate to be on — the backend fails closed
- * otherwise. The change is persisted and applied immediately; there is no RPC
- * that flips the gate itself (that is updateExperimentalFeatures).
+ * The change is persisted and applied immediately. Model Profiles is a
+ * first-class feature, independent of the experimental-features switch (which
+ * gates only the E2S execution mode).
  */
 export async function setModelProfilesEnabled(enabled: boolean): Promise<void> {
   try {
@@ -235,9 +235,9 @@ export async function selectModelProfile(id: string): Promise<void> {
 }
 
 /**
- * Toggle the master experimental-features switch. The backend persists the
- * change and applies the effective Model Profiles profile immediately; the switch
- * gates only the Model Profiles profile (RESEARCH is always available).
+ * Toggle the experimental-features switch. The backend persists the change; the
+ * switch gates only the E2S execution mode (Model Profiles and RESEARCH are
+ * always available).
  */
 export async function updateExperimentalFeatures(enabled: boolean): Promise<void> {
   try {

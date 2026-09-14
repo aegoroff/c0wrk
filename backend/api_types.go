@@ -25,16 +25,18 @@ type ConfigResponse struct {
 // ExperimentalSettingsResponse exposes the master experimental-features switch
 // to the settings UI. It carries no feature-specific state by design — the
 // switch is all-or-nothing and gates every experimental feature (currently the
-// Model Profiles profile and the E2S execution mode).
+// E2S execution mode). Model Profiles is NOT gated by this switch; it carries
+// its own manual master toggle (model_profiles.enabled).
 type ExperimentalSettingsResponse struct {
 	Enabled bool `json:"enabled"`
 }
 
 // ModelProfilesSettingsResponse exposes the EFFECTIVE (resolved) Model Profiles profile state
 // to the settings UI, not the raw persisted config. Enabled mirrors the
-// resolved master toggle (forced false while the experimental gate is off);
-// EssentialToolsEnabled mirrors the resolved essential-tools variant
-// sub-toggle. Both are false when the config is not loaded.
+// resolved master toggle (model_profiles.enabled, carried through verbatim — the
+// experimental-features switch does not affect it); EssentialToolsEnabled
+// mirrors the resolved essential-tools variant sub-toggle. Both are false when
+// the config is not loaded.
 type ModelProfilesSettingsResponse struct {
 	Enabled               bool `json:"enabled"`
 	EssentialToolsEnabled bool `json:"essential_tools_enabled"`

@@ -34,17 +34,13 @@ func loadModelProfilesCatalog(agentDir string, log *slog.Logger) []config.ModelP
 
 // effectiveModelProfilesConfig resolves the persisted `model_profiles:` section against the given
 // profile catalog (predefined ∪ custom — see config.LoadModelProfilesCatalog) and
-// returns the runtime profile with the master toggle forced off when
-// experimental features are disabled. The stored profile choice is preserved
-// (only the effective master toggle flips), so re-enabling experimental
-// features restores the prior profile. Resolution warnings are returned for
+// returns the effective runtime profile. Model Profiles is NOT gated by the
+// experimental-features switch: the master toggle (model_profiles.enabled) is
+// the only switch and is carried through verbatim, so the effective profile is
+// exactly what the operator persisted. Resolution warnings are returned for
 // the caller to surface (load time) or log (runtime re-resolves).
 func effectiveModelProfilesConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProfile) (profile config.ModelProfilesConfig, warnings []string) {
-	profile, warnings = config.ResolveModelProfilesConfig(cfg.ModelProfiles, modelProfilesCatalog)
-	if !cfg.Experimental.Enabled {
-		profile.Enabled = false
-	}
-	return profile, warnings
+	return config.ResolveModelProfilesConfig(cfg.ModelProfiles, modelProfilesCatalog)
 }
 
 // activeModelProfile returns the catalog entry the persisted `model_profiles:` section
@@ -148,8 +144,8 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 	// never requires a rebuild.
 	//
 	// The model-profile profile is resolved from the active profile in the
-	// catalog (the experimental gate is folded in by effectiveModelProfilesConfig;
-	// resolution warnings are surfaced at load time, not here).
+	// catalog (resolution warnings are surfaced at load time, not here). It is
+	// not gated by the experimental-features switch.
 	modelProfiles, _ := effectiveModelProfilesConfig(cfg, modelProfilesCatalog)
 	return &core.BuilderConfig{
 		LLM: core.BuilderLLMConfig{

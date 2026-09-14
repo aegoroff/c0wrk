@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted → Partially supersedes [ADR-022](./022-small-llm-profile.md) (the inline `small_llm.*` config storage; the variant-and-master-toggle architecture itself stands unchanged) → The `SLM` nomenclature, the `slm.*` config keys, the `slm-profiles.yaml` store, the `slm` metrics key and the "Small LLM" tab label are superseded by [ADR-043](./043-model-profiles-rename.md)
+Accepted → Partially supersedes [ADR-022](./022-small-llm-profile.md) (the inline `small_llm.*` config storage; the variant-and-master-toggle architecture itself stands unchanged) → The `SLM` nomenclature, the `slm.*` config keys, the `slm-profiles.yaml` store, the `slm` metrics key and the "Small LLM" tab label are superseded by [ADR-043](./043-model-profiles-rename.md) → The experimental-gate coupling (the gate forcing the feature off at the `ToBuilderConfig` boundary, the failed-closed enable, and the one-way `slm.enabled` reset when the gate closed) is partially superseded by [ADR-044](./044-model-profiles-out-of-experimental.md)
 
 ## Context
 

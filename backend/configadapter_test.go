@@ -188,22 +188,29 @@ func TestToBuilderConfig_ModelProfilesSamplingReasoningEffortDefault(t *testing.
 	}
 }
 
-// TestToBuilderConfig_ExperimentalGatesModelProfiles verifies the experimental
-// master switch forces the Model Profiles profile off regardless of the stored
-// ModelProfiles.Enabled value, and restores it when experimental features are on.
-func TestToBuilderConfig_ExperimentalGatesModelProfiles(t *testing.T) {
+// TestToBuilderConfig_ModelProfilesNotGatedByExperimental verifies Model Profiles
+// is no longer gated by the experimental master switch: the stored
+// ModelProfiles.Enabled flows through ToBuilderConfig verbatim regardless of
+// whether experimental features are on — the master toggle alone decides.
+func TestToBuilderConfig_ModelProfilesNotGatedByExperimental(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ModelProfiles.Enabled = true
 
-	// Experimental off (zero value) → the effective Model Profiles master is off.
-	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); bc.ModelProfiles.Enabled {
-		t.Error("experimental off should force ModelProfiles.Enabled false")
+	// Experimental off (zero value) → the stored Model Profiles master still flows through.
+	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); !bc.ModelProfiles.Enabled {
+		t.Error("experimental off must not clear ModelProfiles.Enabled")
 	}
 
-	// Experimental on → the stored Model Profiles master flows through.
+	// Experimental on → the stored Model Profiles master flows through too.
 	cfg.Experimental.Enabled = true
 	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); !bc.ModelProfiles.Enabled {
 		t.Error("experimental on should preserve ModelProfiles.Enabled true")
+	}
+
+	// Master off → false regardless of the experimental gate.
+	cfg.ModelProfiles.Enabled = false
+	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); bc.ModelProfiles.Enabled {
+		t.Error("master off must keep ModelProfiles.Enabled false")
 	}
 }
 

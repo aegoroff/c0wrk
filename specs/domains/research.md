@@ -133,7 +133,7 @@ Metrics are derived from the reconciled graph:
 ## Invariants
 
 - RESEARCH mode is available only for real projects.
-- RESEARCH mode is not gated by the `experimental.enabled` switch (which gates the Model Profiles feature and the E2S execution mode) — it stays available for every real project.
+- RESEARCH mode is not gated by the `experimental.enabled` switch (which gates only the E2S execution mode) — it stays available for every real project.
 - The persisted research root is absolute and contained within the project workspace; the default root is `<workspace>/.research`.
 - Enabling is idempotent: it may reparse, reseed, repersist, rescan, and re-emit without duplicating domain state.
 - Disabling clears the persisted toggle and recursive watch while preserving research artifacts and seeded skills.
@@ -177,5 +177,5 @@ Metrics are derived from the reconciled graph:
 - [../contracts/desktop-frontend.md](../contracts/desktop-frontend.md) - RESEARCH RPC surface and DTO boundary
 - [../contracts/event-catalog.md](../contracts/event-catalog.md) - `research:changed` and `research:file_changed` events
 - [architecture/security-model.md](../architecture/security-model.md) - workspace containment and untrusted persisted artifacts
-- [model-profiles.md](model-profiles.md) - model profiles, one of the two features gated by `experimental.enabled` (the other is E2S)
+- [model-profiles.md](model-profiles.md) - model profiles, tuning for local / mid-size models (not gated by `experimental.enabled` — the manual `model_profiles.enabled` master toggle is the only switch; see [ADR-044](../decisions/044-model-profiles-out-of-experimental.md))
 - [frontend/README.md](frontend/README.md) - frontend panel architecture

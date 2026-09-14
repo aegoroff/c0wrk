@@ -2398,7 +2398,6 @@ func TestSelectModelProfile_PersistFailureRollsBack(t *testing.T) {
 // sessions without a restart — in both directions.
 func TestSetModelProfilesEnabled_PersistsAndApplies(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
-	f.config.Experimental.Enabled = true
 
 	if err := f.SetModelProfilesEnabled(true); err != nil {
 		t.Fatalf("SetModelProfilesEnabled(true): %v", err)
@@ -2436,24 +2435,28 @@ func TestSetModelProfilesEnabled_PersistsAndApplies(t *testing.T) {
 	}
 }
 
-// TestSetModelProfilesEnabled_EnableRequiresExperimental verifies enabling fails closed
-// while the experimental gate is off: an error, no in-memory change, no router
-// rebuild.
-func TestSetModelProfilesEnabled_EnableRequiresExperimental(t *testing.T) {
-	f, mock, _ := newTestAPI(t) // experimental defaults to false
+// TestSetModelProfilesEnabled_EnableWithoutExperimental verifies enabling succeeds with
+// the experimental gate off: the master toggle is the only switch, so the enable
+// flips the in-memory value, persists it, and runs the shared Model Profiles
+// post-mutation tail (router rebuild).
+func TestSetModelProfilesEnabled_EnableWithoutExperimental(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t) // experimental defaults to false
 
-	err := f.SetModelProfilesEnabled(true)
-	if err == nil {
-		t.Fatal("expected an error enabling the model-profile profile while experimental features are disabled")
+	if err := f.SetModelProfilesEnabled(true); err != nil {
+		t.Fatalf("SetModelProfilesEnabled(true) with experimental off: %v", err)
 	}
-	if !strings.Contains(err.Error(), "experimental") {
-		t.Errorf("error = %q, want it to mention experimental", err)
+	if !f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = false, want true")
 	}
-	if f.config.ModelProfiles.Enabled {
-		t.Error("ModelProfiles.Enabled must not change when the gate rejects the enable")
+	persisted, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
 	}
-	if mock.rebuildRouterCalls != 0 {
-		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
+	if !persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = false, want true")
+	}
+	if mock.rebuildRouterCalls != 1 {
+		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 }
 
@@ -2461,7 +2464,6 @@ func TestSetModelProfilesEnabled_EnableRequiresExperimental(t *testing.T) {
 // value is a true no-op: no persist, no router rebuild.
 func TestSetModelProfilesEnabled_NoopWhenUnchanged(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	f.config.Experimental.Enabled = true
 	f.config.ModelProfiles.Enabled = true
 
 	if err := f.SetModelProfilesEnabled(true); err != nil {
@@ -2477,7 +2479,6 @@ func TestSetModelProfilesEnabled_NoopWhenUnchanged(t *testing.T) {
 // a rejected request.
 func TestSetModelProfilesEnabled_PersistFailureRollsBack(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
-	f.config.Experimental.Enabled = true
 	f.configPath = filepath.Join(filepath.Dir(cfgPath), "missing", "config.yaml")
 
 	if err := f.SetModelProfilesEnabled(true); err == nil {
@@ -2495,7 +2496,6 @@ func TestSetModelProfilesEnabled_PersistFailureRollsBack(t *testing.T) {
 // any mutation.
 func TestSetModelProfilesEnabled_EmptyPathRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	f.config.Experimental.Enabled = true
 	f.configPath = ""
 
 	if err := f.SetModelProfilesEnabled(true); err == nil {
@@ -2512,7 +2512,6 @@ func TestSetModelProfilesEnabled_EmptyPathRejected(t *testing.T) {
 func TestSetModelProfilesEnabled_EmitsConfigUpdated(t *testing.T) {
 	f, _, rec, db := newUpdateLLMConfigProjectHarness(t)
 	defer func() { _ = db.Close() }()
-	f.config.Experimental.Enabled = true
 
 	if err := f.SetModelProfilesEnabled(true); err != nil {
 		t.Fatalf("SetModelProfilesEnabled(true): %v", err)
@@ -3005,46 +3004,44 @@ func TestUpdateExperimentalFeatures_EmitsConfigUpdated(t *testing.T) {
 	}
 }
 
-// TestUpdateExperimentalFeatures_DisableClearsModelProfilesEnabled verifies that turning
-// the experimental gate off also clears the persisted Model Profiles master toggle
-// (config.ModelProfiles.Enabled) in the same write, and that re-enabling the gate does
-// not silently resurrect it — the operator must opt back in explicitly.
-func TestUpdateExperimentalFeatures_DisableClearsModelProfilesEnabled(t *testing.T) {
+// TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled verifies that
+// toggling the experimental gate leaves the Model Profiles master toggle
+// untouched in both directions: Model Profiles is not gated by the
+// experimental-features switch, so disabling the gate keeps the stored value.
+func TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled(t *testing.T) {
 	f, _, cfgPath := newTestAPI(t)
 
-	// Start from the "both on" state reached by enabling the ModelProfiles master toggle
-	// while experimental features are on.
+	// Start from the "both on" state.
 	f.config.Experimental.Enabled = true
 	f.config.ModelProfiles.Enabled = true
 
 	if err := f.UpdateExperimentalFeatures(false); err != nil {
 		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
 	}
-	if f.config.ModelProfiles.Enabled {
-		t.Error("in-memory ModelProfiles.Enabled = true, want false after disabling experimental features")
+	if !f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = false, want it untouched (true) after disabling experimental features")
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.ModelProfiles.Enabled {
-		t.Error("persisted ModelProfiles.Enabled = true, want false (reload must not resurrect it)")
+	if !persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = false, want it untouched (true)")
 	}
 
-	// Re-enabling the gate must NOT reactivate the model-profile master: the
-	// cleared value was persisted, so it stays off until an explicit opt-in.
+	// Re-enabling the gate must not disturb it either.
 	if err := f.UpdateExperimentalFeatures(true); err != nil {
 		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
 	}
-	if f.config.ModelProfiles.Enabled {
-		t.Error("in-memory ModelProfiles.Enabled = true after re-enabling experimental features, want false")
+	if !f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = false after re-enabling experimental features, want true")
 	}
 	persisted, err = config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.ModelProfiles.Enabled {
-		t.Error("persisted ModelProfiles.Enabled = true after re-enabling experimental features, want false")
+	if !persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = false after re-enabling experimental features, want true")
 	}
 }
 
@@ -3308,14 +3305,6 @@ func TestUpdateLLMConfig_DeferredSavesSerializedInOrder(t *testing.T) {
 // [.., false].
 func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
-
-	// Experimental features gate the Model Profiles master toggle in
-	// ToBuilderConfig; enable them so the rebuild snapshots mirror the
-	// production mapping (the variant values asserted below are unaffected by
-	// the gate either way).
-	f.configMu.Lock()
-	f.config.Experimental.Enabled = true
-	f.configMu.Unlock()
 
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})

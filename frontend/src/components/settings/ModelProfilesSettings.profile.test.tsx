@@ -4,8 +4,10 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 // Mock the API layer: the component must not touch real Wails bindings.
-// updateExperimentalFeatures is the master experimental gate — the profile UI
-// must never call it (UX invariant: profile switch does not toggle the gate).
+// updateExperimentalFeatures toggles the experimental-features switch, whose
+// only gated feature is the E2S execution mode — Model Profiles graduated out
+// of that gate (ADR-044), so the profile UI must never call it (UX invariant:
+// neither switching a profile nor the master profile toggle touches the gate).
 const getModelProfilesMock = vi.fn()
 const updateModelProfileMock = vi.fn()
 const createModelProfileMock = vi.fn()
@@ -247,7 +249,7 @@ describe('ModelProfilesSettings — profile selector', () => {
     expect(selectModelProfileMock).not.toHaveBeenCalled()
   })
 
-  it('UX invariant: switching a profile never touches the master experimental gate', async () => {
+  it('UX invariant: switching a profile never touches the experimental (E2S) switch', async () => {
     const before = useExperimentalStore.getState().enabled
     getModelProfilesMock
       .mockResolvedValueOnce(resp({ active_id: 'test-tuned' }))
@@ -608,7 +610,7 @@ describe('ModelProfilesSettings — master toggle (model_profiles.enabled)', () 
     expect(masterToggle()?.checked).toBe(false)
   })
 
-  it('UX invariant: the master toggle never touches the master experimental gate', async () => {
+  it('UX invariant: the master profile toggle never touches the experimental (E2S) switch', async () => {
     const before = useExperimentalStore.getState().enabled
     getModelProfilesMock
       .mockResolvedValueOnce(resp({ enabled: false }))
@@ -620,5 +622,23 @@ describe('ModelProfilesSettings — master toggle (model_profiles.enabled)', () 
     expect(setModelProfilesEnabledMock).toHaveBeenCalledWith(true)
     expect(updateExperimentalFeaturesMock).not.toHaveBeenCalled()
     expect(useExperimentalStore.getState().enabled).toBe(before)
+  })
+})
+
+describe('ModelProfilesSettings — independent of the experimental switch', () => {
+  // ADR-044: Model Profiles graduated out of the experimental gate. The switch
+  // being off (the state that used to hide the profile surface) must not gate
+  // the profile UI — it renders fully interactive while the gate is off.
+  it('renders the full profile UI while the experimental switch is off', async () => {
+    useExperimentalStore.setState({ enabled: false, loaded: true })
+    await render()
+
+    expect(selectorTrigger()).not.toBeNull()
+    expect(selectorTrigger()?.disabled).toBe(false)
+    expect(toggleFor('Curate the tool subset')).not.toBeNull()
+    expect(container.textContent).toContain('Context Management')
+
+    // Rendering the profile surface leaves the experimental switch untouched.
+    expect(useExperimentalStore.getState().enabled).toBe(false)
   })
 })

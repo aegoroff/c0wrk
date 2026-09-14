@@ -389,15 +389,15 @@ func TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing(t *testing.T) {
 // Model Profiles essential-tools narrowing × goal mode
 // ----------------------------------------------------------------------------
 
-// modelProfilesNarrowingConfig returns a runtime config with experimental features ON and
-// the Model Profiles profile ON, resolving to the model-agnostic "generic" profile
-// (the narrowing-active shape). id optionally overrides the active profile.
+// modelProfilesNarrowingConfig returns a runtime config with the Model Profiles
+// master toggle ON, resolving to the model-agnostic "generic" profile (the
+// narrowing-active shape). Model Profiles is not gated by the experimental-features
+// switch, so the gate is left unset. id optionally overrides the active profile.
 func modelProfilesNarrowingConfig(profileID string) *config.Config {
 	if profileID == "" {
 		profileID = config.ModelProfilesGenericProfileID
 	}
 	return &config.Config{
-		Experimental:  config.ExperimentalConfig{Enabled: true},
 		ModelProfiles: config.ModelProfilesPersistConfig{Enabled: true, ActiveProfile: profileID},
 	}
 }
@@ -444,8 +444,9 @@ func TestSendMessage_GoalBlockedByModelProfiles(t *testing.T) {
 }
 
 // TestModelProfilesGoalBlocked_Combinations pins the guard predicate: only master-on AND
-// the active profile's essential-tools variant-on blocks goal mode; the
-// experimental gate folds in; a nil config never blocks.
+// the active profile's essential-tools variant-on blocks goal mode; a nil config
+// never blocks. Model Profiles is not gated by the experimental-features switch,
+// so the gate plays no part.
 func TestModelProfilesGoalBlocked_Combinations(t *testing.T) {
 	cases := []struct {
 		name string
@@ -454,17 +455,8 @@ func TestModelProfilesGoalBlocked_Combinations(t *testing.T) {
 	}{
 		{"nil config (fail-open)", nil, false},
 		{
-			"experimental off",
-			&config.Config{
-				Experimental:  config.ExperimentalConfig{Enabled: false},
-				ModelProfiles: config.ModelProfilesPersistConfig{Enabled: true, ActiveProfile: config.ModelProfilesGenericProfileID},
-			},
-			false,
-		},
-		{
 			"master off",
 			&config.Config{
-				Experimental:  config.ExperimentalConfig{Enabled: true},
 				ModelProfiles: config.ModelProfilesPersistConfig{Enabled: false, ActiveProfile: config.ModelProfilesGenericProfileID},
 			},
 			false,
