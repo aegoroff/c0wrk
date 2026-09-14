@@ -438,3 +438,96 @@ func TestVerifierReDerivationExcludedToolNames_OmitsDelegateOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultGoalVerifier_SLM_Lite_Directive verifies the END-TO-END wiring:
+// with the small-LLM Lite profile active, the production goal verifier
+// (defaultGoalVerifier) hands the Conductor the LITE verification directive
+// (plus the scaffold/few-shot blocks) instead of the verbose one, with its
+// placeholders resolved. The verifier's assembled system prompt is captured via
+// the orchestrator's ContextFactory seam, so this exercises the real code path
+// rather than the prompt builder alone.
+func TestDefaultGoalVerifier_SLM_Lite_Directive(t *testing.T) {
+	o := newE2STestOrchestrator(&mockLLMCaller{}, createTestRegistry(), &mockEmitter{}, nil)
+	var captured string
+	o.contextFactory = captureContextFactory(&captured)
+
+	ctx := sdktools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	gs := &goal.GoalState{
+		Condition:        "CONDITION-LITE-E2E",
+		VerifyClause:     "go test ./...",
+		VerificationMode: goal.VerificationModeExecutable,
+	}
+
+	outcome, err := o.defaultGoalVerifier(ctx, gs, nil, "verify the goal", "", orchestration.NewMapBlackboard(), nil, conductorDeps{})
+	if err != nil {
+		t.Fatalf("defaultGoalVerifier returned error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatal("defaultGoalVerifier returned a nil outcome")
+	}
+	if captured == "" {
+		t.Fatal("verifier system prompt was not captured via the ContextFactory seam")
+	}
+	// The Lite verification directive is in effect: its '## Steps' section is
+	// present while the verbose directive's '## How to Verify' section is not.
+	if !strings.Contains(captured, "## Steps") {
+		t.Error("verifier did not receive the lite directive (missing '## Steps')")
+	}
+	if strings.Contains(captured, "## How to Verify") {
+		t.Error("verbose verification directive leaked into the lite verifier prompt")
+	}
+	// Scaffold + few-shot appended per the full Lite profile.
+	if !strings.Contains(captured, "Thought Scaffold") || !strings.Contains(captured, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("verifier prompt missing scaffold/few-shot under the full Lite profile")
+	}
+	// Placeholders resolved.
+	if !strings.Contains(captured, "CONDITION-LITE-E2E") || !strings.Contains(captured, "go test ./...") {
+		t.Error("verifier lite directive placeholders were not resolved")
+	}
+	if strings.Contains(captured, "{goal_condition}") || strings.Contains(captured, "{shell_tool}") {
+		t.Error("verifier prompt carries an unresolved placeholder")
+	}
+}
+
+// stubGoalProposerLiteE2E is a no-op GoalProposer so deriveGoal's precondition
+// (deps.goalProposer != nil) holds. The stub is never reached: the mock LLM
+// returns an empty end_turn with no propose_goal call, so deriveGoal exits
+// before using it — the asserted artifact is the captured derivation system
+// prompt, assembled before the Conductor loop runs.
+type stubGoalProposerLiteE2E struct{}
+
+func (stubGoalProposerLiteE2E) Propose(_ context.Context, _ tools.GoalProposal) (tools.GoalProposalResponse, error) {
+	return tools.GoalProposalResponse{Decision: "cancel"}, nil
+}
+
+// TestDeriveGoal_SLM_Lite_Directive is the derivation counterpart of
+// TestDefaultGoalVerifier_SLM_Lite_Directive: with Lite active, the production
+// derivation agent receives the LITE GoalDerivation directive (plus
+// scaffold/few-shot) rather than the verbose one. Captured via the same
+// ContextFactory seam.
+func TestDeriveGoal_SLM_Lite_Directive(t *testing.T) {
+	o := newE2STestOrchestrator(&mockLLMCaller{}, createTestRegistry(), &mockEmitter{}, nil)
+	var captured string
+	o.contextFactory = captureContextFactory(&captured)
+
+	ctx := sdktools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	deps := o.buildConductorDeps(nil, nil)
+	deps.goalProposer = stubGoalProposerLiteE2E{}
+
+	// The run's outcome is irrelevant here (the stub yields no approved goal);
+	// only the assembled system prompt matters.
+	_, _ = o.deriveGoal(ctx, "derive a goal", orchestration.NewMapBlackboard(), nil, deps)
+
+	if captured == "" {
+		t.Fatal("derivation system prompt was not captured via the ContextFactory seam")
+	}
+	if !strings.Contains(captured, "## Steps") {
+		t.Error("derivation did not receive the lite directive (missing '## Steps')")
+	}
+	if strings.Contains(captured, "## Your Mission") {
+		t.Error("verbose GoalDerivation leaked into the derivation prompt under Lite")
+	}
+	if !strings.Contains(captured, "Thought Scaffold") || !strings.Contains(captured, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("derivation prompt missing scaffold/few-shot under the full Lite profile")
+	}
+}

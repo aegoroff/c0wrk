@@ -18,17 +18,21 @@ SLM profiles are the tuning mechanism for running the Conductor against a "small
 - `core/builder.go` — `applySLMPresets` (seeds the builder-level reasoning-effort default from the profile's explicit value), `applyLoopHardening` (overrides circuit-breaker thresholds), `applyContextManagement` (overrides compaction/pruning/reserve on the executor config), `resolveSamplingFunc` (overrides router sampling)
 - `core/slm/tools_filter.go` — pure, deterministic `SelectTools` (with turn-scoped `extraGuaranteed` names) + `ProtectedToolNames` (static tool-set assembly)
 - `core/slm/tool_groups.go` — `ToolGroupCatalog`: the static workflow clusters (plan / subagents) the always-present picker offers atomically
-- `core/orchestrator.go` — `SLM SLMSettings` mirror on `OrchestratorConfig`; `applySLMToolFilter` (the single call site in `HandleMessage`) and `slmAgentGuaranteedTools` (turn-scoped delegate guarantee)
+- `core/orchestrator.go` — `SLM SLMSettings` mirror on `OrchestratorConfig`; `applySLMToolFilter` (the single call site in `HandleMessage`) + `slmAgentGuaranteedTools` (turn-scoped delegate guarantee) + `slmEssentialToolsEnabled` (the goal-block predicate: master toggle AND essential-tools variant)
 - `core/orchestrator_handle.go` — `prepareRequestContext` carries the SystemPrompt sub-toggle flags into context (`withSLMPromptProfile`)
-- `core/systemprompt.go` — `buildSystemPromptWith` swaps the OrchestratorSystem directive for OrchestratorSystemLite and appends the scaffold / few-shot blocks
+- `core/systemprompt.go` — `buildSystemPromptWith` swaps the core directive for its Lite counterpart and appends the scaffold / few-shot blocks under the context flags (`slmPromptProfileFromCtx`); `systemPromptSpec.allowLiteVariants` / `liteCoreDirective` + `buildSpecializedSystemPromptWithLite` extend the same swap to the goal derivation and verification agents (subagent-profile specialized runs never opt in)
 - `core/prompts/orchestrator_lite.md` — compact core directive (the Lite swap)
 - `core/prompts/orchestrator_lite_scaffold.md` — three-step reasoning scaffold
 - `core/prompts/orchestrator_lite_fewshot.md` — curated worked-example ReAct cycles
-- `backend/frontend_api_config.go` — the SLM RPC surface (`GetSLMProfiles` / `CreateSLMProfile` / `UpdateSLMProfile` / `DeleteSLMProfile` / `SelectSLMProfile` plus the master-toggle `SetSLMEnabled`) + the suggestion matcher (`normalizeSLMModelToken` / `suggestSLMProfileID`)
+- `core/prompts/goal_derivation_lite.md` / `goal_verification_lite.md` / `goal_rederivation_lite.md` — compact Lite counterparts of the goal derivation / verification / re-derivation directives (the same `GoalVerificationSubstitute` placeholder set, selected by `GoalVerificationLiteDirectiveByMode`)
+- `core/orchestrator_goal.go` — `ErrGoalBlockedBySLM` sentinel + the goal-mode guard in `HandleMessage`'s goal branch and at `resumeGoalLoop` entry (defense-in-depth behind the frontend rejection); `deriveGoal` / `defaultGoalVerifier` render the Lite goal directives via `buildSpecializedSystemPromptWithLite`
+- `backend/frontend_api_config.go` — the SLM RPC surface (`GetSLMProfiles` / `CreateSLMProfile` / `UpdateSLMProfile` / `DeleteSLMProfile` / `SelectSLMProfile` plus the master-toggle `SetSLMEnabled`) + the suggestion matcher (`normalizeSLMModelToken` / `suggestSLMProfileID`) + `slmGoalBlocked()` (the effective `Enabled && EssentialTools.Enabled` gate) + the `ConfigResponse.slm` block (`SLMSettingsResponse`)
+- `backend/frontend_api_session.go` — `SendMessage` / `ResumeTask` / `ResumeSession` refuse a goal (explicit flag OR `/goal` prefix) and a paused-goal resume while `slmGoalBlocked()`; `goalResumeBlockedBySLM` reads the session's unfinished task + goal state to decide
 - `backend/session/agent_metrics.go`, `backend/session/manager.go`, `backend/session/emitter.go` — `SetSLMProfile` threads the active profile's identity into every session's `agent_metrics` payload
 - `frontend/src/components/settings/SLMSettings.tsx` / `SLMProfileSelector.tsx` / `SLMProfileDialog.tsx` / `SLMControls.tsx` / `SLMSections.tsx` / `SLMContextSection.tsx` — settings UI (the `slm.enabled` master toggle + profile block + values editor)
 - `frontend/src/lib/slmTools.ts` — `essentialToolPickerOptions` (always-present picker universe: clusters + ungrouped tools) plus the display-only markdown formatters `toolDescriptionMarkdown` / `toolGroupTooltipMarkdown`
 - `frontend/src/api/config.ts` — typed wrappers for the six SLM RPCs (five profile-scoped + the master toggle)
+- `frontend/src/stores/slmGateStore.ts` + `frontend/src/lib/goalGate.ts` + `frontend/src/hooks/useSLMGate.ts` — the frontend goal-gate mirror: a `{enabled, essentialToolsEnabled, loaded}` store latched from `GetConfig`, the single `isGoalBlockedBySLM()` composition (`loaded && enabled && essentialToolsEnabled`), and the one-shot fetch hook (retried on `backend:ready` / `config:updated`, fail-safe while unloaded)
 
 ## Core Types
 
@@ -140,7 +144,27 @@ The assigned set is exactly this union — nothing more, nothing less — emitte
 
 **No chat surfaced events.** The narrowing is a silent, deterministic background step: it emits no `tools_assigned` card and no budget diagnostics into the chat (the former `tools_assigned` event and `small_llm_tool_budget_overflow` diagnostic were removed alongside the `max_tools` budget — see [../decisions/035-remove-small-llm-tool-budget.md](../decisions/035-remove-small-llm-tool-budget.md)).
 
-**Goal mode is never narrowed.** The filter runs on `HandleMessage`'s Conductor path and inside the E2S branch (`runE2SWithState`) — both AFTER the goal-mode early return. Goal mode deliberately keeps the full tool set (the goal-loop tools, including the verifier-required `declare_verification`, would otherwise be dropped by `SelectTools`).
+**Goal mode is refused, not narrowed, while the narrowing is active.** The filter itself runs only on `HandleMessage`'s Conductor path and inside the E2S branch (`runE2SWithState`) — both AFTER the goal-mode early return — so goal mode would otherwise keep the full tool set (the goal-loop tools, including the verifier-required `declare_verification`, would be dropped by `SelectTools`). Rather than let that silent divergence stand, goal mode is **unavailable** whenever the effective profile narrows the tool set — see [Goal-mode gate (`goalBlocked`)](#goal-mode-gate-goalblocked).
+
+### Goal-mode gate (`goalBlocked`)
+
+Goal mode and the essential-tools narrowing are mutually exclusive:
+
+```
+goalBlocked = SLM.Enabled && EssentialTools.Enabled
+            (the resolved form of `slm.enabled && essential_tools.enabled`,
+             experimental gate already folded into SLM.Enabled)
+```
+
+`SLM.Enabled` is the **effective** master toggle (the experimental gate already folded in by `effectiveSLMConfig`, so closing the gate also clears it) and `EssentialTools.Enabled` is the active profile's essential-tools variant sub-toggle. The two operands are DISTINCT and both must hold: master-on with the variant off leaves the tool set untouched, so goal mode stays available. `goalBlocked` is therefore a property of the RESOLVED configuration (not the raw persisted `slm:` section) and tracks a runtime profile switch — the catalog is re-read, so a `SelectSLMProfile` / `SetSLMEnabled` takes effect without a restart.
+
+The narrowing is tuned for single-pass Conductor work and hides the goal-loop tooling (`propose_goal`, `declare_goal_status`, `declare_verification`), so under it a goal could never be derived or concluded. Refusing the request is honest where entering an unrunnable loop is not. Enforcement is defense-in-depth:
+
+- **Frontend (UX, fail-safe).** `slmGateStore` latches `{enabled, essentialToolsEnabled, loaded}` from `GetConfig` (the `ConfigResponse.slm` block — see [../contracts/desktop-frontend.md](../contracts/desktop-frontend.md)); the goal toggle is disabled with an explanatory reason (`isGoalBlockedBySLM()` in `lib/goalGate.ts`), and any stale `goalEnabled` arming is cleared (`inputModeStore.disarmGoal`). An unloaded ("unknown") gate does NOT block — the backend remains authoritative.
+- **Backend session API (authoritative).** `FrontendAPI.SendMessage` refuses a goal request — the explicit flag OR a `/goal` prefix on the POST-preprocess text — with a descriptive error BEFORE any side effect (no activity timestamp, no persisted message, no task), and `ResumeTask` / `ResumeSession` refuse resuming a session whose unfinished task carries a non-terminal goal state (`goalResumeBlockedBySLM`).
+- **Orchestrator (invariant).** `HandleMessage`'s goal branch and `resumeGoalLoop` entry return `ErrGoalBlockedBySLM` when `slmEssentialToolsEnabled()`, so a direct caller bypassing the API hits the same wall.
+
+Fail-open by design: a not-yet-loaded config never blocks (the invariant is enforced downstream regardless), and a task-store read failure during a resume check is treated as "not blocked" — the manager re-checks under the session lock and `resumeGoalLoop` is the ultimate authority.
 
 ### System Prompt Simplification
 
@@ -150,7 +174,7 @@ Shrinks the system prompt injected for a small model. Applied in `buildSystemPro
 - **ReasoningScaffold** — appends a three-step thought template (goal → tool choice + rationale → exact args). Only honored when Lite is on.
 - **FewShot** — appends curated worked-example ReAct cycles (correct tool-call format, tool choice, error recovery, finish). Only honored when Lite is on.
 
-Specialized runs (e.g. goal derivation) carry their own core directive and are never swapped to the lite orchestrator directive. The shared sections (family overlay, verification mandate, injection defense, workspace, env, AGENTS.md, skills) are appended UNCHANGED in both modes.
+**Prompt-variant parity for goal agents.** A specialized run carries its own core directive instead of `OrchestratorSystem`, so it was previously never swapped at all — which meant the goal derivation and verification passes (the very passes that run *under* an active profile) ignored the profile's `system_prompt` variant entirely. They now opt into the same swap through `buildSpecializedSystemPromptWithLite` (`systemPromptSpec.allowLiteVariants` + `liteCoreDirective`): `deriveGoal` swaps `prompts.GoalDerivation` for `prompts.GoalDerivationLite`, and `defaultGoalVerifier` swaps the mode's verbose directive for its Lite counterpart (`GoalVerificationLite` / `GoalReDerivationLite`, resolved through the SAME `GoalVerificationSubstitute` placeholder set by `GoalVerificationLiteDirectiveByMode`); the `ReasoningScaffold` / `FewShot` blocks are appended per their sub-toggles exactly as on the orchestrator path. Subagent-profile specialized runs (`core/conductor.go`) deliberately do NOT opt in — their `allowLiteVariants` stays false — so a profile's body remains authoritative even under Lite. When SLM is off or `lite` is off, every specialized directive is emitted byte-identically to the un-swapped baseline (the Lite directives are ignored). The shared sections (family overlay, verification mandate, injection defense, workspace, env, AGENTS.md, skills) are appended UNCHANGED in both modes.
 
 ### Sampling Overrides
 
@@ -217,10 +241,14 @@ core/builder.go: NewOrchestratorBuilder
                            + OrchestratorConfig.SLM (SLMSettings)
                         ▼
 per-session Orchestrator.HandleMessage (Conductor path; the E2S branch applies the same filter):
+  ├─ opts.Goal && slmEssentialToolsEnabled() → ErrGoalBlockedBySLM
+  │     (goal refused: goalBlocked = SLM.Enabled && EssentialTools.Enabled;
+  │      FrontendAPI.SendMessage already refused it before any side effect)
   ├─ applySLMToolFilter (ONCE) → slm.SelectTools (static union,
   │     silent — no events emitted)
   └─ prepareRequestContext → withSLMPromptProfile (ctx flags)
-       → buildSystemPromptWith → Lite swap + scaffold + few-shot
+       → buildSystemPromptWith → Lite swap (goal derivation/verification
+         swap too, via buildSpecializedSystemPromptWithLite) + scaffold + few-shot
 
 backend/session: Manager.SetSLMProfile(effective cfg, active profile)
   → every session's agent_metrics payload carries slm.{enabled,
@@ -237,14 +265,14 @@ backend/session: Manager.SetSLMProfile(effective cfg, active profile)
 - An empty or dangling `slm.active_profile` resolves to `generic` with exactly one warning — never an error; the effective run is unaffected.
 - Custom-store loading never fails the app: broken entries are dropped with warnings that reach the UI; saving is fail-closed (an invalid set is rejected whole, atomically, without touching the file).
 - Profile ids are stable slugs; renaming changes only the display name. The metrics `profile` field carries the id slug, so renames never fragment metric series.
-- The essential-tools filter runs exactly once per task on the Conductor path (before the ReAct loop) and once in the E2S branch; it is never applied in goal mode.
+- The essential-tools filter runs exactly once per task on the Conductor path (before the ReAct loop) and once in the E2S branch; goal mode is never narrowed, but it is **REFUSED** while the narrowing is active (`goalBlocked = SLM.Enabled && EssentialTools.Enabled`), enforced by the session API before any side effect and by `ErrGoalBlockedBySLM` in the orchestrator.
 - **The assigned set is exactly always-present ∪ protected ∪ MCP ∪ turn-scoped guarantees, in registry order.** There is no slot budget and no router matching: nothing in the assigned set is ever trimmed, and the filter emits no events.
 - A task whose context carries requested subagents (an explicit `#agent` mention) always has `delegate` in its curated tool set, even though it is neither pinned nor MCP-sourced.
 - The lite directive retains the compact Git Policy and the Efficiency Hints micro-hints (truncated-output mechanics, fact-memory discipline, MCP priority); the `Edit → Verify Cycle` section appears exactly once in each of the lite and full directives.
 - `finish`, the fact-memory / human-interaction tools, the step checklist (`update_checklist`), and the ReAct read/recovery tools (`read_attachment`, `read_skill_resource`, `tool_result_read`) are always preserved regardless of the always-present list, so a narrowed session is never left unable to complete its loop; every MCP-sourced tool is always kept whole.
 - The injection-defense section is never removed or altered by the Lite swap (strict constraint); the lite directive carries no injection-defense content because it is injected separately and unchanged.
 - FewShot and ReasoningScaffold are only honored when Lite is active (both are tailored to the lite directive's style).
-- Specialized runs (goal derivation) are never swapped to the lite orchestrator directive.
+- Goal derivation and verification specialized runs DO honor the `system_prompt` variant through their own Lite directives (`buildSpecializedSystemPromptWithLite`); subagent-profile specialized runs are never swapped. With SLM off or `lite` off, every specialized directive is byte-identical to the un-swapped baseline.
 - Sampling overrides are inherit-by-default: only explicitly set (non-zero) parameters override the vendor preset; unset parameters inherit it. All set parameters (temperature, top_p, top_k, repetition_penalty, presence_penalty) reach the providers that support them through the sp4rk router plumbing (per-parameter provider notes above). `reasoning_effort` is profile-set only — empty inherits the model default.
 - Context-management overrides are applied identically at every executor-config materialization site (`Build`, `buildRouter`, `buildContextFactory`), so the orchestrator executor, the router fallback, and the subagent context factory never disagree when the variant is on.
 - When the master toggle or the `context` variant toggle is off, the executor config is returned byte-for-byte unchanged; every override knob is independent (`> 0` per-field gate), and general compaction/pruning defaults are never modified.

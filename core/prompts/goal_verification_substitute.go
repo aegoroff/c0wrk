@@ -67,3 +67,18 @@ func GoalVerificationDirectiveByMode(mode, condition, verifyClause, reportedEvid
 	}
 	return GoalVerificationSubstitute(directive, condition, verifyClause, reportedEvidence)
 }
+
+// GoalVerificationLiteDirectiveByMode is the Lite counterpart of
+// GoalVerificationDirectiveByMode: it selects the compact Lite variant of the
+// verification directive for the given mode and resolves the SAME placeholder
+// set via GoalVerificationSubstitute. The orchestrator's goal verifier
+// (defaultGoalVerifier) uses it to render the Lite directive it hands to
+// buildSpecializedSystemPromptWithLite, which swaps it in only when the
+// small-LLM Lite profile is active.
+func GoalVerificationLiteDirectiveByMode(mode, condition, verifyClause, reportedEvidence string) string {
+	directive := GoalVerificationLite
+	if mode == goal.VerificationModeReDerivation {
+		directive = GoalReDerivationLite
+	}
+	return GoalVerificationSubstitute(directive, condition, verifyClause, reportedEvidence)
+}

@@ -20,6 +20,18 @@ import (
 	sdktools "github.com/v0lka/sp4rk/tools"
 )
 
+// ErrGoalBlockedBySLM is returned when a goal request — a fresh one
+// (HandleMessage with HandleOptions.Goal) or a resumed one (a paused goal
+// re-entering resumeGoalLoop) — is attempted while the Small-LLM
+// essential-tools narrowing is active (see slmEssentialToolsEnabled). The
+// narrowing targets single-pass Conductor work and hides the goal-loop tooling
+// (propose_goal, declare_goal_status, declare_verification), so a goal could
+// never be derived or concluded; rather than silently degrade, goal mode is
+// refused. The frontend API rejects such requests earlier with a user-facing
+// message; this sentinel keeps the invariant enforceable when the orchestrator
+// is driven directly and is the unit-test contract.
+var ErrGoalBlockedBySLM = errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active")
+
 // deriveGoal runs a full-context Conductor pass whose only job is to derive a
 // crisp {condition, verify} goal from the user's message and submit it for
 // user sign-off via propose_goal. It reuses the entire Conductor toolset
@@ -70,7 +82,8 @@ func (o *Orchestrator) deriveGoal(
 	// RunConductor — derivation is a Conductor run with a different instruction
 	// set, not a separate engine.
 	deps.systemPromptOverride = func(ctx context.Context, msg string, modelMeta llm.ModelMetadata) string {
-		return buildSpecializedSystemPrompt(ctx, msg, modelMeta, prompts.GoalDerivation)
+		return buildSpecializedSystemPromptWithLite(ctx, msg, modelMeta,
+			prompts.GoalDerivation, prompts.GoalDerivationLite)
 	}
 	// Bound the derivation loop independently of routing complexity.
 	deps.resumeSteps = nil // derivation never resumes from a checkpoint
@@ -419,6 +432,15 @@ func (o *Orchestrator) resumeGoalLoop(
 	nudge string,
 	forceCompactionStrategy string,
 ) (*HandleResult, error) {
+	// Defense-in-depth: a paused goal must not be re-entered while the
+	// Small-LLM essential-tools narrowing is active — the goal-loop tooling is
+	// hidden under the narrowing (see ErrGoalBlockedBySLM). The frontend API
+	// rejects such a resume before dispatching, but driving the orchestrator
+	// directly must hit the same wall. Checked before ANY side effect (status
+	// mutation, logging, turn runner).
+	if o.slmEssentialToolsEnabled() {
+		return nil, ErrGoalBlockedBySLM
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -1298,8 +1320,15 @@ func (o *Orchestrator) defaultGoalVerifier(
 	directive := prompts.GoalVerificationSubstitute(
 		directiveText, gs.Condition, gs.VerifyClause, renderReportedEvidence(verdict),
 	)
+	// Lite counterpart of the directive, resolved through the same placeholder
+	// set. buildSpecializedSystemPromptWithLite swaps to it only when the
+	// small-LLM Lite profile is active; otherwise it is ignored and the verbose
+	// directive above is used verbatim.
+	liteDirective := prompts.GoalVerificationLiteDirectiveByMode(
+		gs.VerificationMode, gs.Condition, gs.VerifyClause, renderReportedEvidence(verdict),
+	)
 	deps.systemPromptOverride = func(ctx context.Context, msg string, modelMeta llm.ModelMetadata) string {
-		return buildSpecializedSystemPrompt(ctx, msg, modelMeta, directive)
+		return buildSpecializedSystemPromptWithLite(ctx, msg, modelMeta, directive, liteDirective)
 	}
 
 	// Inject a fresh sink so this pass's outcome is captured in isolation.

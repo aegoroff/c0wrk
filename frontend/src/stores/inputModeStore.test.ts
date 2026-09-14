@@ -67,6 +67,20 @@ describe('inputModeStore e2s/goal mutual exclusion', () => {
   })
 })
 
+describe('inputModeStore goal disarm (SLM gate)', () => {
+  it('disarmGoal clears an armed goal toggle', () => {
+    useInputModeStore.setState({ goalEnabled: true })
+    useInputModeStore.getState().disarmGoal()
+    expect(useInputModeStore.getState().goalEnabled).toBe(false)
+  })
+
+  it('disarmGoal is a no-op when goal mode is already off', () => {
+    useInputModeStore.setState({ goalEnabled: false })
+    useInputModeStore.getState().disarmGoal()
+    expect(useInputModeStore.getState().goalEnabled).toBe(false)
+  })
+})
+
 describe('inputModeStore persistence', () => {
   it('persists e2sEnabled (unlike goalEnabled) under the c0wrk-input-mode key', () => {
     useInputModeStore.getState().setE2sEnabled(true)

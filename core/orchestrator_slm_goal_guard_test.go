@@ -1,0 +1,157 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/v0lka/c0wrk/core/goal"
+	"github.com/v0lka/sp4rk/agent/router"
+	"github.com/v0lka/sp4rk/llm"
+	"github.com/v0lka/sp4rk/orchestration"
+)
+
+// slmNarrowingOn / slmNarrowingOff are the two SLMSettings shapes the goal
+// guard keys on: both the master toggle and the essential-tools variant.
+func slmNarrowingOn() SLMSettings {
+	return SLMSettings{Enabled: true, EssentialTools: SLMEssentialSettings{Enabled: true}}
+}
+
+// TestSLMEssentialToolsEnabled_Combinations pins the predicate the guard uses:
+// only master-on AND variant-on is "narrowing active". Every other combination
+// leaves goal mode untouched (behavior unchanged).
+func TestSLMEssentialToolsEnabled_Combinations(t *testing.T) {
+	cases := []struct {
+		name string
+		slm  SLMSettings
+		want bool
+	}{
+		{"master off, variant on", SLMSettings{Enabled: false, EssentialTools: SLMEssentialSettings{Enabled: true}}, false},
+		{"master on, variant off", SLMSettings{Enabled: true, EssentialTools: SLMEssentialSettings{Enabled: false}}, false},
+		{"both off", SLMSettings{}, false},
+		{"both on", slmNarrowingOn(), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &Orchestrator{config: OrchestratorConfig{SLM: tc.slm}}
+			if got := o.slmEssentialToolsEnabled(); got != tc.want {
+				t.Errorf("slmEssentialToolsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleMessage_GoalBlockedBySLM verifies the core defense-in-depth: a
+// fresh goal request is refused with ErrGoalBlockedBySLM while the Small-LLM
+// essential-tools narrowing is active — before any LLM work runs.
+func TestHandleMessage_GoalBlockedBySLM(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Message: llm.Message{Role: "assistant", Content: "should never run"}}, nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), nil, nil)
+	o.config.SLM = slmNarrowingOn()
+
+	result, err := o.HandleMessage(context.Background(), "achieve something", "session-slm-goal", HandleOptions{Goal: true})
+	if !errors.Is(err, ErrGoalBlockedBySLM) {
+		t.Fatalf("HandleMessage error = %v, want ErrGoalBlockedBySLM", err)
+	}
+	if result != nil {
+		t.Errorf("HandleMessage result = %+v, want nil on the block", result)
+	}
+	mockLLM.mu.Lock()
+	calls := len(mockLLM.calls)
+	mockLLM.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("LLM calls = %d, want 0 — the block must precede any goal work", calls)
+	}
+}
+
+// TestResumeGoalLoop_BlockedBySLM verifies the paused-goal defense-in-depth:
+// re-entering the goal loop is refused with ErrGoalBlockedBySLM while the
+// narrowing is active, before the turn runner runs or the goal status is
+// mutated.
+func TestResumeGoalLoop_BlockedBySLM(t *testing.T) {
+	o := newGoalTestOrchestrator()
+	o.config.SLM = slmNarrowingOn()
+	recorder := &goalSeedRecorder{}
+	o.goalTurnRunner = recorder.run
+
+	pausedGS := &goal.GoalState{
+		Condition:    "ship the feature",
+		VerifyClause: "go test ./...",
+		TurnCount:    2,
+		Status:       goal.StatusActive,
+		CreatedAt:    time.Now(),
+	}
+
+	result, err := o.resumeGoalLoop(
+		context.Background(), "resume the goal", orchestration.NewMapBlackboard(), nil, "",
+		&router.RoutingDecision{Domain: "general", Complexity: 3}, pausedGS, nil, "", "",
+	)
+	if !errors.Is(err, ErrGoalBlockedBySLM) {
+		t.Fatalf("resumeGoalLoop error = %v, want ErrGoalBlockedBySLM", err)
+	}
+	if result != nil {
+		t.Errorf("resumeGoalLoop result = %+v, want nil on the block", result)
+	}
+	if recorder.turns != 0 {
+		t.Errorf("turn runner invoked %d times, want 0 — the block must precede the loop", recorder.turns)
+	}
+}
+
+// TestResumeGoalLoop_NarrowingOff_Proceeds pins "behavior unchanged when SLM
+// is off": with the master toggle off (variant on), a paused goal resumes into
+// the goal loop exactly as before.
+func TestResumeGoalLoop_NarrowingOff_Proceeds(t *testing.T) {
+	o := newGoalTestOrchestrator()
+	o.config.SLM = SLMSettings{Enabled: false, EssentialTools: SLMEssentialSettings{Enabled: true}}
+	recorder := &goalSeedRecorder{}
+	o.goalTurnRunner = recorder.run
+
+	pausedGS := &goal.GoalState{
+		Condition:    "ship the feature",
+		VerifyClause: "go test ./...",
+		TurnCount:    2,
+		Status:       goal.StatusActive,
+		CreatedAt:    time.Now(),
+	}
+	if _, err := o.resumeGoalLoop(
+		context.Background(), "resume the goal", orchestration.NewMapBlackboard(), nil, "",
+		nil, pausedGS, nil, "", "",
+	); err != nil {
+		t.Fatalf("resumeGoalLoop failed: %v", err)
+	}
+	if recorder.turns != 1 {
+		t.Fatalf("turn runner called %d times, want 1 (the loop must re-enter)", recorder.turns)
+	}
+}
+
+// TestResumeGoalLoop_EssentialToolsOff_Proceeds pins "behavior unchanged when
+// the essential-tools variant is off": master on but variant off leaves the
+// goal resume path untouched.
+func TestResumeGoalLoop_EssentialToolsOff_Proceeds(t *testing.T) {
+	o := newGoalTestOrchestrator()
+	o.config.SLM = SLMSettings{Enabled: true, EssentialTools: SLMEssentialSettings{Enabled: false}}
+	recorder := &goalSeedRecorder{}
+	o.goalTurnRunner = recorder.run
+
+	pausedGS := &goal.GoalState{
+		Condition:    "ship the feature",
+		VerifyClause: "go test ./...",
+		TurnCount:    2,
+		Status:       goal.StatusActive,
+		CreatedAt:    time.Now(),
+	}
+	if _, err := o.resumeGoalLoop(
+		context.Background(), "resume the goal", orchestration.NewMapBlackboard(), nil, "",
+		nil, pausedGS, nil, "", "",
+	); err != nil {
+		t.Fatalf("resumeGoalLoop failed: %v", err)
+	}
+	if recorder.turns != 1 {
+		t.Fatalf("turn runner called %d times, want 1 (the loop must re-enter)", recorder.turns)
+	}
+}

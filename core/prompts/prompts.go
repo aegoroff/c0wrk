@@ -61,6 +61,16 @@ var GoalMode string
 //go:embed goal_derivation.md
 var GoalDerivation string
 
+// GoalDerivationLite is the compact counterpart of GoalDerivation used when the
+// small-LLM SystemPrompt.Lite profile is active. It keeps only the derivation
+// essentials (investigate, derive a {condition, verify} pair, choose the
+// verification_mode, propose_goal) and drops the verbose worked guidance an SLM
+// cannot hold. Selected by buildSpecializedSystemPromptWithLite
+// (core/systemprompt.go).
+//
+//go:embed goal_derivation_lite.md
+var GoalDerivationLite string
+
 // Goal verification — the directive for the isolated read-only/test agent that
 // independently confirms or rejects a "met" claim for a declared goal. Used by
 // the verification step that runs after an agent emits a "met" verdict via
@@ -73,6 +83,16 @@ var GoalDerivation string
 
 //go:embed goal_verification.md
 var GoalVerification string
+
+// GoalVerificationLite is the compact counterpart of GoalVerification used when
+// the small-LLM SystemPrompt.Lite profile is active. It carries the SAME
+// placeholder set as the verbose directive ({goal_condition},
+// {goal_verify_clause}, {reported_evidence}, {shell_tool}) resolved by
+// GoalVerificationSubstitute, so callers render it exactly like the verbose
+// directive. Selected by GoalVerificationLiteDirectiveByMode.
+//
+//go:embed goal_verification_lite.md
+var GoalVerificationLite string
 
 // Goal re-derivation verification — the directive for the isolated agent that
 // verifies a "met" claim in re_derivation mode. Instead of running a single
@@ -87,6 +107,14 @@ var GoalVerification string
 //
 //go:embed goal_rederivation.md
 var GoalReDerivation string
+
+// GoalReDerivationLite is the compact counterpart of GoalReDerivation used when
+// the small-LLM SystemPrompt.Lite profile is active. It reuses the same
+// placeholder set as the verbose re-derivation directive and is selected by
+// GoalVerificationLiteDirectiveByMode.
+//
+//go:embed goal_rederivation_lite.md
+var GoalReDerivationLite string
 
 // Orchestrator family-specific prompts
 

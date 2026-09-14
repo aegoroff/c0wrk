@@ -2723,6 +2723,16 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// blackboard is restored and the agent runs the goal loop on the inherited
 	// facts/history, deriving a fresh goal from the new message.
 	if opts.Goal {
+		// The Small-LLM essential-tools narrowing is built for single-pass
+		// Conductor work and hides the goal-loop tooling (propose_goal,
+		// declare_goal_status, declare_verification), so a goal could never be
+		// derived or concluded. Refuse BEFORE the continuation reactivation
+		// side effect rather than entering an unrunnable loop. The frontend API
+		// rejects this earlier with a user-facing message; the sentinel keeps
+		// the invariant for direct callers.
+		if o.slmEssentialToolsEnabled() {
+			return nil, ErrGoalBlockedBySLM
+		}
 		// Commit point for a goal continuation: the restored task is
 		// reactivated only now (see reactivateContinuationTask) — a failure
 		// before this point (e.g. blackboard restore) leaves the anchor's

@@ -383,3 +383,146 @@ func TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing(t *testing.T) {
 		t.Errorf("a plain skill-ref E2S send must pass the prefix guard, got: %v", err)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// Small-LLM essential-tools narrowing × goal mode
+// ----------------------------------------------------------------------------
+
+// slmNarrowingConfig returns a runtime config with experimental features ON and
+// the Small-LLM profile ON, resolving to the model-agnostic "generic" profile
+// (the narrowing-active shape). id optionally overrides the active profile.
+func slmNarrowingConfig(profileID string) *config.Config {
+	if profileID == "" {
+		profileID = config.SLMGenericProfileID
+	}
+	return &config.Config{
+		Experimental: config.ExperimentalConfig{Enabled: true},
+		SLM:          config.SLMPersistConfig{Enabled: true, ActiveProfile: profileID},
+	}
+}
+
+// TestSendMessage_GoalBlockedBySLM verifies the frontend-layer guard: a goal
+// request — armed by the explicit flag OR a leading /goal command — is refused
+// while the Small-LLM essential-tools narrowing is active, BEFORE any side
+// effect (no persisted message, no task row).
+func TestSendMessage_GoalBlockedBySLM(t *testing.T) {
+	api, sessionStore, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	api.config = slmNarrowingConfig("")
+
+	cases := []struct {
+		name string
+		text string
+		goal bool
+	}{
+		{"explicit flag", "do the thing", true},
+		{"/goal prefix", "/goal do the thing", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := api.SendMessage("fork-src", tc.text, nil, nil, "", "", tc.goal, "", false, false)
+			if err == nil {
+				t.Fatal("expected an error for a goal send under the Small-LLM essential-tools profile")
+			}
+			if !strings.Contains(err.Error(), "Small-LLM") {
+				t.Errorf("expected a Small-LLM rejection, got: %v", err)
+			}
+			// Rejected before any side effect: no message persisted, no task row.
+			if msgs, mErr := sessionStore.LoadMessages(ctx, "fork-src"); mErr != nil {
+				t.Fatalf("LoadMessages: %v", mErr)
+			} else if len(msgs) != 0 {
+				t.Errorf("gated send must not persist a message, got %d", len(msgs))
+			}
+			if latest, lErr := sessionStore.GetLatestTaskID(ctx, "fork-src"); lErr != nil || latest != "" {
+				t.Errorf("gated send must not start a task (latest=%q, err=%v)", latest, lErr)
+			}
+		})
+	}
+}
+
+// TestSlmGoalBlocked_Combinations pins the guard predicate: only master-on AND
+// the active profile's essential-tools variant-on blocks goal mode; the
+// experimental gate folds in; a nil config never blocks.
+func TestSlmGoalBlocked_Combinations(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{"nil config (fail-open)", nil, false},
+		{
+			"experimental off",
+			&config.Config{
+				Experimental: config.ExperimentalConfig{Enabled: false},
+				SLM:          config.SLMPersistConfig{Enabled: true, ActiveProfile: config.SLMGenericProfileID},
+			},
+			false,
+		},
+		{
+			"master off",
+			&config.Config{
+				Experimental: config.ExperimentalConfig{Enabled: true},
+				SLM:          config.SLMPersistConfig{Enabled: false, ActiveProfile: config.SLMGenericProfileID},
+			},
+			false,
+		},
+		{"variant off (qwen3.8-27b)", slmNarrowingConfig("qwen3.8-27b"), false},
+		{"narrowing active (generic)", slmNarrowingConfig(""), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &FrontendAPI{config: tc.cfg}
+			if got := api.slmGoalBlocked(); got != tc.want {
+				t.Errorf("slmGoalBlocked() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResumeTask_GoalBlockedBySLM verifies the paused-goal resume guard: a
+// paused task carrying a NON-terminal goal state is rejected while the
+// narrowing is active, while a paused non-goal (or terminal-goal) task is
+// unaffected.
+func TestResumeTask_GoalBlockedBySLM(t *testing.T) {
+	api, sessionStore, _, db := newForkTestAPI(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	api.config = slmNarrowingConfig("")
+
+	// A paused task with no goal state is NOT a paused goal: the guard must
+	// leave it alone (the harness manager has no task store, so a permitted
+	// resume returns nil without side effects).
+	if err := sessionStore.SaveTask(ctx, session.TaskRecord{
+		ID: "task-resume", SessionID: "fork-src", OriginalRequest: "plain paused task",
+		RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
+		Reflections: json.RawMessage(`[]`), Status: "paused", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+	if err := api.ResumeTask("fork-src", "", ""); err != nil {
+		t.Errorf("a paused non-goal task must be unaffected, got: %v", err)
+	}
+
+	// Attach an ACTIVE goal state → the same paused task is now a paused goal
+	// and must be rejected.
+	if err := sessionStore.SaveGoalState(ctx, "task-resume", json.RawMessage(`{"condition":"x","verify_clause":"y","status":"active"}`)); err != nil {
+		t.Fatalf("SaveGoalState(active): %v", err)
+	}
+	if err := api.ResumeTask("fork-src", "", ""); err == nil {
+		t.Fatal("expected a paused goal resume to be rejected under the narrowing")
+	} else if !strings.Contains(err.Error(), "Small-LLM") {
+		t.Errorf("expected a Small-LLM rejection, got: %v", err)
+	}
+
+	// A TERMINAL goal state is not a resumable goal (resume runs the plain
+	// path), so it is unaffected too.
+	if err := sessionStore.SaveGoalState(ctx, "task-resume", json.RawMessage(`{"condition":"x","status":"met"}`)); err != nil {
+		t.Fatalf("SaveGoalState(met): %v", err)
+	}
+	if err := api.ResumeTask("fork-src", "", ""); err != nil {
+		t.Errorf("a terminal-goal (plain-path) resume must be unaffected, got: %v", err)
+	}
+}

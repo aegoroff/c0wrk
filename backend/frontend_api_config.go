@@ -30,6 +30,11 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		return ConfigResponse{Loaded: false}
 	}
 
+	// Report the EFFECTIVE Small-LLM profile state (the experimental gate is
+	// folded into the master toggle by effectiveSLMConfig), not the raw
+	// persisted `slm:` section.
+	slmProfile, _ := effectiveSLMConfig(f.config, f.slmCatalog())
+
 	resp := ConfigResponse{
 		Loaded:       true,
 		LogLevel:     f.config.LogLevel,
@@ -47,6 +52,10 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		},
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
+		},
+		SLM: SLMSettingsResponse{
+			Enabled:               slmProfile.Enabled,
+			EssentialToolsEnabled: slmProfile.EssentialTools.Enabled,
 		},
 	}
 
@@ -873,6 +882,29 @@ func suggestSLMProfileID(defaultModel string) string {
 // without a restart; the store file is tiny and conversions are not hot paths.
 func (f *FrontendAPI) slmCatalog() []config.SLMProfile {
 	return loadSLMCatalog(f.agentDir, f.log())
+}
+
+// slmGoalBlocked reports whether goal mode must be refused because the
+// small-LLM essential-tools narrowing is active: the master SLM toggle AND the
+// active profile's essential-tools variant both on, with the experimental gate
+// folded in (see effectiveSLMConfig — the gate forces the effective toggle off
+// while experimental features are disabled). The profile is resolved against
+// the live catalog so a runtime profile switch takes effect without a restart.
+// Returns false when no config is loaded (fail-open, matching every other
+// runtime config read): a not-yet-loaded config must never block a request on
+// principle.
+func (f *FrontendAPI) slmGoalBlocked() bool {
+	f.configMu.RLock()
+	cfg := f.config
+	f.configMu.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	// slmCatalog() does file I/O — resolve the effective profile outside the
+	// config lock; effectiveSLMConfig only reads cfg, so a concurrent config
+	// swap cannot corrupt it.
+	profile, _ := effectiveSLMConfig(cfg, f.slmCatalog())
+	return profile.Enabled && profile.EssentialTools.Enabled
 }
 
 // slmPickerData returns the read-only picker universe for the

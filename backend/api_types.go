@@ -19,6 +19,7 @@ type ConfigResponse struct {
 	Search       ConfigSearchResp             `json:"search"`
 	Proxy        ProxySettingsResponse        `json:"proxy"`
 	Experimental ExperimentalSettingsResponse `json:"experimental"`
+	SLM          SLMSettingsResponse          `json:"slm"`
 }
 
 // ExperimentalSettingsResponse exposes the master experimental-features switch
@@ -27,6 +28,16 @@ type ConfigResponse struct {
 // Small-LLM profile and the E2S execution mode).
 type ExperimentalSettingsResponse struct {
 	Enabled bool `json:"enabled"`
+}
+
+// SLMSettingsResponse exposes the EFFECTIVE (resolved) Small-LLM profile state
+// to the settings UI, not the raw persisted config. Enabled mirrors the
+// resolved master toggle (forced false while the experimental gate is off);
+// EssentialToolsEnabled mirrors the resolved essential-tools variant
+// sub-toggle. Both are false when the config is not loaded.
+type SLMSettingsResponse struct {
+	Enabled               bool `json:"enabled"`
+	EssentialToolsEnabled bool `json:"essential_tools_enabled"`
 }
 
 // ReasoningInfo holds native reasoning options for a model family.

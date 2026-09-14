@@ -1058,9 +1058,10 @@ func TestOrchestratorSystemLite_TokenFootprint(t *testing.T) {
 }
 
 // TestBuildSpecializedSystemPrompt_SLMLite_NotSwapped verifies that a
-// specialized run (e.g. goal derivation) is NEVER swapped to the lite
-// orchestrator directive, even when SLMLiteKey is set. The specialized
-// directive owns its own completion semantics and must not be replaced.
+// specialized run built via buildSpecializedSystemPrompt — the path used by
+// subagent profiles and other non-opted-in specialized runs — is NEVER swapped
+// to a Lite directive, even when SLMLiteKey is set. Such a run's own core
+// directive owns its completion semantics and must be preserved verbatim.
 func TestBuildSpecializedSystemPrompt_SLMLite_NotSwapped(t *testing.T) {
 	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
 	got := buildSpecializedSystemPrompt(ctx, "derive a goal", llmModelMetaForTests(), prompts.GoalDerivation)
@@ -1072,5 +1073,192 @@ func TestBuildSpecializedSystemPrompt_SLMLite_NotSwapped(t *testing.T) {
 	// The lite orchestrator directive must NOT replace the specialized one.
 	if strings.Contains(got, "Thought Scaffold") {
 		t.Error("specialized prompt was swapped to lite orchestrator directive — must be preserved")
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_ScopeIsolation verifies the scope
+// guarantee: subagent-profile specialized runs (which use
+// buildSpecializedSystemPrompt, NOT the *WithLite entry point) are byte-identical
+// whether or not Lite is active. Their profile body stays authoritative and no
+// scaffold/few-shot block is appended — the goal-only opt-in never reaches them.
+func TestBuildSpecializedSystemPromptWithLite_ScopeIsolation(t *testing.T) {
+	const body = "# Code Reviewer\n\nPROFILE-BODY-MARKER-Z9: review the diff."
+	meta := llmModelMetaForTests()
+
+	withoutLite := buildSpecializedSystemPrompt(
+		tools.WithWorkspacePath(context.Background(), "/ws"), "review", meta, body)
+	withLite := buildSpecializedSystemPrompt(
+		tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws"), "review", meta, body)
+
+	if withLite != withoutLite {
+		t.Error("subagent-profile specialized run changed under Lite — scope isolation violated")
+	}
+	if !strings.Contains(withLite, "PROFILE-BODY-MARKER-Z9") {
+		t.Error("profile body dropped under Lite")
+	}
+	if strings.Contains(withLite, "Thought Scaffold") {
+		t.Error("scaffold block leaked into a subagent-profile run under Lite")
+	}
+	if strings.Contains(withLite, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("few-shot block leaked into a subagent-profile run under Lite")
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_SwapsDirectiveAndAppendsSubToggles
+// verifies that an opted-in specialized run (goal derivation/verification block)
+// swaps its verbose directive for the Lite one and appends BOTH the reasoning
+// scaffold and the few-shot block when the sub-toggles are on.
+func TestBuildSpecializedSystemPromptWithLite_SwapsDirectiveAndAppendsSubToggles(t *testing.T) {
+	const verboseDirective = "VERBOSE-SPECIALIZED-DIRECTIVE-MARKER-A1"
+	const liteDirective = "LITE-SPECIALIZED-DIRECTIVE-MARKER-B2"
+
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	got := buildSpecializedSystemPromptWithLite(ctx, "derive", llmModelMetaForTests(), verboseDirective, liteDirective)
+
+	if !strings.Contains(got, liteDirective) {
+		t.Error("lite specialized directive not substituted under Lite")
+	}
+	if strings.Contains(got, verboseDirective) {
+		t.Error("verbose specialized directive leaked under Lite")
+	}
+	if !strings.Contains(got, "Thought Scaffold") {
+		t.Error("ReasoningScaffold block missing under full Lite profile")
+	}
+	if !strings.Contains(got, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("FewShot block missing under full Lite profile")
+	}
+	// The shared project-context prefix is still injected.
+	if !strings.Contains(got, "/ws") {
+		t.Error("shared project context dropped from the opted-in specialized run")
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_SubTogglesIndependent proves the
+// scaffold/few-shot sub-toggles are honored independently for an opted-in
+// specialized run, and that neither can be present while the other is off.
+func TestBuildSpecializedSystemPromptWithLite_SubTogglesIndependent(t *testing.T) {
+	const verboseDirective = "VERBOSE-SPECIALIZED-DIRECTIVE-MARKER-A1"
+	const liteDirective = "LITE-SPECIALIZED-DIRECTIVE-MARKER-B2"
+	meta := llmModelMetaForTests()
+
+	cases := []struct {
+		name     string
+		profile  slmPromptProfile
+		wantScaf bool
+		wantFew  bool
+	}{
+		{"both off", slmPromptProfile{Lite: true}, false, false},
+		{"scaffold only", slmPromptProfile{Lite: true, ReasoningScaffold: true}, true, false},
+		{"few-shot only", slmPromptProfile{Lite: true, FewShot: true}, false, true},
+		{"both on", slmPromptProfile{Lite: true, ReasoningScaffold: true, FewShot: true}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tools.WithWorkspacePath(withSLMPromptProfile(context.Background(), tc.profile), "/ws")
+			got := buildSpecializedSystemPromptWithLite(ctx, "derive", meta, verboseDirective, liteDirective)
+
+			// The lite directive is always swapped in while Lite is on.
+			if !strings.Contains(got, liteDirective) {
+				t.Error("lite specialized directive not substituted")
+			}
+			if gotScaf := strings.Contains(got, "Thought Scaffold"); gotScaf != tc.wantScaf {
+				t.Errorf("scaffold presence = %v, want %v", gotScaf, tc.wantScaf)
+			}
+			if gotFew := strings.Contains(got, "Worked Examples — Correct ReAct Cycles"); gotFew != tc.wantFew {
+				t.Errorf("few-shot presence = %v, want %v", gotFew, tc.wantFew)
+			}
+		})
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_RequiresLite proves the Lite
+// directive is NOT swapped in when Lite is off, even if the scaffold/few-shot
+// sub-toggles are on — those are tailored to the Lite directive.
+func TestBuildSpecializedSystemPromptWithLite_RequiresLite(t *testing.T) {
+	const verboseDirective = "VERBOSE-SPECIALIZED-DIRECTIVE-MARKER-A1"
+	const liteDirective = "LITE-SPECIALIZED-DIRECTIVE-MARKER-B2"
+
+	ctx := tools.WithWorkspacePath(
+		withSLMPromptProfile(context.Background(), slmPromptProfile{Lite: false, FewShot: true, ReasoningScaffold: true}),
+		"/ws",
+	)
+	got := buildSpecializedSystemPromptWithLite(ctx, "derive", llmModelMetaForTests(), verboseDirective, liteDirective)
+
+	if !strings.Contains(got, verboseDirective) {
+		t.Error("verbose directive dropped while Lite is off")
+	}
+	if strings.Contains(got, liteDirective) {
+		t.Error("lite directive swapped in while Lite is off")
+	}
+	if strings.Contains(got, "Thought Scaffold") || strings.Contains(got, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("scaffold/few-shot appended while Lite is off")
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_OffByteIdentical is the no-regression
+// guard for the goal path: with Lite off (or absent), the opted-in builder
+// produces byte-identical output to the plain specialized builder for the same
+// directive. This proves the Lite machinery adds zero bytes when inactive.
+func TestBuildSpecializedSystemPromptWithLite_OffByteIdentical(t *testing.T) {
+	const verboseDirective = "VERBOSE-SPECIALIZED-DIRECTIVE-MARKER-A1"
+	const liteDirective = "LITE-SPECIALIZED-DIRECTIVE-MARKER-B2"
+	meta := llmModelMetaForTests()
+
+	// Lite absent entirely.
+	plainCtx := tools.WithWorkspacePath(context.Background(), "/ws")
+	viaOptIn := buildSpecializedSystemPromptWithLite(plainCtx, "derive", meta, verboseDirective, liteDirective)
+	viaPlain := buildSpecializedSystemPrompt(plainCtx, "derive", meta, verboseDirective)
+	if viaOptIn != viaPlain {
+		t.Error("opted-in builder diverges from plain builder when Lite is absent")
+	}
+
+	// Profile present but Lite off.
+	liteOffCtx := tools.WithWorkspacePath(
+		withSLMPromptProfile(context.Background(), slmPromptProfile{Lite: false, FewShot: true, ReasoningScaffold: true}),
+		"/ws",
+	)
+	viaOptInLiteOff := buildSpecializedSystemPromptWithLite(liteOffCtx, "derive", meta, verboseDirective, liteDirective)
+	viaPlainLiteOff := buildSpecializedSystemPrompt(liteOffCtx, "derive", meta, verboseDirective)
+	if viaOptInLiteOff != viaPlainLiteOff {
+		t.Error("opted-in builder diverges from plain builder when Lite is off")
+	}
+}
+
+// TestBuildSpecializedSystemPromptWithLite_RealGoalDirectives exercises the
+// actual wiring the goal agents use: with Lite on, the derivation and
+// verification specialized runs receive the Lite directive (not the verbose
+// one) plus the scaffold/few-shot blocks. It mirrors the exact construction at
+// the deriveGoal / defaultGoalVerifier call sites.
+func TestBuildSpecializedSystemPromptWithLite_RealGoalDirectives(t *testing.T) {
+	ctx := tools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	meta := llmModelMetaForTests()
+
+	// Derivation: verbose GoalDerivation swapped for GoalDerivationLite.
+	deriv := buildSpecializedSystemPromptWithLite(ctx, "derive", meta,
+		prompts.GoalDerivation, prompts.GoalDerivationLite)
+	if !strings.Contains(deriv, "## Steps") {
+		t.Error("derivation did not receive the lite directive (missing its '## Steps' section)")
+	}
+	if strings.Contains(deriv, "## Your Mission") {
+		t.Error("verbose GoalDerivation leaked into the derivation prompt under Lite")
+	}
+	if !strings.Contains(deriv, "Thought Scaffold") || !strings.Contains(deriv, "Worked Examples — Correct ReAct Cycles") {
+		t.Error("derivation prompt missing scaffold/few-shot under full Lite profile")
+	}
+
+	// Verification: verbose directive swapped for the lite one, placeholders resolved.
+	const cond, verify, evidence = "COND-XYZ", "go test ./...", "EVIDENCE-QQQ"
+	directive := prompts.GoalVerificationSubstitute(prompts.GoalVerification, cond, verify, evidence)
+	liteDirective := prompts.GoalVerificationLiteDirectiveByMode("executable", cond, verify, evidence)
+	ver := buildSpecializedSystemPromptWithLite(ctx, "verify", meta, directive, liteDirective)
+
+	if !strings.Contains(ver, liteDirective) {
+		t.Error("verifier did not receive the lite directive under Lite")
+	}
+	if !strings.Contains(ver, cond) || !strings.Contains(ver, verify) || !strings.Contains(ver, evidence) {
+		t.Error("verifier lite directive placeholders were not resolved")
+	}
+	if strings.Contains(ver, "{goal_condition}") || strings.Contains(ver, "{shell_tool}") {
+		t.Error("verifier prompt carries an unresolved placeholder")
 	}
 }

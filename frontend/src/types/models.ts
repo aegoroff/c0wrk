@@ -396,12 +396,28 @@ export interface ConfigResponse {
   proxy: ProxySettingsResponse
   /** Optional to keep existing typed mocks/test fixtures compatible. */
   experimental?: ConfigExperimentalResponse
+  /**
+   * Effective (resolved) Small-LLM profile gate. Optional so existing typed
+   * mocks/test fixtures — which predate the field — stay compatible; a payload
+   * without it is treated as "SLM off".
+   */
+  slm?: ConfigSLMResponse
 }
 
 /** Master experimental-features switch (all-or-nothing). It is also the sole
  *  availability gate for the E2S execution mode. */
 export interface ConfigExperimentalResponse {
   enabled: boolean
+}
+
+/** Effective (resolved) Small-LLM profile state exposed by GetConfig — mirrors
+ *  the backend's SLMSettingsResponse, NOT the raw persisted `slm:` section.
+ *  `enabled` is the resolved master toggle (forced false while the experimental
+ *  gate is off); `essential_tools_enabled` is the resolved essential-tools
+ *  variant sub-toggle. Both are false when the config is not yet loaded. */
+export interface ConfigSLMResponse {
+  enabled: boolean
+  essential_tools_enabled: boolean
 }
 
 export interface ProviderConfigRequest {

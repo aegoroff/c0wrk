@@ -472,6 +472,22 @@ type systemPromptSpec struct {
 	// skills, vector hints) without inheriting orchestrator-specific mode
 	// instructions that would conflict with its own directive.
 	specialized bool
+
+	// allowLiteVariants opts a specialized run into the small-LLM Lite prompt
+	// swap. It is set ONLY for the goal derivation and goal verification agents
+	// (both assembled via buildSpecializedSystemPromptWithLite), never for
+	// subagent-profile specialized runs (conductor.go), whose profile body must
+	// stay authoritative even under Lite. When true AND Lite is active,
+	// buildSystemPromptWith swaps coreDirective for liteCoreDirective and
+	// appends the reasoning scaffold / few-shot blocks per their sub-toggles.
+	allowLiteVariants bool
+
+	// liteCoreDirective is the compact Lite counterpart of coreDirective, used
+	// only when allowLiteVariants is set AND Lite is active. It must already
+	// have any shell-tool substitution applied by the caller. Empty means no
+	// Lite variant is available, in which case the verbose coreDirective is
+	// kept even under Lite.
+	liteCoreDirective string
 }
 
 // buildSystemPrompt assembles the system prompt for a normal orchestrator
@@ -506,6 +522,29 @@ func buildSpecializedSystemPrompt(ctx context.Context, userMessage string, model
 	})
 }
 
+// buildSpecializedSystemPromptWithLite assembles a specialized Conductor
+// system prompt that OPTS INTO the small-LLM Lite prompt swap. It is used by
+// the goal derivation and goal verification agents only. In addition to the
+// shared project-context prefix that buildSpecializedSystemPrompt injects, it
+// carries a Lite counterpart of its core directive: when Lite is active the
+// verbose coreDirective is swapped for liteCoreDirective and the reasoning
+// scaffold / few-shot blocks are appended per their sub-toggles. liteCoreDirective
+// must already have any shell-tool substitution applied by the caller (the
+// verification directives are rendered through GoalVerificationSubstitute, which
+// does this).
+//
+// Subagent-profile specialized runs deliberately do NOT use this entry point —
+// they call buildSpecializedSystemPrompt, whose directive is never swapped, so
+// a profile's body remains authoritative even under Lite.
+func buildSpecializedSystemPromptWithLite(ctx context.Context, userMessage string, modelMeta llm.ModelMetadata, coreDirective, liteCoreDirective string) string {
+	return buildSystemPromptWith(ctx, userMessage, modelMeta, systemPromptSpec{
+		coreDirective:     coreDirective,
+		liteCoreDirective: liteCoreDirective,
+		specialized:       true,
+		allowLiteVariants: true,
+	})
+}
+
 // The prompt is split by CacheBreak into a stable (cacheable) prefix and a
 // volatile tail. The stable prefix contains all session-invariant content
 // (core directive, family overlay, workspace, env, AGENTS.md, skills) so
@@ -529,30 +568,44 @@ func buildSystemPromptWith(ctx context.Context, userMessage string, modelMeta ll
 		family = "default"
 	}
 
-	// Small-LLM prompt profile: when Lite is active, swap the verbose
-	// OrchestratorSystem core directive (already substituted into
-	// spec.coreDirective by the caller) for the compact OrchestratorSystemLite
-	// directive, and conditionally append the reasoning scaffold
-	// (ReasoningScaffold) and the worked-example few-shot block (FewShot). The
-	// two sub-toggles are independent but only honored when Lite is on, since
-	// both are tailored to the lite directive's style. This trims the
-	// behavioral core for a small model while leaving every shared section
-	// (family overlay, verification mandate, injection defense, workspace,
-	// env, AGENTS.md, skills) appended UNCHANGED below — the injection-defense
-	// content is never removed or altered (strict constraint). Specialized
-	// runs (e.g. goal derivation) carry their own core directive and are never
-	// swapped to the lite orchestrator directive.
+	// Small-LLM prompt profile: when Lite is active, swap the verbose core
+	// directive for a compact Lite counterpart and conditionally append the
+	// reasoning scaffold (ReasoningScaffold) and the worked-example few-shot
+	// block (FewShot). The two sub-toggles are independent but only honored
+	// when Lite is on, since both are tailored to the Lite directive's style.
+	// This trims the behavioral core for a small model while leaving every
+	// shared section (family overlay, verification mandate, injection defense,
+	// workspace, env, AGENTS.md, skills) appended UNCHANGED below — the
+	// injection-defense content is never removed or altered (strict
+	// constraint).
+	//
+	// The Lite directive depends on the run type:
+	//   - a standard orchestrator run swaps OrchestratorSystem for
+	//     OrchestratorSystemLite;
+	//   - a specialized goal derivation/verification run (allowLiteVariants) is
+	//     swapped for its own liteCoreDirective;
+	//   - any other specialized run (subagent profiles) is NEVER swapped — it
+	//     leaves allowLiteVariants false and keeps its profile body verbatim.
 	coreDirective := spec.coreDirective
 	fewShot := ""
 	scaffold := ""
-	if slmLiteFromCtx(ctx) && !spec.specialized {
-		coreDirective = prompts.SubstituteShellTool(prompts.OrchestratorSystemLite)
-		if profile, ok := slmPromptProfileFromCtx(ctx); ok {
-			if profile.ReasoningScaffold {
-				scaffold = prompts.OrchestratorLiteScaffold
-			}
-			if profile.FewShot {
-				fewShot = prompts.OrchestratorLiteFewShot
+	if slmLiteFromCtx(ctx) {
+		liteDirective := ""
+		switch {
+		case !spec.specialized:
+			liteDirective = prompts.SubstituteShellTool(prompts.OrchestratorSystemLite)
+		case spec.allowLiteVariants && spec.liteCoreDirective != "":
+			liteDirective = spec.liteCoreDirective
+		}
+		if liteDirective != "" {
+			coreDirective = liteDirective
+			if profile, ok := slmPromptProfileFromCtx(ctx); ok {
+				if profile.ReasoningScaffold {
+					scaffold = prompts.OrchestratorLiteScaffold
+				}
+				if profile.FewShot {
+					fewShot = prompts.OrchestratorLiteFewShot
+				}
 			}
 		}
 	}

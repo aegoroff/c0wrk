@@ -257,24 +257,25 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	if e2s && goal {
 		return errors.New("E2S mode and goal mode are mutually exclusive — disable one of the toggles before sending")
 	}
+	// Detect the leading "/goal" command prefix once, on the POST-preprocessing
+	// text: PreprocessMessageText strips leading /skill and #agent refs, which
+	// can expose a /goal prefix hidden behind them ("/myskill /goal …"), and
+	// the manager arms goal mode from the processed text — the raw-text check
+	// alone misses that form. Preprocessing is pure, so both guards below still
+	// reject before any side effect; the workspace path is irrelevant to prefix
+	// stripping.
+	processed := core.PreprocessMessageText(text, activeSkills, activeAgents, "")
+	_, isGoalPrefix := core.DetectAndStripGoalMode(processed)
+	goalEnabled := goal || isGoalPrefix
 	// A leading "/goal" command arms goal mode in the manager even when the
 	// explicit flag is absent (goalEnabled := isGoal || goal), so it must not
-	// slip past the exclusivity check above: otherwise the manager would build
+	// slip past the exclusivity check below: otherwise the manager would build
 	// a HandleOptions with BOTH Goal and E2S set, which core rejects as a
 	// wiring mistake (ErrE2SGoalConflict) AFTER the run's E2S takeover cleanup
 	// was skipped. Reject it here, before any side effect, exactly like the
 	// explicit-flag case.
-	if e2s {
-		// Run the check on the POST-preprocessing text: PreprocessMessageText
-		// strips leading /skill and #agent refs, which can expose a /goal
-		// prefix hidden behind them ("/myskill /goal …"), and the manager
-		// arms goal mode from the processed text — the raw check alone misses
-		// that form. Preprocessing is pure, so this still rejects before any
-		// side effect; the workspace path is irrelevant to prefix stripping.
-		processed := core.PreprocessMessageText(text, activeSkills, activeAgents, "")
-		if _, isGoalPrefix := core.DetectAndStripGoalMode(processed); isGoalPrefix {
-			return errors.New("E2S mode and goal mode are mutually exclusive — an E2S message cannot carry a /goal command")
-		}
+	if e2s && isGoalPrefix {
+		return errors.New("E2S mode and goal mode are mutually exclusive — an E2S message cannot carry a /goal command")
 	}
 	// E2S is experimental: fail closed BEFORE any side effect (no activity
 	// timestamp, no persisted message, no task launch) when the flag arrives
@@ -284,6 +285,18 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	// a gated request is rejected on principle, regardless of runtime state.
 	if e2s && !f.experimentalFeaturesEnabled() {
 		return errors.New("E2S mode is experimental and currently disabled — enable experimental features in settings to use it")
+	}
+	// Goal mode is refused while the Small-LLM essential-tools narrowing is
+	// active: the narrowing is tuned for single-pass conductor work and hides
+	// the goal-loop tooling, so a goal could never be derived or concluded.
+	// Both arming signals are covered — the explicit flag and a /goal prefix —
+	// and the rejection lands BEFORE any side effect (no activity timestamp, no
+	// persisted message, no task), so a blocked goal never leaves a phantom
+	// row. slmGoalBlocked resolves the effective profile (active profile ∪
+	// experimental gate) and is false when the profile or its essential-tools
+	// variant is off, so the default path is unchanged.
+	if goalEnabled && f.slmGoalBlocked() {
+		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — disable the Small-LLM profile or its essential-tools narrowing to use goal mode")
 	}
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
@@ -400,7 +413,35 @@ func (f *FrontendAPI) ResumeTask(id, modelOverride, reasoningEffort string) erro
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized")
 	}
+	if f.goalResumeBlockedBySLM(id) {
+		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — the paused goal cannot be resumed; disable the Small-LLM profile or its essential-tools narrowing to resume it")
+	}
 	return f.app.Manager().ResumeTask(f.ctx(), id, modelOverride, reasoningEffort, "")
+}
+
+// goalResumeBlockedBySLM reports whether resuming session id would re-enter a
+// goal loop while the Small-LLM essential-tools narrowing is active. It is
+// true only when the narrowing is on AND the session's unfinished task carries
+// a NON-terminal goal state (the exact condition Orchestrator.Resume uses to
+// pick the goal loop) — a paused plain or E2S task is unaffected, so non-goal
+// resumes and the default (profile-off) path are unchanged. A task-store read
+// failure is treated as "not blocked" (fail-open): the manager re-checks under
+// the session lock and resumeGoalLoop is the ultimate authority, so a transient
+// read error must not strand a legitimate resume.
+func (f *FrontendAPI) goalResumeBlockedBySLM(id string) bool {
+	if f.store == nil || !f.slmGoalBlocked() {
+		return false
+	}
+	adapter := session.NewTaskStoreAdapter(f.store)
+	taskID, err := adapter.GetUnfinishedTaskID(id)
+	if err != nil || taskID == "" {
+		return false
+	}
+	gs, err := adapter.LoadGoalState(taskID)
+	if err != nil || gs == nil {
+		return false
+	}
+	return !gs.Status.IsTerminal()
 }
 
 // PauseSession signals the currently-running task (any mode) for the session to
@@ -425,6 +466,9 @@ func (f *FrontendAPI) PauseSession(sessionID string) error {
 func (f *FrontendAPI) ResumeSession(sessionID, modelOverride, reasoningEffort, nudge string) error {
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized")
+	}
+	if f.goalResumeBlockedBySLM(sessionID) {
+		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — the paused goal cannot be resumed; disable the Small-LLM profile or its essential-tools narrowing to resume it")
 	}
 	return f.app.Manager().ResumeSession(f.ctx(), sessionID, modelOverride, reasoningEffort, nudge)
 }
