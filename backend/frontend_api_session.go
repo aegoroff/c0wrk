@@ -286,7 +286,7 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	if e2s && !f.experimentalFeaturesEnabled() {
 		return errors.New("E2S mode is experimental and currently disabled — enable experimental features in settings to use it")
 	}
-	// Goal mode is refused while the Small-LLM essential-tools narrowing is
+	// Goal mode is refused while the Model Profiles essential-tools narrowing is
 	// active: the two are mutually exclusive. The narrowing is applied only on
 	// the non-goal Conductor path and the E2S branch (both run after goal
 	// mode's early return), so it never narrows a goal run today — the
@@ -297,11 +297,11 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 	// are covered — the explicit flag and a /goal prefix — and the rejection
 	// lands BEFORE any side effect (no activity timestamp, no persisted
 	// message, no task), so a blocked goal never leaves a phantom row.
-	// slmGoalBlocked resolves the effective profile (active profile ∪
+	// modelProfilesGoalBlocked resolves the effective profile (active profile ∪
 	// experimental gate) and is false when the profile or its essential-tools
 	// variant is off, so the default path is unchanged.
-	if goalEnabled && f.slmGoalBlocked() {
-		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — disable the Small-LLM profile or its essential-tools narrowing to use goal mode")
+	if goalEnabled && f.modelProfilesGoalBlocked() {
+		return errors.New("goal mode is unavailable while the Model Profiles essential-tools profile is active — disable the Model Profiles profile or its essential-tools narrowing to use goal mode")
 	}
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
@@ -418,14 +418,14 @@ func (f *FrontendAPI) ResumeTask(id, modelOverride, reasoningEffort string) erro
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized")
 	}
-	if f.goalResumeBlockedBySLM(id) {
-		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — the paused goal cannot be resumed; disable the Small-LLM profile or its essential-tools narrowing to resume it")
+	if f.goalResumeBlockedByModelProfiles(id) {
+		return errors.New("goal mode is unavailable while the Model Profiles essential-tools profile is active — the paused goal cannot be resumed; disable the Model Profiles profile or its essential-tools narrowing to resume it")
 	}
 	return f.app.Manager().ResumeTask(f.ctx(), id, modelOverride, reasoningEffort, "")
 }
 
-// goalResumeBlockedBySLM reports whether resuming session id would re-enter a
-// goal loop while the Small-LLM essential-tools narrowing is active. It is
+// goalResumeBlockedByModelProfiles reports whether resuming session id would re-enter a
+// goal loop while the Model Profiles essential-tools narrowing is active. It is
 // true only when the narrowing is on AND the session's unfinished task carries
 // a NON-terminal goal state (the exact condition Orchestrator.Resume uses to
 // pick the goal loop) — a paused plain or E2S task is unaffected, so non-goal
@@ -434,8 +434,8 @@ func (f *FrontendAPI) ResumeTask(id, modelOverride, reasoningEffort string) erro
 // re-checked by the session manager (Manager.ResumeTask, under the session lock
 // and before any task activation) and resumeGoalLoop is the ultimate
 // authority, so a transient read error must not strand a legitimate resume.
-func (f *FrontendAPI) goalResumeBlockedBySLM(id string) bool {
-	if f.store == nil || !f.slmGoalBlocked() {
+func (f *FrontendAPI) goalResumeBlockedByModelProfiles(id string) bool {
+	if f.store == nil || !f.modelProfilesGoalBlocked() {
 		return false
 	}
 	adapter := session.NewTaskStoreAdapter(f.store)
@@ -473,8 +473,8 @@ func (f *FrontendAPI) ResumeSession(sessionID, modelOverride, reasoningEffort, n
 	if f.app == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized")
 	}
-	if f.goalResumeBlockedBySLM(sessionID) {
-		return errors.New("goal mode is unavailable while the Small-LLM essential-tools profile is active — the paused goal cannot be resumed; disable the Small-LLM profile or its essential-tools narrowing to resume it")
+	if f.goalResumeBlockedByModelProfiles(sessionID) {
+		return errors.New("goal mode is unavailable while the Model Profiles essential-tools profile is active — the paused goal cannot be resumed; disable the Model Profiles profile or its essential-tools narrowing to resume it")
 	}
 	return f.app.Manager().ResumeSession(f.ctx(), sessionID, modelOverride, reasoningEffort, nudge)
 }

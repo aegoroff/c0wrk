@@ -1,6 +1,6 @@
 import { Target } from 'lucide-react'
 import { useInputModeStore } from '@/stores/inputModeStore'
-import { GOAL_BLOCKED_BY_SLM_REASON } from '@/lib/goalGate'
+import { GOAL_BLOCKED_BY_MODEL_PROFILES_REASON } from '@/lib/goalGate'
 import { cn } from '@/lib/utils'
 
 /**
@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
  *
  * The toggle is available on both the first message of a task and on
  * continuations, where re-enabling it runs the goal loop on the inherited
- * blackboard of the prior task — EXCEPT while the Small-LLM profile's
+ * blackboard of the prior task — EXCEPT while the Model Profiles profile's
  * essential-tools variant is active, under which goal mode is refused: the
  * narrowing is applied only to the non-goal Conductor path and the E2S branch
  * (both run after goal mode's early return), so it never narrows a goal run; if
@@ -30,12 +30,12 @@ export function GoalToggle({ disabled = false, blocked = false }: { disabled?: b
   const goalEnabled = useInputModeStore((s) => s.goalEnabled)
   const setGoalEnabled = useInputModeStore((s) => s.setGoalEnabled)
 
-  // `blocked` (goal unavailable under the SLM profile) and `disabled` (session
+  // `blocked` (goal unavailable under the ModelProfiles profile) and `disabled` (session
   // lock) both lock the button; the reason surfaces in the title. The gate
   // reason wins when both apply — it is the more specific, actionable one.
   const isDisabled = disabled || blocked
   const title = blocked
-    ? GOAL_BLOCKED_BY_SLM_REASON
+    ? GOAL_BLOCKED_BY_MODEL_PROFILES_REASON
     : disabled
       ? 'Locked while the session is running'
       : goalEnabled

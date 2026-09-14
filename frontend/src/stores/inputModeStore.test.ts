@@ -67,7 +67,7 @@ describe('inputModeStore e2s/goal mutual exclusion', () => {
   })
 })
 
-describe('inputModeStore goal disarm (SLM gate)', () => {
+describe('inputModeStore goal disarm (ModelProfiles gate)', () => {
   it('disarmGoal clears an armed goal toggle', () => {
     useInputModeStore.setState({ goalEnabled: true })
     useInputModeStore.getState().disarmGoal()

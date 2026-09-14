@@ -439,19 +439,19 @@ func TestVerifierReDerivationExcludedToolNames_OmitsDelegateOnly(t *testing.T) {
 	}
 }
 
-// TestDefaultGoalVerifier_SLM_Lite_Directive verifies the END-TO-END wiring:
-// with the small-LLM Lite profile active, the production goal verifier
+// TestDefaultGoalVerifier_ModelProfiles_Lite_Directive verifies the END-TO-END wiring:
+// with the model-profile Lite profile active, the production goal verifier
 // (defaultGoalVerifier) hands the Conductor the LITE verification directive
 // (plus the scaffold/few-shot blocks) instead of the verbose one, with its
 // placeholders resolved. The verifier's assembled system prompt is captured via
 // the orchestrator's ContextFactory seam, so this exercises the real code path
 // rather than the prompt builder alone.
-func TestDefaultGoalVerifier_SLM_Lite_Directive(t *testing.T) {
+func TestDefaultGoalVerifier_ModelProfiles_Lite_Directive(t *testing.T) {
 	o := newE2STestOrchestrator(&mockLLMCaller{}, createTestRegistry(), &mockEmitter{}, nil)
 	var captured string
 	o.contextFactory = captureContextFactory(&captured)
 
-	ctx := sdktools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	ctx := sdktools.WithWorkspacePath(WithModelProfilesLite(context.Background()), "/ws")
 	gs := &goal.GoalState{
 		Condition:        "CONDITION-LITE-E2E",
 		VerifyClause:     "go test ./...",
@@ -500,17 +500,17 @@ func (stubGoalProposerLiteE2E) Propose(_ context.Context, _ tools.GoalProposal) 
 	return tools.GoalProposalResponse{Decision: "cancel"}, nil
 }
 
-// TestDeriveGoal_SLM_Lite_Directive is the derivation counterpart of
-// TestDefaultGoalVerifier_SLM_Lite_Directive: with Lite active, the production
+// TestDeriveGoal_ModelProfiles_Lite_Directive is the derivation counterpart of
+// TestDefaultGoalVerifier_ModelProfiles_Lite_Directive: with Lite active, the production
 // derivation agent receives the LITE GoalDerivation directive (plus
 // scaffold/few-shot) rather than the verbose one. Captured via the same
 // ContextFactory seam.
-func TestDeriveGoal_SLM_Lite_Directive(t *testing.T) {
+func TestDeriveGoal_ModelProfiles_Lite_Directive(t *testing.T) {
 	o := newE2STestOrchestrator(&mockLLMCaller{}, createTestRegistry(), &mockEmitter{}, nil)
 	var captured string
 	o.contextFactory = captureContextFactory(&captured)
 
-	ctx := sdktools.WithWorkspacePath(WithSLMLite(context.Background()), "/ws")
+	ctx := sdktools.WithWorkspacePath(WithModelProfilesLite(context.Background()), "/ws")
 	deps := o.buildConductorDeps(nil, nil)
 	deps.goalProposer = stubGoalProposerLiteE2E{}
 

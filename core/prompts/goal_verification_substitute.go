@@ -72,7 +72,7 @@ func GoalVerificationDirectiveByMode(mode, condition, verifyClause, reportedEvid
 // set via GoalVerificationSubstitute. The orchestrator's goal verifier
 // (defaultGoalVerifier) uses it to render the Lite directive it hands to
 // buildSpecializedSystemPromptWithLite, which swaps it in only when the
-// small-LLM Lite profile is active. It shares goalVerificationDirectiveForMode
+// Model Profiles Lite variant is active. It shares goalVerificationDirectiveForMode
 // with the verbose wrapper, so the two variants can never drift apart.
 func GoalVerificationLiteDirectiveByMode(mode, condition, verifyClause, reportedEvidence string) string {
 	directive := goalVerificationDirectiveForMode(mode, GoalVerificationLite, GoalReDerivationLite)

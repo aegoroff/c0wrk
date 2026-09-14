@@ -23,7 +23,7 @@ const EventBackendReady = "backend:ready"
 
 // EventConfigUpdated is emitted after a config mutation is persisted (any
 // Update* RPC that writes config.yaml: LLM, search, proxy, security,
-// Small-LLM, model overrides, MCP servers, log level, the experimental
+// Model Profiles, model overrides, MCP servers, log level, the experimental
 // toggle, trusted git repos, update preferences). No payload — consumers
 // re-read the config via GetConfig. Dispatched asynchronously from
 // persistConfig (backend/frontend_api_config.go) so the Wails dispatch never

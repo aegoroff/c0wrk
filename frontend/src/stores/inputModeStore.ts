@@ -59,7 +59,7 @@ interface InputModeActions {
   /** Toggle goal mode for the next sent message. Enabling it disables E2S. */
   setGoalEnabled: (enabled: boolean) => void
   /**
-   * Disarm goal mode because the Small-LLM profile has made it unavailable
+   * Disarm goal mode because the Model Profiles feature has made it unavailable
    * (master toggle AND essential-tools variant both on — see lib/goalGate).
    * Idempotent (a no-op when goal mode is already off). Mirrors the E2S
    * disarm: a gate closing must clear any stale arming rather than leave a

@@ -1409,9 +1409,9 @@ func (m *Manager) ResumeTask(ctx context.Context, id, modelOverride, reasoningEf
 		session.mu.Unlock()
 		return ErrSessionCompacting
 	}
-	// Small-LLM goal guard: a paused non-terminal goal must not be resumed
+	// Model Profiles goal guard: a paused non-terminal goal must not be resumed
 	// while the essential-tools narrowing is active — goal mode and the
-	// narrowing are mutually exclusive (see core.ErrGoalBlockedBySLM). Checked
+	// narrowing are mutually exclusive (see core.ErrGoalBlockedByModelProfiles). Checked
 	// here, under the session lock and BEFORE the task is activated or
 	// reactivated, so EVERY resume entry point that funnels through ResumeTask
 	// (the ResumeTask / ResumeSession RPCs, the sendMessage nudge-resume, and
@@ -1422,9 +1422,9 @@ func (m *Manager) ResumeTask(ctx context.Context, id, modelOverride, reasoningEf
 	// authority behind this; the frontend API pre-check gives the friendly
 	// message.
 	if goalState != nil && !goalState.Status.IsTerminal() &&
-		session.orchestrator != nil && session.orchestrator.SLMNarrowingEnabled() {
+		session.orchestrator != nil && session.orchestrator.ModelProfilesNarrowingEnabled() {
 		session.mu.Unlock()
-		return core.ErrGoalBlockedBySLM
+		return core.ErrGoalBlockedByModelProfiles
 	}
 	// Launching the resumed task consumes any recorded pause owner (the
 	// resume supersedes a previous pause request — including the user pause
@@ -1963,7 +1963,7 @@ func (m *Manager) emitTaskCancelledUnlessShuttingDown(id string) bool {
 }
 
 // emitAgentMetrics emits the aggregated agent quality metrics (parse errors,
-// loop-detector nudges/aborts, steps, output tokens and the active Small-LLM
+// loop-detector nudges/aborts, steps, output tokens and the active Model Profiles
 // profile) for the task run that just finished — complete, cancel or failure.
 // The counters reset afterwards, so one agent_metrics event covers exactly
 // one task run. No-op when the session is no longer tracked.

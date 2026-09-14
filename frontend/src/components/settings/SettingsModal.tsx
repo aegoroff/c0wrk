@@ -14,7 +14,7 @@ import { ProxySettings } from './ProxySettings'
 import { SoundSettings } from './SoundSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
 import { LLMSettings } from './LLMSettings'
-import { SLMSettings } from './SLMSettings'
+import { ModelProfilesSettings } from './ModelProfilesSettings'
 import { SearchSettings } from './SearchSettings'
 import { MCPSettings } from './MCPSettings'
 import { SecuritySettings } from './SecuritySettings'
@@ -51,11 +51,11 @@ export function SettingsModal() {
   const prevOpenRef = useRef(open)
   const experimentalEnabled = useExperimentalFeatures()
 
-  // If the experimental switch is turned off while the Small-LLM tab is
+  // If the experimental switch is turned off while the Model Profiles tab is
   // active, fall back to General — the tab itself is hidden and must never
   // remain the active (rendered) content.
   useEffect(() => {
-    if (!experimentalEnabled && activeTab === 'small-llm') {
+    if (!experimentalEnabled && activeTab === 'model-profiles') {
       setActiveTab('general')
     }
   }, [experimentalEnabled, activeTab, setActiveTab])
@@ -184,9 +184,9 @@ export function SettingsModal() {
               <span className="hidden sm:inline text-xs">LLM</span>
             </TabsTrigger>
             {experimentalEnabled && (
-              <TabsTrigger value="small-llm" className="flex-initial min-w-0 gap-1">
+              <TabsTrigger value="model-profiles" className="flex-initial min-w-0 gap-1">
                 <Gauge className="h-4 w-4" />
-                <span className="hidden sm:inline text-xs">Small LLM</span>
+                <span className="hidden sm:inline text-xs">Model Profiles</span>
               </TabsTrigger>
             )}
             <TabsTrigger value="search" className="flex-initial min-w-0 gap-1">
@@ -240,8 +240,8 @@ export function SettingsModal() {
           </TabsContent>
 
           {experimentalEnabled && (
-            <TabsContent value="small-llm" className={TAB_CONTENT_CLASS}>
-              <SLMSettings />
+            <TabsContent value="model-profiles" className={TAB_CONTENT_CLASS}>
+              <ModelProfilesSettings />
             </TabsContent>
           )}
 

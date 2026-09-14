@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 /**
  * Master experimental-features switch, loaded once from GetConfig and updated
- * in place when the user toggles it in Settings. Gated features (the Small-LLM
+ * in place when the user toggles it in Settings. Gated features (the Model Profiles
  * profile and the E2S execution mode) read their availability reactively so
  * hiding/revealing happens within the same session without a reload.
  *

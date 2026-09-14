@@ -184,7 +184,7 @@ type Manager struct {
 	fileTracker         *FileCoherenceTracker
 	converter           *markitdown.Converter // lazy-init markitdown converter for AttachFiles
 	converterMu         sync.Mutex            // guards lazy converter initialization
-	slm                 SLMMetaInfo           // Small-LLM profile annotating agent_metrics events (guarded by mu)
+	modelProfiles       ModelProfilesMetaInfo // Model Profiles profile annotating agent_metrics events (guarded by mu)
 
 	// ignoreCache caches per-root ignore.Resolver instances so the directory
 	// tree is walked only once per root (not on every SendMessage). The key
@@ -366,18 +366,18 @@ func (m *Manager) SetMaxSummaryLen(n int) {
 	m.maxSummaryLen = n
 }
 
-// SetSLMProfile records the Small-LLM profile sessions run under, so
+// SetModelProfile records the Model Profiles profile sessions run under, so
 // "agent_metrics" events can be grouped by the active optimization variants.
-// The profile entry is the catalog entry the persisted slm.active_profile
-// resolves to (callers resolve it via backend.activeSLMProfile) and carries
+// The profile entry is the catalog entry the persisted model_profiles.active_profile
+// resolves to (callers resolve it via backend.activeModelProfile) and carries
 // the id + kind reported in the payload — reported even when the master
 // toggle is off. Metrics collection itself is profile-independent; the
 // profile only annotates the payload. Applies to emitters created after the
 // call.
-func (m *Manager) SetSLMProfile(cfg config.SLMConfig, profile config.SLMProfile) {
-	info := slmProfileFromConfig(cfg, profile)
+func (m *Manager) SetModelProfile(cfg config.ModelProfilesConfig, profile config.ModelProfile) {
+	info := modelProfileFromConfig(cfg, profile)
 	m.mu.Lock()
-	m.slm = info
+	m.modelProfiles = info
 	m.mu.Unlock()
 }
 
@@ -387,7 +387,7 @@ func (m *Manager) SetSLMProfile(cfg config.SLMConfig, profile config.SLMProfile)
 // Build, and the orchestrator factory reads the live config only for sessions
 // built afterwards, so an already-built orchestrator would otherwise keep the
 // stale gate (leaving an enabled E2S mode unusable until restart). Mirrors
-// SetSLMProfile. Safe while a session's task is running.
+// SetModelProfile. Safe while a session's task is running.
 //
 // A session's orchestrator pointer is set in the Session literal before the
 // session is published in m.sessions and is never reassigned afterwards, so
@@ -408,17 +408,17 @@ func (m *Manager) SetE2SSettings(settings core.E2SSettings) {
 	}
 }
 
-// SetSLMSettings refreshes the small-LLM settings on every live session
-// orchestrator so a runtime SLM change (master toggle, profile switch,
+// SetModelProfilesSettings refreshes the model-profile settings on every live session
+// orchestrator so a runtime ModelProfiles change (master toggle, profile switch,
 // essential-tools variant flip, or the experimental gate) reaches sessions
 // built before the change. Mirrors SetE2SSettings: the builder seeds
-// config.SLM once at Build and the orchestrator factory reads the live config
+// config.ModelProfiles once at Build and the orchestrator factory reads the live config
 // only for sessions built afterwards, so an already-built orchestrator would
 // otherwise keep the stale build-time snapshot — e.g. the goal-mode guard
 // reading a narrowing the operator has since disabled, refusing a goal until an
 // app restart. Safe while a session's task is running — the per-orchestrator
 // override is atomic.
-func (m *Manager) SetSLMSettings(settings core.SLMSettings) {
+func (m *Manager) SetModelProfilesSettings(settings core.ModelProfilesSettings) {
 	m.mu.RLock()
 	orchestrators := make([]*core.Orchestrator, 0, len(m.sessions))
 	for _, s := range m.sessions {
@@ -428,15 +428,15 @@ func (m *Manager) SetSLMSettings(settings core.SLMSettings) {
 	}
 	m.mu.RUnlock()
 	for _, o := range orchestrators {
-		o.SetSLMSettings(settings)
+		o.SetModelProfilesSettings(settings)
 	}
 }
 
-// slmProfile returns the recorded Small-LLM profile snapshot.
-func (m *Manager) slmProfile() SLMMetaInfo {
+// modelProfile returns the recorded Model Profiles profile snapshot.
+func (m *Manager) modelProfile() ModelProfilesMetaInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.slm
+	return m.modelProfiles
 }
 
 // SetServiceLLMTimeout sets the timeout for one-shot "service" LLM requests
@@ -617,9 +617,9 @@ func (m *Manager) getOrRestoreSession(id string) (*Session, error) {
 	emitter.SetToolCallIDSink(func(tool, toolCallID string) {
 		m.lastToolCallIDs.Store(id, toolCallIDEntry{id: toolCallID, tool: tool})
 	})
-	// Annotate agent metrics with the Small-LLM profile the session runs under.
-	slm := m.slmProfile()
-	emitter.SetSLMProfile(slm)
+	// Annotate agent metrics with the Model Profiles profile the session runs under.
+	modelProfiles := m.modelProfile()
+	emitter.SetModelProfile(modelProfiles)
 
 	// Snapshot mutable fields under read lock.
 	m.mu.RLock()
@@ -986,9 +986,9 @@ func (m *Manager) CreateSession(projectID, workspacePath string) (*SessionInfo, 
 	emitter.SetToolCallIDSink(func(tool, toolCallID string) {
 		m.lastToolCallIDs.Store(id, toolCallIDEntry{id: toolCallID, tool: tool})
 	})
-	// Annotate agent metrics with the Small-LLM profile the session runs under.
-	slm := m.slmProfile()
-	emitter.SetSLMProfile(slm)
+	// Annotate agent metrics with the Model Profiles profile the session runs under.
+	modelProfiles := m.modelProfile()
+	emitter.SetModelProfile(modelProfiles)
 
 	// Snapshot mutable fields under read lock
 	m.mu.RLock()

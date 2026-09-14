@@ -11,8 +11,8 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/core"
+	"github.com/v0lka/c0wrk/core/modelprofiles"
 	"github.com/v0lka/c0wrk/core/proxy"
-	"github.com/v0lka/c0wrk/core/slm"
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/llm"
 	sdktools "github.com/v0lka/sp4rk/tools"
@@ -48,11 +48,11 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
 		},
-		// The EFFECTIVE Small-LLM gate (the experimental gate folded into the
-		// master toggle by effectiveSLMConfig), precomputed by
-		// refreshSLMGateLocked so this read path performs NO disk I/O — see the
+		// The EFFECTIVE Model Profiles gate (the experimental gate folded into the
+		// master toggle by effectiveModelProfilesConfig), precomputed by
+		// refreshModelProfilesGateLocked so this read path performs NO disk I/O — see the
 		// GUARANTEE on collectAllModels.
-		SLM: f.slmGateResp,
+		ModelProfiles: f.modelProfilesGateResp,
 	}
 
 	// Populate AllModels: flat list of all enabled models.
@@ -138,8 +138,8 @@ func (f *FrontendAPI) buildLLMResponse() ConfigLLMResponse {
 // blocking I/O. GetConfig must remain a pure in-memory read: it runs on every
 // settings open, and a model list containing an unknown model must not stall
 // the UI behind a network timeout. The only disk-backed datum GetConfig reports
-// — the effective Small-LLM gate (`ConfigResponse.slm`) — is precomputed by
-// refreshSLMGateLocked at construction and on each SLM / experimental mutation
+// — the effective Model Profiles gate (`ConfigResponse.model_profiles`) — is precomputed by
+// refreshModelProfilesGateLocked at construction and on each ModelProfiles / experimental mutation
 // (both under configMu), so the read path never reads the profile catalog.
 //
 // Entries are keyed by composite (provider, model) so that two providers
@@ -355,7 +355,7 @@ func (f *FrontendAPI) UpdateLLMConfig(req LLMFullConfigRequest) error {
 	// use the updated provider immediately. The snapshot is taken fresh here
 	// rather than carried over from the mutation phase, and configMu.RLock is
 	// held across snapshot + rebuild: config writers that mutate and rebuild
-	// under configMu.Lock (UpdateSLMProfile, SetModelConfig) cannot run
+	// under configMu.Lock (UpdateModelProfile, SetModelConfig) cannot run
 	// in between, so this rebuild can never apply a snapshot that predates
 	// their changes and roll the router back. RLock stays shared with
 	// readers, so GetConfig is still never convoyed behind the rebuild, and
@@ -363,7 +363,7 @@ func (f *FrontendAPI) UpdateLLMConfig(req LLMFullConfigRequest) error {
 	// FrontendAPI, so holding the RLock across them cannot deadlock.
 	if b := f.builder(); b != nil {
 		f.configMu.RLock()
-		fresh := ToBuilderConfig(f.config, f.slmCatalog())
+		fresh := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 		b.RebuildJudge(fresh)
 		rebuildErr := b.RebuildRouter(fresh)
 		f.configMu.RUnlock()
@@ -396,7 +396,7 @@ func (f *FrontendAPI) UpdateSearchSettings(settings SearchSettingsRequest) error
 
 	// Rebuild web search tool via the backend builder.
 	if b := f.builder(); b != nil {
-		b.UpdateSearchTool(ToBuilderConfig(f.config, f.slmCatalog()))
+		b.UpdateSearchTool(ToBuilderConfig(f.config, f.modelProfilesCatalog()))
 	}
 
 	return nil
@@ -435,7 +435,7 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 
 	// Rebuild proxy transport and propagate to all subsystems.
 	if b := f.builder(); b != nil {
-		bcfg := ToBuilderConfig(f.config, f.slmCatalog())
+		bcfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 		if err := b.RebuildProxy(context.Background(), bcfg); err != nil {
 			f.log().Warn("failed to rebuild proxy after settings update", "error", err)
 			return fmt.Errorf("proxy rebuild failed: %w", err)
@@ -447,14 +447,14 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 
 // UpdateExperimentalFeatures toggles the master experimental-features switch
 // at runtime. It persists the change and rebuilds the LLM router so the
-// gated features (the Small-LLM profile and the E2S execution mode) take
+// gated features (the Model Profiles profile and the E2S execution mode) take
 // effect for new sessions without
 // an app restart.
 //
-// Disabling experimental features also clears the persisted Small-LLM master
-// toggle (config.SLM.Enabled) in the same write, so re-enabling the gate later
-// does not silently reactivate the Small-LLM profile — the operator must opt
-// in again explicitly. The adapter gate in effectiveSLMConfig is left
+// Disabling experimental features also clears the persisted Model Profiles master
+// toggle (config.ModelProfiles.Enabled) in the same write, so re-enabling the gate later
+// does not silently reactivate the Model Profiles profile — the operator must opt
+// in again explicitly. The adapter gate in effectiveModelProfilesConfig is left
 // untouched and keeps forcing the effective profile off while experimental
 // features are disabled, as defense-in-depth against manual config.yaml edits.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
@@ -466,32 +466,32 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	}
 
 	f.config.Experimental.Enabled = enabled
-	// Turning the gate off also drops the durable Small-LLM master toggle:
-	// leaving slm.enabled true on disk would resurrect the profile on the next
+	// Turning the gate off also drops the durable Model Profiles master toggle:
+	// leaving model_profiles.enabled true on disk would resurrect the profile on the next
 	// enable, contradicting the master-off state the operator just set.
 	if !enabled {
-		f.config.SLM.Enabled = false
+		f.config.ModelProfiles.Enabled = false
 	}
 
 	if err := f.persistConfig(); err != nil {
 		f.log().Warn("failed to persist experimental features toggle", "error", err)
 	}
 
-	// Rebuild the LLM router so the Small-LLM profile (sampling overrides,
+	// Rebuild the LLM router so the Model Profiles profile (sampling overrides,
 	// essential-tools narrowing, context management) is applied or removed
 	// immediately. The same builder config carries the effective E2S settings,
 	// reused below to refresh the live orchestrators.
-	builderCfg := ToBuilderConfig(f.config, f.slmCatalog())
+	builderCfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 	// Recompute the cached effective gate GetConfig serves (this method runs
-	// under configMu.Lock): closing the gate forces the effective SLM off.
-	f.refreshSLMGateLocked()
+	// under configMu.Lock): closing the gate forces the effective ModelProfiles off.
+	f.refreshModelProfilesGateLocked()
 	if b := f.builder(); b != nil {
 		if err := b.RebuildRouter(builderCfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after experimental-features toggle", "error", err)
 		}
 	}
 
-	// Keep the session manager's Small-LLM snapshot in sync so agent_metrics
+	// Keep the session manager's Model Profiles snapshot in sync so agent_metrics
 	// events created afterwards are annotated with the effective profile, and
 	// push the refreshed E2S gate onto already-built session orchestrators —
 	// otherwise the mode stays disabled there (stale config.E2S) until an app
@@ -500,14 +500,14 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		if mgr := app.Manager(); mgr != nil {
 			// Resolution warnings were surfaced at load time; the gate flip
 			// does not change the profile id.
-			slmCatalog := f.slmCatalog()
-			slmProfile, _ := effectiveSLMConfig(f.config, slmCatalog)
-			mgr.SetSLMProfile(slmProfile, activeSLMProfile(f.config.SLM, slmCatalog))
+			modelProfilesCatalog := f.modelProfilesCatalog()
+			modelProfile, _ := effectiveModelProfilesConfig(f.config, modelProfilesCatalog)
+			mgr.SetModelProfile(modelProfile, activeModelProfile(f.config.ModelProfiles, modelProfilesCatalog))
 			mgr.SetE2SSettings(builderCfg.E2S)
-			// The experimental gate flips the effective SLM master toggle, so
-			// refresh the live orchestrators' SLM settings too (the goal guard
+			// The experimental gate flips the effective ModelProfiles master toggle, so
+			// refresh the live orchestrators' ModelProfiles settings too (the goal guard
 			// reads them). Mirrors the E2S push above.
-			mgr.SetSLMSettings(core.SLMSettingsFromBuilderConfig(builderCfg.SLM))
+			mgr.SetModelProfilesSettings(core.ModelProfilesSettingsFromBuilderConfig(builderCfg.ModelProfiles))
 		}
 	}
 
@@ -639,7 +639,7 @@ func (f *FrontendAPI) UpdateSecuritySettings(settings SecuritySettingsResponse) 
 
 	// Apply policies to the shared tool registry via the backend builder.
 	if b := f.builder(); b != nil {
-		builderCfg := ToBuilderConfig(f.config, f.slmCatalog())
+		builderCfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 		// Re-register the shell tool FIRST: the blacklist is compiled into
 		// the tool instance at registration, so runtime edits need it to
 		// take effect without an app restart. The call is atomic (a compile
@@ -744,7 +744,7 @@ func responseToGroupPolicies(groups map[string]GroupPolicyResponse) (map[string]
 	return out, nil
 }
 
-// GetSLMProfiles returns the small-LLM profile catalog for the settings
+// GetModelProfiles returns the model-profile profile catalog for the settings
 // picker: every profile (predefined ∪ custom store under f.agentDir) with its
 // 25 knob values, the stored active profile id, the suggested profile id
 // (normalized default-model match against the predefined slugs; null when
@@ -755,20 +755,20 @@ func responseToGroupPolicies(groups map[string]GroupPolicyResponse) (map[string]
 // generic". When config is not yet initialized the profiles are still
 // returned (the catalog is independent of config.yaml); active_id is empty
 // and suggested_profile_id is null.
-func (f *FrontendAPI) GetSLMProfiles() SLMProfilesResponse {
+func (f *FrontendAPI) GetModelProfiles() ModelProfilesResponse {
 	// Lock (not RLock): the one-shot notices are drained on read.
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
 	// Picker universe (built-in tools + workflow clusters) comes from the live
 	// tool registry, not from config, so it is read here.
-	builtinTools, toolGroups := f.slmPickerData()
+	builtinTools, toolGroups := f.modelProfilesPickerData()
 
-	resp := SLMProfilesResponse{
-		Profiles:       []SLMProfileDTO{},
+	resp := ModelProfilesResponse{
+		Profiles:       []ModelProfileDTO{},
 		BuiltinTools:   builtinTools,
 		ToolGroups:     toolGroups,
-		ProtectedTools: nonNilStringSlice(slm.ProtectedToolNames()),
+		ProtectedTools: nonNilStringSlice(modelprofiles.ProtectedToolNames()),
 		Warnings:       []string{},
 	}
 
@@ -776,13 +776,13 @@ func (f *FrontendAPI) GetSLMProfiles() SLMProfilesResponse {
 	// without a restart; store warnings surface in the response. The catalog
 	// (predefined ∪ custom) is independent of config.yaml, so it is returned
 	// even before the config is initialized.
-	catalog, storeWarnings := config.LoadSLMCatalog(f.agentDir)
+	catalog, storeWarnings := config.LoadModelProfilesCatalog(f.agentDir)
 	for _, w := range storeWarnings {
-		f.log().Warn("small-LLM profile warning", "warning", w)
+		f.log().Warn("model-profile profile warning", "warning", w)
 	}
 	resp.Warnings = append(resp.Warnings, storeWarnings...)
 	for _, p := range catalog {
-		resp.Profiles = append(resp.Profiles, slmProfileToDTO(p))
+		resp.Profiles = append(resp.Profiles, modelProfileToDTO(p))
 	}
 
 	if f.config == nil {
@@ -790,42 +790,42 @@ func (f *FrontendAPI) GetSLMProfiles() SLMProfilesResponse {
 	}
 
 	// Global master toggle, reported verbatim (it is not a profile value).
-	resp.Enabled = f.config.SLM.Enabled
+	resp.Enabled = f.config.ModelProfiles.Enabled
 
 	// Stored view, verbatim: a dangling id stays visible while the resolver
 	// warning explains the generic fallback.
-	resp.ActiveID = f.config.SLM.ActiveProfile
-	_, resolveWarnings := config.ResolveSLMConfig(f.config.SLM, catalog)
+	resp.ActiveID = f.config.ModelProfiles.ActiveProfile
+	_, resolveWarnings := config.ResolveModelProfilesConfig(f.config.ModelProfiles, catalog)
 	for _, w := range resolveWarnings {
-		f.log().Warn("small-LLM profile warning", "warning", w)
+		f.log().Warn("model-profile profile warning", "warning", w)
 	}
 	resp.Warnings = append(resp.Warnings, resolveWarnings...)
 
 	// One-shot notices (e.g. delete of the active profile) appear exactly in
 	// the next Get.
-	resp.Warnings = append(resp.Warnings, f.slmNotices...)
-	f.slmNotices = nil
+	resp.Warnings = append(resp.Warnings, f.modelProfilesNotices...)
+	f.modelProfilesNotices = nil
 
-	if id := suggestSLMProfileID(f.config.LLM.DefaultModel); id != "" {
+	if id := suggestModelProfileID(f.config.LLM.DefaultModel); id != "" {
 		resp.SuggestedProfileID = &id
 	}
 	return resp
 }
 
-// slmSuggestSuffixTokens lists the trailing marketing/instruction suffixes
+// modelProfilesSuggestSuffixTokens lists the trailing marketing/instruction suffixes
 // stripped (with their "-" separator) from BOTH the model name and the
 // predefined slug before comparison: "Qwen3.8-27B-Instruct" and the slug
 // "qwen3.8-27b" normalize to the same token.
-var slmSuggestSuffixTokens = []string{"instruct", "it", "latest", "free"}
+var modelProfilesSuggestSuffixTokens = []string{"instruct", "it", "latest", "free"}
 
-// normalizeSLMModelToken canonicalizes a model name or profile slug for the
+// normalizeModelProfilesModelToken canonicalizes a model name or profile slug for the
 // suggestion match: lowercase, keep only the last path segment after "/"
 // (provider prefixes such as "Qwen/" or "openrouter/qwen/"), drop any
 // ":"-separated decoration inside that segment (openrouter's ":free"),
-// strip trailing suffix tokens (see slmSuggestSuffixTokens), then drop every
+// strip trailing suffix tokens (see modelProfilesSuggestSuffixTokens), then drop every
 // remaining non-alphanumeric character so separator styles ("qwen3.8-27b",
 // "qwen3_8_27b") collapse together.
-func normalizeSLMModelToken(s string) string {
+func normalizeModelProfilesModelToken(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if i := strings.LastIndex(s, "/"); i >= 0 {
 		s = s[i+1:]
@@ -835,7 +835,7 @@ func normalizeSLMModelToken(s string) string {
 	}
 	for changed := true; changed; {
 		changed = false
-		for _, suffix := range slmSuggestSuffixTokens {
+		for _, suffix := range modelProfilesSuggestSuffixTokens {
 			if strings.HasSuffix(s, "-"+suffix) {
 				s = strings.TrimSuffix(s, "-"+suffix)
 				changed = true
@@ -852,25 +852,25 @@ func normalizeSLMModelToken(s string) string {
 	return b.String()
 }
 
-// suggestSLMProfileID returns the predefined profile whose slug best matches
+// suggestModelProfileID returns the predefined profile whose slug best matches
 // the configured default model name, or "" when nothing matches. "generic"
 // is never suggested — it is the model-agnostic fallback the picker already
 // offers. The match is containment on the normalized tokens (model name
 // contains the slug), so vendor decorations ("Qwen/Qwen3.8-27B",
 // "qwen3.8-27b-instruct-2507") still land on "qwen3.8-27b"; the longest
 // matching slug wins so a more specific profile beats a shorter one.
-func suggestSLMProfileID(defaultModel string) string {
-	norm := normalizeSLMModelToken(defaultModel)
+func suggestModelProfileID(defaultModel string) string {
+	norm := normalizeModelProfilesModelToken(defaultModel)
 	if norm == "" {
 		return ""
 	}
 	best := ""
 	bestLen := 0
-	for _, p := range config.PredefinedSLMProfiles() {
-		if p.ID == config.SLMGenericProfileID {
+	for _, p := range config.PredefinedModelProfiles() {
+		if p.ID == config.ModelProfilesGenericProfileID {
 			continue
 		}
-		slug := normalizeSLMModelToken(p.ID)
+		slug := normalizeModelProfilesModelToken(p.ID)
 		if slug == "" {
 			continue
 		}
@@ -882,83 +882,83 @@ func suggestSLMProfileID(defaultModel string) string {
 	return best
 }
 
-// slmCatalog loads the full small-LLM profile catalog (predefined ∪ custom
+// modelProfilesCatalog loads the full model-profile profile catalog (predefined ∪ custom
 // store under f.agentDir), logging store-level warnings. Reads are fresh so a
 // custom profile saved at runtime applies on the next config conversion
 // without a restart; the store file is tiny and conversions are not hot paths.
-func (f *FrontendAPI) slmCatalog() []config.SLMProfile {
-	return loadSLMCatalog(f.agentDir, f.log())
+func (f *FrontendAPI) modelProfilesCatalog() []config.ModelProfile {
+	return loadModelProfilesCatalog(f.agentDir, f.log())
 }
 
-// refreshSLMGateLocked recomputes the cached effective Small-LLM gate reported
-// as ConfigResponse.slm. Callers must hold configMu for WRITING. The profile
+// refreshModelProfilesGateLocked recomputes the cached effective Model Profiles gate reported
+// as ConfigResponse.model_profiles. Callers must hold configMu for WRITING. The profile
 // catalog (a disk read) is resolved only here — at construction and on the rare
-// SLM / experimental mutations — never on the GetConfig read path, which just
+// ModelProfiles / experimental mutations — never on the GetConfig read path, which just
 // serves the cached value (keeping GetConfig a pure in-memory read, per the
 // GUARANTEE on collectAllModels).
-func (f *FrontendAPI) refreshSLMGateLocked() {
+func (f *FrontendAPI) refreshModelProfilesGateLocked() {
 	if f.config == nil {
-		f.slmGateResp = SLMSettingsResponse{}
+		f.modelProfilesGateResp = ModelProfilesSettingsResponse{}
 		return
 	}
-	profile, _ := effectiveSLMConfig(f.config, f.slmCatalog())
-	f.slmGateResp = SLMSettingsResponse{
+	profile, _ := effectiveModelProfilesConfig(f.config, f.modelProfilesCatalog())
+	f.modelProfilesGateResp = ModelProfilesSettingsResponse{
 		Enabled:               profile.Enabled,
 		EssentialToolsEnabled: profile.EssentialTools.Enabled,
 	}
 }
 
-// slmGoalBlocked reports whether goal mode must be refused because the
-// small-LLM essential-tools narrowing is active: the master SLM toggle AND the
+// modelProfilesGoalBlocked reports whether goal mode must be refused because the
+// model-profile essential-tools narrowing is active: the master ModelProfiles toggle AND the
 // active profile's essential-tools variant both on, with the experimental gate
-// folded in (see effectiveSLMConfig — the gate forces the effective toggle off
+// folded in (see effectiveModelProfilesConfig — the gate forces the effective toggle off
 // while experimental features are disabled). The profile is resolved against
 // the live catalog so a runtime profile switch takes effect without a restart.
 // Returns false when no config is loaded (fail-open, matching every other
 // runtime config read): a not-yet-loaded config must never block a request on
 // principle.
-func (f *FrontendAPI) slmGoalBlocked() bool {
+func (f *FrontendAPI) modelProfilesGoalBlocked() bool {
 	// Cheap shunt under the read lock: no config, or the master toggle
 	// persisted off, can never block — skip the catalog read too. The config
 	// pointer is set once at construction and never swapped (only its fields
 	// are mutated in place), so the short hold is safe.
 	f.configMu.RLock()
-	shunt := f.config == nil || !f.config.SLM.Enabled
+	shunt := f.config == nil || !f.config.ModelProfiles.Enabled
 	f.configMu.RUnlock()
 	if shunt {
 		return false
 	}
-	// slmCatalog() does file I/O (reads ~/.c0wrk/slm-profiles.yaml) — load it
+	// modelProfilesCatalog() does file I/O (reads ~/.c0wrk/model-profiles.yaml) — load it
 	// OUTSIDE the config lock, then resolve the effective profile UNDER the
 	// read lock. Resolving under the lock is required for race-freedom:
-	// effectiveSLMConfig reads cfg.SLM and cfg.Experimental, and the setters
-	// (SetSLMEnabled / SelectSLMProfile / UpdateExperimentalFeatures) mutate
+	// effectiveModelProfilesConfig reads cfg.ModelProfiles and cfg.Experimental, and the setters
+	// (SetModelProfilesEnabled / SelectModelProfile / UpdateExperimentalFeatures) mutate
 	// those SAME fields IN PLACE under the write lock, so reading them from a
 	// detached pointer would be a data race. (This is not a safe "config
 	// swap": the config is never swapped, only mutated.)
-	catalog := f.slmCatalog()
+	catalog := f.modelProfilesCatalog()
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
 	if f.config == nil {
 		return false
 	}
-	profile, _ := effectiveSLMConfig(f.config, catalog)
+	profile, _ := effectiveModelProfilesConfig(f.config, catalog)
 	return profile.Enabled && profile.EssentialTools.Enabled
 }
 
-// slmPickerData returns the read-only picker universe for the
+// modelProfilesPickerData returns the read-only picker universe for the
 // always-present picker: every registered built-in tool that is neither
 // MCP-sourced nor goal-mode-only, with its description, plus the workflow
 // clusters (each restricted to that universe). Both slices are non-nil, so JSON
 // serializes them as []. Returns empty slices when the application is
 // unavailable (before construction, or in unit tests built without an
 // Application).
-func (f *FrontendAPI) slmPickerData() ([]SLMBuiltinTool, []SLMToolGroup) {
+func (f *FrontendAPI) modelProfilesPickerData() ([]ModelProfilesBuiltinTool, []ModelProfilesToolGroup) {
 	if f.app == nil {
-		return []SLMBuiltinTool{}, []SLMToolGroup{}
+		return []ModelProfilesBuiltinTool{}, []ModelProfilesToolGroup{}
 	}
 	tools := builtinToolInfos(f.app.ListTools())
-	return tools, slmToolGroups(tools)
+	return tools, modelProfilesToolGroups(tools)
 }
 
 // builtinToolInfos extracts the picker universe from a descriptor list, sorted
@@ -974,38 +974,38 @@ func (f *FrontendAPI) slmPickerData() ([]SLMBuiltinTool, []SLMToolGroup) {
 //     user's selection.
 //
 // Everything else is returned, including the reserved system/orchestration
-// group and the protected tools (slm.ProtectedToolNames) — the latter are
+// group and the protected tools (modelprofiles.ProtectedToolNames) — the latter are
 // the selection's un-narrowable members, so the picker subtracts the
-// already-allowed set before offering an entry (see SLMEssentialToolsResp).
+// already-allowed set before offering an entry (see ModelProfilesEssentialToolsResp).
 // Deterministic (sorted) and freshly allocated so callers may mutate it.
 //
 // The description is the tool's registry text verbatim: every built-in — c0wrk
 // and sp4rk alike — follows the purpose/when-to-use/inputs/outputs/example/
 // anti-example rubric (guarded in core/tools and sp4rk/tools/builtins), so the
 // UI can reformat it into markdown for the picker's hover tooltip.
-func builtinToolInfos(descriptors []sdktools.ToolDescriptor) []SLMBuiltinTool {
-	out := make([]SLMBuiltinTool, 0, len(descriptors))
+func builtinToolInfos(descriptors []sdktools.ToolDescriptor) []ModelProfilesBuiltinTool {
+	out := make([]ModelProfilesBuiltinTool, 0, len(descriptors))
 	for _, d := range descriptors {
 		if d.SourceCategory == sdktools.SourceCategoryMCP || coretools.IsGoalModeTool(d.Name) {
 			continue
 		}
-		out = append(out, SLMBuiltinTool{Name: d.Name, Description: d.Description})
+		out = append(out, ModelProfilesBuiltinTool{Name: d.Name, Description: d.Description})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// slmToolGroups projects the workflow-cluster catalog onto the picker
+// modelProfilesToolGroups projects the workflow-cluster catalog onto the picker
 // universe: a cluster is kept when at least one of its members is in the
 // universe (members are filtered to it), and a cluster with no surviving member
 // is dropped. The result is freshly allocated.
-func slmToolGroups(tools []SLMBuiltinTool) []SLMToolGroup {
+func modelProfilesToolGroups(tools []ModelProfilesBuiltinTool) []ModelProfilesToolGroup {
 	registered := make(map[string]struct{}, len(tools))
 	for _, t := range tools {
 		registered[t.Name] = struct{}{}
 	}
-	catalog := slm.ToolGroupCatalog()
-	out := make([]SLMToolGroup, 0, len(catalog))
+	catalog := modelprofiles.ToolGroupCatalog()
+	out := make([]ModelProfilesToolGroup, 0, len(catalog))
 	for _, g := range catalog {
 		members := make([]string, 0, len(g.Tools))
 		for _, name := range g.Tools {
@@ -1016,7 +1016,7 @@ func slmToolGroups(tools []SLMBuiltinTool) []SLMToolGroup {
 		if len(members) == 0 {
 			continue
 		}
-		out = append(out, SLMToolGroup{
+		out = append(out, ModelProfilesToolGroup{
 			ID:          g.ID,
 			Title:       g.Title,
 			Description: g.Description,
@@ -1026,63 +1026,63 @@ func slmToolGroups(tools []SLMBuiltinTool) []SLMToolGroup {
 	return out
 }
 
-// slmStore reads the custom profile store (fail-soft), logging store-level
+// modelProfilesStore reads the custom profile store (fail-soft), logging store-level
 // warnings. Mutations operate on this fresh snapshot.
-func (f *FrontendAPI) slmStore() (custom []config.SLMProfile, storePath string) {
-	storePath = config.SLMProfilesPath(f.agentDir)
-	custom, warnings := config.LoadCustomSLMProfiles(storePath)
+func (f *FrontendAPI) modelProfilesStore() (custom []config.ModelProfile, storePath string) {
+	storePath = config.ModelProfilesPath(f.agentDir)
+	custom, warnings := config.LoadCustomModelProfiles(storePath)
 	for _, w := range warnings {
-		f.log().Warn("small-LLM profile warning", "warning", w)
+		f.log().Warn("model-profile profile warning", "warning", w)
 	}
 	return custom, storePath
 }
 
-// applySLMChange is the uniform post-mutation tail shared by the profile
+// applyModelProfilesChange is the uniform post-mutation tail shared by the profile
 // CRUD/select methods. Callers must hold configMu and call it only after a
 // successful write; it (1) clears the config load-warnings channel so a stale
 // "damaged store"/"dangling active id" warning stops being served by GetConfig
 // once the mutation fixed the condition, (2) announces the change
 // (config:updated), (3) rebuilds the LLM router so the effective profile
 // applies to new sessions without a restart, and (4) refreshes the session
-// manager's Small-LLM snapshot so later agent_metrics events are annotated
+// manager's Model Profiles snapshot so later agent_metrics events are annotated
 // with the new profile.
-func (f *FrontendAPI) applySLMChange() {
+func (f *FrontendAPI) applyModelProfilesChange() {
 	f.configLoadErrors = nil
 	f.emitConfigUpdated()
 	// Recompute the cached effective gate that GetConfig serves (this method
 	// runs under configMu.Lock), so the goal-mode block the settings UI mirrors
 	// tracks the just-applied change.
-	f.refreshSLMGateLocked()
-	builderCfg := ToBuilderConfig(f.config, f.slmCatalog())
+	f.refreshModelProfilesGateLocked()
+	builderCfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 	if b := f.builder(); b != nil {
 		if err := b.RebuildRouter(builderCfg); err != nil {
-			f.log().Warn("failed to rebuild LLM router after small-LLM profile change", "error", err)
+			f.log().Warn("failed to rebuild LLM router after model-profile profile change", "error", err)
 		}
 	}
 	if app := f.app; app != nil {
 		if mgr := app.Manager(); mgr != nil {
-			slmCatalog := f.slmCatalog()
-			slmProfile, _ := effectiveSLMConfig(f.config, slmCatalog)
-			mgr.SetSLMProfile(slmProfile, activeSLMProfile(f.config.SLM, slmCatalog))
-			// Push the refreshed SLM settings onto already-built orchestrators
+			modelProfilesCatalog := f.modelProfilesCatalog()
+			modelProfile, _ := effectiveModelProfilesConfig(f.config, modelProfilesCatalog)
+			mgr.SetModelProfile(modelProfile, activeModelProfile(f.config.ModelProfiles, modelProfilesCatalog))
+			// Push the refreshed ModelProfiles settings onto already-built orchestrators
 			// so the runtime change takes effect there without an app restart —
 			// otherwise the goal-mode guard (and the essential-tools filter)
 			// would keep the stale build-time snapshot until the session is
 			// rebuilt. Mirrors the E2S push.
-			mgr.SetSLMSettings(core.SLMSettingsFromBuilderConfig(builderCfg.SLM))
+			mgr.SetModelProfilesSettings(core.ModelProfilesSettingsFromBuilderConfig(builderCfg.ModelProfiles))
 		}
 	}
 }
 
-// CreateSLMProfile duplicates the catalog profile baseID under a new display
+// CreateModelProfile duplicates the catalog profile baseID under a new display
 // name as a custom profile and persists it to the custom store
-// (~/.c0wrk/slm-profiles.yaml). An empty baseID means the generic profile.
+// (~/.c0wrk/model-profiles.yaml). An empty baseID means the generic profile.
 // The name must be non-empty and unique against every predefined and custom
 // profile name; the id is derived from the name. The active profile is NOT
 // changed (select explicitly afterwards). Returns the new profile id.
 // Validation runs before any write; the store save is atomic, so a failure
 // leaves nothing behind.
-func (f *FrontendAPI) CreateSLMProfile(baseID, name string) (string, error) {
+func (f *FrontendAPI) CreateModelProfile(baseID, name string) (string, error) {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
@@ -1090,26 +1090,26 @@ func (f *FrontendAPI) CreateSLMProfile(baseID, name string) (string, error) {
 		return "", errors.New("config not initialized")
 	}
 	if baseID == "" {
-		baseID = config.SLMGenericProfileID
+		baseID = config.ModelProfilesGenericProfileID
 	}
-	base, ok := config.FindSLMProfile(f.slmCatalog(), baseID)
+	base, ok := config.FindModelProfile(f.modelProfilesCatalog(), baseID)
 	if !ok {
-		return "", fmt.Errorf("base profile %q does not exist in the small-LLM profile catalog", baseID)
+		return "", fmt.Errorf("base profile %q does not exist in the model-profile profile catalog", baseID)
 	}
 
-	custom, storePath := f.slmStore()
-	created, err := config.CreateCustomSLMProfile(name, base.Config, custom)
+	custom, storePath := f.modelProfilesStore()
+	created, err := config.CreateCustomModelProfile(name, base.Config, custom)
 	if err != nil {
-		return "", fmt.Errorf("invalid small-LLM profile: %w", err)
+		return "", fmt.Errorf("invalid model-profile profile: %w", err)
 	}
-	if err := config.SaveCustomSLMProfiles(storePath, slices.Concat(custom, []config.SLMProfile{created})); err != nil {
-		return "", fmt.Errorf("failed to persist the small-LLM profile store: %w", err)
+	if err := config.SaveCustomModelProfiles(storePath, slices.Concat(custom, []config.ModelProfile{created})); err != nil {
+		return "", fmt.Errorf("failed to persist the model-profile profile store: %w", err)
 	}
-	f.applySLMChange()
+	f.applyModelProfilesChange()
 	return created.ID, nil
 }
 
-// UpdateSLMProfile updates the CUSTOM profile id. Only the two request-level
+// UpdateModelProfile updates the CUSTOM profile id. Only the two request-level
 // fields are optional: a nil Name keeps the stored display name, a nil Config
 // keeps the stored 25 knob values. A supplied Config is a WHOLE-VALUE
 // replacement — all 25 knobs are overwritten by the request (the values DTO
@@ -1118,7 +1118,7 @@ func (f *FrontendAPI) CreateSLMProfile(baseID, name string) (string, error) {
 // rejected. Validation runs before any mutation, and the store save is an
 // atomic full rewrite, so an invalid payload or a failed write leaves the
 // stored state untouched.
-func (f *FrontendAPI) UpdateSLMProfile(id string, req SLMProfileUpdateRequest) error {
+func (f *FrontendAPI) UpdateModelProfile(id string, req ModelProfileUpdateRequest) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
@@ -1128,14 +1128,14 @@ func (f *FrontendAPI) UpdateSLMProfile(id string, req SLMProfileUpdateRequest) e
 	if req.Name == nil && req.Config == nil {
 		return nil // nothing requested — nothing to validate or persist
 	}
-	if _, isPredefined := config.FindPredefinedSLMProfile(id); isPredefined {
-		return fmt.Errorf("the small-LLM profile %q is predefined and read-only; duplicate it as a custom profile to edit it", id)
+	if _, isPredefined := config.FindPredefinedModelProfile(id); isPredefined {
+		return fmt.Errorf("the model-profile profile %q is predefined and read-only; duplicate it as a custom profile to edit it", id)
 	}
 
-	custom, storePath := f.slmStore()
-	idx := slices.IndexFunc(custom, func(p config.SLMProfile) bool { return p.ID == id })
+	custom, storePath := f.modelProfilesStore()
+	idx := slices.IndexFunc(custom, func(p config.ModelProfile) bool { return p.ID == id })
 	if idx < 0 {
-		return fmt.Errorf("the small-LLM profile %q does not exist in the profile catalog", id)
+		return fmt.Errorf("the model-profile profile %q does not exist in the profile catalog", id)
 	}
 
 	// Next name: trimmed, non-empty, unique against every OTHER profile name
@@ -1145,95 +1145,95 @@ func (f *FrontendAPI) UpdateSLMProfile(id string, req SLMProfileUpdateRequest) e
 	if req.Name != nil {
 		nextName = strings.TrimSpace(*req.Name)
 		if nextName == "" {
-			return errors.New("small-LLM profile name must not be empty")
+			return errors.New("model-profile profile name must not be empty")
 		}
-		for _, p := range config.PredefinedSLMProfiles() {
+		for _, p := range config.PredefinedModelProfiles() {
 			if p.Name == nextName {
-				return fmt.Errorf("small-LLM profile name %q collides with the predefined profile %q", nextName, p.ID)
+				return fmt.Errorf("model-profile profile name %q collides with the predefined profile %q", nextName, p.ID)
 			}
 		}
 		for i, p := range custom {
 			if i != idx && p.Name == nextName {
-				return fmt.Errorf("small-LLM profile name %q is already used by custom profile %q", nextName, p.ID)
+				return fmt.Errorf("model-profile profile name %q is already used by custom profile %q", nextName, p.ID)
 			}
 		}
 	}
 
 	// Next values: the profile constructor re-validates everything
-	// (config.ValidateSLMProfileConfig semantics).
+	// (config.ValidateModelProfileConfig semantics).
 	nextCfg := custom[idx].Config
 	if req.Config != nil {
-		nextCfg = slmValuesToProfileConfig(*req.Config)
+		nextCfg = modelProfilesValuesToProfileConfig(*req.Config)
 	}
-	updated, err := config.NewSLMProfile(custom[idx].ID, nextName, config.SLMProfileKindCustom, nextCfg)
+	updated, err := config.NewModelProfile(custom[idx].ID, nextName, config.ModelProfileKindCustom, nextCfg)
 	if err != nil {
-		return fmt.Errorf("invalid small-LLM profile payload: %w", err)
+		return fmt.Errorf("invalid model-profile profile payload: %w", err)
 	}
 	next := slices.Clone(custom)
 	next[idx] = updated
-	if err := config.SaveCustomSLMProfiles(storePath, next); err != nil {
-		return fmt.Errorf("failed to persist the small-LLM profile: %w", err)
+	if err := config.SaveCustomModelProfiles(storePath, next); err != nil {
+		return fmt.Errorf("failed to persist the model-profile profile: %w", err)
 	}
-	f.applySLMChange()
+	f.applyModelProfilesChange()
 	return nil
 }
 
-// DeleteSLMProfile removes the CUSTOM profile id from the store. Predefined
+// DeleteModelProfile removes the CUSTOM profile id from the store. Predefined
 // profiles are undeletable and unknown ids are rejected. Deleting the ACTIVE
 // profile first falls back to generic in config.yaml (persisted before the
 // store write, rolled back if the config persist fails) and records a one-shot
-// notice that the next GetSLMProfiles reports as a warning alongside the
+// notice that the next GetModelProfiles reports as a warning alongside the
 // switched active id.
-func (f *FrontendAPI) DeleteSLMProfile(id string) error {
+func (f *FrontendAPI) DeleteModelProfile(id string) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
 	if f.config == nil {
 		return errors.New("config not initialized")
 	}
-	if _, isPredefined := config.FindPredefinedSLMProfile(id); isPredefined {
-		return fmt.Errorf("the small-LLM profile %q is predefined and cannot be deleted", id)
+	if _, isPredefined := config.FindPredefinedModelProfile(id); isPredefined {
+		return fmt.Errorf("the model-profile profile %q is predefined and cannot be deleted", id)
 	}
 
-	custom, storePath := f.slmStore()
-	if !slices.ContainsFunc(custom, func(p config.SLMProfile) bool { return p.ID == id }) {
-		return fmt.Errorf("the small-LLM profile %q does not exist in the profile catalog", id)
+	custom, storePath := f.modelProfilesStore()
+	if !slices.ContainsFunc(custom, func(p config.ModelProfile) bool { return p.ID == id }) {
+		return fmt.Errorf("the model-profile profile %q does not exist in the profile catalog", id)
 	}
 
 	// Deleting the active profile switches config.yaml to generic FIRST: if
 	// the config persist fails the in-memory id is restored and the store is
 	// never touched; if the store delete then fails, config.yaml merely points
 	// at generic while the profile still exists — a benign, retry-safe state.
-	wasActive := f.config.SLM.ActiveProfile == id
+	wasActive := f.config.ModelProfiles.ActiveProfile == id
 	if wasActive {
 		if f.configPath == "" {
 			return errors.New("config path not set")
 		}
-		prev := f.config.SLM.ActiveProfile
-		f.config.SLM.ActiveProfile = config.SLMGenericProfileID
+		prev := f.config.ModelProfiles.ActiveProfile
+		f.config.ModelProfiles.ActiveProfile = config.ModelProfilesGenericProfileID
 		if err := config.Save(f.config, f.configPath); err != nil {
-			f.config.SLM.ActiveProfile = prev
-			return fmt.Errorf("failed to persist small-LLM config: %w", err)
+			f.config.ModelProfiles.ActiveProfile = prev
+			return fmt.Errorf("failed to persist model-profile config: %w", err)
 		}
 	}
 
-	if _, err := config.DeleteCustomSLMProfile(storePath, id); err != nil {
-		return fmt.Errorf("failed to delete the small-LLM profile: %w", err)
+	if _, err := config.DeleteCustomModelProfile(storePath, id); err != nil {
+		return fmt.Errorf("failed to delete the model-profile profile: %w", err)
 	}
 	if wasActive {
-		f.slmNotices = append(f.slmNotices,
-			fmt.Sprintf("the active small-LLM profile %q was deleted; switched to the generic profile", id))
+		f.modelProfilesNotices = append(f.modelProfilesNotices,
+			fmt.Sprintf("the active model-profile profile %q was deleted; switched to the generic profile", id))
 	}
-	f.applySLMChange()
+	f.applyModelProfilesChange()
 	return nil
 }
 
-// SelectSLMProfile makes id the active small-LLM profile and persists the
-// choice to config.yaml (slm.active_profile). The id must exist in the
+// SelectModelProfile makes id the active model-profile profile and persists the
+// choice to config.yaml (model_profiles.active_profile). The id must exist in the
 // catalog (predefined ∪ custom); a failed disk write rolls the in-memory
 // state back so the rejected selection is indistinguishable from a rejected
 // request.
-func (f *FrontendAPI) SelectSLMProfile(id string) error {
+func (f *FrontendAPI) SelectModelProfile(id string) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
@@ -1241,36 +1241,36 @@ func (f *FrontendAPI) SelectSLMProfile(id string) error {
 		return errors.New("config not initialized")
 	}
 	if id == "" {
-		return errors.New("small-LLM profile id must not be empty")
+		return errors.New("model-profile profile id must not be empty")
 	}
 	if f.configPath == "" {
 		return errors.New("config path not set")
 	}
-	if _, ok := config.FindSLMProfile(f.slmCatalog(), id); !ok {
-		return fmt.Errorf("small-LLM profile %q does not exist in the profile catalog", id)
+	if _, ok := config.FindModelProfile(f.modelProfilesCatalog(), id); !ok {
+		return fmt.Errorf("model-profile profile %q does not exist in the profile catalog", id)
 	}
-	if f.config.SLM.ActiveProfile == id {
+	if f.config.ModelProfiles.ActiveProfile == id {
 		return nil // already active — no state change
 	}
 
-	prev := f.config.SLM.ActiveProfile
-	f.config.SLM.ActiveProfile = id
+	prev := f.config.ModelProfiles.ActiveProfile
+	f.config.ModelProfiles.ActiveProfile = id
 	if err := config.Save(f.config, f.configPath); err != nil {
-		f.config.SLM.ActiveProfile = prev
-		return fmt.Errorf("failed to persist small-LLM config: %w", err)
+		f.config.ModelProfiles.ActiveProfile = prev
+		return fmt.Errorf("failed to persist model-profile config: %w", err)
 	}
-	f.applySLMChange()
+	f.applyModelProfilesChange()
 	return nil
 }
 
-// SetSLMEnabled toggles the global Small-LLM master switch (slm.enabled) and
+// SetModelProfilesEnabled toggles the global Model Profiles master switch (model_profiles.enabled) and
 // persists it to config.yaml. Enabling is gate-checked: the profile is an
 // experimental feature, so turning it ON requires experimental.enabled;
 // turning it OFF is always allowed (so the stored value can be cleared even
 // after the gate closes). A request matching the stored value is a no-op, and
 // a failed disk write rolls the in-memory value back so the rejected toggle is
 // indistinguishable from a rejected request.
-func (f *FrontendAPI) SetSLMEnabled(enabled bool) error {
+func (f *FrontendAPI) SetModelProfilesEnabled(enabled bool) error {
 	f.configMu.Lock()
 	defer f.configMu.Unlock()
 
@@ -1281,48 +1281,48 @@ func (f *FrontendAPI) SetSLMEnabled(enabled bool) error {
 		return errors.New("config path not set")
 	}
 	if enabled && !f.config.Experimental.Enabled {
-		return errors.New("the small-LLM profile is experimental and currently disabled — enable experimental features in settings to use it")
+		return errors.New("the model-profile profile is experimental and currently disabled — enable experimental features in settings to use it")
 	}
-	if f.config.SLM.Enabled == enabled {
+	if f.config.ModelProfiles.Enabled == enabled {
 		return nil // already in the requested state — no state change
 	}
 
-	prev := f.config.SLM.Enabled
-	f.config.SLM.Enabled = enabled
+	prev := f.config.ModelProfiles.Enabled
+	f.config.ModelProfiles.Enabled = enabled
 	if err := config.Save(f.config, f.configPath); err != nil {
-		f.config.SLM.Enabled = prev
-		return fmt.Errorf("failed to persist small-LLM config: %w", err)
+		f.config.ModelProfiles.Enabled = prev
+		return fmt.Errorf("failed to persist model-profile config: %w", err)
 	}
-	f.applySLMChange()
+	f.applyModelProfilesChange()
 	return nil
 }
 
-// slmProfileToDTO converts one catalog profile into the picker DTO.
-func slmProfileToDTO(p config.SLMProfile) SLMProfileDTO {
-	return SLMProfileDTO{
+// modelProfileToDTO converts one catalog profile into the picker DTO.
+func modelProfileToDTO(p config.ModelProfile) ModelProfileDTO {
+	return ModelProfileDTO{
 		ID:     p.ID,
 		Name:   p.Name,
 		Kind:   string(p.Kind),
-		Values: slmProfileConfigToValues(p.Config),
+		Values: modelProfileConfigToValues(p.Config),
 	}
 }
 
-// slmProfileConfigToValues converts the profile-level 25-knob struct into
+// modelProfileConfigToValues converts the profile-level 25-knob struct into
 // the JSON-tagged values DTO. AlwaysPresent is normalized to a non-nil slice
 // so JSON serialization yields [] instead of null.
-func slmProfileConfigToValues(c config.SLMProfileConfig) SLMProfileValues {
-	return SLMProfileValues{
-		EssentialTools: SLMEssentialToolsValues{
+func modelProfileConfigToValues(c config.ModelProfileConfig) ModelProfileValues {
+	return ModelProfileValues{
+		EssentialTools: ModelProfilesEssentialToolsValues{
 			Enabled:             c.EssentialTools.Enabled,
 			AlwaysPresent:       nonNilStringSlice(c.EssentialTools.AlwaysPresent),
 			CompactDescriptions: c.EssentialTools.CompactDescriptions,
 		},
-		SystemPrompt: SLMSystemPromptResp{
+		SystemPrompt: ModelProfilesSystemPromptResp{
 			Lite:              c.SystemPrompt.Lite,
 			FewShot:           c.SystemPrompt.FewShot,
 			ReasoningScaffold: c.SystemPrompt.ReasoningScaffold,
 		},
-		Sampling: SLMSamplingResp{
+		Sampling: ModelProfilesSamplingResp{
 			Enabled:           c.Sampling.Enabled,
 			Temperature:       c.Sampling.Temperature,
 			TopP:              c.Sampling.TopP,
@@ -1331,7 +1331,7 @@ func slmProfileConfigToValues(c config.SLMProfileConfig) SLMProfileValues {
 			PresencePenalty:   c.Sampling.PresencePenalty,
 			ReasoningEffort:   c.Sampling.ReasoningEffort,
 		},
-		LoopHardening: SLMLoopHardeningResp{
+		LoopHardening: ModelProfilesLoopHardeningResp{
 			Enabled:                      c.LoopHardening.Enabled,
 			RepeatNudgeThreshold:         c.LoopHardening.RepeatNudgeThreshold,
 			ParseErrorAbortThreshold:     c.LoopHardening.ParseErrorAbortThreshold,
@@ -1339,9 +1339,9 @@ func slmProfileConfigToValues(c config.SLMProfileConfig) SLMProfileValues {
 			FruitlessAbortThreshold:      c.LoopHardening.FruitlessAbortThreshold,
 			SameToolRepeatNudgeThreshold: c.LoopHardening.SameToolRepeatNudgeThreshold,
 		},
-		Context: SLMContextResp{
+		Context: ModelProfilesContextResp{
 			Enabled: c.Context.Enabled,
-			Compaction: SLMCompactionResp{
+			Compaction: ModelProfilesCompactionResp{
 				KeepLast:       c.Context.Compaction.KeepLast,
 				BlockSize:      c.Context.Compaction.BlockSize,
 				TriggerPercent: c.Context.Compaction.TriggerPercent,
@@ -1352,10 +1352,10 @@ func slmProfileConfigToValues(c config.SLMProfileConfig) SLMProfileValues {
 	}
 }
 
-// slmValuesToProfileConfig converts the values DTO into the profile-level
-// 25-knob struct for validation/persistence via config.NewSLMProfile.
-func slmValuesToProfileConfig(r SLMProfileValues) config.SLMProfileConfig {
-	return config.SLMProfileConfig{
+// modelProfilesValuesToProfileConfig converts the values DTO into the profile-level
+// 25-knob struct for validation/persistence via config.NewModelProfile.
+func modelProfilesValuesToProfileConfig(r ModelProfileValues) config.ModelProfileConfig {
+	return config.ModelProfileConfig{
 		EssentialTools: config.EssentialToolsConfig{
 			Enabled:             r.EssentialTools.Enabled,
 			AlwaysPresent:       r.EssentialTools.AlwaysPresent,
@@ -1366,7 +1366,7 @@ func slmValuesToProfileConfig(r SLMProfileValues) config.SLMProfileConfig {
 			FewShot:           r.SystemPrompt.FewShot,
 			ReasoningScaffold: r.SystemPrompt.ReasoningScaffold,
 		},
-		Sampling: config.SLMSamplingConfig{
+		Sampling: config.ModelProfilesSamplingConfig{
 			Enabled:           r.Sampling.Enabled,
 			Temperature:       r.Sampling.Temperature,
 			TopP:              r.Sampling.TopP,
@@ -1383,9 +1383,9 @@ func slmValuesToProfileConfig(r SLMProfileValues) config.SLMProfileConfig {
 			FruitlessAbortThreshold:      r.LoopHardening.FruitlessAbortThreshold,
 			SameToolRepeatNudgeThreshold: r.LoopHardening.SameToolRepeatNudgeThreshold,
 		},
-		Context: config.SLMContextConfig{
+		Context: config.ModelProfilesContextConfig{
 			Enabled: r.Context.Enabled,
-			Compaction: config.SLMCompactionConfig{
+			Compaction: config.ModelProfilesCompactionConfig{
 				KeepLast:       r.Context.Compaction.KeepLast,
 				BlockSize:      r.Context.Compaction.BlockSize,
 				TriggerPercent: r.Context.Compaction.TriggerPercent,
@@ -1451,7 +1451,7 @@ func (f *FrontendAPI) ListProviderModels(req ListProviderModelsRequest) ([]strin
 		f.configMu.RUnlock()
 		return nil, errors.New("application not initialized")
 	}
-	cfg := ToBuilderConfig(f.config, f.slmCatalog())
+	cfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 	f.configMu.RUnlock()
 
 	if err := applyListProviderModelsOverrides(cfg, req); err != nil {
@@ -1732,7 +1732,7 @@ func (f *FrontendAPI) SetModelConfig(model string, req ModelConfigRequest) error
 
 	// Rebuild the LLM router so the new override takes effect for new sessions.
 	if b := f.builder(); b != nil {
-		bcfg := ToBuilderConfig(f.config, f.slmCatalog())
+		bcfg := ToBuilderConfig(f.config, f.modelProfilesCatalog())
 		if err := b.RebuildRouter(bcfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after model config update", "error", err)
 		}

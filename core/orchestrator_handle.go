@@ -23,10 +23,10 @@ func (o *Orchestrator) prepareRequestContext(ctx context.Context, message string
 		ctx = context.WithValue(ctx, InjectionDefenseKey, true)
 	}
 
-	// Small-LLM prompt profile: carry the SystemPrompt sub-toggle flags so
+	// Model Profiles prompt profile: carry the SystemPrompt sub-toggle flags so
 	// buildSystemPromptWith can gate the lite directive, reasoning scaffold,
-	// and few-shot examples independently (see applySLMPromptProfile).
-	ctx = o.applySLMPromptProfile(ctx)
+	// and few-shot examples independently (see applyModelProfilesPromptProfile).
+	ctx = o.applyModelProfilesPromptProfile(ctx)
 
 	// Generate RAG hints from vector index (non-blocking, 2s timeout).
 	ctx = o.injectVectorSearchHints(ctx, message)
@@ -43,10 +43,10 @@ func (o *Orchestrator) prepareRequestContext(ctx context.Context, message string
 	return ctx
 }
 
-// applySLMPromptProfile carries the small-LLM SystemPrompt sub-toggle flags
+// applyModelProfilesPromptProfile carries the model-profile SystemPrompt sub-toggle flags
 // into ctx so buildSystemPromptWith can gate the lite directive, reasoning
 // scaffold, and few-shot examples independently. Gated on BOTH the effective
-// master SLM.Enabled toggle and the SystemPrompt variant being active (Lite
+// master ModelProfiles.Enabled toggle and the SystemPrompt variant being active (Lite
 // on) (defense-in-depth) — when either is off the ctx value is absent and
 // buildSystemPromptWith uses the default verbose directive with no
 // scaffold/few-shot additions. Reads the effective settings (the runtime
@@ -59,10 +59,10 @@ func (o *Orchestrator) prepareRequestContext(ctx context.Context, message string
 // specialized run assembled by buildSpecializedSystemPromptWithLite — would
 // miss the Lite swap the fresh path applied, so the same goal would get
 // different verifier prompts depending on whether it had been paused.
-func (o *Orchestrator) applySLMPromptProfile(ctx context.Context) context.Context {
-	sc := o.slmSettings()
+func (o *Orchestrator) applyModelProfilesPromptProfile(ctx context.Context) context.Context {
+	sc := o.modelProfilesSettings()
 	if sc.Enabled && sc.SystemPrompt.Lite {
-		ctx = withSLMPromptProfile(ctx, slmPromptProfile{
+		ctx = withModelProfilesPromptProfile(ctx, modelProfilesPromptProfile{
 			Lite:              sc.SystemPrompt.Lite,
 			FewShot:           sc.SystemPrompt.FewShot,
 			ReasoningScaffold: sc.SystemPrompt.ReasoningScaffold,
@@ -324,12 +324,12 @@ func (o *Orchestrator) routeAndActivateSkills(
 
 	routing, err := o.router.Route(ctx, routingMessage, availableTools, o.historySnapshot(), routerSkills)
 	if err != nil {
-		// Small-LLM degradation path: when the essential-tools narrowing is
+		// Model Profiles degradation path: when the essential-tools narrowing is
 		// active and the routing JSON is unparseable even after the router's
 		// built-in repair retry, fail safe instead of failing the task —
 		// continue with a default routing decision. The tool filter then
-		// applies its static selection (applySLMToolFilter).
-		if errors.Is(err, router.ErrRoutingParse) && o.slmEssentialToolsEnabled() {
+		// applies its static selection (applyModelProfilesToolFilter).
+		if errors.Is(err, router.ErrRoutingParse) && o.modelProfilesEssentialToolsEnabled() {
 			if o.logger != nil {
 				o.logger.Warn("orchestrator: routing decision unparseable after repair retry; continuing with default routing",
 					"error", err)

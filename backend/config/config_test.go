@@ -1165,13 +1165,13 @@ llm:
 	}
 }
 
-// TestSLMLegacyInlineSectionIgnoredAndDropped pins the sanctioned reset
+// TestModelProfilesLegacyInlineSectionIgnoredAndDropped pins the sanctioned reset
 // migration: a pre-profiles config.yaml with an inline `small_llm:` section
 // (full 25-knob set + master toggle) must load WITHOUT errors — decoding is
 // non-strict, so the unknown legacy key is silently ignored — and the next
-// save must drop it entirely, persisting only the new slim `slm:` section
+// save must drop it entirely, persisting only the new slim `model_profiles:` section
 // (enabled + active_profile).
-func TestSLMLegacyInlineSectionIgnoredAndDropped(t *testing.T) {
+func TestModelProfilesLegacyInlineSectionIgnoredAndDropped(t *testing.T) {
 	content := `
 llm:
   default_model: claude-3-haiku
@@ -1200,7 +1200,7 @@ small_llm:
 	configPath := writeTestConfig(t, content)
 
 	// Load: the legacy section is ignored without errors; the effective state
-	// is the fresh slm defaults (master off, generic active).
+	// is the fresh modelProfiles defaults (master off, generic active).
 	result, err := LoadWithResult(configPath)
 	if err != nil {
 		t.Fatalf("LoadWithResult() failed on a legacy inline small_llm config: %v", err)
@@ -1208,14 +1208,14 @@ small_llm:
 	if len(result.LoadErrors) != 0 {
 		t.Fatalf("legacy small_llm.* must be ignored without load errors, got %v", result.LoadErrors)
 	}
-	if result.Config.SLM.Enabled {
-		t.Error("legacy small_llm.enabled must be ignored (reset migration), want slm.enabled=false")
+	if result.Config.ModelProfiles.Enabled {
+		t.Error("legacy small_llm.enabled must be ignored (reset migration), want model_profiles.enabled=false")
 	}
-	if got := result.Config.SLM.ActiveProfile; got != SLMGenericProfileID {
-		t.Errorf("slm.active_profile = %q, want the seeded %q", got, SLMGenericProfileID)
+	if got := result.Config.ModelProfiles.ActiveProfile; got != ModelProfilesGenericProfileID {
+		t.Errorf("model_profiles.active_profile = %q, want the seeded %q", got, ModelProfilesGenericProfileID)
 	}
 
-	// Save: only the slim slm section survives; the legacy knobs are gone.
+	// Save: only the slim modelProfiles section survives; the legacy knobs are gone.
 	if err := Save(result.Config, configPath); err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
@@ -1226,9 +1226,9 @@ small_llm:
 	if strings.Contains(string(saved), "small_llm") {
 		t.Errorf("saved config still contains the legacy small_llm section:\n%s", saved)
 	}
-	for _, want := range []string{"slm:", "enabled: false", "active_profile: " + SLMGenericProfileID} {
+	for _, want := range []string{"model_profiles:", "enabled: false", "active_profile: " + ModelProfilesGenericProfileID} {
 		if !strings.Contains(string(saved), want) {
-			t.Errorf("saved config missing %q in the slim slm section:\n%s", want, saved)
+			t.Errorf("saved config missing %q in the slim modelProfiles section:\n%s", want, saved)
 		}
 	}
 
@@ -1240,16 +1240,16 @@ small_llm:
 	if len(reloaded.LoadErrors) != 0 {
 		t.Errorf("migrated config must load without warnings, got %v", reloaded.LoadErrors)
 	}
-	if reloaded.Config.SLM.Enabled || reloaded.Config.SLM.ActiveProfile != SLMGenericProfileID {
-		t.Errorf("migrated slm state = %+v, want disabled generic", reloaded.Config.SLM)
+	if reloaded.Config.ModelProfiles.Enabled || reloaded.Config.ModelProfiles.ActiveProfile != ModelProfilesGenericProfileID {
+		t.Errorf("migrated modelProfiles state = %+v, want disabled generic", reloaded.Config.ModelProfiles)
 	}
 }
 
-// TestResolveAndLoad_SLMFallbackWarningSurfaced verifies that a stale
-// slm.active_profile (e.g. a custom profile deleted by hand) surfaces the
+// TestResolveAndLoad_ModelProfilesFallbackWarningSurfaced verifies that a stale
+// model_profiles.active_profile (e.g. a custom profile deleted by hand) surfaces the
 // soft generic fallback through the same load-warnings channel the UI
 // displays (configLoadErrors) instead of failing the load.
-func TestResolveAndLoad_SLMFallbackWarningSurfaced(t *testing.T) {
+func TestResolveAndLoad_ModelProfilesFallbackWarningSurfaced(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // windows parity
@@ -1264,7 +1264,7 @@ llm:
     api_key: "test-key"
     models:
       - claude-3-haiku
-slm:
+model_profiles:
   enabled: true
   active_profile: deleted-externally
 `
@@ -1274,49 +1274,49 @@ slm:
 
 	resolved := ResolveAndLoad(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	if resolved.Config.SLM.ActiveProfile != "deleted-externally" {
-		t.Errorf("the stored active profile id must be preserved, got %q", resolved.Config.SLM.ActiveProfile)
+	if resolved.Config.ModelProfiles.ActiveProfile != "deleted-externally" {
+		t.Errorf("the stored active profile id must be preserved, got %q", resolved.Config.ModelProfiles.ActiveProfile)
 	}
 	if len(resolved.LoadErrors) != 1 {
-		t.Fatalf("LoadErrors = %v, want exactly the SLM fallback warning", resolved.LoadErrors)
+		t.Fatalf("LoadErrors = %v, want exactly the ModelProfiles fallback warning", resolved.LoadErrors)
 	}
 	if !strings.Contains(resolved.LoadErrors[0], "deleted-externally") ||
-		!strings.Contains(resolved.LoadErrors[0], SLMGenericProfileID) {
+		!strings.Contains(resolved.LoadErrors[0], ModelProfilesGenericProfileID) {
 		t.Errorf("warning must name the stale id and the generic fallback, got %q", resolved.LoadErrors[0])
 	}
 }
 
-// TestLoadSLMCatalog_MergesCustomProfiles verifies the catalog assembly used
+// TestLoadModelProfilesCatalog_MergesCustomProfiles verifies the catalog assembly used
 // for resolution: the predefined entries plus the custom store, with store
 // problems reported as warnings rather than errors.
-func TestLoadSLMCatalog_MergesCustomProfiles(t *testing.T) {
+func TestLoadModelProfilesCatalog_MergesCustomProfiles(t *testing.T) {
 	dir := t.TempDir()
 
 	// No store file yet: the catalog is exactly the predefined set.
-	catalog, warnings := LoadSLMCatalog(dir)
+	catalog, warnings := LoadModelProfilesCatalog(dir)
 	if len(warnings) != 0 {
 		t.Errorf("pristine catalog must load without warnings, got %v", warnings)
 	}
-	if len(catalog) != len(PredefinedSLMProfiles()) {
-		t.Fatalf("catalog size = %d, want %d (predefined only)", len(catalog), len(PredefinedSLMProfiles()))
+	if len(catalog) != len(PredefinedModelProfiles()) {
+		t.Fatalf("catalog size = %d, want %d (predefined only)", len(catalog), len(PredefinedModelProfiles()))
 	}
 
-	custom, err := NewSLMProfile("my-tuned", "My Tuned", SLMProfileKindCustom, SLMProfileConfig{})
+	custom, err := NewModelProfile("my-tuned", "My Tuned", ModelProfileKindCustom, ModelProfileConfig{})
 	if err != nil {
-		t.Fatalf("NewSLMProfile: %v", err)
+		t.Fatalf("NewModelProfile: %v", err)
 	}
-	if err := SaveCustomSLMProfiles(SLMProfilesPath(dir), []SLMProfile{custom}); err != nil {
-		t.Fatalf("SaveCustomSLMProfiles: %v", err)
+	if err := SaveCustomModelProfiles(ModelProfilesPath(dir), []ModelProfile{custom}); err != nil {
+		t.Fatalf("SaveCustomModelProfiles: %v", err)
 	}
 
-	catalog, warnings = LoadSLMCatalog(dir)
+	catalog, warnings = LoadModelProfilesCatalog(dir)
 	if len(warnings) != 0 {
 		t.Errorf("catalog with a healthy store must load without warnings, got %v", warnings)
 	}
-	if _, ok := FindSLMProfile(catalog, "my-tuned"); !ok {
+	if _, ok := FindModelProfile(catalog, "my-tuned"); !ok {
 		t.Error("custom profile missing from the merged catalog")
 	}
-	if _, ok := FindSLMProfile(catalog, SLMGenericProfileID); !ok {
+	if _, ok := FindModelProfile(catalog, ModelProfilesGenericProfileID); !ok {
 		t.Error("predefined generic profile missing from the merged catalog")
 	}
 }

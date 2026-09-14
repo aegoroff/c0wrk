@@ -778,14 +778,14 @@ func TestManager_ResumeTask_ArchivedRejected(t *testing.T) {
 	}
 }
 
-// TestResumeTask_PausedGoalBlockedBySLMNarrowing verifies the manager-level
+// TestResumeTask_PausedGoalBlockedByModelProfilesNarrowing verifies the manager-level
 // choke point for the paused-goal × narrowing exclusion: resuming a paused
-// non-terminal goal while the Small-LLM essential-tools narrowing is active is
-// refused with core.ErrGoalBlockedBySLM BEFORE any side effect — so the task row
+// non-terminal goal while the Model Profiles essential-tools narrowing is active is
+// refused with core.ErrGoalBlockedByModelProfiles BEFORE any side effect — so the task row
 // stays 'paused' (never flipped to in_progress) and the session is not
 // activated. This is what keeps a later plain message on the nudge-resume path
 // instead of degrading into a plain continuation with the goal tools stripped.
-func TestResumeTask_PausedGoalBlockedBySLMNarrowing(t *testing.T) {
+func TestResumeTask_PausedGoalBlockedByModelProfilesNarrowing(t *testing.T) {
 	gsJSON, err := json.Marshal(&goal.GoalState{
 		Condition:    "ship the feature",
 		VerifyClause: "go test ./...",
@@ -817,13 +817,13 @@ func TestResumeTask_PausedGoalBlockedBySLMNarrowing(t *testing.T) {
 		t.Fatal("session/orchestrator not available after CreateSession")
 	}
 	// Arm the narrowing on the live orchestrator — the runtime path that
-	// SetSLMSettings represents (a settings toggle), leaving the persisted goal
+	// SetModelProfilesSettings represents (a settings toggle), leaving the persisted goal
 	// row non-terminal.
-	sess.orchestrator.SetSLMSettings(core.SLMSettings{Enabled: true, EssentialTools: core.SLMEssentialSettings{Enabled: true}})
+	sess.orchestrator.SetModelProfilesSettings(core.ModelProfilesSettings{Enabled: true, EssentialTools: core.ModelProfilesEssentialSettings{Enabled: true}})
 	drainEvents(eventChan)
 
-	if err = mgr.ResumeTask(context.Background(), info.ID, "", "", ""); !errors.Is(err, core.ErrGoalBlockedBySLM) {
-		t.Fatalf("ResumeTask error = %v, want core.ErrGoalBlockedBySLM", err)
+	if err = mgr.ResumeTask(context.Background(), info.ID, "", "", ""); !errors.Is(err, core.ErrGoalBlockedByModelProfiles) {
+		t.Fatalf("ResumeTask error = %v, want core.ErrGoalBlockedByModelProfiles", err)
 	}
 
 	// No side effect: the row must not have been flipped to in_progress, and the
@@ -851,11 +851,11 @@ func TestResumeTask_PausedGoalBlockedBySLMNarrowing(t *testing.T) {
 	}
 }
 
-// TestManager_SetSLMSettings_PushesToLiveOrchestrators verifies the runtime SLM
+// TestManager_SetModelProfilesSettings_PushesToLiveOrchestrators verifies the runtime ModelProfiles
 // push (Issue 1): a live session's already-built orchestrator picks up the
 // refreshed settings, so a narrowing toggled after the session was built takes
 // effect — and is cleared again — without a rebuild.
-func TestManager_SetSLMSettings_PushesToLiveOrchestrators(t *testing.T) {
+func TestManager_SetModelProfilesSettings_PushesToLiveOrchestrators(t *testing.T) {
 	eventChan := make(chan Event, 100)
 	mgr := NewManager(functionalOrchestratorFactory(&finishLLM{answer: "x"}), func(e Event) { eventChan <- e }, t.TempDir())
 	t.Cleanup(mgr.Shutdown)
@@ -867,18 +867,18 @@ func TestManager_SetSLMSettings_PushesToLiveOrchestrators(t *testing.T) {
 	if !ok || sess.orchestrator == nil {
 		t.Fatal("session/orchestrator not available after CreateSession")
 	}
-	if sess.orchestrator.SLMNarrowingEnabled() {
+	if sess.orchestrator.ModelProfilesNarrowingEnabled() {
 		t.Fatal("precondition: narrowing must be off at build time")
 	}
 
-	mgr.SetSLMSettings(core.SLMSettings{Enabled: true, EssentialTools: core.SLMEssentialSettings{Enabled: true}})
-	if !sess.orchestrator.SLMNarrowingEnabled() {
-		t.Fatal("SetSLMSettings did not reach the already-built orchestrator")
+	mgr.SetModelProfilesSettings(core.ModelProfilesSettings{Enabled: true, EssentialTools: core.ModelProfilesEssentialSettings{Enabled: true}})
+	if !sess.orchestrator.ModelProfilesNarrowingEnabled() {
+		t.Fatal("SetModelProfilesSettings did not reach the already-built orchestrator")
 	}
 
-	mgr.SetSLMSettings(core.SLMSettings{})
-	if sess.orchestrator.SLMNarrowingEnabled() {
-		t.Fatal("SetSLMSettings did not clear the narrowing on the live orchestrator")
+	mgr.SetModelProfilesSettings(core.ModelProfilesSettings{})
+	if sess.orchestrator.ModelProfilesNarrowingEnabled() {
+		t.Fatal("SetModelProfilesSettings did not clear the narrowing on the live orchestrator")
 	}
 }
 

@@ -24,7 +24,7 @@ function countersSummary(c: AgentMetricsCounters): string {
  * Session stats strip: routing/attempt stats plus the per-run agent quality
  * report delivered by the `agent_metrics` event on task finish/abort
  * (parse errors, loop-detector nudges/aborts, steps, output tokens and the
- * active small-LLM profile). Minimal by design — data, not decoration.
+ * active model profile). Minimal by design — data, not decoration.
  * Rendered only when the user enables it in Settings → General; collection
  * and persistence happen regardless of this display toggle.
  */
@@ -45,9 +45,9 @@ function SessionStatsRow({ sessionId }: { sessionId: string }) {
       <span>invalid calls: {m.invalid_tool_calls}</span>
       <span>nudges: {countersSummary(m.nudges)}</span>
       <span>aborts: {countersSummary(m.aborts)}</span>
-      {m.slm.enabled && (
+      {m.model_profiles.enabled && (
         <span className="text-warning">
-          small-llm: {m.slm.variants.length > 0 ? m.slm.variants.join(', ') : 'on'}
+          model-profiles: {m.model_profiles.variants.length > 0 ? m.model_profiles.variants.join(', ') : 'on'}
         </span>
       )}
     </div>

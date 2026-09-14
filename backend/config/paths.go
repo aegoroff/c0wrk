@@ -139,15 +139,15 @@ func DialogStatePath(agentDir string) string {
 	return filepath.Join(agentDir, "dialog_state.json")
 }
 
-// SLMProfilesPath returns the path to slm-profiles.yaml inside the agent
-// directory. This file holds the operator-authored custom small-LLM
+// ModelProfilesPath returns the path to model-profiles.yaml inside the agent
+// directory. This file holds the operator-authored custom model-profile
 // profiles in a versioned format separate from config.yaml: profiles are
 // user data with independent lifecycle (create/edit/delete from the
 // settings UI), not machine-managed runtime state and not static config.
 // The file is created lazily by the first save; absence means "no custom
-// profiles". See slm_profiles_store.go for the format.
-func SLMProfilesPath(agentDir string) string {
-	return filepath.Join(agentDir, "slm-profiles.yaml")
+// profiles". See modelProfiles_profiles_store.go for the format.
+func ModelProfilesPath(agentDir string) string {
+	return filepath.Join(agentDir, "model-profiles.yaml")
 }
 
 // GitConfigSnapshotsDir returns the directory where per-repository git-config

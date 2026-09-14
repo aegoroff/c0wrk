@@ -289,7 +289,7 @@ describe('reconstructContent (via chatMessageToUI)', () => {
       finish: 'full', parse_errors: 1, steps: 3, output_tokens: 42, invalid_tool_calls: 1,
       nudges: { repeat: 0, same_tool: 0, fruitless: 0, parse: 1, truncation: 0 },
       aborts: { repeat: 0, same_tool: 0, fruitless: 0, parse: 0, truncation: 0 },
-      slm: { enabled: false, variants: [] },
+      model_profiles: { enabled: false, variants: [] },
     }
     const result = chatMessageToUI(makeMsg({
       role: 'status',
@@ -304,7 +304,7 @@ describe('reconstructContent (via chatMessageToUI)', () => {
       finish: 'full', parse_errors: 1, steps: 3, output_tokens: 42,
       nudges: { repeat: 0, same_tool: 0, fruitless: 0, parse: 1 },
       aborts: { repeat: 0, same_tool: 0, fruitless: 0, parse: 0 },
-      slm: { enabled: false, variants: [] },
+      model_profiles: { enabled: false, variants: [] },
     }
     const result = chatMessageToUI(makeMsg({
       role: 'status',
@@ -351,7 +351,7 @@ describe('lastAgentMetricsFromHistory / isAgentMetricsRow', () => {
     finish: 'partial', parse_errors: 2, steps: 7, output_tokens: 512, invalid_tool_calls: 0,
     nudges: { repeat: 1, same_tool: 0, fruitless: 1, parse: 2, truncation: 1 },
     aborts: { repeat: 0, same_tool: 0, fruitless: 0, parse: 0, truncation: 0 },
-    slm: { enabled: true, variants: ['lite'] },
+    model_profiles: { enabled: true, variants: ['lite'] },
   }
   const metricsMsg = chatMessageToUI(makeMsg({
     id: 9,
@@ -387,7 +387,7 @@ describe('lastAgentMetricsFromHistory / isAgentMetricsRow', () => {
       finish: 'full', parse_errors: 1, steps: 4, output_tokens: 100,
       nudges: { repeat: 0, same_tool: 0, fruitless: 0, parse: 1 },
       aborts: { repeat: 0, same_tool: 0, fruitless: 0, parse: 0 },
-      slm: { enabled: false, variants: [] },
+      model_profiles: { enabled: false, variants: [] },
     }
     const legacyMsg = chatMessageToUI(makeMsg({
       id: 10,

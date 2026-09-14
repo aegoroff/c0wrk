@@ -1,6 +1,6 @@
 import { Volume2, VolumeX } from 'lucide-react'
 import { useSoundStore } from '@/stores/soundStore'
-import { Toggle } from './SLMControls'
+import { Toggle } from './ModelProfilesControls'
 import { playSound, type SoundKind } from '@/lib/sound'
 
 /**

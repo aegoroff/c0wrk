@@ -26,7 +26,7 @@ type SkillSection struct {
 
 // BuildSystemPrompt assembles the E2S system prompt P: the compact core
 // directive from core/prompts/e2s.md (role + E2S protocol; cfg.SystemPrompt
-// overrides it — the Small-LLM Lite swap), followed by the security
+// overrides it — the Model Profiles Lite swap), followed by the security
 // directives (the unconditional VerificationMandate and the config-gated
 // InjectionDefense, mirroring the Conductor's prefix — SECURITY.md mandates
 // them for every model-facing loop), the workspace sections, the Available

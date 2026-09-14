@@ -30,8 +30,8 @@ var defaultAgentDirs = []string{
 	"~/.c0wrk/.agents/agents",
 }
 
-// defaultSLMAlwaysPresent is the default always-present tool allow-list
-// exposed when the small-LLM essential-tools variant is active. It balances a
+// defaultModelProfilesAlwaysPresent is the default always-present tool allow-list
+// exposed when the model-profile essential-tools variant is active. It balances a
 // minimal schema footprint against enough capability to navigate, edit,
 // search, and finalize tasks, and it pins the tools the ReAct loop itself
 // depends on — reading user attachments and activated-skill resources, and
@@ -39,7 +39,7 @@ var defaultAgentDirs = []string{
 // tool_result_read) plus the step checklist (update_checklist) — so an active
 // profile never leaves a session unable to finish its loop. MCP-backed tools
 // are layered on separately at runtime.
-var defaultSLMAlwaysPresent = []string{
+var defaultModelProfilesAlwaysPresent = []string{
 	"read_file",
 	"read_attachment",
 	"read_skill_resource",
@@ -472,21 +472,21 @@ func ApplyDefaults(cfg *Config) {
 		cfg.Proxy.SetGlobalEnv = &trueVal
 	}
 
-	// Small-LLM profile persist defaults. The section carries only the master
-	// toggle and the active profile id (SLMPersistConfig): the master toggle
+	// Model Profiles profile persist defaults. The section carries only the master
+	// toggle and the active profile id (ModelProfilesPersistConfig): the master toggle
 	// defaults to false (manual only — no auto-detection), and the active
 	// profile defaults to the model-agnostic "generic" profile. The 25
 	// variant knobs are no longer seeded here — they come from the active
-	// profile's catalog entry at resolve time (ResolveSLMConfig), where the
+	// profile's catalog entry at resolve time (ResolveModelProfilesConfig), where the
 	// generic profile carries the researched defaults (reasoning_effort
 	// "medium", loop thresholds 2/3/3/5/4, context 6/5/80/2/16384, the
 	// default always-present list). A legacy inline small_llm.* section is
 	// ignored at load and dropped on the next save.
-	if cfg.SLM.ActiveProfile == "" {
-		cfg.SLM.ActiveProfile = SLMGenericProfileID
+	if cfg.ModelProfiles.ActiveProfile == "" {
+		cfg.ModelProfiles.ActiveProfile = ModelProfilesGenericProfileID
 	}
 
-	// E2S execution-mode defaults. Like the Small-LLM profile the section is
+	// E2S execution-mode defaults. Like the Model Profiles profile the section is
 	// seeded unconditionally (zero → default) so the values stay visible and
 	// editable while the mode itself stays a no-op until experimental.enabled
 	// is true (there is no separate e2s master toggle). The byte limit mirrors

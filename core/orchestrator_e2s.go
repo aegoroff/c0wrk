@@ -426,13 +426,13 @@ func (o *Orchestrator) runE2SWithState(
 	// declare_verification) and plan-workflow tools never reach the model;
 	// Execute stays on the real registry (all security gates intact) and
 	// rejects stripped names fail-closed.
-	// Small-LLM essential-tools narrowing applies to E2S too — full parity
+	// Model Profiles essential-tools narrowing applies to E2S too — full parity
 	// with the Conductor path (goal mode is the only documented exception):
 	// the same static selection (always-present list + protected
 	// orchestration tools + MCP tools + the turn-scoped delegate guarantee)
 	// narrows the E2S catalog exactly once here, before stripping.
 	e2sTools := stripE2SUnavailableTools(tools.StripGoalModeTools(
-		o.applySLMToolFilter(availableTools, slmAgentGuaranteedTools(ctx)...)))
+		o.applyModelProfilesToolFilter(availableTools, modelProfilesAgentGuaranteedTools(ctx)...)))
 
 	// Trajectory: same composite store as a Conductor run (in-memory for
 	// synchronous reads + best-effort DB persistence), synced by the loop
@@ -499,13 +499,13 @@ func (o *Orchestrator) runE2SWithState(
 	}
 
 	e2sCfg := o.e2sSettings()
-	// Small-LLM loop-hardening parity: the executor's circuit breaker gets a
+	// Model Profiles loop-hardening parity: the executor's circuit breaker gets a
 	// tighter repeat-nudge threshold under the profile; the E2S anti-spin
 	// nudge is the same concept, so the override applies here too (the
 	// abort threshold keeps its fail-safe strictly-greater ordering via
 	// Config.withDefaults).
 	spinNudge := e2sCfg.RepeatNudgeThreshold
-	if sc := o.slmSettings(); sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
+	if sc := o.modelProfilesSettings(); sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
 		// The profile override must stay strictly below the configured abort
 		// threshold: at or above it Config.withDefaults would silently raise
 		// abort to nudge+1, reintroducing the divergence the e2s config
@@ -514,7 +514,7 @@ func (o *Orchestrator) runE2SWithState(
 		if sc.LoopHardening.RepeatNudgeThreshold < e2sCfg.RepeatAbortThreshold {
 			spinNudge = sc.LoopHardening.RepeatNudgeThreshold
 		} else {
-			o.logWarn("e2s_loop: ignoring Small-LLM repeat-nudge override — not strictly below the configured abort threshold",
+			o.logWarn("e2s_loop: ignoring Model Profiles repeat-nudge override — not strictly below the configured abort threshold",
 				"override", sc.LoopHardening.RepeatNudgeThreshold,
 				"abort_threshold", e2sCfg.RepeatAbortThreshold,
 				"using_nudge", e2sCfg.RepeatNudgeThreshold)
@@ -557,9 +557,9 @@ func (o *Orchestrator) runE2SWithState(
 		ToolCache:    deps.toolCache,
 		PauseChecker: deps.pauseChecker,
 		// Conductor-parity knobs (review fix cycle): the resolved reasoning
-		// effort (per-message override / Small-LLM sampling), the
+		// effort (per-message override / Model Profiles sampling), the
 		// config-gated injection-defense directive, the subagent prompt
-		// sections (roster + explicit #mentions), the Small-LLM Lite prompt
+		// sections (roster + explicit #mentions), the Model Profiles Lite prompt
 		// swap, the verify-on-edit hook, and the finish-join guard over
 		// pending async delegations.
 		ReasoningEffort:    deps.reasoningEffort,
@@ -658,12 +658,12 @@ func (o *Orchestrator) runE2SWithState(
 }
 
 // e2sCoreDirective selects the E2S core system directive: the Lite variant
-// when the Small-LLM prompt profile is active on the context (set by
+// when the Model Profiles prompt profile is active on the context (set by
 // prepareRequestContext before the E2S branch — the profile keys ride the
 // same request context), the compiled-in full directive otherwise ("" lets
 // the e2s package apply its own default).
 func e2sCoreDirective(ctx context.Context) string {
-	if slmLiteFromCtx(ctx) {
+	if modelProfilesLiteFromCtx(ctx) {
 		return prompts.E2SSystemLite
 	}
 	return ""

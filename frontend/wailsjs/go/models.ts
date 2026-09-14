@@ -301,6 +301,20 @@ export namespace backend {
 		}
 	}
 	
+	export class ModelProfilesSettingsResponse {
+	    enabled: boolean;
+	    essential_tools_enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesSettingsResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.essential_tools_enabled = source["essential_tools_enabled"];
+	    }
+	}
 	export class ExperimentalSettingsResponse {
 	    enabled: boolean;
 	
@@ -353,6 +367,7 @@ export namespace backend {
 	    search: ConfigSearchResp;
 	    proxy: ProxySettingsResponse;
 	    experimental: ExperimentalSettingsResponse;
+	    model_profiles: ModelProfilesSettingsResponse;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConfigResponse(source);
@@ -367,6 +382,7 @@ export namespace backend {
 	        this.search = this.convertValues(source["search"], ConfigSearchResp);
 	        this.proxy = this.convertValues(source["proxy"], ProxySettingsResponse);
 	        this.experimental = this.convertValues(source["experimental"], ExperimentalSettingsResponse);
+	        this.model_profiles = this.convertValues(source["model_profiles"], ModelProfilesSettingsResponse);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -625,6 +641,327 @@ export namespace backend {
 		    return a;
 		}
 	}
+	
+	export class ModelProfilesCompactionResp {
+	    keep_last: number;
+	    block_size: number;
+	    trigger_percent: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesCompactionResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.keep_last = source["keep_last"];
+	        this.block_size = source["block_size"];
+	        this.trigger_percent = source["trigger_percent"];
+	    }
+	}
+	export class ModelProfilesContextResp {
+	    enabled: boolean;
+	    compaction: ModelProfilesCompactionResp;
+	    tool_output_keep_last_n: number;
+	    output_token_reserve: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesContextResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.compaction = this.convertValues(source["compaction"], ModelProfilesCompactionResp);
+	        this.tool_output_keep_last_n = source["tool_output_keep_last_n"];
+	        this.output_token_reserve = source["output_token_reserve"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ModelProfilesLoopHardeningResp {
+	    enabled: boolean;
+	    repeat_nudge_threshold: number;
+	    parse_error_abort_threshold: number;
+	    fruitless_nudge_threshold: number;
+	    fruitless_abort_threshold: number;
+	    same_tool_repeat_nudge_threshold: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesLoopHardeningResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.repeat_nudge_threshold = source["repeat_nudge_threshold"];
+	        this.parse_error_abort_threshold = source["parse_error_abort_threshold"];
+	        this.fruitless_nudge_threshold = source["fruitless_nudge_threshold"];
+	        this.fruitless_abort_threshold = source["fruitless_abort_threshold"];
+	        this.same_tool_repeat_nudge_threshold = source["same_tool_repeat_nudge_threshold"];
+	    }
+	}
+	export class ModelProfilesSamplingResp {
+	    enabled: boolean;
+	    temperature: number;
+	    top_p: number;
+	    top_k: number;
+	    repetition_penalty: number;
+	    presence_penalty: number;
+	    reasoning_effort: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesSamplingResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.temperature = source["temperature"];
+	        this.top_p = source["top_p"];
+	        this.top_k = source["top_k"];
+	        this.repetition_penalty = source["repetition_penalty"];
+	        this.presence_penalty = source["presence_penalty"];
+	        this.reasoning_effort = source["reasoning_effort"];
+	    }
+	}
+	export class ModelProfilesSystemPromptResp {
+	    lite: boolean;
+	    few_shot: boolean;
+	    reasoning_scaffold: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesSystemPromptResp(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lite = source["lite"];
+	        this.few_shot = source["few_shot"];
+	        this.reasoning_scaffold = source["reasoning_scaffold"];
+	    }
+	}
+	export class ModelProfilesEssentialToolsValues {
+	    enabled: boolean;
+	    always_present: string[];
+	    compact_descriptions: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesEssentialToolsValues(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.always_present = source["always_present"];
+	        this.compact_descriptions = source["compact_descriptions"];
+	    }
+	}
+	export class ModelProfileValues {
+	    essential_tools: ModelProfilesEssentialToolsValues;
+	    system_prompt: ModelProfilesSystemPromptResp;
+	    sampling: ModelProfilesSamplingResp;
+	    loop_hardening: ModelProfilesLoopHardeningResp;
+	    context: ModelProfilesContextResp;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfileValues(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.essential_tools = this.convertValues(source["essential_tools"], ModelProfilesEssentialToolsValues);
+	        this.system_prompt = this.convertValues(source["system_prompt"], ModelProfilesSystemPromptResp);
+	        this.sampling = this.convertValues(source["sampling"], ModelProfilesSamplingResp);
+	        this.loop_hardening = this.convertValues(source["loop_hardening"], ModelProfilesLoopHardeningResp);
+	        this.context = this.convertValues(source["context"], ModelProfilesContextResp);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ModelProfileDTO {
+	    id: string;
+	    name: string;
+	    kind: string;
+	    values: ModelProfileValues;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfileDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.values = this.convertValues(source["values"], ModelProfileValues);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ModelProfileUpdateRequest {
+	    name?: string;
+	    config?: ModelProfileValues;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfileUpdateRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.config = this.convertValues(source["config"], ModelProfileValues);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class ModelProfilesBuiltinTool {
+	    name: string;
+	    description: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesBuiltinTool(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	    }
+	}
+	
+	
+	
+	
+	export class ModelProfilesToolGroup {
+	    id: string;
+	    title: string;
+	    description: string;
+	    tools: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesToolGroup(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.tools = source["tools"];
+	    }
+	}
+	export class ModelProfilesResponse {
+	    enabled: boolean;
+	    profiles: ModelProfileDTO[];
+	    active_id: string;
+	    suggested_profile_id?: string;
+	    builtin_tools: ModelProfilesBuiltinTool[];
+	    tool_groups: ModelProfilesToolGroup[];
+	    protected_tools: string[];
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelProfilesResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.profiles = this.convertValues(source["profiles"], ModelProfileDTO);
+	        this.active_id = source["active_id"];
+	        this.suggested_profile_id = source["suggested_profile_id"];
+	        this.builtin_tools = this.convertValues(source["builtin_tools"], ModelProfilesBuiltinTool);
+	        this.tool_groups = this.convertValues(source["tool_groups"], ModelProfilesToolGroup);
+	        this.protected_tools = source["protected_tools"];
+	        this.warnings = source["warnings"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
 	
 	export class NewHypothesisCard {
 	    title: string;
@@ -910,322 +1247,6 @@ export namespace backend {
 	        this.content = source["content"];
 	    }
 	}
-	export class SLMBuiltinTool {
-	    name: string;
-	    description: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMBuiltinTool(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.description = source["description"];
-	    }
-	}
-	export class SLMCompactionResp {
-	    keep_last: number;
-	    block_size: number;
-	    trigger_percent: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMCompactionResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.keep_last = source["keep_last"];
-	        this.block_size = source["block_size"];
-	        this.trigger_percent = source["trigger_percent"];
-	    }
-	}
-	export class SLMContextResp {
-	    enabled: boolean;
-	    compaction: SLMCompactionResp;
-	    tool_output_keep_last_n: number;
-	    output_token_reserve: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMContextResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.compaction = this.convertValues(source["compaction"], SLMCompactionResp);
-	        this.tool_output_keep_last_n = source["tool_output_keep_last_n"];
-	        this.output_token_reserve = source["output_token_reserve"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SLMEssentialToolsValues {
-	    enabled: boolean;
-	    always_present: string[];
-	    compact_descriptions: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMEssentialToolsValues(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.always_present = source["always_present"];
-	        this.compact_descriptions = source["compact_descriptions"];
-	    }
-	}
-	export class SLMLoopHardeningResp {
-	    enabled: boolean;
-	    repeat_nudge_threshold: number;
-	    parse_error_abort_threshold: number;
-	    fruitless_nudge_threshold: number;
-	    fruitless_abort_threshold: number;
-	    same_tool_repeat_nudge_threshold: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMLoopHardeningResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.repeat_nudge_threshold = source["repeat_nudge_threshold"];
-	        this.parse_error_abort_threshold = source["parse_error_abort_threshold"];
-	        this.fruitless_nudge_threshold = source["fruitless_nudge_threshold"];
-	        this.fruitless_abort_threshold = source["fruitless_abort_threshold"];
-	        this.same_tool_repeat_nudge_threshold = source["same_tool_repeat_nudge_threshold"];
-	    }
-	}
-	export class SLMSamplingResp {
-	    enabled: boolean;
-	    temperature: number;
-	    top_p: number;
-	    top_k: number;
-	    repetition_penalty: number;
-	    presence_penalty: number;
-	    reasoning_effort: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMSamplingResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.temperature = source["temperature"];
-	        this.top_p = source["top_p"];
-	        this.top_k = source["top_k"];
-	        this.repetition_penalty = source["repetition_penalty"];
-	        this.presence_penalty = source["presence_penalty"];
-	        this.reasoning_effort = source["reasoning_effort"];
-	    }
-	}
-	export class SLMSystemPromptResp {
-	    lite: boolean;
-	    few_shot: boolean;
-	    reasoning_scaffold: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMSystemPromptResp(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.lite = source["lite"];
-	        this.few_shot = source["few_shot"];
-	        this.reasoning_scaffold = source["reasoning_scaffold"];
-	    }
-	}
-	export class SLMProfileValues {
-	    essential_tools: SLMEssentialToolsValues;
-	    system_prompt: SLMSystemPromptResp;
-	    sampling: SLMSamplingResp;
-	    loop_hardening: SLMLoopHardeningResp;
-	    context: SLMContextResp;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMProfileValues(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.essential_tools = this.convertValues(source["essential_tools"], SLMEssentialToolsValues);
-	        this.system_prompt = this.convertValues(source["system_prompt"], SLMSystemPromptResp);
-	        this.sampling = this.convertValues(source["sampling"], SLMSamplingResp);
-	        this.loop_hardening = this.convertValues(source["loop_hardening"], SLMLoopHardeningResp);
-	        this.context = this.convertValues(source["context"], SLMContextResp);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SLMProfileDTO {
-	    id: string;
-	    name: string;
-	    kind: string;
-	    values: SLMProfileValues;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMProfileDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.name = source["name"];
-	        this.kind = source["kind"];
-	        this.values = this.convertValues(source["values"], SLMProfileValues);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class SLMProfileUpdateRequest {
-	    name?: string;
-	    config?: SLMProfileValues;
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMProfileUpdateRequest(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.config = this.convertValues(source["config"], SLMProfileValues);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	export class SLMToolGroup {
-	    id: string;
-	    title: string;
-	    description: string;
-	    tools: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMToolGroup(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.title = source["title"];
-	        this.description = source["description"];
-	        this.tools = source["tools"];
-	    }
-	}
-	export class SLMProfilesResponse {
-	    enabled: boolean;
-	    profiles: SLMProfileDTO[];
-	    active_id: string;
-	    suggested_profile_id?: string;
-	    builtin_tools: SLMBuiltinTool[];
-	    tool_groups: SLMToolGroup[];
-	    protected_tools: string[];
-	    warnings: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new SLMProfilesResponse(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.profiles = this.convertValues(source["profiles"], SLMProfileDTO);
-	        this.active_id = source["active_id"];
-	        this.suggested_profile_id = source["suggested_profile_id"];
-	        this.builtin_tools = this.convertValues(source["builtin_tools"], SLMBuiltinTool);
-	        this.tool_groups = this.convertValues(source["tool_groups"], SLMToolGroup);
-	        this.protected_tools = source["protected_tools"];
-	        this.warnings = source["warnings"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	
-	
 	export class SearchRequest {
 	    query: string;
 	    top_k: number;
@@ -2347,6 +2368,7 @@ export namespace session {
 	    active: boolean;
 	    has_unfinished_task: boolean;
 	    unfinished_task_id?: string;
+	    unfinished_task_status?: string;
 	    paused: boolean;
 	    compacting: boolean;
 	    compaction_availability: core.CompactionAvailability[];
@@ -2362,6 +2384,7 @@ export namespace session {
 	        this.active = source["active"];
 	        this.has_unfinished_task = source["has_unfinished_task"];
 	        this.unfinished_task_id = source["unfinished_task_id"];
+	        this.unfinished_task_status = source["unfinished_task_status"];
 	        this.paused = source["paused"];
 	        this.compacting = source["compacting"];
 	        this.compaction_availability = this.convertValues(source["compaction_availability"], core.CompactionAvailability);

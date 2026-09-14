@@ -46,136 +46,136 @@ func TestAgentsMDSearchPaths_NoHomeDir(t *testing.T) {
 	}
 }
 
-// slmTestCatalog returns the predefined catalog plus one custom profile
+// modelProfilesTestCatalog returns the predefined catalog plus one custom profile
 // ("test-profile") carrying fully-on variant values, for ToBuilderConfig
 // mapping tests: the effective profile is resolved from the catalog, so test
-// values live in a profile with cfg.SLM.ActiveProfile pointing at it.
-func slmTestCatalog() []config.SLMProfile {
-	customCfg := config.SLMProfileConfig{
+// values live in a profile with cfg.ModelProfiles.ActiveProfile pointing at it.
+func modelProfilesTestCatalog() []config.ModelProfile {
+	customCfg := config.ModelProfileConfig{
 		SystemPrompt: config.SystemPromptConfig{Lite: true, FewShot: true, ReasoningScaffold: true},
-		Context: config.SLMContextConfig{
+		Context: config.ModelProfilesContextConfig{
 			Enabled:             true,
-			Compaction:          config.SLMCompactionConfig{KeepLast: 6, BlockSize: 5, TriggerPercent: 80},
+			Compaction:          config.ModelProfilesCompactionConfig{KeepLast: 6, BlockSize: 5, TriggerPercent: 80},
 			ToolOutputKeepLastN: 2,
 			OutputTokenReserve:  8192,
 		},
 	}
-	custom, err := config.NewSLMProfile("test-profile", "Test Profile", config.SLMProfileKindCustom, customCfg)
+	custom, err := config.NewModelProfile("test-profile", "Test Profile", config.ModelProfileKindCustom, customCfg)
 	if err != nil {
 		panic(err)
 	}
-	return append(config.PredefinedSLMProfiles(), custom)
+	return append(config.PredefinedModelProfiles(), custom)
 }
 
-// TestToBuilderConfig_SLMSystemPrompt verifies the config→builder mapping
+// TestToBuilderConfig_ModelProfilesSystemPrompt verifies the config→builder mapping
 // for the prompt-simplification variant: the active profile's
 // SystemPrompt.{Lite, FewShot, ReasoningScaffold} all flow into
-// BuilderSLMSystemPromptConfig so a profile change takes effect on rebuild.
-func TestToBuilderConfig_SLMSystemPrompt(t *testing.T) {
+// BuilderModelProfilesSystemPromptConfig so a profile change takes effect on rebuild.
+func TestToBuilderConfig_ModelProfilesSystemPrompt(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Experimental.Enabled = true
-	cfg.SLM.Enabled = true
-	cfg.SLM.ActiveProfile = "test-profile"
+	cfg.ModelProfiles.Enabled = true
+	cfg.ModelProfiles.ActiveProfile = "test-profile"
 
-	bc := ToBuilderConfig(cfg, slmTestCatalog())
+	bc := ToBuilderConfig(cfg, modelProfilesTestCatalog())
 
-	if !bc.SLM.Enabled {
-		t.Error("SLM.Enabled not mapped")
+	if !bc.ModelProfiles.Enabled {
+		t.Error("ModelProfiles.Enabled not mapped")
 	}
 	// Lite is the SystemPrompt variant master toggle (there is no separate
 	// Enabled field in config/builder — see SystemPromptConfig). It must map
 	// straight through so a profile change takes effect on rebuild.
-	if !bc.SLM.SystemPrompt.Lite {
+	if !bc.ModelProfiles.SystemPrompt.Lite {
 		t.Error("SystemPrompt.Lite not mapped")
 	}
-	if !bc.SLM.SystemPrompt.FewShot {
+	if !bc.ModelProfiles.SystemPrompt.FewShot {
 		t.Error("SystemPrompt.FewShot not mapped")
 	}
-	if !bc.SLM.SystemPrompt.ReasoningScaffold {
+	if !bc.ModelProfiles.SystemPrompt.ReasoningScaffold {
 		t.Error("SystemPrompt.ReasoningScaffold not mapped")
 	}
 
 	// Master off — even with Lite true, Enabled carries the master gate only.
-	cfg.SLM.Enabled = false
-	bc = ToBuilderConfig(cfg, slmTestCatalog())
-	if bc.SLM.Enabled {
+	cfg.ModelProfiles.Enabled = false
+	bc = ToBuilderConfig(cfg, modelProfilesTestCatalog())
+	if bc.ModelProfiles.Enabled {
 		t.Error("master Enabled should be false")
 	}
 	// The variant sub-toggle still reflects the profile value (master gating is
 	// applied at runtime, not stripped at the mapping layer).
-	if !bc.SLM.SystemPrompt.Lite {
+	if !bc.ModelProfiles.SystemPrompt.Lite {
 		t.Error("SystemPrompt.Lite should still map the profile value")
 	}
 }
 
-// TestToBuilderConfig_SLMContext verifies the config→builder mapping for
+// TestToBuilderConfig_ModelProfilesContext verifies the config→builder mapping for
 // the context-management variant: the active profile's Context.{Enabled,
 // Compaction, ToolOutputKeepLastN, OutputTokenReserve} all flow into
-// BuilderSLMContext so a profile change takes effect on rebuild.
-func TestToBuilderConfig_SLMContext(t *testing.T) {
+// BuilderModelProfilesContext so a profile change takes effect on rebuild.
+func TestToBuilderConfig_ModelProfilesContext(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Experimental.Enabled = true
-	cfg.SLM.Enabled = true
-	cfg.SLM.ActiveProfile = "test-profile"
+	cfg.ModelProfiles.Enabled = true
+	cfg.ModelProfiles.ActiveProfile = "test-profile"
 
-	bc := ToBuilderConfig(cfg, slmTestCatalog())
+	bc := ToBuilderConfig(cfg, modelProfilesTestCatalog())
 
-	if !bc.SLM.Context.Enabled {
+	if !bc.ModelProfiles.Context.Enabled {
 		t.Error("Context.Enabled not mapped")
 	}
-	if bc.SLM.Context.Compaction.KeepLast != 6 {
-		t.Errorf("Context.Compaction.KeepLast = %d, want 6", bc.SLM.Context.Compaction.KeepLast)
+	if bc.ModelProfiles.Context.Compaction.KeepLast != 6 {
+		t.Errorf("Context.Compaction.KeepLast = %d, want 6", bc.ModelProfiles.Context.Compaction.KeepLast)
 	}
-	if bc.SLM.Context.Compaction.BlockSize != 5 {
-		t.Errorf("Context.Compaction.BlockSize = %d, want 5", bc.SLM.Context.Compaction.BlockSize)
+	if bc.ModelProfiles.Context.Compaction.BlockSize != 5 {
+		t.Errorf("Context.Compaction.BlockSize = %d, want 5", bc.ModelProfiles.Context.Compaction.BlockSize)
 	}
-	if bc.SLM.Context.Compaction.TriggerPercent != 80 {
-		t.Errorf("Context.Compaction.TriggerPercent = %d, want 80", bc.SLM.Context.Compaction.TriggerPercent)
+	if bc.ModelProfiles.Context.Compaction.TriggerPercent != 80 {
+		t.Errorf("Context.Compaction.TriggerPercent = %d, want 80", bc.ModelProfiles.Context.Compaction.TriggerPercent)
 	}
-	if bc.SLM.Context.ToolOutputKeepLastN != 2 {
-		t.Errorf("Context.ToolOutputKeepLastN = %d, want 2", bc.SLM.Context.ToolOutputKeepLastN)
+	if bc.ModelProfiles.Context.ToolOutputKeepLastN != 2 {
+		t.Errorf("Context.ToolOutputKeepLastN = %d, want 2", bc.ModelProfiles.Context.ToolOutputKeepLastN)
 	}
-	if bc.SLM.Context.OutputTokenReserve != 8192 {
-		t.Errorf("Context.OutputTokenReserve = %d, want 8192", bc.SLM.Context.OutputTokenReserve)
+	if bc.ModelProfiles.Context.OutputTokenReserve != 8192 {
+		t.Errorf("Context.OutputTokenReserve = %d, want 8192", bc.ModelProfiles.Context.OutputTokenReserve)
 	}
 
 	// Master off — Enabled carries the master gate only; the variant values
 	// still map through (gating is applied at runtime by
 	// applyContextManagement, not stripped at the mapping layer).
-	cfg.SLM.Enabled = false
-	bc = ToBuilderConfig(cfg, slmTestCatalog())
-	if bc.SLM.Enabled {
+	cfg.ModelProfiles.Enabled = false
+	bc = ToBuilderConfig(cfg, modelProfilesTestCatalog())
+	if bc.ModelProfiles.Enabled {
 		t.Error("master Enabled should be false")
 	}
-	if !bc.SLM.Context.Enabled {
+	if !bc.ModelProfiles.Context.Enabled {
 		t.Error("Context.Enabled should still map the profile value")
 	}
 }
 
-// TestToBuilderConfig_SLMSamplingReasoningEffortDefault verifies the
-// seeded reasoning-effort default (docs/development/slm-defaults-research.md, R3)
+// TestToBuilderConfig_ModelProfilesSamplingReasoningEffortDefault verifies the
+// seeded reasoning-effort default (docs/development/model-profiles-defaults-research.md, R3)
 // end to end on the c0wrk side: a freshly defaulted config (active profile
 // "generic") with the sampling variant enabled resolves to reasoning effort
-// "medium" in the builder config. applySLMPresets (core) then seeds it as
+// "medium" in the builder config. applyModelProfilesPresets (core) then seeds it as
 // the builder-level default, and sp4rk's qwen mapping sends the native
 // reasoning_effort parameter per request.
-func TestToBuilderConfig_SLMSamplingReasoningEffortDefault(t *testing.T) {
+func TestToBuilderConfig_ModelProfilesSamplingReasoningEffortDefault(t *testing.T) {
 	cfg := &config.Config{}
 	config.ApplyDefaults(cfg)
 	cfg.Experimental.Enabled = true
-	cfg.SLM.Enabled = true
+	cfg.ModelProfiles.Enabled = true
 	// Enable the sampling variant on a writable copy of the generic profile so
 	// the variant is actually active (values are profile-owned now).
-	catalog := config.PredefinedSLMProfiles()
+	catalog := config.PredefinedModelProfiles()
 	for i := range catalog {
-		if catalog[i].ID != config.SLMGenericProfileID {
+		if catalog[i].ID != config.ModelProfilesGenericProfileID {
 			continue
 		}
 		variantCfg := catalog[i].Config
 		variantCfg.Sampling.Enabled = true
-		withSampling, err := config.NewSLMProfile(catalog[i].ID, catalog[i].Name, catalog[i].Kind, variantCfg)
+		withSampling, err := config.NewModelProfile(catalog[i].ID, catalog[i].Name, catalog[i].Kind, variantCfg)
 		if err != nil {
-			t.Fatalf("NewSLMProfile: %v", err)
+			t.Fatalf("NewModelProfile: %v", err)
 		}
 		catalog[i] = withSampling
 		break
@@ -183,27 +183,27 @@ func TestToBuilderConfig_SLMSamplingReasoningEffortDefault(t *testing.T) {
 
 	bc := ToBuilderConfig(cfg, catalog)
 
-	if got := bc.SLM.Sampling.ReasoningEffort; got != "medium" {
+	if got := bc.ModelProfiles.Sampling.ReasoningEffort; got != "medium" {
 		t.Errorf("fresh config with the sampling variant enabled resolves ReasoningEffort = %q, want the seeded default %q", got, "medium")
 	}
 }
 
-// TestToBuilderConfig_ExperimentalGatesSLM verifies the experimental
-// master switch forces the Small-LLM profile off regardless of the stored
-// SLM.Enabled value, and restores it when experimental features are on.
-func TestToBuilderConfig_ExperimentalGatesSLM(t *testing.T) {
+// TestToBuilderConfig_ExperimentalGatesModelProfiles verifies the experimental
+// master switch forces the Model Profiles profile off regardless of the stored
+// ModelProfiles.Enabled value, and restores it when experimental features are on.
+func TestToBuilderConfig_ExperimentalGatesModelProfiles(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.SLM.Enabled = true
+	cfg.ModelProfiles.Enabled = true
 
-	// Experimental off (zero value) → the effective Small-LLM master is off.
-	if bc := ToBuilderConfig(cfg, config.PredefinedSLMProfiles()); bc.SLM.Enabled {
-		t.Error("experimental off should force SLM.Enabled false")
+	// Experimental off (zero value) → the effective Model Profiles master is off.
+	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); bc.ModelProfiles.Enabled {
+		t.Error("experimental off should force ModelProfiles.Enabled false")
 	}
 
-	// Experimental on → the stored Small-LLM master flows through.
+	// Experimental on → the stored Model Profiles master flows through.
 	cfg.Experimental.Enabled = true
-	if bc := ToBuilderConfig(cfg, config.PredefinedSLMProfiles()); !bc.SLM.Enabled {
-		t.Error("experimental on should preserve SLM.Enabled true")
+	if bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles()); !bc.ModelProfiles.Enabled {
+		t.Error("experimental on should preserve ModelProfiles.Enabled true")
 	}
 }
 
@@ -221,7 +221,7 @@ func TestToBuilderConfig_ProviderOutputTokenReserve(t *testing.T) {
 		},
 	}
 
-	bc := ToBuilderConfig(cfg, config.PredefinedSLMProfiles())
+	bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles())
 
 	if got := bc.LLM.ProviderConfigs["anthropic"].OutputTokenReserve; got != 12288 {
 		t.Errorf("anthropic OutputTokenReserve = %d, want 12288", got)
@@ -232,7 +232,7 @@ func TestToBuilderConfig_ProviderOutputTokenReserve(t *testing.T) {
 	// Providers without an explicit reserve must map zero (inherit), not
 	// accidentally inherit some other provider's value.
 	cfg.LLM.OpenAICompatible["other"] = config.OpenAICompatibleConfig{Models: []string{"m"}}
-	bc = ToBuilderConfig(cfg, config.PredefinedSLMProfiles())
+	bc = ToBuilderConfig(cfg, config.PredefinedModelProfiles())
 	if got := bc.LLM.ProviderConfigs["other"].OutputTokenReserve; got != 0 {
 		t.Errorf("other OutputTokenReserve = %d, want 0 (inherit)", got)
 	}
@@ -246,7 +246,7 @@ func TestToBuilderConfig_WebFetchTimeouts(t *testing.T) {
 	cfg := &config.Config{}
 	config.ApplyDefaults(cfg)
 
-	bc := ToBuilderConfig(cfg, config.PredefinedSLMProfiles())
+	bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles())
 	if got := bc.Timeouts.WebFetchTimeout; got != 30 {
 		t.Errorf("WebFetchTimeout default = %d, want 30", got)
 	}
@@ -260,7 +260,7 @@ func TestToBuilderConfig_WebFetchTimeouts(t *testing.T) {
 	cfg.Timeouts.WebFetchProxyTimeout = 45
 	cfg.Timeouts.WebFetchRetries = 3
 
-	bc = ToBuilderConfig(cfg, config.PredefinedSLMProfiles())
+	bc = ToBuilderConfig(cfg, config.PredefinedModelProfiles())
 	if got := bc.Timeouts.WebFetchProxyTimeout; got != 45 {
 		t.Errorf("WebFetchProxyTimeout = %d, want 45", got)
 	}
@@ -280,13 +280,13 @@ func TestE2SConfigExperimentalGate(t *testing.T) {
 
 	// Fail-closed: the experimental gate off disables E2S.
 	cfg.Experimental.Enabled = false
-	if ToBuilderConfig(cfg, config.PredefinedSLMProfiles()).E2S.Enabled {
+	if ToBuilderConfig(cfg, config.PredefinedModelProfiles()).E2S.Enabled {
 		t.Error("BuilderE2SConfig.Enabled must be false while the experimental gate is off")
 	}
 
 	// Gate on: E2S is available and the stored knobs pass through verbatim.
 	cfg.Experimental.Enabled = true
-	got := ToBuilderConfig(cfg, config.PredefinedSLMProfiles()).E2S
+	got := ToBuilderConfig(cfg, config.PredefinedModelProfiles()).E2S
 	if !got.Enabled {
 		t.Error("BuilderE2SConfig.Enabled must follow the experimental gate")
 	}

@@ -810,14 +810,14 @@ func TestRunE2SLoop_SpinStopOutputNotUserEcho(t *testing.T) {
 	}
 }
 
-// TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering pins the guard on
-// the profile path: a Small-LLM loop-hardening repeat-nudge override at or
+// TestRunE2SLoop_ModelProfilesNudgeOverrideCannotBypassOrdering pins the guard on
+// the profile path: a Model Profiles loop-hardening repeat-nudge override at or
 // above the configured E2S abort threshold is ignored, falling back to the
 // validated nudge. Without the guard the override (9 >= abort 5) would make
 // Config.withDefaults silently raise the effective abort to nudge+1 (10),
 // diverging from the configured repeat_abort_threshold — the same silent
 // divergence the e2s config validation rejects up front.
-func TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
+func TestRunE2SLoop_ModelProfilesNudgeOverrideCannotBypassOrdering(t *testing.T) {
 	spinArgs := `{"path":"same.txt"}`
 	mockLLM := &mockLLMCaller{
 		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
@@ -830,9 +830,9 @@ func TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
 	o.config.E2S.RepeatAbortThreshold = 5
 	// A misconfigured profile override: request a nudge at 9, at/above the
 	// abort threshold — it must be ignored rather than diverge.
-	o.config.SLM = SLMSettings{
+	o.config.ModelProfiles = ModelProfilesSettings{
 		Enabled:       true,
-		LoopHardening: SLMLoopHardeningSettings{Enabled: true, RepeatNudgeThreshold: 9},
+		LoopHardening: ModelProfilesLoopHardeningSettings{Enabled: true, RepeatNudgeThreshold: 9},
 	}
 
 	result, err := o.HandleMessage(context.Background(), "read same.txt forever", "session-e2s-sl", HandleOptions{E2S: true})
@@ -863,7 +863,7 @@ func TestRunE2SLoop_SLMNudgeOverrideCannotBypassOrdering(t *testing.T) {
 		}
 	}
 	if !nudged {
-		t.Error("no spin_nudge was emitted — the Small-LLM override (9 >= abort 5) fired the abort first, bypassing the validated ordering")
+		t.Error("no spin_nudge was emitted — the Model Profiles override (9 >= abort 5) fired the abort first, bypassing the validated ordering")
 	} else if firstNudge != 3 {
 		t.Errorf("first spin_nudge at repeat_count %d, want 3 (the validated nudge, not the ignored 9 override)", firstNudge)
 	}

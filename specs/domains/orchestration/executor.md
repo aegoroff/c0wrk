@@ -42,9 +42,9 @@ Unknown tokens fail closed (profile parser `ParseError`, delegate-task validatio
 
 Mode-disabled tools (e.g. `glob`/`ripgrep`/`semantic_search` in No-Project/CHAT mode) are filtered out at selection time. The Conductor-only tools (`delegate`, `cancel_delegation`, `declare_plan`, `execute_plan`, `reflect`) are stripped from subagents via `stripConductorOnlyTools`; `delegate`/`cancel_delegation` are re-added only when `allow_redelegate` is true (depth-capped).
 
-### Small-LLM Loop Hardening (c0wrk threshold override)
+### Model Profiles Loop Hardening (c0wrk threshold override)
 
-When the active SLM profile's `loop_hardening` variant is on (master `slm.enabled` AND the profile's `loop_hardening.enabled` — see [../slm.md](../slm.md)), `core/builder.go` `applyLoopHardening` overrides the executor's circuit-breaker `CircuitBreakerConfig` with tighter-or-equal thresholds (`repeat_nudge_threshold`, `parse_error_abort_threshold`, `fruitless_nudge_threshold`, `fruitless_abort_threshold`, `same_tool_repeat_nudge_threshold` — four strictly tighter, `parse_error_abort_threshold` equal to the baseline) so a small model that repeats itself or stalls is nudged/aborted sooner. Only the thresholds present in the profile are overridden; all others keep their baseline. The override is applied once at builder construction and is inert when the profile is off.
+When the active model profile's `loop_hardening` variant is on (master `model_profiles.enabled` AND the profile's `loop_hardening.enabled` — see [../model-profiles.md](../model-profiles.md)), `core/builder.go` `applyLoopHardening` overrides the executor's circuit-breaker `CircuitBreakerConfig` with tighter-or-equal thresholds (`repeat_nudge_threshold`, `parse_error_abort_threshold`, `fruitless_nudge_threshold`, `fruitless_abort_threshold`, `same_tool_repeat_nudge_threshold` — four strictly tighter, `parse_error_abort_threshold` equal to the baseline) so a small model that repeats itself or stalls is nudged/aborted sooner. Only the thresholds present in the profile are overridden; all others keep their baseline. The override is applied once at builder construction and is inert when the profile is off.
 
 ### Verify-on-Edit Mechanical Verification
 

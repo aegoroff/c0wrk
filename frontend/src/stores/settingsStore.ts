@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-type SettingsTab = 'general' | 'appearance' | 'llm' | 'small-llm' | 'search' | 'mcp' | 'security' | 'about'
+type SettingsTab = 'general' | 'appearance' | 'llm' | 'model-profiles' | 'search' | 'mcp' | 'security' | 'about'
 
 interface SettingsState {
   open: boolean

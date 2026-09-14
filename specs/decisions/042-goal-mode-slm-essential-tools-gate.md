@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted → Identifiers renamed by [ADR-043](./043-model-profiles-rename.md) (`ErrGoalBlockedBySLM` → `ErrGoalBlockedByModelProfiles`, `ConfigResponse.slm` → `ConfigResponse.model_profiles`); the decision itself stands
 
 ## Context
 

@@ -28,11 +28,11 @@ Conductor.Run(ctx, message, routing, activeSkills, opts)
 │     ├─ Core: orchestrator system + family overlay + verification mandate
 │     │    (orchestrator system + plan context have their `{shell_tool}` placeholders
 │     │     resolved to the active platform's shell tool via prompts.SubstituteShellTool)
-│     ├─ [SLM Lite] when the active profile's system_prompt.lite is on, the verbose
+│     ├─ [Model Profiles Lite] when the active profile's system_prompt.lite is on, the verbose
 │     │    orchestrator core directive swaps to the compact OrchestratorSystemLite,
 │     │    optionally appending the reasoning scaffold and few-shot blocks. The
 │     │    shared sections (family, verification, injection defense, workspace,
-│     │    env, AGENTS.md, skills) are appended UNCHANGED. See [../slm.md](../slm.md).
+│     │    env, AGENTS.md, skills) are appended UNCHANGED. See [../model-profiles.md](../model-profiles.md).
 │     ├─ Workspace + temp dir
 │     ├─ Environment block
 │     ├─ Vector search hints
@@ -184,7 +184,7 @@ The guard is consulted in `UpdateChecklistTool.Execute` after parsing succeeds a
 - The Conductor installs a `ChecklistGuardFunc` that rejects standalone (empty `step_id`) `update_checklist` calls once a plan is declared **in the current run**; a standalone checklist is only valid for plan-less tasks. A restored plan from a previous (completed) task does NOT count as declared — the guard consults a per-run `planRunState`, not the raw blackboard plan.
 - When a plan is declared **in the current run**, `delegate` is disabled (PlanChecker guard via `launcher.HasDeclaredPlan()`); `execute_plan` is the only execution path for plan steps. A restored plan does not disable `delegate`.
 - Active skill bodies are rendered verbatim in the Conductor system prompt (no truncation).
-- The Small-LLM Lite swap only replaces the core directive; the injection-defense section is injected separately and UNCHANGED in both modes (strict constraint). The swap is gated on the SLM master toggle (`slm.enabled`) AND the active profile's `system_prompt.lite`, and never applies to specialized runs (e.g. goal derivation). See [../slm.md](../slm.md).
+- The Model Profiles Lite swap only replaces the core directive; the injection-defense section is injected separately and UNCHANGED in both modes (strict constraint). The swap is gated on the Model Profiles master toggle (`model_profiles.enabled`) AND the active profile's `system_prompt.lite`, and never applies to specialized runs (e.g. goal derivation). See [../model-profiles.md](../model-profiles.md).
 - The Conductor context is isolated from subagent contexts: subagents carry their own `ContextManager`, and only their summaries return to the Conductor as tool results.
 - The Delegation Registry is scoped to a single Conductor run; it is injected into the context at launch and does not outlive the run.
 - `finish` with pending async delegations is rejected: the executor's finish guard (`Executor.SetFinishGuard`, set by the sp4rk Conductor) errors while async delegations are pending, and the executor injects a nudge and retries rather than accepting finish. Finish is accepted only once each pending delegation completes or is cancelled via `cancel_delegation`; there is no implicit join — nothing waits.

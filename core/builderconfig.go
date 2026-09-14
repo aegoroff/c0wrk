@@ -18,7 +18,7 @@ type BuilderConfig struct {
 	MCP           BuilderMCPConfig
 	Orchestration BuilderOrchestrationConfig
 	GoalLoop      BuilderGoalLoopConfig
-	SLM           BuilderSLMConfig
+	ModelProfiles BuilderModelProfilesConfig
 	E2S           BuilderE2SConfig
 	ToolLimits    BuilderToolLimitsConfig
 	Timeouts      BuilderTimeoutsConfig
@@ -55,14 +55,14 @@ type BuilderConfig struct {
 }
 
 // ---------------------------------------------------------------------------
-// Small LLM profile
+// Model Profiles profile
 // ---------------------------------------------------------------------------
 
-// BuilderSLMConfig mirrors config.SLMConfig for the subset of the
+// BuilderModelProfilesConfig mirrors config.ModelProfilesConfig for the subset of the
 // profile that core consumes. core never imports backend/config, so values are
 // copied via ToBuilderConfig. Only the master toggle and the variants wired in
 // this step (Sampling, LoopHardening) are represented.
-type BuilderSLMConfig struct {
+type BuilderModelProfilesConfig struct {
 	// Enabled is the master toggle. When false every variant sub-toggle is
 	// ignored and behavior is identical to the un-profiled baseline.
 	Enabled bool
@@ -70,11 +70,11 @@ type BuilderSLMConfig struct {
 	// EssentialTools narrows the conductor's advertised tool set to an
 	// always-present subset to reduce per-prompt schema overhead for small
 	// models.
-	EssentialTools BuilderSLMEssentialConfig
+	EssentialTools BuilderModelProfilesEssentialConfig
 
 	// Sampling overrides LLM sampling parameters (temperature, top_p,
 	// reasoning effort) for more deterministic, lower-effort generation.
-	Sampling BuilderSLMSampling
+	Sampling BuilderModelProfilesSampling
 
 	// LoopHardening tightens the executor circuit-breaker thresholds so a
 	// small model that repeats itself or makes no progress is caught sooner.
@@ -82,51 +82,51 @@ type BuilderSLMConfig struct {
 
 	// Context applies aggressive context management: tighter compaction,
 	// stricter tool-output pruning, and a larger output token reserve.
-	Context BuilderSLMContext
+	Context BuilderModelProfilesContext
 
 	// SystemPrompt applies prompt-simplification variants (currently the Lite
 	// core-directive swap) to shrink the system prompt injected for a small
 	// model. When Lite is active, buildSystemPromptWith trades the verbose
 	// OrchestratorSystem directive for the compact OrchestratorSystemLite.
-	SystemPrompt BuilderSLMSystemPromptConfig
+	SystemPrompt BuilderModelProfilesSystemPromptConfig
 }
 
-// SLMSettingsFromBuilderConfig projects the core-layer BuilderSLMConfig onto
-// the orchestrator's runtime SLMSettings. It is the single mapping between the
-// two shapes: Build() uses it to populate OrchestratorConfig.SLM, and the
+// ModelProfilesSettingsFromBuilderConfig projects the core-layer BuilderModelProfilesConfig onto
+// the orchestrator's runtime ModelProfilesSettings. It is the single mapping between the
+// two shapes: Build() uses it to populate OrchestratorConfig.ModelProfiles, and the
 // backend uses it to push a refreshed snapshot onto already-built orchestrators
-// (via (*Orchestrator).SetSLMSettings) after a runtime SLM change. Keeping one
+// (via (*Orchestrator).SetModelProfilesSettings) after a runtime ModelProfiles change. Keeping one
 // mapping means the build-time and runtime-refreshed values can never diverge.
-func SLMSettingsFromBuilderConfig(cfg BuilderSLMConfig) SLMSettings {
-	return SLMSettings{
+func ModelProfilesSettingsFromBuilderConfig(cfg BuilderModelProfilesConfig) ModelProfilesSettings {
+	return ModelProfilesSettings{
 		Enabled: cfg.Enabled,
-		EssentialTools: SLMEssentialSettings{
+		EssentialTools: ModelProfilesEssentialSettings{
 			Enabled:             cfg.EssentialTools.Enabled,
 			AlwaysPresent:       cfg.EssentialTools.AlwaysPresent,
 			CompactDescriptions: cfg.EssentialTools.CompactDescriptions,
 		},
-		SystemPrompt: SLMSystemPromptSettings{
+		SystemPrompt: ModelProfilesSystemPromptSettings{
 			Lite:              cfg.SystemPrompt.Lite,
 			FewShot:           cfg.SystemPrompt.FewShot,
 			ReasoningScaffold: cfg.SystemPrompt.ReasoningScaffold,
 		},
-		LoopHardening: SLMLoopHardeningSettings{
+		LoopHardening: ModelProfilesLoopHardeningSettings{
 			Enabled:              cfg.LoopHardening.Enabled,
 			RepeatNudgeThreshold: cfg.LoopHardening.RepeatNudgeThreshold,
 		},
 	}
 }
 
-// BuilderSLMSystemPromptConfig holds the prompt-simplification variant
-// overrides for the small-LLM profile. Lite is the variant master toggle (it
+// BuilderModelProfilesSystemPromptConfig holds the prompt-simplification variant
+// overrides for the model-profile profile. Lite is the variant master toggle (it
 // mirrors config.SystemPromptConfig, which has no separate Enabled field, so
 // Enabled is not duplicated here). Lite swaps the core directive, FewShot
 // appends worked ReAct examples, ReasoningScaffold appends the
 // structured-thought template. Each is only honored when the variant is active
-// (master SLM.Enabled on AND Lite on); FewShot and ReasoningScaffold
+// (master ModelProfiles.Enabled on AND Lite on); FewShot and ReasoningScaffold
 // additionally require Lite, since the examples and scaffold are tailored to
 // the lite directive.
-type BuilderSLMSystemPromptConfig struct {
+type BuilderModelProfilesSystemPromptConfig struct {
 	// Lite swaps the verbose OrchestratorSystem core directive for the compact
 	// OrchestratorSystemLite directive. The shared sections (family overlay,
 	// verification mandate, injection defense, workspace, env, AGENTS.md,
@@ -142,12 +142,12 @@ type BuilderSLMSystemPromptConfig struct {
 	ReasoningScaffold bool
 }
 
-// BuilderSLMSampling holds the sampling-variant overrides. Every
+// BuilderModelProfilesSampling holds the sampling-variant overrides. Every
 // parameter uses zero as the "not set" sentinel: an unset field inherits the
 // per-family vendor preset (prompt.DefaultSampling) instead of clobbering it,
 // so enabling the variant with no explicit values is a behavioral no-op.
-type BuilderSLMSampling struct {
-	// Enabled gates this variant (in addition to the master SLM.Enabled).
+type BuilderModelProfilesSampling struct {
+	// Enabled gates this variant (in addition to the master ModelProfiles.Enabled).
 	Enabled bool
 
 	// Temperature sets generation temperature (lower = more deterministic).
@@ -187,7 +187,7 @@ type BuilderSLMSampling struct {
 // BuilderLoopHardening holds the circuit-breaker tightening overrides. Only
 // the thresholds present here are overridden; all others keep their baseline.
 type BuilderLoopHardening struct {
-	// Enabled gates this variant (in addition to the master SLM.Enabled).
+	// Enabled gates this variant (in addition to the master ModelProfiles.Enabled).
 	Enabled bool
 
 	RepeatNudgeThreshold         int
@@ -197,9 +197,9 @@ type BuilderLoopHardening struct {
 	SameToolRepeatNudgeThreshold int
 }
 
-// BuilderSLMCompaction holds the compaction-tightening overrides. Zero
+// BuilderModelProfilesCompaction holds the compaction-tightening overrides. Zero
 // values mean "do not override" — the executor baseline is kept for that knob.
-type BuilderSLMCompaction struct {
+type BuilderModelProfilesCompaction struct {
 	// KeepLast overrides the executor sliding-window keep-last count.
 	KeepLast int
 
@@ -210,15 +210,15 @@ type BuilderSLMCompaction struct {
 	TriggerPercent int
 }
 
-// BuilderSLMContext holds the aggressive context-management overrides:
+// BuilderModelProfilesContext holds the aggressive context-management overrides:
 // tighter compaction, stricter tool-output pruning, larger output token
 // reserve. Applied via applyContextManagement.
-type BuilderSLMContext struct {
-	// Enabled gates this variant (in addition to the master SLM.Enabled).
+type BuilderModelProfilesContext struct {
+	// Enabled gates this variant (in addition to the master ModelProfiles.Enabled).
 	Enabled bool
 
 	// Compaction overrides the executor compaction knobs.
-	Compaction BuilderSLMCompaction
+	Compaction BuilderModelProfilesCompaction
 
 	// ToolOutputKeepLastN overrides the executor tool-output pruning depth.
 	ToolOutputKeepLastN int
@@ -227,10 +227,10 @@ type BuilderSLMContext struct {
 	OutputTokenReserve int
 }
 
-// BuilderSLMEssentialConfig holds the always-present-tool-set narrowing
+// BuilderModelProfilesEssentialConfig holds the always-present-tool-set narrowing
 // settings for the essential-tools variant.
-type BuilderSLMEssentialConfig struct {
-	// Enabled gates this variant (in addition to the master SLM.Enabled).
+type BuilderModelProfilesEssentialConfig struct {
+	// Enabled gates this variant (in addition to the master ModelProfiles.Enabled).
 	Enabled bool
 
 	// AlwaysPresent is the allow-list of tool names always exposed when this
@@ -239,7 +239,7 @@ type BuilderSLMEssentialConfig struct {
 	AlwaysPresent []string
 
 	// CompactDescriptions swaps full builtin tool descriptions for one-line
-	// compact variants (small-LLM essential-tools extension).
+	// compact variants (model-profile essential-tools extension).
 	CompactDescriptions bool
 }
 

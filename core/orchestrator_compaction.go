@@ -215,7 +215,7 @@ func (o *Orchestrator) ManualCompactionAvailability() []CompactionAvailability {
 }
 
 // manualCompactionConfig builds the sp4rk strategy config from the
-// orchestrator's executor compaction settings (Small-LLM context overrides
+// orchestrator's executor compaction settings (Model Profiles context overrides
 // already applied by the builder — the same values buildContextFactory uses
 // for per-executor strategies).
 func (o *Orchestrator) manualCompactionConfig() sdkmemory.CompactionConfig {

@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { ChatInputToolbar } from './ChatInputToolbar'
-import { GOAL_BLOCKED_BY_SLM_REASON } from '@/lib/goalGate'
+import { GOAL_BLOCKED_BY_MODEL_PROFILES_REASON } from '@/lib/goalGate'
 import type { ChatInputController } from '@/hooks/useChatInputController'
 import { useInputModeStore } from '@/stores/inputModeStore'
 
@@ -41,12 +41,12 @@ vi.mock('@/hooks/useExperimentalFeatures', () => ({
   useExperimentalFeatures: () => false,
 }))
 
-// The toolbar consults the Small-LLM goal gate through this hook, whose real
+// The toolbar consults the Model Profiles goal gate through this hook, whose real
 // implementation also fetches the config via the Wails bindings (unavailable in
 // jsdom). Expose a mutable flag so each test drives the blocked/unblocked state.
-const slmGate = vi.hoisted(() => ({ blocked: false }))
-vi.mock('@/hooks/useSLMGate', () => ({
-  useSLMGate: () => slmGate.blocked,
+const modelProfilesGate = vi.hoisted(() => ({ blocked: false }))
+vi.mock('@/hooks/useModelProfilesGate', () => ({
+  useModelProfilesGate: () => modelProfilesGate.blocked,
 }))
 
 function makeController(overrides: Partial<ChatInputController>): ChatInputController {
@@ -122,7 +122,7 @@ function goalTrigger(): HTMLButtonElement {
 
 beforeEach(() => {
   useInputModeStore.setState({ goalEnabled: false })
-  slmGate.blocked = false
+  modelProfilesGate.blocked = false
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -199,22 +199,22 @@ describe('ChatInputToolbar resume lock during attachment uploads', () => {
   })
 })
 
-describe('ChatInputToolbar goal block under the Small-LLM gate', () => {
+describe('ChatInputToolbar goal block under the Model Profiles gate', () => {
   it('disables the goal toggle and shows the reason hint while blocked', () => {
-    slmGate.blocked = true
+    modelProfilesGate.blocked = true
     renderToolbar()
     expect(goalTrigger().disabled).toBe(true)
-    expect(goalTrigger().getAttribute('title')).toBe(GOAL_BLOCKED_BY_SLM_REASON)
+    expect(goalTrigger().getAttribute('title')).toBe(GOAL_BLOCKED_BY_MODEL_PROFILES_REASON)
     const hint = container.querySelector('[data-testid="goal-blocked-hint"]')
     expect(hint).not.toBeNull()
-    expect(hint?.textContent).toBe(GOAL_BLOCKED_BY_SLM_REASON)
+    expect(hint?.textContent).toBe(GOAL_BLOCKED_BY_MODEL_PROFILES_REASON)
   })
 
   it('auto-resets an armed goal toggle when the gate blocks', () => {
     act(() => {
       useInputModeStore.setState({ goalEnabled: true })
     })
-    slmGate.blocked = true
+    modelProfilesGate.blocked = true
     renderToolbar()
     expect(useInputModeStore.getState().goalEnabled).toBe(false)
   })

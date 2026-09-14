@@ -46,7 +46,7 @@ specs/
 │   ├── research.md
 │   ├── review.md
 │   ├── session-lifecycle.md
-│   ├── slm.md
+│   ├── model-profiles.md
 │   ├── tool-manager.md
 │   ├── verify-on-edit.md
 │   ├── workspace.md

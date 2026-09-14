@@ -1,6 +1,6 @@
 import { BarChart3 } from 'lucide-react'
 import { useUIStore } from '@/stores/uiStore'
-import { Toggle } from './SLMControls'
+import { Toggle } from './ModelProfilesControls'
 
 /**
  * General-tab control for the per-run session statistics row under the chat

@@ -29,17 +29,17 @@ type FrontendAPI struct {
 	configMu         sync.RWMutex
 	configPath       string
 	configLoadErrors []string
-	// slmGateResp caches the EFFECTIVE Small-LLM gate reported as
-	// ConfigResponse.slm. Resolving it needs the profile catalog, which is
+	// modelProfilesGateResp caches the EFFECTIVE Model Profiles gate reported as
+	// ConfigResponse.model_profiles. Resolving it needs the profile catalog, which is
 	// read from disk, so caching keeps GetConfig a pure in-memory read (it runs
 	// on every settings open — see the GUARANTEE on collectAllModels). Seeded at
-	// construction and refreshed by refreshSLMGateLocked at every SLM /
+	// construction and refreshed by refreshModelProfilesGateLocked at every ModelProfiles /
 	// experimental mutation. Guarded by configMu.
-	slmGateResp SLMSettingsResponse
-	// slmNotices carries one-shot Small-LLM profile notices (e.g. "the
+	modelProfilesGateResp ModelProfilesSettingsResponse
+	// modelProfilesNotices carries one-shot Model Profiles profile notices (e.g. "the
 	// active profile was deleted; switched to generic") for the NEXT
-	// GetSLMProfiles call. Guarded by configMu; drained on read.
-	slmNotices []string
+	// GetModelProfiles call. Guarded by configMu; drained on read.
+	modelProfilesNotices []string
 	// saveMu serializes full config-save sequences for writers that must not
 	// hold configMu across slow work (persist → No-Project provisioning →
 	// judge/router rebuild, currently UpdateLLMConfig). configMu above guards
@@ -289,11 +289,11 @@ func NewFrontendAPI(cfg FrontendAPIConfig) *FrontendAPI {
 		quitApp:         cfg.QuitApp,
 	}
 
-	// Seed the effective Small-LLM gate cache (ConfigResponse.slm) so GetConfig
-	// stays a pure in-memory read. Every later SLM / experimental mutation
-	// refreshes it via refreshSLMGateLocked.
+	// Seed the effective Model Profiles gate cache (ConfigResponse.model_profiles) so GetConfig
+	// stays a pure in-memory read. Every later ModelProfiles / experimental mutation
+	// refreshes it via refreshModelProfilesGateLocked.
 	f.configMu.Lock()
-	f.refreshSLMGateLocked()
+	f.refreshModelProfilesGateLocked()
 	f.configMu.Unlock()
 
 	// Mirror the trusted-repo list into the process-wide git trust registry

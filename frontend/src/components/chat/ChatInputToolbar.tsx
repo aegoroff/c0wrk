@@ -2,9 +2,9 @@ import { useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Play, Pause, Square, MessageSquare, Terminal, Sparkles, Loader2, FolderPlus, Paperclip } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { GOAL_BLOCKED_BY_SLM_REASON } from '@/lib/goalGate'
+import { GOAL_BLOCKED_BY_MODEL_PROFILES_REASON } from '@/lib/goalGate'
 import type { ChatInputController } from '@/hooks/useChatInputController'
-import { useSLMGate } from '@/hooks/useSLMGate'
+import { useModelProfilesGate } from '@/hooks/useModelProfilesGate'
 import { ModelCombobox } from './ModelCombobox'
 import { ReasoningCombobox } from './ReasoningCombobox'
 import { GoalToggle } from './GoalToggle'
@@ -55,17 +55,17 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
   // Budget selector is only meaningful when goal mode is enabled.
   const goalEnabled = useInputModeStore((s) => s.goalEnabled)
 
-  // Goal mode is unavailable while the Small-LLM profile's essential-tools
+  // Goal mode is unavailable while the Model Profiles profile's essential-tools
   // variant is active: the narrowing is applied only to the non-goal Conductor
   // path and the E2S branch (both run after goal mode's early return), so it
   // never narrows a goal run; if it were applied to a goal run it would hide
   // the goal-loop tooling (propose_goal, declare_goal_status,
   // declare_verification) and make the loop unrunnable.
-  // `useSLMGate` is the reactive form of lib/goalGate's authoritative rule;
+  // `useModelProfilesGate` is the reactive form of lib/goalGate's authoritative rule;
   // while it reports blocked we lock the goal toggle and explain why, and we
   // disarm any stale goal arming (the same "gate closed → clear the toggle"
   // discipline as the E2S disarm in useExperimentalFeatures).
-  const goalBlocked = useSLMGate()
+  const goalBlocked = useModelProfilesGate()
   const disarmGoal = useInputModeStore((s) => s.disarmGoal)
   useEffect(() => {
     if (goalBlocked) disarmGoal()
@@ -148,11 +148,11 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
         // the toolbar.
         <span
           className="text-xs italic text-warning truncate max-w-[320px]"
-          title={GOAL_BLOCKED_BY_SLM_REASON}
+          title={GOAL_BLOCKED_BY_MODEL_PROFILES_REASON}
           role="status"
           data-testid="goal-blocked-hint"
         >
-          {GOAL_BLOCKED_BY_SLM_REASON}
+          {GOAL_BLOCKED_BY_MODEL_PROFILES_REASON}
         </span>
       )}
       {mode === 'chat' && (

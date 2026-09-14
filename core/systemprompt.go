@@ -473,7 +473,7 @@ type systemPromptSpec struct {
 	// instructions that would conflict with its own directive.
 	specialized bool
 
-	// allowLiteVariants opts a specialized run into the small-LLM Lite prompt
+	// allowLiteVariants opts a specialized run into the model-profile Lite prompt
 	// swap. It is set ONLY for the goal derivation and goal verification agents
 	// (both assembled via buildSpecializedSystemPromptWithLite), never for
 	// subagent-profile specialized runs (conductor.go), whose profile body must
@@ -523,7 +523,7 @@ func buildSpecializedSystemPrompt(ctx context.Context, userMessage string, model
 }
 
 // buildSpecializedSystemPromptWithLite assembles a specialized Conductor
-// system prompt that OPTS INTO the small-LLM Lite prompt swap. It is used by
+// system prompt that OPTS INTO the model-profile Lite prompt swap. It is used by
 // the goal derivation and goal verification agents only. In addition to the
 // shared project-context prefix that buildSpecializedSystemPrompt injects, it
 // carries a Lite counterpart of its core directive: when Lite is active the
@@ -568,7 +568,7 @@ func buildSystemPromptWith(ctx context.Context, userMessage string, modelMeta ll
 		family = "default"
 	}
 
-	// Small-LLM prompt profile: when Lite is active, swap the verbose core
+	// Model Profiles prompt profile: when Lite is active, swap the verbose core
 	// directive for a compact Lite counterpart and conditionally append the
 	// reasoning scaffold (ReasoningScaffold) and the worked-example few-shot
 	// block (FewShot). The two sub-toggles are independent but only honored
@@ -589,7 +589,7 @@ func buildSystemPromptWith(ctx context.Context, userMessage string, modelMeta ll
 	coreDirective := spec.coreDirective
 	fewShot := ""
 	scaffold := ""
-	if slmLiteFromCtx(ctx) {
+	if modelProfilesLiteFromCtx(ctx) {
 		liteDirective := ""
 		switch {
 		case !spec.specialized:
@@ -599,7 +599,7 @@ func buildSystemPromptWith(ctx context.Context, userMessage string, modelMeta ll
 		}
 		if liteDirective != "" {
 			coreDirective = liteDirective
-			if profile, ok := slmPromptProfileFromCtx(ctx); ok {
+			if profile, ok := modelProfilesPromptProfileFromCtx(ctx); ok {
 				if profile.ReasoningScaffold {
 					scaffold = prompts.OrchestratorLiteScaffold
 				}

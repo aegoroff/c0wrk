@@ -196,20 +196,20 @@ func (m *mockBuilder) JudgeAvailable() bool {
 	return false
 }
 
-// activateCustomSLMProfile creates a writable custom SLM profile in f's
+// activateCustomModelProfile creates a writable custom ModelProfiles profile in f's
 // agent-dir store and makes it the active one, mirroring the production state
 // where knob edits target the active custom profile (predefined profiles are
 // read-only). Returns the activated profile.
-func activateCustomSLMProfile(t *testing.T, f *FrontendAPI) config.SLMProfile {
+func activateCustomModelProfile(t *testing.T, f *FrontendAPI) config.ModelProfile {
 	t.Helper()
-	profile, err := config.CreateCustomSLMProfile("Test Tuned", config.SLMProfileConfig{}, nil)
+	profile, err := config.CreateCustomModelProfile("Test Tuned", config.ModelProfileConfig{}, nil)
 	if err != nil {
-		t.Fatalf("CreateCustomSLMProfile: %v", err)
+		t.Fatalf("CreateCustomModelProfile: %v", err)
 	}
-	if err := config.SaveCustomSLMProfiles(config.SLMProfilesPath(f.agentDir), []config.SLMProfile{profile}); err != nil {
-		t.Fatalf("SaveCustomSLMProfiles: %v", err)
+	if err := config.SaveCustomModelProfiles(config.ModelProfilesPath(f.agentDir), []config.ModelProfile{profile}); err != nil {
+		t.Fatalf("SaveCustomModelProfiles: %v", err)
 	}
-	f.config.SLM.ActiveProfile = profile.ID
+	f.config.ModelProfiles.ActiveProfile = profile.ID
 	return profile
 }
 
@@ -232,9 +232,9 @@ func newTestAPI(t *testing.T) (*FrontendAPI, *mockBuilder, string) {
 		builderOverride: mock,
 	}
 	// Knob values live in the active profile: activate a writable custom one
-	// so SLM profile mutations have an editable target (the default "generic" active
+	// so ModelProfiles profile mutations have an editable target (the default "generic" active
 	// profile is predefined/read-only).
-	activateCustomSLMProfile(t, f)
+	activateCustomModelProfile(t, f)
 	return f, mock, cfgPath
 }
 
@@ -1518,23 +1518,23 @@ func TestGetSecuritySettings_ExecuteBlacklistDefaults(t *testing.T) {
 	}
 }
 
-// --- SLMConfig ---
+// --- ModelProfilesConfig ---
 
-// validSLMConfig is a profile that passes all validation rules. It is the
+// validModelProfilesConfig is a profile that passes all validation rules. It is the
 // baseline used by the happy-path tests; individual cases mutate copies.
-func validSLMValues() SLMProfileValues {
-	return SLMProfileValues{
-		EssentialTools: SLMEssentialToolsValues{
+func validModelProfilesValues() ModelProfileValues {
+	return ModelProfileValues{
+		EssentialTools: ModelProfilesEssentialToolsValues{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file", "edit_file"},
 		},
-		SystemPrompt: SLMSystemPromptResp{Lite: true},
-		Sampling: SLMSamplingResp{
+		SystemPrompt: ModelProfilesSystemPromptResp{Lite: true},
+		Sampling: ModelProfilesSamplingResp{
 			Enabled:     true,
 			Temperature: 0.1,
 			TopP:        0.9,
 		},
-		LoopHardening: SLMLoopHardeningResp{
+		LoopHardening: ModelProfilesLoopHardeningResp{
 			Enabled:                      true,
 			RepeatNudgeThreshold:         2,
 			ParseErrorAbortThreshold:     3,
@@ -1542,9 +1542,9 @@ func validSLMValues() SLMProfileValues {
 			FruitlessAbortThreshold:      5,
 			SameToolRepeatNudgeThreshold: 4,
 		},
-		Context: SLMContextResp{
+		Context: ModelProfilesContextResp{
 			Enabled: true,
-			Compaction: SLMCompactionResp{
+			Compaction: ModelProfilesCompactionResp{
 				KeepLast:       6,
 				BlockSize:      5,
 				TriggerPercent: 80,
@@ -1555,50 +1555,50 @@ func validSLMValues() SLMProfileValues {
 	}
 }
 
-// slmConfigReq wraps a copy of v into a values-only update request.
-func slmConfigReq(v SLMProfileValues) SLMProfileUpdateRequest {
+// modelProfilesConfigReq wraps a copy of v into a values-only update request.
+func modelProfilesConfigReq(v ModelProfileValues) ModelProfileUpdateRequest {
 	cfg := v
-	return SLMProfileUpdateRequest{Config: &cfg}
+	return ModelProfileUpdateRequest{Config: &cfg}
 }
 
-// slmFindProfile locates a profile DTO by id in a GetSLMProfiles response.
-func slmFindProfile(t *testing.T, resp SLMProfilesResponse, id string) SLMProfileDTO {
+// modelProfilesFindProfile locates a profile DTO by id in a GetModelProfiles response.
+func modelProfilesFindProfile(t *testing.T, resp ModelProfilesResponse, id string) ModelProfileDTO {
 	t.Helper()
 	for _, p := range resp.Profiles {
 		if p.ID == id {
 			return p
 		}
 	}
-	t.Fatalf("profile %q not found in the GetSLMProfiles response", id)
-	return SLMProfileDTO{}
+	t.Fatalf("profile %q not found in the GetModelProfiles response", id)
+	return ModelProfileDTO{}
 }
 
-// slmStoredProfile reads the custom store under f's agent dir.
-func slmStoredProfile(t *testing.T, f *FrontendAPI, id string) config.SLMProfile {
+// modelProfilesStoredProfile reads the custom store under f's agent dir.
+func modelProfilesStoredProfile(t *testing.T, f *FrontendAPI, id string) config.ModelProfile {
 	t.Helper()
-	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	profiles, _ := config.LoadCustomModelProfiles(config.ModelProfilesPath(f.agentDir))
 	for _, p := range profiles {
 		if p.ID == id {
 			return p
 		}
 	}
 	t.Fatalf("custom profile %q not found in the store", id)
-	return config.SLMProfile{}
+	return config.ModelProfile{}
 }
 
-// --- GetSLMProfiles ---
+// --- GetModelProfiles ---
 
-func TestGetSLMProfiles_ReturnsCatalog(t *testing.T) {
+func TestGetModelProfiles_ReturnsCatalog(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
 	// Push distinctive values through the public write path.
-	want := validSLMValues()
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(want)); err != nil {
-		t.Fatalf("UpdateSLMProfile: %v", err)
+	want := validModelProfilesValues()
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(want)); err != nil {
+		t.Fatalf("UpdateModelProfile: %v", err)
 	}
 
-	got := f.GetSLMProfiles()
+	got := f.GetModelProfiles()
 
 	if got.ActiveID != active.ID {
 		t.Errorf("ActiveID = %q, want %q", got.ActiveID, active.ID)
@@ -1619,15 +1619,15 @@ func TestGetSLMProfiles_ReturnsCatalog(t *testing.T) {
 			t.Errorf("profile %q has unexpected kind %q", p.ID, p.Kind)
 		}
 	}
-	if nPredefined != len(config.PredefinedSLMProfiles()) {
-		t.Errorf("predefined profiles = %d, want %d", nPredefined, len(config.PredefinedSLMProfiles()))
+	if nPredefined != len(config.PredefinedModelProfiles()) {
+		t.Errorf("predefined profiles = %d, want %d", nPredefined, len(config.PredefinedModelProfiles()))
 	}
 	if nCustom == 0 {
 		t.Error("no custom profiles in the catalog despite the activated store profile")
 	}
 
 	// The active profile's values round-trip through the DTO.
-	dto := slmFindProfile(t, got, active.ID)
+	dto := modelProfilesFindProfile(t, got, active.ID)
 	if !dto.Values.EssentialTools.Enabled || len(dto.Values.EssentialTools.AlwaysPresent) != 2 {
 		t.Errorf("active profile values did not round-trip: %+v", dto.Values.EssentialTools)
 	}
@@ -1640,9 +1640,9 @@ func TestGetSLMProfiles_ReturnsCatalog(t *testing.T) {
 	}
 }
 
-func TestGetSLMProfiles_NilConfigReturnsCatalogAndUniverse(t *testing.T) {
+func TestGetModelProfiles_NilConfigReturnsCatalogAndUniverse(t *testing.T) {
 	f := &FrontendAPI{}
-	got := f.GetSLMProfiles()
+	got := f.GetModelProfiles()
 	if got.ActiveID != "" {
 		t.Errorf("ActiveID = %q, want empty for nil config", got.ActiveID)
 	}
@@ -1652,34 +1652,34 @@ func TestGetSLMProfiles_NilConfigReturnsCatalogAndUniverse(t *testing.T) {
 	if got.SuggestedProfileID != nil {
 		t.Errorf("SuggestedProfileID = %v, want nil for nil config", *got.SuggestedProfileID)
 	}
-	if len(got.Profiles) != len(config.PredefinedSLMProfiles()) {
+	if len(got.Profiles) != len(config.PredefinedModelProfiles()) {
 		t.Errorf("profiles = %d, want the %d predefined entries (catalog is config-independent)",
-			len(got.Profiles), len(config.PredefinedSLMProfiles()))
+			len(got.Profiles), len(config.PredefinedModelProfiles()))
 	}
 	if got.BuiltinTools == nil || got.ToolGroups == nil || got.Warnings == nil || got.Profiles == nil {
 		t.Error("slices must be non-nil (JSON [] not null) even without an app/config")
 	}
 }
 
-// TestGetSLMProfiles_ReportsStoredEnabled verifies the master toggle is echoed
-// verbatim from config.yaml (slm.enabled) — it is not a per-profile value.
-func TestGetSLMProfiles_ReportsStoredEnabled(t *testing.T) {
+// TestGetModelProfiles_ReportsStoredEnabled verifies the master toggle is echoed
+// verbatim from config.yaml (model_profiles.enabled) — it is not a per-profile value.
+func TestGetModelProfiles_ReportsStoredEnabled(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 
-	f.config.SLM.Enabled = true
-	if got := f.GetSLMProfiles(); !got.Enabled {
-		t.Error("Enabled = false, want true when slm.enabled is true")
+	f.config.ModelProfiles.Enabled = true
+	if got := f.GetModelProfiles(); !got.Enabled {
+		t.Error("Enabled = false, want true when model_profiles.enabled is true")
 	}
 
-	f.config.SLM.Enabled = false
-	if got := f.GetSLMProfiles(); got.Enabled {
-		t.Error("Enabled = true, want false when slm.enabled is false")
+	f.config.ModelProfiles.Enabled = false
+	if got := f.GetModelProfiles(); got.Enabled {
+		t.Error("Enabled = true, want false when model_profiles.enabled is false")
 	}
 }
 
-func TestGetSLMProfiles_PickerAlwaysNonNil(t *testing.T) {
+func TestGetModelProfiles_PickerAlwaysNonNil(t *testing.T) {
 	f := &FrontendAPI{} // no app: registry unavailable
-	got := f.GetSLMProfiles()
+	got := f.GetModelProfiles()
 	if got.BuiltinTools == nil || len(got.BuiltinTools) != 0 {
 		t.Errorf("BuiltinTools = %v, want empty non-nil when the registry is unavailable", got.BuiltinTools)
 	}
@@ -1688,7 +1688,7 @@ func TestGetSLMProfiles_PickerAlwaysNonNil(t *testing.T) {
 	}
 }
 
-func TestGetSLMProfiles_SuggestedFromDefaultModel(t *testing.T) {
+func TestGetModelProfiles_SuggestedFromDefaultModel(t *testing.T) {
 	cases := []struct {
 		defaultModel string
 		want         string // "" means nil (no suggestion)
@@ -1704,7 +1704,7 @@ func TestGetSLMProfiles_SuggestedFromDefaultModel(t *testing.T) {
 		t.Run(tc.defaultModel, func(t *testing.T) {
 			f, _, _ := newTestAPI(t)
 			f.config.LLM.DefaultModel = tc.defaultModel
-			got := f.GetSLMProfiles()
+			got := f.GetModelProfiles()
 			if tc.want == "" {
 				if got.SuggestedProfileID != nil {
 					t.Fatalf("SuggestedProfileID = %q, want nil", *got.SuggestedProfileID)
@@ -1721,12 +1721,12 @@ func TestGetSLMProfiles_SuggestedFromDefaultModel(t *testing.T) {
 	}
 }
 
-// TestSuggestSLMProfileID_Normalization exercises the pure matcher: provider
+// TestSuggestModelProfileID_Normalization exercises the pure matcher: provider
 // prefixes are stripped ("Qwen/", "openrouter/qwen/", ":" keys), trailing
 // marketing suffixes collapse ("-instruct", "-it", ":free"), separators are
 // irrelevant, "generic" is never suggested, and unknown/custom names yield no
 // match.
-func TestSuggestSLMProfileID_Normalization(t *testing.T) {
+func TestSuggestModelProfileID_Normalization(t *testing.T) {
 	cases := []struct{ model, want string }{
 		{"qwen3.8-27b", "qwen3.8-27b"},
 		{"Qwen/Qwen3.8-27B", "qwen3.8-27b"},
@@ -1743,17 +1743,17 @@ func TestSuggestSLMProfileID_Normalization(t *testing.T) {
 		{"   ", ""},
 	}
 	for _, tc := range cases {
-		if got := suggestSLMProfileID(tc.model); got != tc.want {
-			t.Errorf("suggestSLMProfileID(%q) = %q, want %q", tc.model, got, tc.want)
+		if got := suggestModelProfileID(tc.model); got != tc.want {
+			t.Errorf("suggestModelProfileID(%q) = %q, want %q", tc.model, got, tc.want)
 		}
 	}
 }
 
-func TestGetSLMProfiles_DanglingActiveWarns(t *testing.T) {
+func TestGetModelProfiles_DanglingActiveWarns(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	f.config.SLM.ActiveProfile = "ghost-profile"
+	f.config.ModelProfiles.ActiveProfile = "ghost-profile"
 
-	got := f.GetSLMProfiles()
+	got := f.GetModelProfiles()
 	if got.ActiveID != "ghost-profile" {
 		t.Errorf("ActiveID = %q, want the stored (dangling) id", got.ActiveID)
 	}
@@ -1802,22 +1802,22 @@ func TestBuiltinToolInfos_ExcludesNonNarrowable(t *testing.T) {
 	}
 }
 
-// TestSLMToolGroups_FilteredToRegistered verifies the cluster projection:
+// TestModelProfilesToolGroups_FilteredToRegistered verifies the cluster projection:
 // member names absent from the picker universe are dropped, a cluster left with
 // no surviving member is omitted, and the surviving members keep catalog order.
-func TestSLMToolGroups_FilteredToRegistered(t *testing.T) {
+func TestModelProfilesToolGroups_FilteredToRegistered(t *testing.T) {
 	// A subset of the plan cluster plus a delegate tool is in the universe, so
 	// the subagents cluster keeps only delegate and the plan cluster only its two
 	// present members.
-	universe := []SLMBuiltinTool{
+	universe := []ModelProfilesBuiltinTool{
 		{Name: "declare_plan"},
 		{Name: "update_checklist"},
 		{Name: "delegate"},
 		{Name: "unrelated_tool"},
 	}
 
-	got := slmToolGroups(universe)
-	byID := make(map[string]SLMToolGroup, len(got))
+	got := modelProfilesToolGroups(universe)
+	byID := make(map[string]ModelProfilesToolGroup, len(got))
 	for _, g := range got {
 		byID[g.ID] = g
 	}
@@ -1847,58 +1847,58 @@ func TestSLMToolGroups_FilteredToRegistered(t *testing.T) {
 
 	// A cluster whose members are all absent from the universe is dropped: with
 	// only a plan member present, the subagents cluster has no surviving member.
-	onlyPlan := slmToolGroups([]SLMBuiltinTool{{Name: "execute_plan"}})
+	onlyPlan := modelProfilesToolGroups([]ModelProfilesBuiltinTool{{Name: "execute_plan"}})
 	if len(onlyPlan) != 1 || onlyPlan[0].ID != "plan" {
 		t.Errorf("clusters = %v, want just plan (subagents has no present member)", onlyPlan)
 	}
 }
 
-// --- CreateSLMProfile ---
+// --- CreateModelProfile ---
 
-func TestCreateSLMProfile_FromPredefinedBase(t *testing.T) {
+func TestCreateModelProfile_FromPredefinedBase(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	id, err := f.CreateSLMProfile("qwen3.8-27b", "My Qwen")
+	id, err := f.CreateModelProfile("qwen3.8-27b", "My Qwen")
 	if err != nil {
-		t.Fatalf("CreateSLMProfile: %v", err)
+		t.Fatalf("CreateModelProfile: %v", err)
 	}
 	if id != "my-qwen" {
 		t.Errorf("generated id = %q, want my-qwen", id)
 	}
 
 	// Values copied from the base, kind custom, active unchanged.
-	created := slmStoredProfile(t, f, id)
-	base, _ := config.FindPredefinedSLMProfile("qwen3.8-27b")
+	created := modelProfilesStoredProfile(t, f, id)
+	base, _ := config.FindPredefinedModelProfile("qwen3.8-27b")
 	if !reflect.DeepEqual(created.Config, base.Config) {
 		t.Errorf("created values differ from the base profile")
 	}
-	if f.config.SLM.ActiveProfile != active.ID {
-		t.Errorf("active profile changed to %q, create must not select", f.config.SLM.ActiveProfile)
+	if f.config.ModelProfiles.ActiveProfile != active.ID {
+		t.Errorf("active profile changed to %q, create must not select", f.config.ModelProfiles.ActiveProfile)
 	}
 	if mock.rebuildRouterCalls != 1 {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 }
 
-func TestCreateSLMProfile_EmptyBaseMeansGeneric(t *testing.T) {
+func TestCreateModelProfile_EmptyBaseMeansGeneric(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 
-	id, err := f.CreateSLMProfile("", "From Generic")
+	id, err := f.CreateModelProfile("", "From Generic")
 	if err != nil {
-		t.Fatalf("CreateSLMProfile: %v", err)
+		t.Fatalf("CreateModelProfile: %v", err)
 	}
-	created := slmStoredProfile(t, f, id)
-	generic, _ := config.FindPredefinedSLMProfile(config.SLMGenericProfileID)
+	created := modelProfilesStoredProfile(t, f, id)
+	generic, _ := config.FindPredefinedModelProfile(config.ModelProfilesGenericProfileID)
 	if !reflect.DeepEqual(created.Config, generic.Config) {
 		t.Error("created values differ from the generic base")
 	}
 }
 
-func TestCreateSLMProfile_UnknownBaseRejected(t *testing.T) {
+func TestCreateModelProfile_UnknownBaseRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 
-	if _, err := f.CreateSLMProfile("no-such-profile", "X"); err == nil {
+	if _, err := f.CreateModelProfile("no-such-profile", "X"); err == nil {
 		t.Fatal("expected error for an unknown base id")
 	}
 	if mock.rebuildRouterCalls != 0 {
@@ -1906,10 +1906,10 @@ func TestCreateSLMProfile_UnknownBaseRejected(t *testing.T) {
 	}
 }
 
-func TestCreateSLMProfile_NameCollisionsRejected(t *testing.T) {
+func TestCreateModelProfile_NameCollisionsRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 
-	predefined := config.PredefinedSLMProfiles()[0]
+	predefined := config.PredefinedModelProfiles()[0]
 	cases := []struct {
 		name   string
 		reason string
@@ -1919,24 +1919,24 @@ func TestCreateSLMProfile_NameCollisionsRejected(t *testing.T) {
 		{"   ", "empty after trim"},
 	}
 	for _, tc := range cases {
-		if _, err := f.CreateSLMProfile("generic", tc.name); err == nil {
+		if _, err := f.CreateModelProfile("generic", tc.name); err == nil {
 			t.Errorf("expected error for a name that %s, got nil", tc.reason)
 		}
 	}
 	// The store is untouched by the rejected creates.
-	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	profiles, _ := config.LoadCustomModelProfiles(config.ModelProfilesPath(f.agentDir))
 	if len(profiles) != 1 {
 		t.Errorf("custom store = %d profiles, want 1 (untouched)", len(profiles))
 	}
 }
 
-// --- UpdateSLMProfile ---
+// --- UpdateModelProfile ---
 
-func TestUpdateSLMProfile_PersistsAndRebuilds(t *testing.T) {
+func TestUpdateModelProfile_PersistsAndRebuilds(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err != nil {
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(validModelProfilesValues())); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -1945,28 +1945,28 @@ func TestUpdateSLMProfile_PersistsAndRebuilds(t *testing.T) {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 	// Values persisted in the store.
-	stored := slmStoredProfile(t, f, active.ID)
+	stored := modelProfilesStoredProfile(t, f, active.ID)
 	if !stored.Config.EssentialTools.Enabled {
 		t.Error("stored values were not applied")
 	}
 }
 
-func TestUpdateSLMProfile_NilConfig(t *testing.T) {
+func TestUpdateModelProfile_NilConfig(t *testing.T) {
 	f := &FrontendAPI{}
-	err := f.UpdateSLMProfile("any", slmConfigReq(validSLMValues()))
+	err := f.UpdateModelProfile("any", modelProfilesConfigReq(validModelProfilesValues()))
 	if err == nil {
 		t.Fatal("expected error when config is nil")
 	}
 }
 
-// TestUpdateSLMProfile_PredefinedRejected verifies the read-only semantics:
+// TestUpdateModelProfile_PredefinedRejected verifies the read-only semantics:
 // predefined profiles are hard-coded, so an update is rejected before any
 // mutation of config.yaml or the profile store.
-func TestUpdateSLMProfile_PredefinedRejected(t *testing.T) {
+func TestUpdateModelProfile_PredefinedRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	err := f.UpdateSLMProfile(config.SLMGenericProfileID, slmConfigReq(validSLMValues()))
+	err := f.UpdateModelProfile(config.ModelProfilesGenericProfileID, modelProfilesConfigReq(validModelProfilesValues()))
 	if err == nil {
 		t.Fatal("expected error for a predefined profile id")
 	}
@@ -1977,20 +1977,20 @@ func TestUpdateSLMProfile_PredefinedRejected(t *testing.T) {
 		t.Errorf("RebuildRouter called %d times, want 0 (nothing was applied)", mock.rebuildRouterCalls)
 	}
 	// The custom store must be untouched.
-	if err := f.UpdateSLMProfile("unknown-id", slmConfigReq(validSLMValues())); err == nil {
+	if err := f.UpdateModelProfile("unknown-id", modelProfilesConfigReq(validModelProfilesValues())); err == nil {
 		t.Fatal("expected error for an unknown profile id")
 	}
-	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	profiles, _ := config.LoadCustomModelProfiles(config.ModelProfilesPath(f.agentDir))
 	if len(profiles) == 0 {
 		t.Fatal("custom store lost its profiles from rejected updates")
 	}
 	_ = active
 }
 
-func TestUpdateSLMProfile_UnknownIDRejected(t *testing.T) {
+func TestUpdateModelProfile_UnknownIDRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 
-	if err := f.UpdateSLMProfile("ghost", slmConfigReq(validSLMValues())); err == nil {
+	if err := f.UpdateModelProfile("ghost", modelProfilesConfigReq(validModelProfilesValues())); err == nil {
 		t.Fatal("expected error for an unknown profile id")
 	}
 	if mock.rebuildRouterCalls != 0 {
@@ -1998,15 +1998,15 @@ func TestUpdateSLMProfile_UnknownIDRejected(t *testing.T) {
 	}
 }
 
-func TestUpdateSLMProfile_Rename(t *testing.T) {
+func TestUpdateModelProfile_Rename(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
 	newName := "Renamed Tuned"
-	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{Name: &newName}); err != nil {
+	if err := f.UpdateModelProfile(active.ID, ModelProfileUpdateRequest{Name: &newName}); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	stored := slmStoredProfile(t, f, active.ID)
+	stored := modelProfilesStoredProfile(t, f, active.ID)
 	if stored.Name != newName {
 		t.Errorf("stored name = %q, want %q", stored.Name, newName)
 	}
@@ -2015,109 +2015,109 @@ func TestUpdateSLMProfile_Rename(t *testing.T) {
 	}
 }
 
-// TestUpdateSLMProfile_RenameCollisionRejected: a rename that lands on a
+// TestUpdateModelProfile_RenameCollisionRejected: a rename that lands on a
 // predefined name or another custom profile's name is rejected without a
 // write; renaming to the profile's own name is a no-op and allowed.
-func TestUpdateSLMProfile_RenameCollisionRejected(t *testing.T) {
+func TestUpdateModelProfile_RenameCollisionRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	first := activateCustomSLMProfile(t, f) // "Test Tuned"
-	secondID, err := f.CreateSLMProfile("generic", "Second Profile")
+	first := activateCustomModelProfile(t, f) // "Test Tuned"
+	secondID, err := f.CreateModelProfile("generic", "Second Profile")
 	if err != nil {
-		t.Fatalf("CreateSLMProfile: %v", err)
+		t.Fatalf("CreateModelProfile: %v", err)
 	}
 
-	predefinedName := config.PredefinedSLMProfiles()[0].Name
+	predefinedName := config.PredefinedModelProfiles()[0].Name
 	for _, tc := range []struct{ name, why string }{
 		{predefinedName, "predefined name"},
 		{first.Name, "another custom profile's name"},
 		{"  ", "empty after trim"},
 	} {
 		name := tc.name
-		if err := f.UpdateSLMProfile(secondID, SLMProfileUpdateRequest{Name: &name}); err == nil {
+		if err := f.UpdateModelProfile(secondID, ModelProfileUpdateRequest{Name: &name}); err == nil {
 			t.Errorf("rename to %s (%q) must be rejected", tc.why, tc.name)
 		}
 	}
 	// Store unchanged: both profiles keep their names.
-	if got := slmStoredProfile(t, f, secondID).Name; got != "Second Profile" {
+	if got := modelProfilesStoredProfile(t, f, secondID).Name; got != "Second Profile" {
 		t.Errorf("rejected rename leaked: second profile name = %q, want Second Profile", got)
 	}
 	// Renaming to the own name is allowed (no-op).
 	own := "Second Profile"
-	if err := f.UpdateSLMProfile(secondID, SLMProfileUpdateRequest{Name: &own}); err != nil {
+	if err := f.UpdateModelProfile(secondID, ModelProfileUpdateRequest{Name: &own}); err != nil {
 		t.Fatalf("rename to the own name must be allowed, got: %v", err)
 	}
 }
 
-func TestUpdateSLMProfile_PartialFields(t *testing.T) {
+func TestUpdateModelProfile_PartialFields(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
 	// Baseline values.
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err != nil {
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(validModelProfilesValues())); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
 	// Name-only update keeps the values.
 	newName := "Only Renamed"
-	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{Name: &newName}); err != nil {
+	if err := f.UpdateModelProfile(active.ID, ModelProfileUpdateRequest{Name: &newName}); err != nil {
 		t.Fatalf("name-only update: %v", err)
 	}
-	stored := slmStoredProfile(t, f, active.ID)
+	stored := modelProfilesStoredProfile(t, f, active.ID)
 	if stored.Name != newName || !stored.Config.EssentialTools.Enabled {
 		t.Errorf("name-only update must keep values: name=%q essential=%v", stored.Name, stored.Config.EssentialTools.Enabled)
 	}
 	// Values-only update keeps the name.
-	other := validSLMValues()
+	other := validModelProfilesValues()
 	other.Sampling.Temperature = 0.3
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(other)); err != nil {
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(other)); err != nil {
 		t.Fatalf("values-only update: %v", err)
 	}
-	stored = slmStoredProfile(t, f, active.ID)
+	stored = modelProfilesStoredProfile(t, f, active.ID)
 	if stored.Name != newName || stored.Config.Sampling.Temperature != 0.3 {
 		t.Errorf("values-only update must keep the name: name=%q temp=%v", stored.Name, stored.Config.Sampling.Temperature)
 	}
 	// Empty request is a no-op.
-	if err := f.UpdateSLMProfile(active.ID, SLMProfileUpdateRequest{}); err != nil {
+	if err := f.UpdateModelProfile(active.ID, ModelProfileUpdateRequest{}); err != nil {
 		t.Fatalf("empty request must be a no-op, got: %v", err)
 	}
 }
 
-// TestUpdateSLMProfile_InvalidValuesRejectedWithoutWrite: every invalid value
+// TestUpdateModelProfile_InvalidValuesRejectedWithoutWrite: every invalid value
 // is rejected before any mutation — the store keeps its previous content and
 // no router rebuild happens.
-func TestUpdateSLMProfile_InvalidValuesRejectedWithoutWrite(t *testing.T) {
+func TestUpdateModelProfile_InvalidValuesRejectedWithoutWrite(t *testing.T) {
 	cases := []struct {
 		name   string
-		mutate func(*SLMProfileValues)
+		mutate func(*ModelProfileValues)
 	}{
-		{"negative loop threshold", func(v *SLMProfileValues) { v.LoopHardening.FruitlessAbortThreshold = -5 }},
-		{"zero loop threshold while enabled", func(v *SLMProfileValues) { v.LoopHardening.RepeatNudgeThreshold = 0 }},
-		{"keep_last below 2", func(v *SLMProfileValues) { v.Context.Compaction.KeepLast = 1 }},
-		{"trigger_percent 100", func(v *SLMProfileValues) { v.Context.Compaction.TriggerPercent = 100 }},
-		{"trigger_percent zero", func(v *SLMProfileValues) { v.Context.Compaction.TriggerPercent = 0 }},
-		{"block_size below 2", func(v *SLMProfileValues) { v.Context.Compaction.BlockSize = 1 }},
-		{"tool_output_keep_last_n zero", func(v *SLMProfileValues) { v.Context.ToolOutputKeepLastN = 0 }},
-		{"output_token_reserve zero", func(v *SLMProfileValues) { v.Context.OutputTokenReserve = 0 }},
-		{"negative temperature", func(v *SLMProfileValues) { v.Sampling.Temperature = -0.5 }},
-		{"top_p above 1", func(v *SLMProfileValues) { v.Sampling.TopP = 1.5 }},
-		{"top_k negative", func(v *SLMProfileValues) { v.Sampling.TopK = -3 }},
-		{"repetition_penalty below 1", func(v *SLMProfileValues) { v.Sampling.RepetitionPenalty = 0.5 }},
-		{"presence_penalty above 2", func(v *SLMProfileValues) { v.Sampling.PresencePenalty = 2.5 }},
-		{"invalid reasoning effort", func(v *SLMProfileValues) { v.Sampling.ReasoningEffort = "ultra" }},
+		{"negative loop threshold", func(v *ModelProfileValues) { v.LoopHardening.FruitlessAbortThreshold = -5 }},
+		{"zero loop threshold while enabled", func(v *ModelProfileValues) { v.LoopHardening.RepeatNudgeThreshold = 0 }},
+		{"keep_last below 2", func(v *ModelProfileValues) { v.Context.Compaction.KeepLast = 1 }},
+		{"trigger_percent 100", func(v *ModelProfileValues) { v.Context.Compaction.TriggerPercent = 100 }},
+		{"trigger_percent zero", func(v *ModelProfileValues) { v.Context.Compaction.TriggerPercent = 0 }},
+		{"block_size below 2", func(v *ModelProfileValues) { v.Context.Compaction.BlockSize = 1 }},
+		{"tool_output_keep_last_n zero", func(v *ModelProfileValues) { v.Context.ToolOutputKeepLastN = 0 }},
+		{"output_token_reserve zero", func(v *ModelProfileValues) { v.Context.OutputTokenReserve = 0 }},
+		{"negative temperature", func(v *ModelProfileValues) { v.Sampling.Temperature = -0.5 }},
+		{"top_p above 1", func(v *ModelProfileValues) { v.Sampling.TopP = 1.5 }},
+		{"top_k negative", func(v *ModelProfileValues) { v.Sampling.TopK = -3 }},
+		{"repetition_penalty below 1", func(v *ModelProfileValues) { v.Sampling.RepetitionPenalty = 0.5 }},
+		{"presence_penalty above 2", func(v *ModelProfileValues) { v.Sampling.PresencePenalty = 2.5 }},
+		{"invalid reasoning effort", func(v *ModelProfileValues) { v.Sampling.ReasoningEffort = "ultra" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, mock, _ := newTestAPI(t)
-			active := activateCustomSLMProfile(t, f)
+			active := activateCustomModelProfile(t, f)
 
-			values := validSLMValues()
+			values := validModelProfilesValues()
 			tc.mutate(&values)
 
-			if err := f.UpdateSLMProfile(active.ID, slmConfigReq(values)); err == nil {
+			if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(values)); err == nil {
 				t.Fatal("expected validation error")
 			}
 			// Rejected without a write: the store keeps the zero-valued
 			// profile created by the helper.
-			stored := slmStoredProfile(t, f, active.ID)
+			stored := modelProfilesStoredProfile(t, f, active.ID)
 			if stored.Config.EssentialTools.Enabled {
 				t.Error("rejected update leaked into the profile store")
 			}
@@ -2128,95 +2128,95 @@ func TestUpdateSLMProfile_InvalidValuesRejectedWithoutWrite(t *testing.T) {
 	}
 }
 
-func TestUpdateSLMProfile_ZeroSentinelsAndDisabledVariants(t *testing.T) {
+func TestUpdateModelProfile_ZeroSentinelsAndDisabledVariants(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
 	// Zero sampling numerics mean "inherit the vendor preset" — valid.
-	values := validSLMValues()
+	values := validModelProfilesValues()
 	values.Sampling.Temperature = 0
 	values.Sampling.TopP = 0
 	values.Sampling.TopK = 0
 	values.Sampling.RepetitionPenalty = 0
 	values.Sampling.PresencePenalty = 0
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(values)); err != nil {
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(values)); err != nil {
 		t.Fatalf("zero sampling sentinels must be accepted, got: %v", err)
 	}
 	// All variants disabled: zero values are acceptable (variant logic inert).
-	empty := SLMProfileValues{}
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(empty)); err != nil {
+	empty := ModelProfileValues{}
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(empty)); err != nil {
 		t.Fatalf("all-variants-off payload must be accepted, got: %v", err)
 	}
 	// Empty always_present is valid: protected/MCP tools are kept implicitly.
-	noPins := SLMProfileValues{EssentialTools: SLMEssentialToolsValues{Enabled: true}}
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(noPins)); err != nil {
+	noPins := ModelProfileValues{EssentialTools: ModelProfilesEssentialToolsValues{Enabled: true}}
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(noPins)); err != nil {
 		t.Fatalf("empty always_present must be accepted, got: %v", err)
 	}
 }
 
-// TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched forces the store
+// TestUpdateModelProfile_StoreWriteFailureLeavesStateUntouched forces the store
 // write to fail and verifies nothing changed. The store persists with an
-// atomic temp-file-then-rename (see config.SaveCustomSLMProfiles), so
+// atomic temp-file-then-rename (see config.SaveCustomModelProfiles), so
 // occupying that temp sibling with a directory makes os.WriteFile fail on
 // every platform. Making the agent dir read-only via os.Chmod cannot: on
 // Windows the read-only attribute does not block creating files inside a
 // directory, so the write would silently succeed.
-func TestUpdateSLMProfile_StoreWriteFailureLeavesStateUntouched(t *testing.T) {
+func TestUpdateModelProfile_StoreWriteFailureLeavesStateUntouched(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
-	before := slmStoredProfile(t, f, active.ID)
+	active := activateCustomModelProfile(t, f)
+	before := modelProfilesStoredProfile(t, f, active.ID)
 
 	// Block the atomic write: a directory at the temp path makes the
 	// temp-file creation fail before it can be renamed into place.
-	tmpPath := config.SLMProfilesPath(f.agentDir) + ".tmp"
+	tmpPath := config.ModelProfilesPath(f.agentDir) + ".tmp"
 	if err := os.Mkdir(tmpPath, 0o755); err != nil {
 		t.Fatalf("cannot occupy the store temp path %q: %v", tmpPath, err)
 	}
 
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(validSLMValues())); err == nil {
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(validModelProfilesValues())); err == nil {
 		t.Fatal("expected error when the store write fails")
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0 (nothing was applied)", mock.rebuildRouterCalls)
 	}
-	after := slmStoredProfile(t, f, active.ID)
+	after := modelProfilesStoredProfile(t, f, active.ID)
 	if diff := cmp.Diff(before, after); diff != "" {
 		t.Errorf("failed store write changed the persisted profile (-before +after):\n%s", diff)
 	}
 }
 
-// --- DeleteSLMProfile ---
+// --- DeleteModelProfile ---
 
-func TestDeleteSLMProfile_NonActiveCustom(t *testing.T) {
+func TestDeleteModelProfile_NonActiveCustom(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
-	victim, err := f.CreateSLMProfile("generic", "Doomed Copy")
+	active := activateCustomModelProfile(t, f)
+	victim, err := f.CreateModelProfile("generic", "Doomed Copy")
 	if err != nil {
-		t.Fatalf("CreateSLMProfile: %v", err)
+		t.Fatalf("CreateModelProfile: %v", err)
 	}
 
-	if err := f.DeleteSLMProfile(victim); err != nil {
-		t.Fatalf("DeleteSLMProfile: %v", err)
+	if err := f.DeleteModelProfile(victim); err != nil {
+		t.Fatalf("DeleteModelProfile: %v", err)
 	}
-	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	profiles, _ := config.LoadCustomModelProfiles(config.ModelProfilesPath(f.agentDir))
 	for _, p := range profiles {
 		if p.ID == victim {
 			t.Fatal("deleted profile still in the store")
 		}
 	}
-	if f.config.SLM.ActiveProfile != active.ID {
-		t.Errorf("active profile changed to %q; deleting a non-active profile must not touch it", f.config.SLM.ActiveProfile)
+	if f.config.ModelProfiles.ActiveProfile != active.ID {
+		t.Errorf("active profile changed to %q; deleting a non-active profile must not touch it", f.config.ModelProfiles.ActiveProfile)
 	}
 	if mock.rebuildRouterCalls != 2 { // 1 create + 1 delete
 		t.Errorf("RebuildRouter called %d times, want 2", mock.rebuildRouterCalls)
 	}
 }
 
-func TestDeleteSLMProfile_PredefinedRejected(t *testing.T) {
+func TestDeleteModelProfile_PredefinedRejected(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 
-	for _, p := range config.PredefinedSLMProfiles() {
-		if err := f.DeleteSLMProfile(p.ID); err == nil {
+	for _, p := range config.PredefinedModelProfiles() {
+		if err := f.DeleteModelProfile(p.ID); err == nil {
 			t.Fatalf("expected error deleting the predefined profile %q", p.ID)
 		}
 	}
@@ -2225,41 +2225,41 @@ func TestDeleteSLMProfile_PredefinedRejected(t *testing.T) {
 	}
 }
 
-func TestDeleteSLMProfile_UnknownIDRejected(t *testing.T) {
+func TestDeleteModelProfile_UnknownIDRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	if err := f.DeleteSLMProfile("ghost"); err == nil {
+	if err := f.DeleteModelProfile("ghost"); err == nil {
 		t.Fatal("expected error for an unknown profile id")
 	}
 }
 
-// TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric is the acceptance
+// TestDeleteModelProfile_ActiveCustomFallsBackToGeneric is the acceptance
 // scenario: deleting the ACTIVE custom profile switches the active id to
-// generic in memory AND in config.yaml, and the NEXT GetSLMProfiles reports
+// generic in memory AND in config.yaml, and the NEXT GetModelProfiles reports
 // the generic active id plus a one-shot warning explaining the switch (the
 // second Get no longer carries the notice).
-func TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
+func TestDeleteModelProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 	// Make the store hold exactly one active custom profile.
-	f.config.SLM.ActiveProfile = ""
-	active := activateCustomSLMProfile(t, f)
+	f.config.ModelProfiles.ActiveProfile = ""
+	active := activateCustomModelProfile(t, f)
 
-	if err := f.DeleteSLMProfile(active.ID); err != nil {
-		t.Fatalf("DeleteSLMProfile(active): %v", err)
+	if err := f.DeleteModelProfile(active.ID); err != nil {
+		t.Fatalf("DeleteModelProfile(active): %v", err)
 	}
 
 	// In-memory and persisted active id is generic.
-	if f.config.SLM.ActiveProfile != config.SLMGenericProfileID {
-		t.Errorf("in-memory active = %q, want generic", f.config.SLM.ActiveProfile)
+	if f.config.ModelProfiles.ActiveProfile != config.ModelProfilesGenericProfileID {
+		t.Errorf("in-memory active = %q, want generic", f.config.ModelProfiles.ActiveProfile)
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.SLM.ActiveProfile != config.SLMGenericProfileID {
-		t.Errorf("persisted active = %q, want generic", persisted.SLM.ActiveProfile)
+	if persisted.ModelProfiles.ActiveProfile != config.ModelProfilesGenericProfileID {
+		t.Errorf("persisted active = %q, want generic", persisted.ModelProfiles.ActiveProfile)
 	}
 	// The profile is gone from the store.
-	profiles, _ := config.LoadCustomSLMProfiles(config.SLMProfilesPath(f.agentDir))
+	profiles, _ := config.LoadCustomModelProfiles(config.ModelProfilesPath(f.agentDir))
 	for _, p := range profiles {
 		if p.ID == active.ID {
 			t.Fatal("deleted profile still in the store")
@@ -2270,9 +2270,9 @@ func TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
 	}
 
 	// The next Get reports generic as active plus the one-shot warning.
-	got := f.GetSLMProfiles()
-	if got.ActiveID != config.SLMGenericProfileID {
-		t.Errorf("GetSLMProfiles active = %q, want generic", got.ActiveID)
+	got := f.GetModelProfiles()
+	if got.ActiveID != config.ModelProfilesGenericProfileID {
+		t.Errorf("GetModelProfiles active = %q, want generic", got.ActiveID)
 	}
 	found := false
 	for _, w := range got.Warnings {
@@ -2284,7 +2284,7 @@ func TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
 		t.Errorf("next Get must carry the delete notice, got warnings: %v", got.Warnings)
 	}
 	// The notice is one-shot.
-	again := f.GetSLMProfiles()
+	again := f.GetModelProfiles()
 	for _, w := range again.Warnings {
 		if strings.Contains(w, "was deleted") {
 			t.Errorf("the delete notice must not repeat, got warnings: %v", again.Warnings)
@@ -2292,279 +2292,279 @@ func TestDeleteSLMProfile_ActiveCustomFallsBackToGeneric(t *testing.T) {
 	}
 }
 
-// TestDeleteSLMProfile_ActiveConfigPersistFailureRollsBack: when config.yaml
+// TestDeleteModelProfile_ActiveConfigPersistFailureRollsBack: when config.yaml
 // cannot be written, the delete aborts — the profile stays in the store and
 // the active id keeps pointing at it.
-func TestDeleteSLMProfile_ActiveConfigPersistFailureRollsBack(t *testing.T) {
+func TestDeleteModelProfile_ActiveConfigPersistFailureRollsBack(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	f.config.SLM.ActiveProfile = ""
-	active := activateCustomSLMProfile(t, f)
+	f.config.ModelProfiles.ActiveProfile = ""
+	active := activateCustomModelProfile(t, f)
 
 	f.configPath = "" // force the config.yaml persist to fail
 
-	if err := f.DeleteSLMProfile(active.ID); err == nil {
+	if err := f.DeleteModelProfile(active.ID); err == nil {
 		t.Fatal("expected error when the config persist fails")
 	}
-	if f.config.SLM.ActiveProfile != active.ID {
-		t.Errorf("active id = %q, want %q (rolled back)", f.config.SLM.ActiveProfile, active.ID)
+	if f.config.ModelProfiles.ActiveProfile != active.ID {
+		t.Errorf("active id = %q, want %q (rolled back)", f.config.ModelProfiles.ActiveProfile, active.ID)
 	}
-	slmStoredProfile(t, f, active.ID) // still in the store
+	modelProfilesStoredProfile(t, f, active.ID) // still in the store
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
 	}
 }
 
-// --- SelectSLMProfile ---
+// --- SelectModelProfile ---
 
-func TestSelectSLMProfile_PersistsActiveID(t *testing.T) {
+func TestSelectModelProfile_PersistsActiveID(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	if err := f.SelectSLMProfile("qwen3.8-27b"); err != nil {
-		t.Fatalf("SelectSLMProfile: %v", err)
+	if err := f.SelectModelProfile("qwen3.8-27b"); err != nil {
+		t.Fatalf("SelectModelProfile: %v", err)
 	}
-	if f.config.SLM.ActiveProfile != "qwen3.8-27b" {
-		t.Errorf("in-memory active = %q, want qwen3.8-27b", f.config.SLM.ActiveProfile)
+	if f.config.ModelProfiles.ActiveProfile != "qwen3.8-27b" {
+		t.Errorf("in-memory active = %q, want qwen3.8-27b", f.config.ModelProfiles.ActiveProfile)
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.SLM.ActiveProfile != "qwen3.8-27b" {
-		t.Errorf("persisted active = %q, want qwen3.8-27b", persisted.SLM.ActiveProfile)
+	if persisted.ModelProfiles.ActiveProfile != "qwen3.8-27b" {
+		t.Errorf("persisted active = %q, want qwen3.8-27b", persisted.ModelProfiles.ActiveProfile)
 	}
 	if mock.rebuildRouterCalls != 1 {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 
 	// Selecting a custom profile works the same way.
-	if err := f.SelectSLMProfile(active.ID); err != nil {
-		t.Fatalf("SelectSLMProfile(custom): %v", err)
+	if err := f.SelectModelProfile(active.ID); err != nil {
+		t.Fatalf("SelectModelProfile(custom): %v", err)
 	}
-	if f.config.SLM.ActiveProfile != active.ID {
-		t.Errorf("active = %q, want %q", f.config.SLM.ActiveProfile, active.ID)
+	if f.config.ModelProfiles.ActiveProfile != active.ID {
+		t.Errorf("active = %q, want %q", f.config.ModelProfiles.ActiveProfile, active.ID)
 	}
 }
 
-func TestSelectSLMProfile_AlreadyActiveNoop(t *testing.T) {
+func TestSelectModelProfile_AlreadyActiveNoop(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	if err := f.SelectSLMProfile(active.ID); err != nil {
-		t.Fatalf("SelectSLMProfile: %v", err)
+	if err := f.SelectModelProfile(active.ID); err != nil {
+		t.Fatalf("SelectModelProfile: %v", err)
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0 (no-op)", mock.rebuildRouterCalls)
 	}
 }
 
-func TestSelectSLMProfile_UnknownAndEmptyRejected(t *testing.T) {
+func TestSelectModelProfile_UnknownAndEmptyRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 
 	for _, id := range []string{"ghost", ""} {
-		if err := f.SelectSLMProfile(id); err == nil {
+		if err := f.SelectModelProfile(id); err == nil {
 			t.Errorf("expected error for profile id %q", id)
 		}
 	}
-	if f.config.SLM.ActiveProfile == "ghost" {
+	if f.config.ModelProfiles.ActiveProfile == "ghost" {
 		t.Error("rejected selection must not change the active id")
 	}
 }
 
-// TestSelectSLMProfile_PersistFailureRollsBack: a failed config.yaml write
+// TestSelectModelProfile_PersistFailureRollsBack: a failed config.yaml write
 // restores the previous active id so the rejected selection is
 // indistinguishable from a rejected request.
-func TestSelectSLMProfile_PersistFailureRollsBack(t *testing.T) {
+func TestSelectModelProfile_PersistFailureRollsBack(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
-	prev := f.config.SLM.ActiveProfile
+	prev := f.config.ModelProfiles.ActiveProfile
 
 	f.configPath = ""
-	if err := f.SelectSLMProfile("qwen3.8-27b"); err == nil {
+	if err := f.SelectModelProfile("qwen3.8-27b"); err == nil {
 		t.Fatal("expected error when the config persist fails")
 	}
-	if f.config.SLM.ActiveProfile != prev {
-		t.Errorf("active id = %q, want %q (rolled back)", f.config.SLM.ActiveProfile, prev)
+	if f.config.ModelProfiles.ActiveProfile != prev {
+		t.Errorf("active id = %q, want %q (rolled back)", f.config.ModelProfiles.ActiveProfile, prev)
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
 	}
 }
 
-// --- SetSLMEnabled ---
+// --- SetModelProfilesEnabled ---
 
-// TestSetSLMEnabled_PersistsAndApplies verifies the master toggle is written to
-// config.yaml, flips the in-memory value, and runs the shared SLM
+// TestSetModelProfilesEnabled_PersistsAndApplies verifies the master toggle is written to
+// config.yaml, flips the in-memory value, and runs the shared ModelProfiles
 // post-mutation tail (router rebuild) so the change takes effect for new
 // sessions without a restart — in both directions.
-func TestSetSLMEnabled_PersistsAndApplies(t *testing.T) {
+func TestSetModelProfilesEnabled_PersistsAndApplies(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 	f.config.Experimental.Enabled = true
 
-	if err := f.SetSLMEnabled(true); err != nil {
-		t.Fatalf("SetSLMEnabled(true): %v", err)
+	if err := f.SetModelProfilesEnabled(true); err != nil {
+		t.Fatalf("SetModelProfilesEnabled(true): %v", err)
 	}
-	if !f.config.SLM.Enabled {
-		t.Error("in-memory SLM.Enabled = false, want true")
+	if !f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = false, want true")
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if !persisted.SLM.Enabled {
-		t.Error("persisted SLM.Enabled = false, want true")
+	if !persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = false, want true")
 	}
 	if mock.rebuildRouterCalls != 1 {
 		t.Errorf("RebuildRouter called %d times, want 1", mock.rebuildRouterCalls)
 	}
 
 	// Disabling persists false and rebuilds again (allowed regardless of gate).
-	if err := f.SetSLMEnabled(false); err != nil {
-		t.Fatalf("SetSLMEnabled(false): %v", err)
+	if err := f.SetModelProfilesEnabled(false); err != nil {
+		t.Fatalf("SetModelProfilesEnabled(false): %v", err)
 	}
-	if f.config.SLM.Enabled {
-		t.Error("in-memory SLM.Enabled = true, want false")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = true, want false")
 	}
 	persisted, err = config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.SLM.Enabled {
-		t.Error("persisted SLM.Enabled = true, want false")
+	if persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = true, want false")
 	}
 	if mock.rebuildRouterCalls != 2 {
 		t.Errorf("RebuildRouter called %d times, want 2", mock.rebuildRouterCalls)
 	}
 }
 
-// TestSetSLMEnabled_EnableRequiresExperimental verifies enabling fails closed
+// TestSetModelProfilesEnabled_EnableRequiresExperimental verifies enabling fails closed
 // while the experimental gate is off: an error, no in-memory change, no router
 // rebuild.
-func TestSetSLMEnabled_EnableRequiresExperimental(t *testing.T) {
+func TestSetModelProfilesEnabled_EnableRequiresExperimental(t *testing.T) {
 	f, mock, _ := newTestAPI(t) // experimental defaults to false
 
-	err := f.SetSLMEnabled(true)
+	err := f.SetModelProfilesEnabled(true)
 	if err == nil {
-		t.Fatal("expected an error enabling the small-LLM profile while experimental features are disabled")
+		t.Fatal("expected an error enabling the model-profile profile while experimental features are disabled")
 	}
 	if !strings.Contains(err.Error(), "experimental") {
 		t.Errorf("error = %q, want it to mention experimental", err)
 	}
-	if f.config.SLM.Enabled {
-		t.Error("SLM.Enabled must not change when the gate rejects the enable")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("ModelProfiles.Enabled must not change when the gate rejects the enable")
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
 	}
 }
 
-// TestSetSLMEnabled_NoopWhenUnchanged verifies a request matching the stored
+// TestSetModelProfilesEnabled_NoopWhenUnchanged verifies a request matching the stored
 // value is a true no-op: no persist, no router rebuild.
-func TestSetSLMEnabled_NoopWhenUnchanged(t *testing.T) {
+func TestSetModelProfilesEnabled_NoopWhenUnchanged(t *testing.T) {
 	f, mock, _ := newTestAPI(t)
 	f.config.Experimental.Enabled = true
-	f.config.SLM.Enabled = true
+	f.config.ModelProfiles.Enabled = true
 
-	if err := f.SetSLMEnabled(true); err != nil {
-		t.Fatalf("SetSLMEnabled(true): %v", err)
+	if err := f.SetModelProfilesEnabled(true); err != nil {
+		t.Fatalf("SetModelProfilesEnabled(true): %v", err)
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0 (no-op)", mock.rebuildRouterCalls)
 	}
 }
 
-// TestSetSLMEnabled_PersistFailureRollsBack verifies a failed config.yaml write
+// TestSetModelProfilesEnabled_PersistFailureRollsBack verifies a failed config.yaml write
 // restores the previous value so the rejected toggle is indistinguishable from
 // a rejected request.
-func TestSetSLMEnabled_PersistFailureRollsBack(t *testing.T) {
+func TestSetModelProfilesEnabled_PersistFailureRollsBack(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 	f.config.Experimental.Enabled = true
 	f.configPath = filepath.Join(filepath.Dir(cfgPath), "missing", "config.yaml")
 
-	if err := f.SetSLMEnabled(true); err == nil {
+	if err := f.SetModelProfilesEnabled(true); err == nil {
 		t.Fatal("expected an error when the config persist fails")
 	}
-	if f.config.SLM.Enabled {
-		t.Error("SLM.Enabled = true, want false (rolled back)")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("ModelProfiles.Enabled = true, want false (rolled back)")
 	}
 	if mock.rebuildRouterCalls != 0 {
 		t.Errorf("RebuildRouter called %d times, want 0", mock.rebuildRouterCalls)
 	}
 }
 
-// TestSetSLMEnabled_EmptyPathRejected verifies the config-path guard precedes
+// TestSetModelProfilesEnabled_EmptyPathRejected verifies the config-path guard precedes
 // any mutation.
-func TestSetSLMEnabled_EmptyPathRejected(t *testing.T) {
+func TestSetModelProfilesEnabled_EmptyPathRejected(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 	f.config.Experimental.Enabled = true
 	f.configPath = ""
 
-	if err := f.SetSLMEnabled(true); err == nil {
+	if err := f.SetModelProfilesEnabled(true); err == nil {
 		t.Fatal("expected an error when the config path is not set")
 	}
-	if f.config.SLM.Enabled {
-		t.Error("SLM.Enabled must not change when the path is missing")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("ModelProfiles.Enabled must not change when the path is missing")
 	}
 }
 
-// TestSetSLMEnabled_EmitsConfigUpdated verifies the (asynchronous)
+// TestSetModelProfilesEnabled_EmitsConfigUpdated verifies the (asynchronous)
 // config:updated announcement so frontend consumers re-read the config without
 // an app restart.
-func TestSetSLMEnabled_EmitsConfigUpdated(t *testing.T) {
+func TestSetModelProfilesEnabled_EmitsConfigUpdated(t *testing.T) {
 	f, _, rec, db := newUpdateLLMConfigProjectHarness(t)
 	defer func() { _ = db.Close() }()
 	f.config.Experimental.Enabled = true
 
-	if err := f.SetSLMEnabled(true); err != nil {
-		t.Fatalf("SetSLMEnabled(true): %v", err)
+	if err := f.SetModelProfilesEnabled(true); err != nil {
+		t.Fatalf("SetModelProfilesEnabled(true): %v", err)
 	}
 	rec.waitFor(t, EventConfigUpdated)
 }
 
-// TestSLMNilConfigRejected verifies the nil-config guard on every mutation.
-func TestSLMNilConfigRejected(t *testing.T) {
+// TestModelProfilesNilConfigRejected verifies the nil-config guard on every mutation.
+func TestModelProfilesNilConfigRejected(t *testing.T) {
 	f := &FrontendAPI{}
 	name := "X"
-	if _, err := f.CreateSLMProfile("generic", "X"); err == nil {
-		t.Error("CreateSLMProfile must fail on nil config")
+	if _, err := f.CreateModelProfile("generic", "X"); err == nil {
+		t.Error("CreateModelProfile must fail on nil config")
 	}
-	if err := f.UpdateSLMProfile("any", SLMProfileUpdateRequest{Name: &name}); err == nil {
-		t.Error("UpdateSLMProfile must fail on nil config")
+	if err := f.UpdateModelProfile("any", ModelProfileUpdateRequest{Name: &name}); err == nil {
+		t.Error("UpdateModelProfile must fail on nil config")
 	}
-	if err := f.DeleteSLMProfile("any"); err == nil {
-		t.Error("DeleteSLMProfile must fail on nil config")
+	if err := f.DeleteModelProfile("any"); err == nil {
+		t.Error("DeleteModelProfile must fail on nil config")
 	}
-	if err := f.SelectSLMProfile("any"); err == nil {
-		t.Error("SelectSLMProfile must fail on nil config")
+	if err := f.SelectModelProfile("any"); err == nil {
+		t.Error("SelectModelProfile must fail on nil config")
 	}
-	if err := f.SetSLMEnabled(true); err == nil {
-		t.Error("SetSLMEnabled must fail on nil config")
+	if err := f.SetModelProfilesEnabled(true); err == nil {
+		t.Error("SetModelProfilesEnabled must fail on nil config")
 	}
 }
 
-// TestSLMProfileValues_RoundTrip_FullProfileLossless is the round-trip
+// TestModelProfileValues_RoundTrip_FullProfileLossless is the round-trip
 // integration test: a fully-populated values payload written via
-// UpdateSLMProfile and read back via GetSLMProfiles must survive losslessly.
-// This exercises the converter pair (slmProfileConfigToValues /
-// slmValuesToProfileConfig) end-to-end through the public API surface and the
+// UpdateModelProfile and read back via GetModelProfiles must survive losslessly.
+// This exercises the converter pair (modelProfileConfigToValues /
+// modelProfilesValuesToProfileConfig) end-to-end through the public API surface and the
 // store persist path, covering EVERY field — including the ones the
 // happy-path test omits (FewShot, ReasoningScaffold, ReasoningEffort, and all
 // five loop-hardening thresholds) — so a future converter change that drops a
 // field is caught.
-func TestSLMProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
+func TestModelProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
 	f, _, _ := newTestAPI(t)
-	active := activateCustomSLMProfile(t, f)
+	active := activateCustomModelProfile(t, f)
 
-	want := SLMProfileValues{
-		EssentialTools: SLMEssentialToolsValues{
+	want := ModelProfileValues{
+		EssentialTools: ModelProfilesEssentialToolsValues{
 			Enabled:       true,
 			AlwaysPresent: []string{"read_file", "edit_file", "bash_exec", "semantic_search"},
 		},
-		SystemPrompt: SLMSystemPromptResp{
+		SystemPrompt: ModelProfilesSystemPromptResp{
 			Lite:              true,
 			FewShot:           true,
 			ReasoningScaffold: true,
 		},
-		Sampling: SLMSamplingResp{
+		Sampling: ModelProfilesSamplingResp{
 			Enabled:           true,
 			Temperature:       0.15,
 			TopP:              0.85,
@@ -2573,7 +2573,7 @@ func TestSLMProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
 			PresencePenalty:   1.5,
 			ReasoningEffort:   "low",
 		},
-		LoopHardening: SLMLoopHardeningResp{
+		LoopHardening: ModelProfilesLoopHardeningResp{
 			Enabled:                      true,
 			RepeatNudgeThreshold:         2,
 			ParseErrorAbortThreshold:     3,
@@ -2581,9 +2581,9 @@ func TestSLMProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
 			FruitlessAbortThreshold:      6,
 			SameToolRepeatNudgeThreshold: 5,
 		},
-		Context: SLMContextResp{
+		Context: ModelProfilesContextResp{
 			Enabled: true,
-			Compaction: SLMCompactionResp{
+			Compaction: ModelProfilesCompactionResp{
 				KeepLast:       6,
 				BlockSize:      5,
 				TriggerPercent: 80,
@@ -2593,11 +2593,11 @@ func TestSLMProfileValues_RoundTrip_FullProfileLossless(t *testing.T) {
 		},
 	}
 
-	if err := f.UpdateSLMProfile(active.ID, slmConfigReq(want)); err != nil {
-		t.Fatalf("UpdateSLMProfile failed: %v", err)
+	if err := f.UpdateModelProfile(active.ID, modelProfilesConfigReq(want)); err != nil {
+		t.Fatalf("UpdateModelProfile failed: %v", err)
 	}
 
-	got := slmFindProfile(t, f.GetSLMProfiles(), active.ID).Values
+	got := modelProfilesFindProfile(t, f.GetModelProfiles(), active.ID).Values
 
 	if !reflect.DeepEqual(got.EssentialTools.Enabled, want.EssentialTools.Enabled) ||
 		!slices.Equal(got.EssentialTools.AlwaysPresent, want.EssentialTools.AlwaysPresent) ||
@@ -3005,46 +3005,46 @@ func TestUpdateExperimentalFeatures_EmitsConfigUpdated(t *testing.T) {
 	}
 }
 
-// TestUpdateExperimentalFeatures_DisableClearsSLMEnabled verifies that turning
-// the experimental gate off also clears the persisted Small-LLM master toggle
-// (config.SLM.Enabled) in the same write, and that re-enabling the gate does
+// TestUpdateExperimentalFeatures_DisableClearsModelProfilesEnabled verifies that turning
+// the experimental gate off also clears the persisted Model Profiles master toggle
+// (config.ModelProfiles.Enabled) in the same write, and that re-enabling the gate does
 // not silently resurrect it — the operator must opt back in explicitly.
-func TestUpdateExperimentalFeatures_DisableClearsSLMEnabled(t *testing.T) {
+func TestUpdateExperimentalFeatures_DisableClearsModelProfilesEnabled(t *testing.T) {
 	f, _, cfgPath := newTestAPI(t)
 
-	// Start from the "both on" state reached by enabling the SLM master toggle
+	// Start from the "both on" state reached by enabling the ModelProfiles master toggle
 	// while experimental features are on.
 	f.config.Experimental.Enabled = true
-	f.config.SLM.Enabled = true
+	f.config.ModelProfiles.Enabled = true
 
 	if err := f.UpdateExperimentalFeatures(false); err != nil {
 		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
 	}
-	if f.config.SLM.Enabled {
-		t.Error("in-memory SLM.Enabled = true, want false after disabling experimental features")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = true, want false after disabling experimental features")
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.SLM.Enabled {
-		t.Error("persisted SLM.Enabled = true, want false (reload must not resurrect it)")
+	if persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = true, want false (reload must not resurrect it)")
 	}
 
-	// Re-enabling the gate must NOT reactivate the small-LLM master: the
+	// Re-enabling the gate must NOT reactivate the model-profile master: the
 	// cleared value was persisted, so it stays off until an explicit opt-in.
 	if err := f.UpdateExperimentalFeatures(true); err != nil {
 		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
 	}
-	if f.config.SLM.Enabled {
-		t.Error("in-memory SLM.Enabled = true after re-enabling experimental features, want false")
+	if f.config.ModelProfiles.Enabled {
+		t.Error("in-memory ModelProfiles.Enabled = true after re-enabling experimental features, want false")
 	}
 	persisted, err = config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if persisted.SLM.Enabled {
-		t.Error("persisted SLM.Enabled = true after re-enabling experimental features, want false")
+	if persisted.ModelProfiles.Enabled {
+		t.Error("persisted ModelProfiles.Enabled = true after re-enabling experimental features, want false")
 	}
 }
 
@@ -3293,7 +3293,7 @@ func TestUpdateLLMConfig_DeferredSavesSerializedInOrder(t *testing.T) {
 // TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter verifies that
 // the router rebuild in UpdateLLMConfig cannot roll back changes made by a
 // config writer that mutates and rebuilds under configMu.Lock
-// (SelectSLMProfile, SetModelConfig). The rebuild must re-snapshot the
+// (SelectModelProfile, SetModelConfig). The rebuild must re-snapshot the
 // config and hold configMu.RLock across snapshot + rebuild, so a concurrent
 // writer's mutate+rebuild can never interleave between them and leave the
 // router on a snapshot that predates its changes.
@@ -3301,7 +3301,7 @@ func TestUpdateLLMConfig_DeferredSavesSerializedInOrder(t *testing.T) {
 // The hook parks the FIRST RebuildRouter call (UpdateLLMConfig's) and records
 // the essential-tools variant of each rebuild snapshot in application
 // (completion) order: the active profile starts as a zero-valued custom one
-// (variant off) and the concurrent SelectSLMProfile(generic) switches to the
+// (variant off) and the concurrent SelectModelProfile(generic) switches to the
 // generic profile (variant on). With the fix the order is [false (LLM save),
 // true (profile switch)] — the switch's rebuild lands last and wins; without
 // it the stale LLM-save rebuild completes after it and the router is left on
@@ -3309,7 +3309,7 @@ func TestUpdateLLMConfig_DeferredSavesSerializedInOrder(t *testing.T) {
 func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 
-	// Experimental features gate the Small-LLM master toggle in
+	// Experimental features gate the Model Profiles master toggle in
 	// ToBuilderConfig; enable them so the rebuild snapshots mirror the
 	// production mapping (the variant values asserted below are unaffected by
 	// the gate either way).
@@ -3332,7 +3332,7 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 			<-releaseFirst // hold the LLM save's rebuild open
 		}
 		orderMu.Lock()
-		applied = append(applied, cfg.SLM.EssentialTools.Enabled)
+		applied = append(applied, cfg.ModelProfiles.EssentialTools.Enabled)
 		orderMu.Unlock()
 	}
 
@@ -3355,12 +3355,12 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 	// fix it must block on configMu until the LLM save's rebuild completes.
 	bDone := make(chan error, 1)
 	go func() {
-		bDone <- f.SelectSLMProfile(config.SLMGenericProfileID)
+		bDone <- f.SelectModelProfile(config.ModelProfilesGenericProfileID)
 	}()
 	select {
 	case err := <-bDone:
 		close(releaseFirst)
-		t.Fatalf("SelectSLMProfile completed while UpdateLLMConfig was inside its rebuild phase — the rebuild snapshot can be stale (err=%v)", err)
+		t.Fatalf("SelectModelProfile completed while UpdateLLMConfig was inside its rebuild phase — the rebuild snapshot can be stale (err=%v)", err)
 	case <-time.After(100 * time.Millisecond):
 		// Still blocked: expected under the fix.
 	}
@@ -3370,29 +3370,29 @@ func TestUpdateLLMConfig_RebuildNotRevertedByConcurrentConfigWriter(t *testing.T
 		t.Fatalf("unexpected error from UpdateLLMConfig: %v", err)
 	}
 	if err := <-bDone; err != nil {
-		t.Fatalf("unexpected error from SelectSLMProfile: %v", err)
+		t.Fatalf("unexpected error from SelectModelProfile: %v", err)
 	}
 
 	orderMu.Lock()
 	got := append([]bool(nil), applied...)
 	orderMu.Unlock()
 	if len(got) != 2 || got[0] || !got[1] {
-		t.Fatalf("router rebuild application order = %v, want [false true]: the router was left on a snapshot predating the concurrent small-LLM update", got)
+		t.Fatalf("router rebuild application order = %v, want [false true]: the router was left on a snapshot predating the concurrent model-profile update", got)
 	}
 
 	// Sanity: the profile switch survived in memory and on disk.
 	f.configMu.RLock()
-	inMemory := f.config.SLM.ActiveProfile
+	inMemory := f.config.ModelProfiles.ActiveProfile
 	f.configMu.RUnlock()
-	if inMemory != config.SLMGenericProfileID {
+	if inMemory != config.ModelProfilesGenericProfileID {
 		t.Fatalf("in-memory active profile = %q, want generic", inMemory)
 	}
 	persisted, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("failed to load persisted config: %v", err)
 	}
-	if persisted.SLM.ActiveProfile != config.SLMGenericProfileID {
-		t.Fatal("persisted config lost the selected small-LLM profile")
+	if persisted.ModelProfiles.ActiveProfile != config.ModelProfilesGenericProfileID {
+		t.Fatal("persisted config lost the selected model-profile profile")
 	}
 }
 

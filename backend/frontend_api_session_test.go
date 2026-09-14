@@ -386,32 +386,32 @@ func TestSendMessage_E2SRejectsGoalPrefixExposedByPreprocessing(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Small-LLM essential-tools narrowing × goal mode
+// Model Profiles essential-tools narrowing × goal mode
 // ----------------------------------------------------------------------------
 
-// slmNarrowingConfig returns a runtime config with experimental features ON and
-// the Small-LLM profile ON, resolving to the model-agnostic "generic" profile
+// modelProfilesNarrowingConfig returns a runtime config with experimental features ON and
+// the Model Profiles profile ON, resolving to the model-agnostic "generic" profile
 // (the narrowing-active shape). id optionally overrides the active profile.
-func slmNarrowingConfig(profileID string) *config.Config {
+func modelProfilesNarrowingConfig(profileID string) *config.Config {
 	if profileID == "" {
-		profileID = config.SLMGenericProfileID
+		profileID = config.ModelProfilesGenericProfileID
 	}
 	return &config.Config{
-		Experimental: config.ExperimentalConfig{Enabled: true},
-		SLM:          config.SLMPersistConfig{Enabled: true, ActiveProfile: profileID},
+		Experimental:  config.ExperimentalConfig{Enabled: true},
+		ModelProfiles: config.ModelProfilesPersistConfig{Enabled: true, ActiveProfile: profileID},
 	}
 }
 
-// TestSendMessage_GoalBlockedBySLM verifies the frontend-layer guard: a goal
+// TestSendMessage_GoalBlockedByModelProfiles verifies the frontend-layer guard: a goal
 // request — armed by the explicit flag OR a leading /goal command — is refused
-// while the Small-LLM essential-tools narrowing is active, BEFORE any side
+// while the Model Profiles essential-tools narrowing is active, BEFORE any side
 // effect (no persisted message, no task row).
-func TestSendMessage_GoalBlockedBySLM(t *testing.T) {
+func TestSendMessage_GoalBlockedByModelProfiles(t *testing.T) {
 	api, sessionStore, _, db := newForkTestAPI(t)
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
-	api.config = slmNarrowingConfig("")
+	api.config = modelProfilesNarrowingConfig("")
 
 	cases := []struct {
 		name string
@@ -425,10 +425,10 @@ func TestSendMessage_GoalBlockedBySLM(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := api.SendMessage("fork-src", tc.text, nil, nil, "", "", tc.goal, "", false, false)
 			if err == nil {
-				t.Fatal("expected an error for a goal send under the Small-LLM essential-tools profile")
+				t.Fatal("expected an error for a goal send under the Model Profiles essential-tools profile")
 			}
-			if !strings.Contains(err.Error(), "Small-LLM") {
-				t.Errorf("expected a Small-LLM rejection, got: %v", err)
+			if !strings.Contains(err.Error(), "Model Profiles") {
+				t.Errorf("expected a Model Profiles rejection, got: %v", err)
 			}
 			// Rejected before any side effect: no message persisted, no task row.
 			if msgs, mErr := sessionStore.LoadMessages(ctx, "fork-src"); mErr != nil {
@@ -443,10 +443,10 @@ func TestSendMessage_GoalBlockedBySLM(t *testing.T) {
 	}
 }
 
-// TestSlmGoalBlocked_Combinations pins the guard predicate: only master-on AND
+// TestModelProfilesGoalBlocked_Combinations pins the guard predicate: only master-on AND
 // the active profile's essential-tools variant-on blocks goal mode; the
 // experimental gate folds in; a nil config never blocks.
-func TestSlmGoalBlocked_Combinations(t *testing.T) {
+func TestModelProfilesGoalBlocked_Combinations(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  *config.Config
@@ -456,42 +456,42 @@ func TestSlmGoalBlocked_Combinations(t *testing.T) {
 		{
 			"experimental off",
 			&config.Config{
-				Experimental: config.ExperimentalConfig{Enabled: false},
-				SLM:          config.SLMPersistConfig{Enabled: true, ActiveProfile: config.SLMGenericProfileID},
+				Experimental:  config.ExperimentalConfig{Enabled: false},
+				ModelProfiles: config.ModelProfilesPersistConfig{Enabled: true, ActiveProfile: config.ModelProfilesGenericProfileID},
 			},
 			false,
 		},
 		{
 			"master off",
 			&config.Config{
-				Experimental: config.ExperimentalConfig{Enabled: true},
-				SLM:          config.SLMPersistConfig{Enabled: false, ActiveProfile: config.SLMGenericProfileID},
+				Experimental:  config.ExperimentalConfig{Enabled: true},
+				ModelProfiles: config.ModelProfilesPersistConfig{Enabled: false, ActiveProfile: config.ModelProfilesGenericProfileID},
 			},
 			false,
 		},
-		{"variant off (qwen3.8-27b)", slmNarrowingConfig("qwen3.8-27b"), false},
-		{"narrowing active (generic)", slmNarrowingConfig(""), true},
+		{"variant off (qwen3.8-27b)", modelProfilesNarrowingConfig("qwen3.8-27b"), false},
+		{"narrowing active (generic)", modelProfilesNarrowingConfig(""), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &FrontendAPI{config: tc.cfg}
-			if got := api.slmGoalBlocked(); got != tc.want {
-				t.Errorf("slmGoalBlocked() = %v, want %v", got, tc.want)
+			if got := api.modelProfilesGoalBlocked(); got != tc.want {
+				t.Errorf("modelProfilesGoalBlocked() = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestResumeTask_GoalBlockedBySLM verifies the paused-goal resume guard: a
+// TestResumeTask_GoalBlockedByModelProfiles verifies the paused-goal resume guard: a
 // paused task carrying a NON-terminal goal state is rejected while the
 // narrowing is active, while a paused non-goal (or terminal-goal) task is
 // unaffected.
-func TestResumeTask_GoalBlockedBySLM(t *testing.T) {
+func TestResumeTask_GoalBlockedByModelProfiles(t *testing.T) {
 	api, sessionStore, _, db := newForkTestAPI(t)
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
 
-	api.config = slmNarrowingConfig("")
+	api.config = modelProfilesNarrowingConfig("")
 
 	// A paused task with no goal state is NOT a paused goal: the guard must
 	// leave it alone (the harness manager has no task store, so a permitted
@@ -514,8 +514,8 @@ func TestResumeTask_GoalBlockedBySLM(t *testing.T) {
 	}
 	if err := api.ResumeTask("fork-src", "", ""); err == nil {
 		t.Fatal("expected a paused goal resume to be rejected under the narrowing")
-	} else if !strings.Contains(err.Error(), "Small-LLM") {
-		t.Errorf("expected a Small-LLM rejection, got: %v", err)
+	} else if !strings.Contains(err.Error(), "Model Profiles") {
+		t.Errorf("expected a Model Profiles rejection, got: %v", err)
 	}
 
 	// A TERMINAL goal state is not a resumable goal (resume runs the plain
@@ -528,14 +528,14 @@ func TestResumeTask_GoalBlockedBySLM(t *testing.T) {
 	}
 }
 
-// TestSlmGoalBlocked_ConcurrentWithMutation pins the synchronization fix: the
+// TestModelProfilesGoalBlocked_ConcurrentWithMutation pins the synchronization fix: the
 // effective-profile resolve runs under configMu.RLock, so it cannot race the
-// setters' in-place config writes. Before the fix, slmGoalBlocked read cfg.SLM /
+// setters' in-place config writes. Before the fix, modelProfilesGoalBlocked read cfg.ModelProfiles /
 // cfg.Experimental from a detached pointer outside the lock; under
 // `go test -race` this test would flag that race. It passes silently when run
 // without -race, so the invariant is asserted in CI's race build.
-func TestSlmGoalBlocked_ConcurrentWithMutation(t *testing.T) {
-	api := &FrontendAPI{config: slmNarrowingConfig("")}
+func TestModelProfilesGoalBlocked_ConcurrentWithMutation(t *testing.T) {
+	api := &FrontendAPI{config: modelProfilesNarrowingConfig("")}
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -556,7 +556,7 @@ func TestSlmGoalBlocked_ConcurrentWithMutation(t *testing.T) {
 	}()
 
 	for i := 0; i < 1000; i++ {
-		_ = api.slmGoalBlocked()
+		_ = api.modelProfilesGoalBlocked()
 	}
 	close(stop)
 	wg.Wait()
