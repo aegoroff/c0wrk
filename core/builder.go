@@ -551,23 +551,7 @@ func (b *OrchestratorBuilder) Build(
 			RepeatNudgeThreshold: cfg.E2S.RepeatNudgeThreshold,
 			RepeatAbortThreshold: cfg.E2S.RepeatAbortThreshold,
 		},
-		SLM: SLMSettings{
-			Enabled: cfg.SLM.Enabled,
-			EssentialTools: SLMEssentialSettings{
-				Enabled:             cfg.SLM.EssentialTools.Enabled,
-				AlwaysPresent:       cfg.SLM.EssentialTools.AlwaysPresent,
-				CompactDescriptions: cfg.SLM.EssentialTools.CompactDescriptions,
-			},
-			SystemPrompt: SLMSystemPromptSettings{
-				Lite:              cfg.SLM.SystemPrompt.Lite,
-				FewShot:           cfg.SLM.SystemPrompt.FewShot,
-				ReasoningScaffold: cfg.SLM.SystemPrompt.ReasoningScaffold,
-			},
-			LoopHardening: SLMLoopHardeningSettings{
-				Enabled:              cfg.SLM.LoopHardening.Enabled,
-				RepeatNudgeThreshold: cfg.SLM.LoopHardening.RepeatNudgeThreshold,
-			},
-		},
+		SLM: SLMSettingsFromBuilderConfig(cfg.SLM),
 	}
 
 	// Create tool result cache (per-session lifetime).

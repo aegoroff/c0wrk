@@ -287,12 +287,17 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents []
 		return errors.New("E2S mode is experimental and currently disabled — enable experimental features in settings to use it")
 	}
 	// Goal mode is refused while the Small-LLM essential-tools narrowing is
-	// active: the narrowing is tuned for single-pass conductor work and hides
-	// the goal-loop tooling, so a goal could never be derived or concluded.
-	// Both arming signals are covered — the explicit flag and a /goal prefix —
-	// and the rejection lands BEFORE any side effect (no activity timestamp, no
-	// persisted message, no task), so a blocked goal never leaves a phantom
-	// row. slmGoalBlocked resolves the effective profile (active profile ∪
+	// active: the two are mutually exclusive. The narrowing is applied only on
+	// the non-goal Conductor path and the E2S branch (both run after goal
+	// mode's early return), so it never narrows a goal run today — the
+	// exclusion is explicit so the toggle cannot be a silent no-op in goal
+	// mode. If the narrowing were applied to a goal run it would hide the
+	// goal-loop tooling (propose_goal, declare_goal_status,
+	// declare_verification) and make the loop unrunnable. Both arming signals
+	// are covered — the explicit flag and a /goal prefix — and the rejection
+	// lands BEFORE any side effect (no activity timestamp, no persisted
+	// message, no task), so a blocked goal never leaves a phantom row.
+	// slmGoalBlocked resolves the effective profile (active profile ∪
 	// experimental gate) and is false when the profile or its essential-tools
 	// variant is off, so the default path is unchanged.
 	if goalEnabled && f.slmGoalBlocked() {
@@ -425,9 +430,10 @@ func (f *FrontendAPI) ResumeTask(id, modelOverride, reasoningEffort string) erro
 // a NON-terminal goal state (the exact condition Orchestrator.Resume uses to
 // pick the goal loop) — a paused plain or E2S task is unaffected, so non-goal
 // resumes and the default (profile-off) path are unchanged. A task-store read
-// failure is treated as "not blocked" (fail-open): the manager re-checks under
-// the session lock and resumeGoalLoop is the ultimate authority, so a transient
-// read error must not strand a legitimate resume.
+// failure is treated as "not blocked" (fail-open): the resume is independently
+// re-checked by the session manager (Manager.ResumeTask, under the session lock
+// and before any task activation) and resumeGoalLoop is the ultimate
+// authority, so a transient read error must not strand a legitimate resume.
 func (f *FrontendAPI) goalResumeBlockedBySLM(id string) bool {
 	if f.store == nil || !f.slmGoalBlocked() {
 		return false

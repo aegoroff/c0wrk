@@ -29,6 +29,13 @@ type FrontendAPI struct {
 	configMu         sync.RWMutex
 	configPath       string
 	configLoadErrors []string
+	// slmGateResp caches the EFFECTIVE Small-LLM gate reported as
+	// ConfigResponse.slm. Resolving it needs the profile catalog, which is
+	// read from disk, so caching keeps GetConfig a pure in-memory read (it runs
+	// on every settings open — see the GUARANTEE on collectAllModels). Seeded at
+	// construction and refreshed by refreshSLMGateLocked at every SLM /
+	// experimental mutation. Guarded by configMu.
+	slmGateResp SLMSettingsResponse
 	// slmNotices carries one-shot Small-LLM profile notices (e.g. "the
 	// active profile was deleted; switched to generic") for the NEXT
 	// GetSLMProfiles call. Guarded by configMu; drained on read.
@@ -281,6 +288,13 @@ func NewFrontendAPI(cfg FrontendAPIConfig) *FrontendAPI {
 		appCtx:          cfg.AppCtx,
 		quitApp:         cfg.QuitApp,
 	}
+
+	// Seed the effective Small-LLM gate cache (ConfigResponse.slm) so GetConfig
+	// stays a pure in-memory read. Every later SLM / experimental mutation
+	// refreshes it via refreshSLMGateLocked.
+	f.configMu.Lock()
+	f.refreshSLMGateLocked()
+	f.configMu.Unlock()
 
 	// Mirror the trusted-repo list into the process-wide git trust registry
 	// (core/gittrust), which core/workspace consults to decide whether a

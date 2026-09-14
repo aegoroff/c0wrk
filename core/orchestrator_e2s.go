@@ -505,7 +505,7 @@ func (o *Orchestrator) runE2SWithState(
 	// abort threshold keeps its fail-safe strictly-greater ordering via
 	// Config.withDefaults).
 	spinNudge := e2sCfg.RepeatNudgeThreshold
-	if sc := o.config.SLM; sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
+	if sc := o.slmSettings(); sc.Enabled && sc.LoopHardening.Enabled && sc.LoopHardening.RepeatNudgeThreshold > 0 {
 		// The profile override must stay strictly below the configured abort
 		// threshold: at or above it Config.withDefaults would silently raise
 		// abort to nudge+1, reintroducing the divergence the e2s config

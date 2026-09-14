@@ -30,11 +30,6 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		return ConfigResponse{Loaded: false}
 	}
 
-	// Report the EFFECTIVE Small-LLM profile state (the experimental gate is
-	// folded into the master toggle by effectiveSLMConfig), not the raw
-	// persisted `slm:` section.
-	slmProfile, _ := effectiveSLMConfig(f.config, f.slmCatalog())
-
 	resp := ConfigResponse{
 		Loaded:       true,
 		LogLevel:     f.config.LogLevel,
@@ -53,10 +48,11 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Experimental: ExperimentalSettingsResponse{
 			Enabled: f.config.Experimental.Enabled,
 		},
-		SLM: SLMSettingsResponse{
-			Enabled:               slmProfile.Enabled,
-			EssentialToolsEnabled: slmProfile.EssentialTools.Enabled,
-		},
+		// The EFFECTIVE Small-LLM gate (the experimental gate folded into the
+		// master toggle by effectiveSLMConfig), precomputed by
+		// refreshSLMGateLocked so this read path performs NO disk I/O — see the
+		// GUARANTEE on collectAllModels.
+		SLM: f.slmGateResp,
 	}
 
 	// Populate AllModels: flat list of all enabled models.
@@ -141,7 +137,10 @@ func (f *FrontendAPI) buildLLMResponse() ConfigLLMResponse {
 // defaults for unknown models. No HTTP probes, no registered sources, no
 // blocking I/O. GetConfig must remain a pure in-memory read: it runs on every
 // settings open, and a model list containing an unknown model must not stall
-// the UI behind a network timeout.
+// the UI behind a network timeout. The only disk-backed datum GetConfig reports
+// — the effective Small-LLM gate (`ConfigResponse.slm`) — is precomputed by
+// refreshSLMGateLocked at construction and on each SLM / experimental mutation
+// (both under configMu), so the read path never reads the profile catalog.
 //
 // Entries are keyed by composite (provider, model) so that two providers
 // exposing the same bare model name both appear — the frontend uses the
@@ -483,6 +482,9 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	// immediately. The same builder config carries the effective E2S settings,
 	// reused below to refresh the live orchestrators.
 	builderCfg := ToBuilderConfig(f.config, f.slmCatalog())
+	// Recompute the cached effective gate GetConfig serves (this method runs
+	// under configMu.Lock): closing the gate forces the effective SLM off.
+	f.refreshSLMGateLocked()
 	if b := f.builder(); b != nil {
 		if err := b.RebuildRouter(builderCfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after experimental-features toggle", "error", err)
@@ -502,6 +504,10 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 			slmProfile, _ := effectiveSLMConfig(f.config, slmCatalog)
 			mgr.SetSLMProfile(slmProfile, activeSLMProfile(f.config.SLM, slmCatalog))
 			mgr.SetE2SSettings(builderCfg.E2S)
+			// The experimental gate flips the effective SLM master toggle, so
+			// refresh the live orchestrators' SLM settings too (the goal guard
+			// reads them). Mirrors the E2S push above.
+			mgr.SetSLMSettings(core.SLMSettingsFromBuilderConfig(builderCfg.SLM))
 		}
 	}
 
@@ -884,6 +890,24 @@ func (f *FrontendAPI) slmCatalog() []config.SLMProfile {
 	return loadSLMCatalog(f.agentDir, f.log())
 }
 
+// refreshSLMGateLocked recomputes the cached effective Small-LLM gate reported
+// as ConfigResponse.slm. Callers must hold configMu for WRITING. The profile
+// catalog (a disk read) is resolved only here — at construction and on the rare
+// SLM / experimental mutations — never on the GetConfig read path, which just
+// serves the cached value (keeping GetConfig a pure in-memory read, per the
+// GUARANTEE on collectAllModels).
+func (f *FrontendAPI) refreshSLMGateLocked() {
+	if f.config == nil {
+		f.slmGateResp = SLMSettingsResponse{}
+		return
+	}
+	profile, _ := effectiveSLMConfig(f.config, f.slmCatalog())
+	f.slmGateResp = SLMSettingsResponse{
+		Enabled:               profile.Enabled,
+		EssentialToolsEnabled: profile.EssentialTools.Enabled,
+	}
+}
+
 // slmGoalBlocked reports whether goal mode must be refused because the
 // small-LLM essential-tools narrowing is active: the master SLM toggle AND the
 // active profile's essential-tools variant both on, with the experimental gate
@@ -894,16 +918,31 @@ func (f *FrontendAPI) slmCatalog() []config.SLMProfile {
 // runtime config read): a not-yet-loaded config must never block a request on
 // principle.
 func (f *FrontendAPI) slmGoalBlocked() bool {
+	// Cheap shunt under the read lock: no config, or the master toggle
+	// persisted off, can never block — skip the catalog read too. The config
+	// pointer is set once at construction and never swapped (only its fields
+	// are mutated in place), so the short hold is safe.
 	f.configMu.RLock()
-	cfg := f.config
+	shunt := f.config == nil || !f.config.SLM.Enabled
 	f.configMu.RUnlock()
-	if cfg == nil {
+	if shunt {
 		return false
 	}
-	// slmCatalog() does file I/O — resolve the effective profile outside the
-	// config lock; effectiveSLMConfig only reads cfg, so a concurrent config
-	// swap cannot corrupt it.
-	profile, _ := effectiveSLMConfig(cfg, f.slmCatalog())
+	// slmCatalog() does file I/O (reads ~/.c0wrk/slm-profiles.yaml) — load it
+	// OUTSIDE the config lock, then resolve the effective profile UNDER the
+	// read lock. Resolving under the lock is required for race-freedom:
+	// effectiveSLMConfig reads cfg.SLM and cfg.Experimental, and the setters
+	// (SetSLMEnabled / SelectSLMProfile / UpdateExperimentalFeatures) mutate
+	// those SAME fields IN PLACE under the write lock, so reading them from a
+	// detached pointer would be a data race. (This is not a safe "config
+	// swap": the config is never swapped, only mutated.)
+	catalog := f.slmCatalog()
+	f.configMu.RLock()
+	defer f.configMu.RUnlock()
+	if f.config == nil {
+		return false
+	}
+	profile, _ := effectiveSLMConfig(f.config, catalog)
 	return profile.Enabled && profile.EssentialTools.Enabled
 }
 
@@ -1010,8 +1049,13 @@ func (f *FrontendAPI) slmStore() (custom []config.SLMProfile, storePath string) 
 func (f *FrontendAPI) applySLMChange() {
 	f.configLoadErrors = nil
 	f.emitConfigUpdated()
+	// Recompute the cached effective gate that GetConfig serves (this method
+	// runs under configMu.Lock), so the goal-mode block the settings UI mirrors
+	// tracks the just-applied change.
+	f.refreshSLMGateLocked()
+	builderCfg := ToBuilderConfig(f.config, f.slmCatalog())
 	if b := f.builder(); b != nil {
-		if err := b.RebuildRouter(ToBuilderConfig(f.config, f.slmCatalog())); err != nil {
+		if err := b.RebuildRouter(builderCfg); err != nil {
 			f.log().Warn("failed to rebuild LLM router after small-LLM profile change", "error", err)
 		}
 	}
@@ -1020,6 +1064,12 @@ func (f *FrontendAPI) applySLMChange() {
 			slmCatalog := f.slmCatalog()
 			slmProfile, _ := effectiveSLMConfig(f.config, slmCatalog)
 			mgr.SetSLMProfile(slmProfile, activeSLMProfile(f.config.SLM, slmCatalog))
+			// Push the refreshed SLM settings onto already-built orchestrators
+			// so the runtime change takes effect there without an app restart —
+			// otherwise the goal-mode guard (and the essential-tools filter)
+			// would keep the stale build-time snapshot until the session is
+			// rebuilt. Mirrors the E2S push.
+			mgr.SetSLMSettings(core.SLMSettingsFromBuilderConfig(builderCfg.SLM))
 		}
 	}
 }

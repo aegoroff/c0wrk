@@ -56,8 +56,11 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
   const goalEnabled = useInputModeStore((s) => s.goalEnabled)
 
   // Goal mode is unavailable while the Small-LLM profile's essential-tools
-  // variant is active: that variant narrows the tool set and strips the
-  // goal-mode tools, so an armed goal loop would have nothing to drive it.
+  // variant is active: the narrowing is applied only to the non-goal Conductor
+  // path and the E2S branch (both run after goal mode's early return), so it
+  // never narrows a goal run; if it were applied to a goal run it would hide
+  // the goal-loop tooling (propose_goal, declare_goal_status,
+  // declare_verification) and make the loop unrunnable.
   // `useSLMGate` is the reactive form of lib/goalGate's authoritative rule;
   // while it reports blocked we lock the goal toggle and explain why, and we
   // disarm any stale goal arming (the same "gate closed → clear the toggle"

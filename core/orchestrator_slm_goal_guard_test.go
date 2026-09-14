@@ -155,3 +155,100 @@ func TestResumeGoalLoop_EssentialToolsOff_Proceeds(t *testing.T) {
 		t.Fatalf("turn runner called %d times, want 1 (the loop must re-enter)", recorder.turns)
 	}
 }
+
+// TestOrchestrator_SetSLMSettings_OverridesBuildTimeSnapshot pins the runtime
+// override contract (mirroring TestOrchestrator_SetE2SSettings_OverridesBuildTimeGate):
+// an orchestrator built with the narrowing OFF must honor a later
+// SetSLMSettings(narrowing ON) — and, crucially, a later SetSLMSettings(narrowing
+// OFF) must clear it again — without a rebuild. This is the recovery path the
+// documented error message promises ("disable the Small-LLM profile ... to use
+// goal mode") for an already-live session.
+func TestOrchestrator_SetSLMSettings_OverridesBuildTimeSnapshot(t *testing.T) {
+	o := newGoalTestOrchestrator()
+	o.config.SLM = SLMSettings{} // built with the narrowing off
+
+	if o.slmEssentialToolsEnabled() {
+		t.Fatal("precondition: narrowing must read off at build time")
+	}
+
+	// A runtime toggle turns the narrowing ON: the guard must now fire.
+	o.SetSLMSettings(slmNarrowingOn())
+	if !o.slmEssentialToolsEnabled() {
+		t.Fatal("SetSLMSettings did not take effect: narrowing still reads off")
+	}
+	pausedGS := &goal.GoalState{Condition: "x", Status: goal.StatusActive, CreatedAt: time.Now()}
+	if _, err := o.resumeGoalLoop(
+		context.Background(), "resume", orchestration.NewMapBlackboard(), nil, "",
+		nil, pausedGS, nil, "", "",
+	); !errors.Is(err, ErrGoalBlockedBySLM) {
+		t.Fatalf("resumeGoalLoop error = %v, want ErrGoalBlockedBySLM after runtime narrowing ON", err)
+	}
+
+	// Turning it back OFF must also take effect: the recovery path works for a
+	// live orchestrator (no restart, no rebuild).
+	o.SetSLMSettings(SLMSettings{})
+	if o.slmEssentialToolsEnabled() {
+		t.Fatal("SetSLMSettings did not clear the narrowing")
+	}
+}
+
+// TestHandleMessage_GoalBlockedBySLM_RuntimeNarrowingOn verifies HandleMessage's
+// goal guard reads the runtime override, not the stale build-time snapshot: an
+// orchestrator built with SLM off that a later SetSLMSettings narrows must
+// refuse a goal before any LLM work runs.
+func TestHandleMessage_GoalBlockedBySLM_RuntimeNarrowingOn(t *testing.T) {
+	mockLLM := &mockLLMCaller{
+		callFn: func(_ context.Context, _ llm.ChatRequest) (*llm.ChatResponse, error) {
+			return &llm.ChatResponse{Message: llm.Message{Role: "assistant", Content: "should never run"}}, nil
+		},
+	}
+	o := newE2STestOrchestrator(mockLLM, createTestRegistry(), nil, nil)
+	// Built with SLM off (zero value) — goal allowed at build time.
+	o.SetSLMSettings(slmNarrowingOn())
+
+	result, err := o.HandleMessage(context.Background(), "achieve something", "session-slm-goal-runtime", HandleOptions{Goal: true})
+	if !errors.Is(err, ErrGoalBlockedBySLM) {
+		t.Fatalf("HandleMessage error = %v, want ErrGoalBlockedBySLM after runtime narrowing ON", err)
+	}
+	if result != nil {
+		t.Errorf("HandleMessage result = %+v, want nil on the block", result)
+	}
+	mockLLM.mu.Lock()
+	calls := len(mockLLM.calls)
+	mockLLM.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("LLM calls = %d, want 0 — the block must precede any goal work", calls)
+	}
+}
+
+// TestApplySLMPromptProfile_LiteGatesOnEffectiveSettings pins that the helper
+// shared by prepareRequestContext AND Resume (the Issue 7 fix) carries the Lite
+// profile into the context from the effective settings — including the runtime
+// override — so a resumed goal's specialized verifier run gets the same Lite
+// directive the fresh path did.
+func TestApplySLMPromptProfile_LiteGatesOnEffectiveSettings(t *testing.T) {
+	o := &Orchestrator{}
+
+	if slmLiteFromCtx(o.applySLMPromptProfile(context.Background())) {
+		t.Fatal("lite must be off with a zero SLM config")
+	}
+
+	o.SetSLMSettings(SLMSettings{
+		Enabled:      true,
+		SystemPrompt: SLMSystemPromptSettings{Lite: true, FewShot: true, ReasoningScaffold: true},
+	})
+	ctx := o.applySLMPromptProfile(context.Background())
+	if !slmLiteFromCtx(ctx) {
+		t.Fatal("applySLMPromptProfile did not set the lite key from the effective settings")
+	}
+	p, ok := slmPromptProfileFromCtx(ctx)
+	if !ok || !p.FewShot || !p.ReasoningScaffold {
+		t.Fatalf("lite sub-toggle flags not carried: %+v (ok=%v)", p, ok)
+	}
+
+	// Master off → lite off even with the variant on (defense-in-depth).
+	o.SetSLMSettings(SLMSettings{Enabled: false, SystemPrompt: SLMSystemPromptSettings{Lite: true}})
+	if slmLiteFromCtx(o.applySLMPromptProfile(context.Background())) {
+		t.Fatal("lite must be off when the master toggle is off")
+	}
+}

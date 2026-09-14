@@ -34,6 +34,7 @@ Zustand stores provide normalized, reactive state management. Each store owns on
 - `frontend/src/stores/e2sStore.ts`
 - `frontend/src/stores/researchStore.ts`
 - `frontend/src/stores/terminalRegistryStore.ts`
+- `frontend/src/stores/slmGateStore.ts`
 
 ## Store Catalog
 
@@ -67,6 +68,7 @@ Zustand stores provide normalized, reactive state management. Each store owns on
 | `e2sStore`           | Per-session E2S execution-state Σ snapshots from `e2s_state` events (the backend owns the merge — the store keeps the latest full Σ and replaces it outright; cleared on session switch/delete) | No           |
 | `researchStore`      | Research status, hypothesis graph, metrics, and report for the active project (guarded by `projectId` against stale fetches); the workspace DAG selection (`selectedHypothesisId`, stamped with its R-NNN and never silently rebound across active-project transitions); the dashboard's current card (`activeHypothesisId` + `activeHypothesisResearchId` — an auto-repairing cursor that every `loadStatus`/`loadGraph` reconciles against the active research: a card that no longer resolves, an empty front, or a cross-project load falls back to the active front's leading hypothesis, `active_front[0]` else null); the recommended next step (fetched scoped to the current card via `selectActiveHypothesisId` — `''` means the project-level recommendation); and the persisted research/card pins mirrored from the status payload (`pinnedResearch`/`pinnedHypotheses`, updated by `loadStatus`, preserved by `loadGraph`) | No           |
 | `terminalRegistryStore` | App-lifetime per-session terminal instances (insertion-ordered session IDs + readiness set; removed only on explicit session/project deletion) | No           |
+| `slmGateStore`       | Frontend mirror of the Small-LLM goal gate — `{enabled, essentialToolsEnabled, loaded}` latched from `GetConfig`'s `ConfigResponse.slm`; the goal toggle reads `isGoalBlockedBySLM()` (`loaded && enabled && essentialToolsEnabled`, composed in `lib/goalGate.ts`). Fail-safe while unloaded (an unknown gate never blocks); refetched by `useSLMGate` on `backend:ready`/`config:updated`. See [../slm.md](../slm.md#goal-mode-gate-goalblocked) | No           |
 
 ### Per-Project Persisted Tabs (workspace panel + Git panel)
 

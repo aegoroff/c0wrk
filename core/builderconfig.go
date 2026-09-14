@@ -91,6 +91,32 @@ type BuilderSLMConfig struct {
 	SystemPrompt BuilderSLMSystemPromptConfig
 }
 
+// SLMSettingsFromBuilderConfig projects the core-layer BuilderSLMConfig onto
+// the orchestrator's runtime SLMSettings. It is the single mapping between the
+// two shapes: Build() uses it to populate OrchestratorConfig.SLM, and the
+// backend uses it to push a refreshed snapshot onto already-built orchestrators
+// (via (*Orchestrator).SetSLMSettings) after a runtime SLM change. Keeping one
+// mapping means the build-time and runtime-refreshed values can never diverge.
+func SLMSettingsFromBuilderConfig(cfg BuilderSLMConfig) SLMSettings {
+	return SLMSettings{
+		Enabled: cfg.Enabled,
+		EssentialTools: SLMEssentialSettings{
+			Enabled:             cfg.EssentialTools.Enabled,
+			AlwaysPresent:       cfg.EssentialTools.AlwaysPresent,
+			CompactDescriptions: cfg.EssentialTools.CompactDescriptions,
+		},
+		SystemPrompt: SLMSystemPromptSettings{
+			Lite:              cfg.SystemPrompt.Lite,
+			FewShot:           cfg.SystemPrompt.FewShot,
+			ReasoningScaffold: cfg.SystemPrompt.ReasoningScaffold,
+		},
+		LoopHardening: SLMLoopHardeningSettings{
+			Enabled:              cfg.LoopHardening.Enabled,
+			RepeatNudgeThreshold: cfg.LoopHardening.RepeatNudgeThreshold,
+		},
+	}
+}
+
 // BuilderSLMSystemPromptConfig holds the prompt-simplification variant
 // overrides for the small-LLM profile. Lite is the variant master toggle (it
 // mirrors config.SystemPromptConfig, which has no separate Enabled field, so

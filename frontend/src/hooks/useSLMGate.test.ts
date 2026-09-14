@@ -230,20 +230,75 @@ describe('useSLMGate', () => {
     expect(configMocks.getConfig).toHaveBeenCalledTimes(3)
   })
 
-  it('does not re-fetch after the gate has latched', async () => {
+  it('re-fetches on config:updated after latch, while backend:ready stays retry-only', async () => {
     configMocks.getConfig.mockResolvedValue(
       makeConfig(true, { enabled: true, essential_tools_enabled: true }),
     )
 
     renderHook()
     await flushMicrotasks()
+    expect(useSLMGateStore.getState().loaded).toBe(true)
 
+    // backend:ready is retry-only: a latched gate ignores it.
     fireBackendReady()
     await flushMicrotasks()
+    expect(configMocks.getConfig).toHaveBeenCalledTimes(1)
+
+    // config:updated is a REFRESH trigger: it re-reads the config even after
+    // latching, because this store has no direct writer (unlike the
+    // experimental store, which Settings updates directly).
+    fireConfigUpdated()
+    await flushMicrotasks()
+    expect(configMocks.getConfig).toHaveBeenCalledTimes(2)
+    expect(useSLMGateStore.getState().loaded).toBe(true)
+    expect(rendered.blocked).toBe(true)
+  })
+
+  it('unlatches via config:updated when the user disables the essential-tools variant', async () => {
+    // The user followed the block hint into Settings and turned the variant
+    // off: the backend's config:updated must refresh the latched gate so the
+    // toggle unblocks without an app restart.
+    configMocks.getConfig
+      .mockResolvedValueOnce(makeConfig(true, { enabled: true, essential_tools_enabled: true }))
+      .mockResolvedValueOnce(makeConfig(true, { enabled: true, essential_tools_enabled: false }))
+
+    renderHook()
+    await flushMicrotasks()
+    expect(rendered.blocked).toBe(true)
+    expect(useSLMGateStore.getState().essentialToolsEnabled).toBe(true)
+
     fireConfigUpdated()
     await flushMicrotasks()
 
-    expect(configMocks.getConfig).toHaveBeenCalledTimes(1)
+    expect(configMocks.getConfig).toHaveBeenCalledTimes(2)
+    expect(useSLMGateStore.getState()).toMatchObject({
+      enabled: true,
+      essentialToolsEnabled: false,
+      loaded: true,
+    })
+    expect(rendered.blocked).toBe(false)
+  })
+
+  it('does not downgrade a good latch when a post-latch refresh answers loaded=false', async () => {
+    configMocks.getConfig
+      .mockResolvedValueOnce(makeConfig(true, { enabled: true, essential_tools_enabled: true }))
+      .mockResolvedValueOnce(makeConfig(false))
+
+    renderHook()
+    await flushMicrotasks()
+    expect(useSLMGateStore.getState().loaded).toBe(true)
+
+    fireConfigUpdated()
+    await flushMicrotasks()
+
+    // The mid-startup (loaded=false) refresh answer must leave the good latch
+    // untouched rather than resetting it to "unknown".
+    expect(useSLMGateStore.getState()).toMatchObject({
+      enabled: true,
+      essentialToolsEnabled: true,
+      loaded: true,
+    })
+    expect(rendered.blocked).toBe(true)
   })
 
   it('keeps the fail-safe state (loaded=false, not blocking) on a fetch error', async () => {

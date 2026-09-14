@@ -2,47 +2,64 @@ import { useEffect } from 'react'
 import { getConfig } from '@/api/config'
 import { onGlobalEvent } from '@/api/runtime'
 import { logger } from '@/lib/logger'
+import { isGoalBlockedBySLM } from '@/lib/goalGate'
 import { useSLMGateStore } from '@/stores/slmGateStore'
 
 /**
- * Reads the Small-LLM gate from the shared store and triggers the one-time
- * fetch from GetConfig, mirroring `useExperimentalFeatures`. The store is the
- * single source of truth after the initial load.
+ * Reads the Small-LLM gate from the shared store and keeps it in sync with the
+ * backend's resolved config. Unlike `useExperimentalFeatures` — whose Settings
+ * writes the store directly — this store has NO direct writer, so the backend
+ * events are the only way a runtime config change reaches it.
  *
- * The fetch is attempted on mount and, if it fails (e.g. the backend is still
- * starting during the splash phase) or resolves with `loaded=false` (the
- * backend answers RPCs with a zeroed config until Startup finishes), again on
- * the `backend:ready` event — the same race App.tsx guards against — and on
- * `config:updated`, emitted by the backend after every persisted config
- * mutation (see specs/contracts/event-catalog.md). That second retry covers the
- * residual case where both earlier attempts failed transiently: the next
- * settings save re-reads the live config instead of leaving the gate "unknown"
- * until an app restart. Once the gate has latched, both retries are no-ops.
+ * The fetch runs on mount and on two global events:
+ *   - `backend:ready` — a RETRY-ONLY trigger. It re-attempts the mount fetch
+ *     when that attempt failed or resolved with `loaded=false` (the backend
+ *     answers RPCs with a zeroed config until Startup finishes — the same race
+ *     App.tsx guards against). Once the gate has latched it is a no-op.
+ *   - `config:updated` — a REFRESH trigger, emitted by the backend after every
+ *     persisted config mutation (see specs/contracts/event-catalog.md). It
+ *     IGNORES the latch and overwrites the store with the freshly resolved
+ *     values, so a change the user just made in Settings — e.g. following the
+ *     block hint to disable the profile or the Essential Tools variant — takes
+ *     effect without an app restart. When the response still reports
+ *     `loaded=false` (mid-startup) it leaves the store untouched rather than
+ *     downgrading an existing good latch.
  *
- * Fail-safe: a fetch error leaves `loaded=false` so consumers see "unknown"
- * rather than "definitively off", and a retry can still recover. The backend
- * remains the authoritative enforcement point for the gate.
+ * Fail-safe: on a fetch error the store is left as it was — `loaded=false` on
+ * the initial load, so consumers see "unknown" rather than "definitively off",
+ * and a retry can still recover. The backend remains the authoritative
+ * enforcement point for the gate.
  *
- * @returns whether goal mode is currently blocked by the SLM profile (the
- *          reactive counterpart of `isGoalBlockedBySLM`).
+ * @returns whether goal mode is currently blocked by the SLM profile.
  */
 export function useSLMGate(): boolean {
-  const enabled = useSLMGateStore((s) => s.enabled)
-  const essentialToolsEnabled = useSLMGateStore((s) => s.essentialToolsEnabled)
-  const loaded = useSLMGateStore((s) => s.loaded)
+  // Subscribe to every field the gate reads so a fetch/refresh that writes the
+  // store re-renders this component. The returned value is delegated to
+  // `isGoalBlockedBySLM` — the single definition of the composition in
+  // `lib/goalGate` — which reads the same store synchronously; these
+  // subscriptions are what make that read reactive.
+  useSLMGateStore((s) => s.enabled)
+  useSLMGateStore((s) => s.essentialToolsEnabled)
+  useSLMGateStore((s) => s.loaded)
 
   useEffect(() => {
     let cancelled = false
     let inFlight = false
+    // A refresh (config:updated) or a retry (mount/backend:ready) that arrives
+    // while a fetch is in flight is remembered and replayed once the current
+    // attempt settles, otherwise a one-shot event is consumed with no effect.
+    // A pending refresh always wins: it re-fetches unconditionally, while a
+    // pending retry only re-fetches while the gate is still unlatched.
     let pendingRetry = false
+    let pendingRefresh = false
 
-    const load = () => {
-      if (useSLMGateStore.getState().loaded) return
+    const fetchGate = (refresh: boolean) => {
+      // Retry-only triggers skip a store that has already latched; a refresh
+      // deliberately ignores the latch so a config change can overwrite it.
+      if (!refresh && useSLMGateStore.getState().loaded) return
       if (inFlight) {
-        // A retry (e.g. backend:ready) arrived while a fetch is in flight:
-        // remember it and re-run after the current attempt settles, otherwise
-        // the one-shot backend:ready emission is consumed with no effect.
-        pendingRetry = true
+        if (refresh) pendingRefresh = true
+        else pendingRetry = true
         return
       }
       inFlight = true
@@ -55,8 +72,9 @@ export function useSLMGate(): boolean {
           // zeroed SLM section. Latching that zero would leave the gate
           // "definitively off" for the whole session and permanently consume
           // the one-shot backend:ready retry. Keep the unknown state so the
-          // backend:ready / config:updated retries re-fetch once the config is
-          // live.
+          // backend:ready / config:updated triggers re-fetch once the config is
+          // live. On a refresh this also protects an existing good latch from
+          // being downgraded by a stale mid-startup answer.
           if (cfg.loaded === false) return
           // The `slm` block is optional on the wire (older payloads): a missing
           // block means "SLM off", which never blocks.
@@ -67,24 +85,30 @@ export function useSLMGate(): boolean {
           useSLMGateStore.getState().setLoaded(true)
         })
         .catch((err) => {
-          // Fail-safe: keep the default (not blocking) so goal mode stays
-          // available. `loaded` stays false so consumers see "unknown" rather
-          // than "definitively off", and a retry can still recover.
+          // Fail-safe: keep the store as it was (not blocking on the initial
+          // load) so goal mode stays available. `loaded` stays false so
+          // consumers see "unknown" rather than "definitively off", and a retry
+          // can still recover.
           logger.error('useSLMGate: failed to load config:', err)
         })
         .finally(() => {
           inFlight = false
-          if (pendingRetry && !cancelled && !useSLMGateStore.getState().loaded) {
+          if (cancelled) return
+          if (pendingRefresh) {
+            pendingRefresh = false
             pendingRetry = false
-            load()
+            fetchGate(true)
+          } else if (pendingRetry && !useSLMGateStore.getState().loaded) {
+            pendingRetry = false
+            fetchGate(false)
           }
         })
     }
 
-    load()
+    fetchGate(false)
     const unsubscribes = [
-      onGlobalEvent('backend:ready', load),
-      onGlobalEvent('config:updated', load),
+      onGlobalEvent('backend:ready', () => fetchGate(false)),
+      onGlobalEvent('config:updated', () => fetchGate(true)),
     ]
 
     return () => {
@@ -93,5 +117,5 @@ export function useSLMGate(): boolean {
     }
   }, [])
 
-  return loaded && enabled && essentialToolsEnabled
+  return isGoalBlockedBySLM()
 }

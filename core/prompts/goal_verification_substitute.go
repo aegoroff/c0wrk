@@ -57,14 +57,12 @@ func GoalVerificationSubstitute(text, condition, verifyClause, reportedEvidence 
 //     (GoalReDerivation), whose verifier delegates a fresh, read-only execution
 //     of the goal's process and confirms only on a clean outcome.
 //
-// This is the prompts-layer source of truth for the mode -> directive mapping;
-// it resolves the directive via GoalVerificationSubstitute (the shared
-// placeholder set). Toolset selection by mode stays with the orchestrator.
+// The mode -> directive mapping itself lives in goalVerificationDirectiveForMode
+// (the prompts-layer source of truth, shared with the Lite counterpart), and the
+// placeholders are resolved via GoalVerificationSubstitute. Toolset selection by
+// mode stays with the orchestrator.
 func GoalVerificationDirectiveByMode(mode, condition, verifyClause, reportedEvidence string) string {
-	directive := GoalVerification
-	if mode == goal.VerificationModeReDerivation {
-		directive = GoalReDerivation
-	}
+	directive := goalVerificationDirectiveForMode(mode, GoalVerification, GoalReDerivation)
 	return GoalVerificationSubstitute(directive, condition, verifyClause, reportedEvidence)
 }
 
@@ -74,11 +72,20 @@ func GoalVerificationDirectiveByMode(mode, condition, verifyClause, reportedEvid
 // set via GoalVerificationSubstitute. The orchestrator's goal verifier
 // (defaultGoalVerifier) uses it to render the Lite directive it hands to
 // buildSpecializedSystemPromptWithLite, which swaps it in only when the
-// small-LLM Lite profile is active.
+// small-LLM Lite profile is active. It shares goalVerificationDirectiveForMode
+// with the verbose wrapper, so the two variants can never drift apart.
 func GoalVerificationLiteDirectiveByMode(mode, condition, verifyClause, reportedEvidence string) string {
-	directive := GoalVerificationLite
-	if mode == goal.VerificationModeReDerivation {
-		directive = GoalReDerivationLite
-	}
+	directive := goalVerificationDirectiveForMode(mode, GoalVerificationLite, GoalReDerivationLite)
 	return GoalVerificationSubstitute(directive, condition, verifyClause, reportedEvidence)
+}
+
+// goalVerificationDirectiveForMode is the single source of truth for the
+// verification-mode -> directive mapping shared by the verbose and Lite
+// wrappers: re_derivation selects the re-derivation variant, and every other
+// mode (including the empty/executable default) selects the executable one.
+func goalVerificationDirectiveForMode(mode, executable, reDerivation string) string {
+	if mode == goal.VerificationModeReDerivation {
+		return reDerivation
+	}
+	return executable
 }

@@ -370,6 +370,18 @@ type Orchestrator struct {
 	// HandleMessage / E2S loop.
 	e2sSettingsOverride atomic.Pointer[E2SSettings]
 
+	// slmSettingsOverride, when set, supersedes config.SLM for the effective
+	// small-LLM settings. config is immutable after Build, so a runtime SLM
+	// change (master toggle, profile switch, essential-tools variant flip —
+	// all reach the app through applySLMChange / UpdateExperimentalFeatures)
+	// cannot mutate it directly: it stores the refreshed settings here via
+	// SetSLMSettings and every reader goes through slmSettings(). Without
+	// this, an already-built orchestrator would keep the stale build-time
+	// snapshot until an app restart — the exact problem SetE2SSettings solves
+	// for the E2S gate. The pointer is swapped atomically so a toggle is safe
+	// against an in-flight HandleMessage / Resume.
+	slmSettingsOverride atomic.Pointer[SLMSettings]
+
 	// historyMu guards conversationHistory against cross-goroutine access.
 	// Writers run on the request goroutine (the recordConversationOutcome /
 	// recordResumeOutcome epilogues, CompactConversationHistory's swap) and
@@ -1113,6 +1125,19 @@ func (o *Orchestrator) logDebug(msg string, args ...any) {
 func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, routing *router.RoutingDecision, plansDir string, resumeSteps []agent.Step, goalState *goal.GoalState, nudge string) (result *HandleResult, err error) {
 	o.logDebug("orchestrator: resume started", "resumeSteps", len(resumeSteps), "nudge", nudge != "")
 
+	// Small-LLM goal guard on the resume path: a paused non-terminal goal must
+	// not re-enter the goal loop while the essential-tools narrowing is active
+	// (see ErrGoalBlockedBySLM). Mirrors HandleMessage's goal branch for
+	// resumed goals. Checked before ANY side effect — including the auto-resume
+	// wave below (resumePausedWork), which otherwise relaunches paused delegates
+	// and plan steps — so a direct Resume caller hits the same wall the API
+	// enforces earlier (see FrontendAPI.goalResumeBlockedBySLM and
+	// Manager.ResumeTask). Plain and E2S resumes carry a nil/terminal goalState
+	// and are unaffected.
+	if goalState != nil && !goalState.Status.IsTerminal() && o.slmEssentialToolsEnabled() {
+		return nil, ErrGoalBlockedBySLM
+	}
+
 	// One-shot resume-compaction request: when the user selected a compaction
 	// strategy for this resume (manual compaction of a paused task), the
 	// backend armed it via RequestResumeCompaction before re-entering here.
@@ -1147,6 +1172,13 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	// conversion, so a model switched while the task was paused applies to
 	// documents read after resume. Nil-safe no-op.
 	ctx = markitdown.WithVisionResolver(ctx, o.visionResolver)
+
+	// Small-LLM prompt profile on the resume path, mirroring
+	// prepareRequestContext. Without this the resumed run — including a
+	// resumed goal's independent verifier, a specialized pass assembled by
+	// buildSpecializedSystemPromptWithLite — would miss the Lite swap the
+	// fresh path applied (see applySLMPromptProfile).
+	ctx = o.applySLMPromptProfile(ctx)
 
 	// Wire emitter into restored PersistentBlackboard so persistence warnings
 	// are surfaced to the user (the backend creates the BB without an emitter).
@@ -2243,6 +2275,27 @@ func (o *Orchestrator) e2sSettings() E2SSettings {
 	return o.config.E2S
 }
 
+// SetSLMSettings replaces the effective small-LLM settings. It exists for
+// runtime config changes (the master toggle, a profile switch, or the
+// essential-tools variant flip) that must reach orchestrators built before
+// the change: OrchestratorConfig is immutable after Build, so the refreshed
+// settings are stored in an atomic override (slmSettingsOverride) that
+// slmSettings reads. Mirrors SetE2SSettings. It is safe to call while a task
+// runs — the override is swapped atomically and read once per request.
+func (o *Orchestrator) SetSLMSettings(settings SLMSettings) {
+	o.slmSettingsOverride.Store(&settings)
+}
+
+// slmSettings returns the effective small-LLM settings: the runtime override
+// when a config change has refreshed them, otherwise the build-time config
+// snapshot.
+func (o *Orchestrator) slmSettings() SLMSettings {
+	if p := o.slmSettingsOverride.Load(); p != nil {
+		return *p
+	}
+	return o.config.SLM
+}
+
 // ApplyRequestOverrides applies per-request model and reasoning-effort
 // overrides to all LLM-calling components (router, reflector, the direct LLM
 // caller, and config.Model for metadata resolution). It is the shared step 0
@@ -2723,13 +2776,17 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// blackboard is restored and the agent runs the goal loop on the inherited
 	// facts/history, deriving a fresh goal from the new message.
 	if opts.Goal {
-		// The Small-LLM essential-tools narrowing is built for single-pass
-		// Conductor work and hides the goal-loop tooling (propose_goal,
-		// declare_goal_status, declare_verification), so a goal could never be
-		// derived or concluded. Refuse BEFORE the continuation reactivation
-		// side effect rather than entering an unrunnable loop. The frontend API
-		// rejects this earlier with a user-facing message; the sentinel keeps
-		// the invariant for direct callers.
+		// Goal mode is refused while the Small-LLM essential-tools narrowing is
+		// active. The narrowing is applied only on the non-goal Conductor path
+		// and the E2S branch — both run after this early return — so it never
+		// narrows a goal run today; the two are declared mutually exclusive so
+		// the toggle cannot be a silent no-op in goal mode. If the narrowing
+		// were ever applied to a goal run it would hide the goal-loop tooling
+		// (propose_goal, declare_goal_status, declare_verification) and make
+		// the loop unrunnable. Refuse BEFORE the continuation reactivation
+		// side effect. The frontend API and the session manager reject this
+		// even earlier with a user-facing message; the sentinel keeps the
+		// invariant for direct callers.
 		if o.slmEssentialToolsEnabled() {
 			return nil, ErrGoalBlockedBySLM
 		}
@@ -2900,7 +2957,7 @@ func slmAgentGuaranteedTools(ctx context.Context) []string {
 // When the profile is OFF (the default), it returns the tools untouched — zero
 // behavior change.
 func (o *Orchestrator) applySLMToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
-	sc := o.config.SLM
+	sc := o.slmSettings()
 	// Master toggle AND the essential-tools variant must both be enabled.
 	// When either is off, return the input untouched (zero behavior change).
 	if !o.slmEssentialToolsEnabled() {
@@ -2913,8 +2970,19 @@ func (o *Orchestrator) applySLMToolFilter(in []sdktools.ToolDescriptor, extraGua
 
 // slmEssentialToolsEnabled reports whether the small-LLM profile's
 // essential-tools narrowing is active: master toggle AND the essential-tools
-// variant both on.
+// variant both on. Reads the effective settings (the runtime override when a
+// config change refreshed them), so a runtime toggle is honored without an
+// app restart.
 func (o *Orchestrator) slmEssentialToolsEnabled() bool {
-	sc := o.config.SLM
+	sc := o.slmSettings()
 	return sc.Enabled && sc.EssentialTools.Enabled
+}
+
+// SLMNarrowingEnabled is the exported accessor for slmEssentialToolsEnabled.
+// The session manager uses it to pre-check a resume against the same fresh
+// effective settings the orchestrator's goal guard reads (see
+// Manager.ResumeTask) — so the frontend API's pre-flight and the manager's
+// choke point agree with the orchestrator's invariant.
+func (o *Orchestrator) SLMNarrowingEnabled() bool {
+	return o.slmEssentialToolsEnabled()
 }

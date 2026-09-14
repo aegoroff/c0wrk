@@ -9,8 +9,11 @@ import { create } from 'zustand'
  *   - `enabled` — the resolved Small-LLM master toggle (config `slm.enabled`,
  *     already folded with the experimental gate by the backend).
  *   - `essentialToolsEnabled` — the resolved essential-tools variant
- *     sub-toggle. When on, the profile NARROWS the tool set (goal-mode tools
- *     are stripped before selection), which makes goal mode unusable.
+ *     sub-toggle. When on, goal mode is refused: the narrowing is applied only
+ *     to the non-goal Conductor path and the E2S branch (both run after goal
+ *     mode's early return), so it never narrows a goal run; if it were applied
+ *     to a goal run it would hide the goal-loop tooling (propose_goal,
+ *     declare_goal_status, declare_verification) and make the loop unrunnable.
  *   - `loaded` — whether a live (non-startup-race) config has been latched yet.
  *
  * The two feature flags are DISTINCT and both must be on for the goal block;

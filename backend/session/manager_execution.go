@@ -1409,6 +1409,23 @@ func (m *Manager) ResumeTask(ctx context.Context, id, modelOverride, reasoningEf
 		session.mu.Unlock()
 		return ErrSessionCompacting
 	}
+	// Small-LLM goal guard: a paused non-terminal goal must not be resumed
+	// while the essential-tools narrowing is active — goal mode and the
+	// narrowing are mutually exclusive (see core.ErrGoalBlockedBySLM). Checked
+	// here, under the session lock and BEFORE the task is activated or
+	// reactivated, so EVERY resume entry point that funnels through ResumeTask
+	// (the ResumeTask / ResumeSession RPCs, the sendMessage nudge-resume, and
+	// the manual-compaction auto-resume) is refused without a side effect: the
+	// task row is left untouched (still "paused"), so a later message re-enters
+	// the nudge-resume path instead of degrading into a plain continuation.
+	// The orchestrator's own guard (Resume / resumeGoalLoop) is the ultimate
+	// authority behind this; the frontend API pre-check gives the friendly
+	// message.
+	if goalState != nil && !goalState.Status.IsTerminal() &&
+		session.orchestrator != nil && session.orchestrator.SLMNarrowingEnabled() {
+		session.mu.Unlock()
+		return core.ErrGoalBlockedBySLM
+	}
 	// Launching the resumed task consumes any recorded pause owner (the
 	// resume supersedes a previous pause request — including the user pause
 	// the compaction flow just honoured by NOT auto-resuming).

@@ -408,6 +408,30 @@ func (m *Manager) SetE2SSettings(settings core.E2SSettings) {
 	}
 }
 
+// SetSLMSettings refreshes the small-LLM settings on every live session
+// orchestrator so a runtime SLM change (master toggle, profile switch,
+// essential-tools variant flip, or the experimental gate) reaches sessions
+// built before the change. Mirrors SetE2SSettings: the builder seeds
+// config.SLM once at Build and the orchestrator factory reads the live config
+// only for sessions built afterwards, so an already-built orchestrator would
+// otherwise keep the stale build-time snapshot — e.g. the goal-mode guard
+// reading a narrowing the operator has since disabled, refusing a goal until an
+// app restart. Safe while a session's task is running — the per-orchestrator
+// override is atomic.
+func (m *Manager) SetSLMSettings(settings core.SLMSettings) {
+	m.mu.RLock()
+	orchestrators := make([]*core.Orchestrator, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if s.orchestrator != nil {
+			orchestrators = append(orchestrators, s.orchestrator)
+		}
+	}
+	m.mu.RUnlock()
+	for _, o := range orchestrators {
+		o.SetSLMSettings(settings)
+	}
+}
+
 // slmProfile returns the recorded Small-LLM profile snapshot.
 func (m *Manager) slmProfile() SLMMetaInfo {
 	m.mu.RLock()

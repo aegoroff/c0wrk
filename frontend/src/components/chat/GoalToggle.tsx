@@ -11,8 +11,12 @@ import { cn } from '@/lib/utils'
  * The toggle is available on both the first message of a task and on
  * continuations, where re-enabling it runs the goal loop on the inherited
  * blackboard of the prior task — EXCEPT while the Small-LLM profile's
- * essential-tools variant is active, which narrows the tool set and strips the
- * goal-mode tools. `blocked` carries that gate (see `lib/goalGate`): it locks
+ * essential-tools variant is active, under which goal mode is refused: the
+ * narrowing is applied only to the non-goal Conductor path and the E2S branch
+ * (both run after goal mode's early return), so it never narrows a goal run; if
+ * it were applied to a goal run it would hide the goal-loop tooling
+ * (propose_goal, declare_goal_status, declare_verification) and make the loop
+ * unrunnable. `blocked` carries that gate (see `lib/goalGate`): it locks
  * the button and surfaces the reason (and the fix) in its title. The toggle
  * state (`goalEnabled`) lives in
  * inputModeStore but is NOT persisted: goal mode is per-task opt-in, so

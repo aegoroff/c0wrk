@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -525,4 +526,38 @@ func TestResumeTask_GoalBlockedBySLM(t *testing.T) {
 	if err := api.ResumeTask("fork-src", "", ""); err != nil {
 		t.Errorf("a terminal-goal (plain-path) resume must be unaffected, got: %v", err)
 	}
+}
+
+// TestSlmGoalBlocked_ConcurrentWithMutation pins the synchronization fix: the
+// effective-profile resolve runs under configMu.RLock, so it cannot race the
+// setters' in-place config writes. Before the fix, slmGoalBlocked read cfg.SLM /
+// cfg.Experimental from a detached pointer outside the lock; under
+// `go test -race` this test would flag that race. It passes silently when run
+// without -race, so the invariant is asserted in CI's race build.
+func TestSlmGoalBlocked_ConcurrentWithMutation(t *testing.T) {
+	api := &FrontendAPI{config: slmNarrowingConfig("")}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// Simulate a setter's in-place mutation under the write lock.
+				api.configMu.Lock()
+				api.config.Experimental.Enabled = !api.config.Experimental.Enabled
+				api.configMu.Unlock()
+			}
+		}
+	}()
+
+	for i := 0; i < 1000; i++ {
+		_ = api.slmGoalBlocked()
+	}
+	close(stop)
+	wg.Wait()
 }
