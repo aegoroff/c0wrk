@@ -238,7 +238,7 @@ describe('SettingsModal Appearance tab', () => {
     expect(bannerText()).not.toContain('Log Level')
   })
 
-  it('places Theme and UI Scale side by side on one horizontal level', async () => {
+  it('stacks Theme and UI Scale as separate blocks, Theme first', async () => {
     useSettingsStore.setState({ open: true, activeTab: 'appearance' })
     act(() => {
       root.render(<SettingsModal />)
@@ -256,47 +256,22 @@ describe('SettingsModal Appearance tab', () => {
     expect(themeBlock).not.toBeNull()
     expect(scaleBlock).not.toBeNull()
 
-    // Both blocks share the same layout container, which lays them out as two
-    // equal columns — i.e. on one horizontal level — rather than stacked.
-    const row = themeBlock!.parentElement as HTMLElement
-    expect(row).toBe(scaleBlock!.parentElement)
-    expect(row.className).toContain('grid-cols-2')
-  })
+    // Theme sits at the top of the Appearance stack; UI Scale follows in its
+    // own section below it. The Theme header must precede the UI Scale header
+    // in DOM order, and the UI Scale section must live inside the same stack.
+    const stack = themeBlock!.parentElement as HTMLElement
+    expect(stack.className).toContain('space-y-6')
+    expect(stack.contains(themeHeader!)).toBe(true)
+    expect(stack.contains(scaleHeader!)).toBe(true)
+    expect(
+      themeHeader!.compareDocumentPosition(scaleHeader!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
 
-  it('vertically centers the UI Scale field against the Theme switch group', async () => {
-    useSettingsStore.setState({ open: true, activeTab: 'appearance' })
-    act(() => {
-      root.render(<SettingsModal />)
-    })
-    await flush()
-
-    const spans = Array.from(document.body.querySelectorAll('span'))
-    const themeHeader = spans.find((s) => s.textContent === 'Theme')
-    const scaleHeader = spans.find((s) => s.textContent === 'UI Scale')
-    expect(themeHeader).toBeDefined()
-    expect(scaleHeader).toBeDefined()
-
-    const themeBlock = themeHeader!.closest('div.flex.flex-col') as HTMLElement
-    const scaleBlock = scaleHeader!.closest('div.flex.flex-col') as HTMLElement
-
-    // The two columns stretch to equal height (the taller Theme switch group
-    // defines it), so the shorter UI-scale field has slack to be centered in.
-    const row = themeBlock.parentElement as HTMLElement
-    expect(row.className).toContain('items-stretch')
-
-    // UI Scale's control area grows to fill that slack and centers its child
-    // vertically, putting the field's midpoint on the Theme group's midpoint.
-    const scaleWrap = scaleBlock.lastElementChild as HTMLElement
-    expect(scaleWrap.className).toContain('flex-1')
-    expect(scaleWrap.className).toContain('items-center')
-    expect(scaleWrap.querySelector('input[aria-label="UI scale"]')).not.toBeNull()
-
-    // The Theme switch group is the reference block — it defines the column
-    // height and is not itself grown/centered, so the two midpoints coincide
-    // only because the columns stretch to a common height.
-    const themeControl = themeBlock.lastElementChild as HTMLElement
-    expect(themeControl.className).toContain('gap-1')
-    expect(themeControl.className).not.toContain('flex-1')
+    // The UI Scale section is separated from Theme by a divider (mirroring
+    // how General separates its sections), not laid out as a column.
+    const scaleSection = scaleBlock!.parentElement as HTMLElement
+    expect(scaleSection.className).toContain('border-t')
+    expect(scaleSection.parentElement).toBe(stack)
   })
 
   it('keeps Log Level in General and no longer shows Theme or UI Scale there', async () => {

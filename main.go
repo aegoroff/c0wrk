@@ -116,6 +116,11 @@ func mainImpl() int {
 		// window unconditionally within a millisecond of startup anyway.
 		AssetServer: &assetserver.Options{
 			Assets: assets,
+			// Strict CSP on every asset response (production builds only —
+			// the dev variant in desktop/csp_dev.go is a no-op so it never
+			// breaks the Vite/HMR pipeline). Defense in depth for injected
+			// theme CSS: even a future sanitizer bypass cannot fetch anything.
+			Middleware: desktop.CSPMiddleware(),
 		},
 		// Enable native file-drop so dragging files onto the window emits their
 		// absolute paths to the frontend (files:dropped, wired in Startup via

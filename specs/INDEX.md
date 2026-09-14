@@ -33,6 +33,7 @@
 | SLM profiles (tuning for small/local models) | [domains/slm.md](domains/slm.md), [decisions/041-slm-profiles.md](decisions/041-slm-profiles.md), [decisions/022-small-llm-profile.md](decisions/022-small-llm-profile.md) |
 | File & image attachments (pending → blackboard / content blocks), vision-assisted document conversion & its egress  | [domains/session-lifecycle.md](domains/session-lifecycle.md), [domains/memory/blackboard.md](domains/memory/blackboard.md) |
 | File tree, vector index, workspace       | [domains/workspace.md](domains/workspace.md)                             |
+| Themes (built-in + custom CSS import)    | [domains/theming.md](domains/theming.md)                                 |
 | Git subprocess hardening (untrusted repos, `.git/config` vectors, hooks/filters neutralization, `.git` write gate) + user trust/harden opt-out (snapshot-bound, recheck-with-diff, fail-closed) | [decisions/033-git-subprocess-hardening.md](decisions/033-git-subprocess-hardening.md), [decisions/034-git-trust-opt-out.md](decisions/034-git-trust-opt-out.md), [architecture/security-model.md](architecture/security-model.md) (Git Subprocess Hardening), [domains/workspace.md](domains/workspace.md) |
 | Git auto-fetch (background `git fetch`, switch/ticker/focus triggers) | [domains/git-auto-fetch.md](domains/git-auto-fetch.md)             |
 | Auxiliary work directories               | [architecture/security-model.md](architecture/security-model.md), [contracts/desktop-frontend.md](contracts/desktop-frontend.md) (Work Directories section), [domains/frontend/stores.md](domains/frontend/stores.md) (`workDirsStore`) |
@@ -120,6 +121,7 @@ See [META.md](META.md) for document templates, naming rules, and update protocol
 - [verify-on-edit.md](domains/verify-on-edit.md) - Verify on edit: user-configured test/linter command runs after successful file edits, output injected as a system observation (edit → verify → result; config-only command, all hard security gates intact)
 - [tool-manager.md](domains/tool-manager.md) - External binary dependency manager (rg/uv/markitdown): pinned-version reconciliation, SHA256 verification, no-auto-update supply-chain guarantee
 - [workspace.md](domains/workspace.md) - File tree, vector index, workspace watcher
+- [theming.md](domains/theming.md) - Theming: built-in themes + custom CSS theme import (token format, tokenizer-based sanitize-on-import, storage in `~/.c0wrk/themes`, FOUC-free pre-paint apply), annotated example theme and bundled palette themes in [frontend/src/assets/themes/](../frontend/src/assets/themes/)
 - [review.md](domains/review.md) - Code review feature (review sessions, diff parsing, hunk/file/general comments, clone-on-fork)
 - [research.md](domains/research.md) - Project-scoped research workspace: briefs, versioned methodology skills, hypothesis DAG parsing, metrics, recursive watcher, and incremental frontend graph updates
 

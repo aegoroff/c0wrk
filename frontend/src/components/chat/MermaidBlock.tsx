@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'
-import { useThemeStore } from '@/stores/themeStore'
+import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 import { Button } from '@/components/ui/button'
 import { DEFAULT_ZOOM_STEP, INITIAL_VIEW, usePanZoom } from '@/lib/usePanZoom'
 
@@ -25,7 +25,7 @@ interface MermaidBlockProps {
  * `usePanZoom` hook.
  */
 export function MermaidBlock({ code }: MermaidBlockProps) {
-  const theme = useThemeStore((s) => s.theme)
+  const theme = useThemeStore(selectActiveThemeType)
   const {
     view,
     setView,

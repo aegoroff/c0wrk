@@ -29,13 +29,11 @@ export function UIScaleSelector() {
         <span className="text-sm font-medium">UI Scale</span>
       </div>
       {/*
-        `flex-1 items-center` makes the field fill the available column height
-        and sit on its vertical midpoint. In the Appearance tab the column is
-        stretched to the taller Theme switch group, so the field's center lines
-        up with the Theme control's center. Standalone (un-stretched), the
-        wrapper collapses to the field's own height — a no-op.
+        The field wrapper carries no sizing of its own, so the block stacks
+        naturally (label row, then field) and grows only as tall as its
+        content — no extra slack is created between the label and the field.
       */}
-      <div className="flex flex-1 items-center">
+      <div>
         <EditableCombobox
           value={scale}
           presets={UI_SCALE_PRESETS}

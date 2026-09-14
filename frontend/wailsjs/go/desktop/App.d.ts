@@ -85,6 +85,8 @@ export function DeleteSession(arg1:string):Promise<void>;
 
 export function DeleteTag(arg1:string):Promise<void>;
 
+export function DeleteTheme(arg1:string):Promise<void>;
+
 export function DeleteWorkDirectory(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function DisableResearch(arg1:string):Promise<void>;
@@ -219,6 +221,8 @@ export function ListSessions():Promise<Array<session.SessionInfo>>;
 
 export function ListSkills():Promise<Array<backend.SkillDescriptorDTO>>;
 
+export function ListThemes():Promise<Array<backend.ThemeDTO>>;
+
 export function Merge(arg1:string):Promise<void>;
 
 export function OptimizePrompt(arg1:string):Promise<backend.OptimizePromptResponse>;
@@ -228,6 +232,8 @@ export function PasteFromClipboard(arg1:string,arg2:boolean):Promise<session.Pas
 export function PauseSession(arg1:string):Promise<void>;
 
 export function PersistWindowBounds():Promise<void>;
+
+export function PickAndImportThemes():Promise<Array<backend.ThemeImportResult>>;
 
 export function PickAttachmentFiles():Promise<Array<string>>;
 

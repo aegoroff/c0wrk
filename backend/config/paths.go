@@ -80,6 +80,14 @@ func ToolsDir(agentDir string) string {
 	return filepath.Join(agentDir, "tools")
 }
 
+// ThemesDir returns the user themes directory (~/.c0wrk/themes/) holding
+// custom CSS theme files. Each theme is a standalone *.css file whose name
+// doubles as its stable identifier; the directory is created lazily by the
+// importer, this helper only names it.
+func ThemesDir(agentDir string) string {
+	return filepath.Join(agentDir, "themes")
+}
+
 // ToolsBinDir returns the directory for static binaries managed by the
 // tool-manager (~/.c0wrk/tools/bin/).
 func ToolsBinDir(agentDir string) string {

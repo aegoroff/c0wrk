@@ -5,8 +5,10 @@ import { createRoot, type Root } from 'react-dom/client'
 
 // --- Mock themeStore (avoids persisted localStorage in tests) ---
 vi.mock('@/stores/themeStore', () => ({
-  useThemeStore: (selector: (s: { theme: 'dark' | 'light' }) => unknown) =>
-    selector({ theme: 'dark' }),
+  useThemeStore: (selector: (s: { themeId: string; customThemes: { id: string; name: string; type: string }[] }) => unknown) =>
+    selector({ themeId: 'default-dark', customThemes: [] }),
+  selectActiveThemeType: (s: { themeId: string; customThemes: { id: string; name: string; type: string }[] }) =>
+    s.themeId === 'default-light' ? 'light' : 'dark',
 }))
 
 // --- Mock the dynamic `import('mermaid')` in MermaidBlock ---

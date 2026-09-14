@@ -139,7 +139,7 @@ beforeEach(() => {
   useProjectStore.setState({ activeProjectId: 'proj-1' })
   useChatStore.setState({ messages: {}, messageOrder: {}, taskActive: {}, paused: {}, pausing: {}, compacting: {} })
   useInputModeStore.setState({ mode: 'chat', pendingInsertion: null })
-  useThemeStore.setState({ theme: 'dark' })
+  useThemeStore.setState({ themeId: 'default-dark', themeCss: '', customThemes: [] })
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)

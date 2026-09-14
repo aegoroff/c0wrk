@@ -19,7 +19,7 @@ import {
 import { conflictMarkerPlugin } from '@/lib/cmConflictMarkers'
 import { loadLanguageByName } from '@/lib/cmLanguages'
 import { createOneDarkCMTheme } from '@/lib/cmTheme'
-import { useThemeStore } from '@/stores/themeStore'
+import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 
 interface CodeMirrorViewerProps {
   content: string
@@ -94,7 +94,7 @@ function CodeMirrorEditor({ content, language, diff, highlightLine }: CodeMirror
   const clearHighlightLine = useFileViewerStore((s) => s.clearHighlightLine)
   const activeFile = useFileViewerStore((s) => s.activeFile)
   const workspacePath = useWorkspacePath()
-  const theme = useThemeStore((s) => s.theme)
+  const theme = useThemeStore(selectActiveThemeType)
 
   // Create EditorView on mount, destroy on unmount
   useEffect(() => {

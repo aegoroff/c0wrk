@@ -5,7 +5,7 @@ import { terminalInput, terminalResize, startTerminal, startTerminalInDir } from
 import { useTerminalEvents } from '@/hooks/events/useTerminalEvents'
 import { useXTermTheme } from '@/hooks/useXTermTheme'
 import { useInputModeStore } from '@/stores/inputModeStore'
-import { useThemeStore } from '@/stores/themeStore'
+import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 import { useUiScaleStore } from '@/stores/uiScaleStore'
 import { logger } from '@/lib/logger'
 
@@ -35,14 +35,14 @@ export function Terminal({ sessionId, visible, isActive, onReady }: TerminalProp
     const containerRef = useRef<HTMLDivElement>(null)
     const termRef = useRef<XTerm | null>(null)
     const fitAddonRef = useRef<FitAddon | null>(null)
-    const appTheme = useThemeStore((s) => s.theme)
-    const theme = useXTermTheme(appTheme)
-    // Latest theme kept in a ref so the terminal-creation effect can read the
-    // current palette at construction time without listing `theme` in its
+    const appTheme = useThemeStore(selectActiveThemeType)
+    const palette = useXTermTheme(appTheme)
+    // Latest palette kept in a ref so the terminal-creation effect can read the
+    // current palette at construction time without listing it in its
     // dependency array (which would tear down and restart the session on every
-    // theme switch). A separate effect below applies theme changes live.
-    const themeRef = useRef(theme)
-    themeRef.current = theme
+    // theme switch). A separate effect below applies palette changes live.
+    const paletteRef = useRef(palette)
+    paletteRef.current = palette
 
     // Dead-shell tracking: set on terminal_exited, cleared when a restart
     // succeeded. restarting guards against concurrent restart attempts.
@@ -98,7 +98,7 @@ export function Terminal({ sessionId, visible, isActive, onReady }: TerminalProp
             cursorBlink: true,
             fontSize: 10,
             fontFamily: 'SauceCodePro NF, Menlo, Monaco, "Courier New", monospace',
-            theme: themeRef.current,
+            theme: paletteRef.current,
             scrollback: 10000,
         })
 
@@ -186,14 +186,15 @@ export function Terminal({ sessionId, visible, isActive, onReady }: TerminalProp
         }
     }, [sessionId, onReady, restart])
 
-    // Apply theme changes to the live terminal without restarting the session.
-    // xterm.js re-renders when options.theme is reassigned, so switching the
+    // Apply palette changes to the live terminal without restarting the session.
+    // xterm.js re-renders when its theme option is reassigned, so switching the
     // palette updates the running terminal in place.
     useEffect(() => {
-        if (termRef.current) {
-            termRef.current.options.theme = theme
+        const term = termRef.current
+        if (term) {
+            term.options = { ...term.options, theme: palette }
         }
-    }, [theme])
+    }, [palette])
 
     // Re-fit when the app-wide UI scale (CSS zoom on <html>) changes: zoom
     // resizes the container's layout box, which the container's own

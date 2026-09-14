@@ -225,6 +225,51 @@ func (a *App) PickAttachmentFiles() ([]string, error) {
 	})
 }
 
+// PickAndImportThemes opens a native multi-select file picker restricted to
+// CSS files and imports every chosen file as a user theme in one action. This
+// must remain on App (not FrontendAPI) because it requires the Wails context,
+// exactly like PickDirectory.
+//
+// On cancel, OpenMultipleFilesDialog returns an empty slice and a nil error;
+// the method then returns (nil, nil) — nothing is imported and the frontend
+// maps the null result to "user cancelled". The chosen paths are delegated to
+// backend.ImportThemesFromPaths (the package-level bridge over the
+// unexported FrontendAPI importer), which validates and sanitizes each file
+// independently — one invalid file never blocks the rest of the batch, and
+// per-file outcomes (including failures) come back in the result list so the
+// frontend can surface them. This picker is the ONLY import entry point: the
+// underlying import functions are not FrontendAPI methods precisely so the
+// binding generator never publishes a path-taking RPC to the renderer.
+func (a *App) PickAndImportThemes() ([]backend.ThemeImportResult, error) {
+	if a.ctx == nil {
+		return nil, errors.New("PickAndImportThemes: application context is not initialized")
+	}
+
+	paths, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Import Themes",
+		Filters: []wailsRuntime.FileFilter{
+			{
+				DisplayName: "Theme files",
+				Pattern:     "*.css",
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		// Cancelled: import nothing and report no error.
+		return nil, nil
+	}
+
+	// Delegate to the package-level batch importer: the import entry points
+	// are deliberately NOT FrontendAPI methods (exported methods are
+	// auto-bound to the renderer; a path-taking RPC must not be callable
+	// from compromised renderer JS). The picker above is the sole path
+	// source.
+	return backend.ImportThemesFromPaths(a.FrontendAPI, paths), nil
+}
+
 // log returns the instance logger, falling back to slog.Default() when nil.
 func (a *App) log() *slog.Logger {
 	if a.logger != nil {

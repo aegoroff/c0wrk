@@ -227,16 +227,11 @@ export function SettingsModal() {
           </TabsContent>
 
           <TabsContent value="appearance" className={TAB_CONTENT_CLASS}>
-            {/*
-              Theme and UI Scale sit side by side on a single horizontal step
-              (two equal columns). The columns stretch to the tallest control
-              (the Theme switch group, which is taller than the single-row
-              UI-scale field by its `p-1` wrapper), so UIScaleSelector can
-              vertically center its field against the Theme group.
-            */}
-            <div className="grid grid-cols-2 gap-6 items-stretch">
+            <div className="space-y-6">
               <ThemeSelector />
-              <UIScaleSelector />
+              <div className="border-t border-border pt-4">
+                <UIScaleSelector />
+              </div>
             </div>
           </TabsContent>
 

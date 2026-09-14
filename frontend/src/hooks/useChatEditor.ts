@@ -3,7 +3,7 @@ import { EditorView, placeholder } from '@codemirror/view'
 import { EditorState, Compartment } from '@codemirror/state'
 import { createChatExtensions } from '@/lib/cmChatExtensions'
 import { createChatEditorTheme } from '@/lib/cmChatTheme'
-import { useThemeStore } from '@/stores/themeStore'
+import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 
 /**
  * Decide whether a paste event should take the NATIVE fast path (let
@@ -85,7 +85,7 @@ export function useChatEditor(options: UseChatEditorOptions): ChatEditorAPI {
   const editableComp = useRef(new Compartment())
   const placeholderComp = useRef(new Compartment())
   const themeCompartment = useRef(new Compartment())
-  const theme = useThemeStore((s) => s.theme)
+  const theme = useThemeStore(selectActiveThemeType)
 
   // Keep callback refs up to date without recreating extensions.
   onSendRef.current = options.onSend

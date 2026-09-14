@@ -1,0 +1,68 @@
+/* c0wrk-theme: High Contrast Light | light */
+/*
+  Bundled c0wrk palette theme — "High Contrast Light"
+  Pure-white canvas, near-black text, hard borders, darkened semantic
+  colors — every text/background pair measures at least WCAG AA (core text
+  pairs exceed AAA; measured at authoring time).
+  Original c0wrk palette (no external palette); max-readability variant of
+  the built-in One Light direction.
+  Import: Settings → Theme → [+] → pick this .css file.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #ffffff;
+    --color-foreground: #000000;
+
+    /* Surfaces */
+    --color-card: #f2f2f2;
+    --color-card-foreground: #000000;
+    --color-popover: #f2f2f2;
+    --color-popover-foreground: #000000;
+
+    /* Primary / accent */
+    --color-primary: #0b57d0;
+    --color-primary-foreground: #ffffff;
+    --color-accent: #0b57d0;
+    --color-accent-foreground: #ffffff;
+
+    /* Secondary / muted */
+    --color-secondary: #e8e8e8;
+    --color-secondary-foreground: #1a1a1a;
+    --color-muted: #ededed;
+    --color-muted-foreground: #333333;
+
+    /* Semantic */
+    --color-destructive: #b3261e;
+    --color-destructive-foreground: #ffffff;
+    --color-success: #1a7f37;
+    --color-warning: #9a6700;
+    --color-info: #0b57d0;
+    --color-highlight: #9a6700;
+
+    /* Borders & focus — deliberately heavy; that is the point of this theme */
+    --color-border: #666666;
+    --color-input: #666666;
+    --color-ring: #000000;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 11, 87, 208;
+    --color-success-rgb: 26, 127, 55;
+    --color-destructive-rgb: 179, 38, 30;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #57606a;
+    --color-hljs-keyword: #8250df;
+    --color-hljs-literal: #0969da;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #0b57d0;
+    --color-terminal-selection: #c8c8c8;
+    --color-terminal-bright-white: #000000;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.18);
+
+    color-scheme: light;
+}

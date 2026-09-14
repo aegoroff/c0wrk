@@ -154,6 +154,10 @@ export function DeleteTag(arg1) {
   return window['go']['desktop']['App']['DeleteTag'](arg1);
 }
 
+export function DeleteTheme(arg1) {
+  return window['go']['desktop']['App']['DeleteTheme'](arg1);
+}
+
 export function DeleteWorkDirectory(arg1, arg2, arg3) {
   return window['go']['desktop']['App']['DeleteWorkDirectory'](arg1, arg2, arg3);
 }
@@ -422,6 +426,10 @@ export function ListSkills() {
   return window['go']['desktop']['App']['ListSkills']();
 }
 
+export function ListThemes() {
+  return window['go']['desktop']['App']['ListThemes']();
+}
+
 export function Merge(arg1) {
   return window['go']['desktop']['App']['Merge'](arg1);
 }
@@ -440,6 +448,10 @@ export function PauseSession(arg1) {
 
 export function PersistWindowBounds() {
   return window['go']['desktop']['App']['PersistWindowBounds']();
+}
+
+export function PickAndImportThemes() {
+  return window['go']['desktop']['App']['PickAndImportThemes']();
 }
 
 export function PickAttachmentFiles() {

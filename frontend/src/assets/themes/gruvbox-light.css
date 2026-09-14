@@ -1,0 +1,65 @@
+/* c0wrk-theme: Gruvbox Light | light */
+/*
+  Bundled c0wrk palette theme — "Gruvbox Light"
+  Palette: Gruvbox (github.com/morhetz/gruvbox), light variant.
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #fbf1c7;
+    --color-foreground: #3c3836;
+
+    /* Surfaces */
+    --color-card: #ebdbb2;
+    --color-card-foreground: #3c3836;
+    --color-popover: #ebdbb2;
+    --color-popover-foreground: #3c3836;
+
+    /* Primary / accent */
+    --color-primary: #076678;
+    --color-primary-foreground: #fbf1c7;
+    --color-accent: #076678;
+    --color-accent-foreground: #fbf1c7;
+
+    /* Secondary / muted */
+    --color-secondary: #d5c4a1;
+    --color-secondary-foreground: #504945;
+    --color-muted: #e7dcc3;
+    --color-muted-foreground: #665c54;
+
+    /* Semantic */
+    --color-destructive: #9d0006;
+    --color-destructive-foreground: #fbf1c7;
+    --color-success: #79740e;
+    --color-warning: #b57614;
+    --color-info: #076678;
+    --color-highlight: #b57614;
+
+    /* Borders & focus */
+    --color-border: #d5c4a1;
+    --color-input: #d5c4a1;
+    --color-ring: #076678;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 7, 102, 120;
+    --color-success-rgb: 121, 116, 14;
+    --color-destructive-rgb: 157, 0, 6;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #928374;
+    --color-hljs-keyword: #8f3f71;
+    --color-hljs-literal: #427b58;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #076678;
+    --color-terminal-selection: #d5c4a1;
+    --color-terminal-bright-white: #282828;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.14);
+
+    color-scheme: light;
+}

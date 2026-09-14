@@ -4,7 +4,7 @@ import { EditorState, Compartment } from '@codemirror/state'
 import { markdown } from '@codemirror/lang-markdown'
 import { cn } from '@/lib/utils'
 import { createOneDarkCMTheme } from '@/lib/cmTheme'
-import { useThemeStore } from '@/stores/themeStore'
+import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 
 interface MiniCodeMirrorFieldProps {
   value: string
@@ -37,7 +37,7 @@ export function MiniCodeMirrorField({ value, onChange, placeholder, ariaLabel, l
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const themeCompartment = useRef(new Compartment())
-  const theme = useThemeStore((s) => s.theme)
+  const theme = useThemeStore(selectActiveThemeType)
 
   // The view is created exactly once per mount (effect below), so the update
   // listener must call the LATEST onChange through a ref: capturing the

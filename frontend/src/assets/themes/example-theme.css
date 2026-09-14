@@ -1,0 +1,182 @@
+/* c0wrk-theme: Solar Light | light */
+/*
+  ============================================================================
+  c0wrk example theme — "Solar Light"
+  ============================================================================
+
+  This file is a working tutorial: import it as-is to try it, or copy it as
+  a starting point for your own theme. Every line below explains what a
+  theme can and cannot do.
+
+  HOW TO IMPORT
+  -------------
+  Settings → Appearance → Theme → [+] button → pick one or several .css files
+  (the picker is multi-select). Every valid file is imported; the last one
+  activates immediately, and invalid files are skipped with a notice. The
+  theme appears in the dropdown. Re-importing an updated file with the same
+  name updates the installed theme.
+
+  HOW A THEME WORKS
+  -----------------
+  c0wrk's UI is styled exclusively with CSS custom properties ("design
+  tokens"). A theme is simply a set of overrides for those tokens on :root —
+  you never touch component CSS. The file is injected into the app as a
+  <style> element, so plain CSS variables and rules are all you need; the
+  Tailwind @theme semantics do NOT apply here (a @theme block would be
+  inert, it does not generate utilities).
+
+  LINE 1 IS THE METADATA HEADER (required for an explicit name and type)
+  ------------------------------------------------------------------
+  The first line of this file shows the exact syntax:
+
+      c0wrk-theme: Solar Light | light
+
+  - The header must be the FIRST thing in the file (leading whitespace ok),
+    wrapped in a CSS comment. A marker anywhere else is ignored.
+  - The word after the pipe decides the theme type: dark or light. It
+    drives the icon shown next to the theme in the dropdown (moon vs sun).
+  - No header? The name falls back to the file name (nord.css → "Nord")
+    and the type falls back to a `color-scheme: dark|light` declaration in
+    the CSS body, then to "dark".
+
+  VALIDATION RULES (the import will fail otherwise)
+  -------------------------------------------------
+  - The file must declare --color-background and --color-foreground
+    (the two tokens every theme must provide).
+  - Only custom-property declarations on a single :root rule are used;
+    anything else (regular declarations like `background:`, other
+    selectors, @-rules, functions like image-set()) is rejected at import.
+  - Embedded resources must be inline data URIs; remote or local file
+    references are rejected — a theme must never fetch anything.
+  - Import stores the sanitized canonical form (this file's comments are
+    kept only for the metadata header).
+  - Max file size 512 KiB.
+  - The file name must not collide with the built-ins "default-dark" /
+    "default-light".
+
+  COLOR TOKENS
+  ------------
+  Every token has a default (the built-in One Dark palette); you only
+  override what you want to change. Delete any line you don't need — the
+  app keeps using the default for that token.
+
+  FULL TOKEN REFERENCE: specs/domains/theming.md (in the c0wrk repo).
+  LOCATION: this directory (frontend/src/assets/themes/) also ships the
+  bundled palette themes (nord.css, tokyo-night.css, …) — import any of
+  them the same way.
+*/
+
+:root {
+    /* ------------------------------------------------------------------
+       REQUIRED — the two tokens that make a theme valid.
+       The base canvas and the default text color.                       */
+    --color-background: #fdf6e3;
+    --color-foreground: #657b83;
+
+    /* ------------------------------------------------------------------
+       SURFACES — raised layers: cards, popovers, dropdowns, inputs on
+       top of the background. *-foreground is text/icons on that surface.
+       Use slightly darker (light themes) or lighter (dark themes) shades
+       than the background to create depth.                              */
+    --color-card: #eee8d5;
+    --color-card-foreground: #586e75;
+    --color-popover: #eee8d5;
+    --color-popover-foreground: #586e75;
+
+    /* ------------------------------------------------------------------
+       PRIMARY — the main interactive accent: buttons, links, focused
+       elements, the selection ring.                                      */
+    --color-primary: #268bd2;
+    --color-primary-foreground: #fdf6e3;
+    /* ACCENT — hover/selected highlight for lists and menu rows.         */
+    --color-accent: #268bd2;
+    --color-accent-foreground: #fdf6e3;
+
+    /* ------------------------------------------------------------------
+       SECONDARY — subtle interactive fill (chip backgrounds, toolbar
+       buttons). MUTED — quiet surfaces; *-foreground is the dimmed
+       text/placeholder color.                                            */
+    --color-secondary: #e2ddc8;
+    --color-secondary-foreground: #657b83;
+    --color-muted: #e9e4d1;
+    --color-muted-foreground: #93a1a1;
+
+    /* ------------------------------------------------------------------
+       SEMANTIC — errors, success, info, warnings, highlights.
+       Keep enough contrast with the background for readability.          */
+    --color-destructive: #dc322f;
+    --color-destructive-foreground: #fdf6e3;
+    --color-success: #859900;
+    --color-warning: #b58900;
+    --color-info: #268bd2;
+    --color-highlight: #b58900;
+
+    /* ------------------------------------------------------------------
+       BORDERS & FOCUS — separators, input borders, the focus ring.       */
+    --color-border: #ddd6c1;
+    --color-input: #ddd6c1;
+    --color-ring: #268bd2;
+
+    /* ------------------------------------------------------------------
+       RGB TRIPLETS — comma-separated "r, g, b" (no rgb() wrapper) used
+       with rgba() where alpha blending is needed (e.g. the chat message
+       hover wash). Keep each triplet in sync with its base color above.  */
+    --color-primary-rgb: 38, 139, 210;
+    --color-success-rgb: 133, 153, 0;
+    --color-destructive-rgb: 220, 50, 44;
+
+    /* ------------------------------------------------------------------
+       SYNTAX HIGHLIGHTING (highlight.js) — a minimal but useful set for
+       code blocks and the file viewer.                                   */
+    --color-hljs-comment: #93a1a1;
+    --color-hljs-keyword: #859900;
+    --color-hljs-literal: #2aa198;
+
+    /* ------------------------------------------------------------------
+       EMBEDDED TERMINAL — cursor color, selection background, and the
+       "bright white" version of the text color. The terminal's other ANSI
+       colors are derived from the tokens above (red ← destructive, green
+       ← success, blue ← info, yellow ← highlight, and so on).            */
+    --color-terminal-cursor: #268bd2;
+    --color-terminal-selection: #ddd6c1;
+    --color-terminal-bright-white: #073642;
+
+    /* ------------------------------------------------------------------
+       ELEVATION — the shadow color for floating panels. Softer (more
+       transparent) shadows suit light themes.                            */
+    --color-shadow: rgba(0, 0, 0, 0.12);
+
+    /* ------------------------------------------------------------------
+       TYPE — declares the theme kind to the browser (native form fields,
+       scrollbars, spell-check underlines). ALSO acts as the metadata
+       fallback for the theme type when there is no header.               */
+    color-scheme: light;
+}
+
+/*
+  ============================================================================
+  OPTIONAL EXTRAS
+  ============================================================================
+*/
+
+/*
+  RADIUS — corner rounding of buttons, inputs, cards. Inherited from the
+  app's global scale; override only if you want distinctly different
+  shapes (e.g. a "sharp" theme):
+
+      --radius-sm: 0;
+      --radius-md: 0;
+      --radius-lg: 0;
+      --radius-xl: 0;
+*/
+
+/*
+  MULTI-RULE THEMES — everything above lives in one :root block, but you
+  may add more rules: any selector the app renders is fair game (e.g.
+  tuning a specific component via its class name). Two caveats:
+    - Prefer tokens. Reaching for arbitrary selectors makes your theme
+      fragile across app updates — a rename of an internal class can
+      silently break it.
+    - No stylesheet imports and no external resources (see VALIDATION
+      RULES above); everything the theme needs must live in this file.
+*/

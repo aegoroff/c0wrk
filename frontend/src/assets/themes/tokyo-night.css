@@ -1,0 +1,65 @@
+/* c0wrk-theme: Tokyo Night | dark */
+/*
+  Bundled c0wrk palette theme — "Tokyo Night"
+  Palette: Tokyo Night (github.com/folke/tokyonight.nvim).
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #1a1b26;
+    --color-foreground: #c0caf5;
+
+    /* Surfaces */
+    --color-card: #16161e;
+    --color-card-foreground: #c0caf5;
+    --color-popover: #16161e;
+    --color-popover-foreground: #c0caf5;
+
+    /* Primary / accent */
+    --color-primary: #7aa2f7;
+    --color-primary-foreground: #1a1b26;
+    --color-accent: #7aa2f7;
+    --color-accent-foreground: #1a1b26;
+
+    /* Secondary / muted */
+    --color-secondary: #292e42;
+    --color-secondary-foreground: #a9b1d6;
+    --color-muted: #292e42;
+    --color-muted-foreground: #a9b1d6;
+
+    /* Semantic */
+    --color-destructive: #f7768e;
+    --color-destructive-foreground: #1a1b26;
+    --color-success: #9ece6a;
+    --color-warning: #e0af68;
+    --color-info: #7aa2f7;
+    --color-highlight: #e0af68;
+
+    /* Borders & focus */
+    --color-border: #292e42;
+    --color-input: #292e42;
+    --color-ring: #7aa2f7;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 122, 162, 247;
+    --color-success-rgb: 158, 206, 106;
+    --color-destructive-rgb: 247, 118, 142;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #565f89;
+    --color-hljs-keyword: #bb9af7;
+    --color-hljs-literal: #7dcfff;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #7aa2f7;
+    --color-terminal-selection: #292e42;
+    --color-terminal-bright-white: #ffffff;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.4);
+
+    color-scheme: dark;
+}

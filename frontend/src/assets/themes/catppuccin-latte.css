@@ -1,0 +1,65 @@
+/* c0wrk-theme: Catppuccin Latte | light */
+/*
+  Bundled c0wrk palette theme — "Catppuccin Latte"
+  Palette: Catppuccin (github.com/catppuccin/catppuccin).
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #eff1f5;
+    --color-foreground: #4c4f69;
+
+    /* Surfaces */
+    --color-card: #e6e9ef;
+    --color-card-foreground: #4c4f69;
+    --color-popover: #e6e9ef;
+    --color-popover-foreground: #4c4f69;
+
+    /* Primary / accent */
+    --color-primary: #1e66f5;
+    --color-primary-foreground: #ffffff;
+    --color-accent: #1e66f5;
+    --color-accent-foreground: #ffffff;
+
+    /* Secondary / muted */
+    --color-secondary: #ccd0da;
+    --color-secondary-foreground: #5c5f77;
+    --color-muted: #dce0e8;
+    --color-muted-foreground: #6c6f85;
+
+    /* Semantic */
+    --color-destructive: #d20f39;
+    --color-destructive-foreground: #ffffff;
+    --color-success: #40a02b;
+    --color-warning: #df8e1d;
+    --color-info: #1e66f5;
+    --color-highlight: #df8e1d;
+
+    /* Borders & focus */
+    --color-border: #ccd0da;
+    --color-input: #ccd0da;
+    --color-ring: #1e66f5;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 30, 102, 245;
+    --color-success-rgb: 64, 160, 43;
+    --color-destructive-rgb: 210, 15, 57;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #7c7f93;
+    --color-hljs-keyword: #8839ef;
+    --color-hljs-literal: #179299;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #1e66f5;
+    --color-terminal-selection: #ccd0da;
+    --color-terminal-bright-white: #4c4f69;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.12);
+
+    color-scheme: light;
+}

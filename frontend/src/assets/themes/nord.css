@@ -1,0 +1,65 @@
+/* c0wrk-theme: Nord | dark */
+/*
+  Bundled c0wrk palette theme — "Nord"
+  Palette: Nord (github.com/nordtheme/nord).
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #2e3440;
+    --color-foreground: #d8dee9;
+
+    /* Surfaces */
+    --color-card: #3b4252;
+    --color-card-foreground: #d8dee9;
+    --color-popover: #3b4252;
+    --color-popover-foreground: #d8dee9;
+
+    /* Primary / accent */
+    --color-primary: #88c0d0;
+    --color-primary-foreground: #2e3440;
+    --color-accent: #81a1c1;
+    --color-accent-foreground: #2e3440;
+
+    /* Secondary / muted */
+    --color-secondary: #3b4252;
+    --color-secondary-foreground: #e5e9f0;
+    --color-muted: #3b4252;
+    --color-muted-foreground: #a9b4c4;
+
+    /* Semantic */
+    --color-destructive: #bf616a;
+    --color-destructive-foreground: #ffffff;
+    --color-success: #a3be8c;
+    --color-warning: #d08770;
+    --color-info: #81a1c1;
+    --color-highlight: #ebcb8b;
+
+    /* Borders & focus */
+    --color-border: #3b4252;
+    --color-input: #3b4252;
+    --color-ring: #88c0d0;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 136, 192, 208;
+    --color-success-rgb: 163, 190, 140;
+    --color-destructive-rgb: 191, 97, 106;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #616e88;
+    --color-hljs-keyword: #81a1c1;
+    --color-hljs-literal: #8fbcbb;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #88c0d0;
+    --color-terminal-selection: #434c5e;
+    --color-terminal-bright-white: #eceff4;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.35);
+
+    color-scheme: dark;
+}

@@ -26,6 +26,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useWorkDirsStore } from '@/stores/workDirsStore'
+import { useThemeStore } from '@/stores/themeStore'
 import { ResearchEventBridge } from '@/components/research/ResearchEventBridge'
 import type { ToolManagerToolInfo, ToolManagerProgressData } from '@/types/events'
 import { isStartupError, isRuntimeError, isVectorIndexPayload, isToolManagerStartData, isToolManagerProgressData } from '@/types/events'
@@ -199,6 +200,21 @@ function App() {
       // Backend not ready yet — the backend:ready event will handle it.
     })
     return () => { cancelled = true }
+  }, [])
+
+  // ── Theme catalog: load custom themes once the backend is reachable ──
+  // Same startup pattern as the listProjects safety net above: try the RPC
+  // on mount; if the backend is not ready yet the call fails and backend:ready
+  // (subscribed above) re-triggers it when the backend comes up. The store
+  // applies any custom theme from its persisted cache already (pre-paint in
+  // main.tsx); this fetch only refreshes the descriptor catalog (and rolls
+  // the active theme back to Default Dark if it disappeared on disk).
+  useEffect(() => {
+    const off = subscribe('backend:ready', () => {
+      void useThemeStore.getState().loadThemes()
+    })
+    void useThemeStore.getState().loadThemes()
+    return off
   }, [])
 
   // Listen for runtime errors from the backend (e.g. git missing for CODE mode)

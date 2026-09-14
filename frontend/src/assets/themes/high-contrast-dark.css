@@ -1,0 +1,68 @@
+/* c0wrk-theme: High Contrast Dark | dark */
+/*
+  Bundled c0wrk palette theme — "High Contrast Dark"
+  Pure-black canvas, pure-white text, hard borders, brightened semantic
+  colors — every text/background pair measures at least WCAG AA (core text
+  pairs exceed AAA; measured at authoring time).
+  Original c0wrk palette (no external palette); max-readability variant of
+  the built-in One Dark direction.
+  Import: Settings → Theme → [+] → pick this .css file.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #000000;
+    --color-foreground: #ffffff;
+
+    /* Surfaces */
+    --color-card: #0a0a0a;
+    --color-card-foreground: #ffffff;
+    --color-popover: #0a0a0a;
+    --color-popover-foreground: #ffffff;
+
+    /* Primary / accent */
+    --color-primary: #91cbff;
+    --color-primary-foreground: #000000;
+    --color-accent: #91cbff;
+    --color-accent-foreground: #000000;
+
+    /* Secondary / muted */
+    --color-secondary: #1f1f1f;
+    --color-secondary-foreground: #f0f0f0;
+    --color-muted: #1a1a1a;
+    --color-muted-foreground: #d0d0d0;
+
+    /* Semantic */
+    --color-destructive: #ff9492;
+    --color-destructive-foreground: #000000;
+    --color-success: #56d364;
+    --color-warning: #f2cc60;
+    --color-info: #91cbff;
+    --color-highlight: #f2cc60;
+
+    /* Borders & focus — deliberately heavy; that is the point of this theme */
+    --color-border: #767676;
+    --color-input: #767676;
+    --color-ring: #ffffff;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 145, 203, 255;
+    --color-success-rgb: 86, 211, 100;
+    --color-destructive-rgb: 255, 148, 146;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #b8b8b8;
+    --color-hljs-keyword: #d2a8ff;
+    --color-hljs-literal: #a5d6ff;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #91cbff;
+    --color-terminal-selection: #3d3d3d;
+    --color-terminal-bright-white: #ffffff;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.6);
+
+    color-scheme: dark;
+}

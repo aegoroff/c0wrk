@@ -5,15 +5,22 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { registerLanguages } from './lib/hljsLanguages'
 import '@xterm/xterm/css/xterm.css'
 import './index.css'
-import { useThemeStore, applyThemeToDocument } from './stores/themeStore'
+import { useThemeStore, applyThemeToDocument, selectActiveThemeType } from './stores/themeStore'
 import { useUiScaleStore, applyScaleToDocument } from './stores/uiScaleStore'
 import { installFloatingUiZoomCompensation } from './lib/floatingUiZoom'
 
 // Apply the persisted theme before first paint to avoid a flash of the
 // default (dark) theme. Accessing getState() rehydrates from localStorage
 // synchronously; applyThemeToDocument writes <html data-theme> so the CSS
-// token override is in place before React renders anything.
-applyThemeToDocument(useThemeStore.getState().theme)
+// token override is in place before React renders anything. For a custom
+// theme this also injects the cached theme CSS (persisted alongside the id)
+// into <head> — the palette is correct on the very first frame, no flash of
+// the built-in palette while the backend catalog loads.
+applyThemeToDocument(
+  useThemeStore.getState().themeId,
+  useThemeStore.getState().themeCss,
+  selectActiveThemeType(useThemeStore.getState()),
+)
 
 // Same first-paint contract as the theme above: apply the persisted UI scale
 // (<html style="zoom">) before React renders, so the layout never flashes at

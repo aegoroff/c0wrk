@@ -1,0 +1,65 @@
+/* c0wrk-theme: Rosé Pine Dawn | light */
+/*
+  Bundled c0wrk palette theme — "Rosé Pine Dawn"
+  Palette: Rosé Pine (github.com/rose-pine).
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #faf4ed;
+    --color-foreground: #575279;
+
+    /* Surfaces */
+    --color-card: #f2e9e1;
+    --color-card-foreground: #575279;
+    --color-popover: #f2e9e1;
+    --color-popover-foreground: #575279;
+
+    /* Primary / accent */
+    --color-primary: #286983;
+    --color-primary-foreground: #faf4ed;
+    --color-accent: #286983;
+    --color-accent-foreground: #faf4ed;
+
+    /* Secondary / muted */
+    --color-secondary: #f2e9e1;
+    --color-secondary-foreground: #6e6a86;
+    --color-muted: #f4ece4;
+    --color-muted-foreground: #6e6a86;
+
+    /* Semantic */
+    --color-destructive: #b4637a;
+    --color-destructive-foreground: #ffffff;
+    --color-success: #56949f;
+    --color-warning: #ea9d34;
+    --color-info: #286983;
+    --color-highlight: #ea9d34;
+
+    /* Borders & focus */
+    --color-border: #dfdad9;
+    --color-input: #dfdad9;
+    --color-ring: #286983;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 40, 105, 131;
+    --color-success-rgb: 86, 148, 159;
+    --color-destructive-rgb: 180, 99, 122;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #9898a7;
+    --color-hljs-keyword: #907aa9;
+    --color-hljs-literal: #56949f;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #286983;
+    --color-terminal-selection: #dfdad9;
+    --color-terminal-bright-white: #575279;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.12);
+
+    color-scheme: light;
+}

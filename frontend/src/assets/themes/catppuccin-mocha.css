@@ -1,0 +1,65 @@
+/* c0wrk-theme: Catppuccin Mocha | dark */
+/*
+  Bundled c0wrk palette theme — "Catppuccin Mocha"
+  Palette: Catppuccin (github.com/catppuccin/catppuccin).
+  Import: Settings → Theme → [+] → pick this .css file. Re-importing an
+  updated file with the same name updates the installed theme.
+  Token reference: specs/domains/theming.md (bundled with c0wrk in frontend/src/assets/themes/)
+*/
+
+:root {
+    /* Core */
+    --color-background: #1e1e2e;
+    --color-foreground: #cdd6f4;
+
+    /* Surfaces */
+    --color-card: #181825;
+    --color-card-foreground: #cdd6f4;
+    --color-popover: #181825;
+    --color-popover-foreground: #cdd6f4;
+
+    /* Primary / accent */
+    --color-primary: #89b4fa;
+    --color-primary-foreground: #1e1e2e;
+    --color-accent: #89b4fa;
+    --color-accent-foreground: #1e1e2e;
+
+    /* Secondary / muted */
+    --color-secondary: #313244;
+    --color-secondary-foreground: #bac2de;
+    --color-muted: #313244;
+    --color-muted-foreground: #a6adc8;
+
+    /* Semantic */
+    --color-destructive: #f38ba8;
+    --color-destructive-foreground: #1e1e2e;
+    --color-success: #a6e3a1;
+    --color-warning: #fab387;
+    --color-info: #89b4fa;
+    --color-highlight: #f9e2af;
+
+    /* Borders & focus */
+    --color-border: #313244;
+    --color-input: #313244;
+    --color-ring: #89b4fa;
+
+    /* RGB triplets — keep in sync with the base colors above */
+    --color-primary-rgb: 137, 180, 250;
+    --color-success-rgb: 166, 227, 161;
+    --color-destructive-rgb: 243, 139, 168;
+
+    /* Syntax (highlight.js) */
+    --color-hljs-comment: #7f849c;
+    --color-hljs-keyword: #cba6f7;
+    --color-hljs-literal: #94e2d5;
+
+    /* Embedded terminal */
+    --color-terminal-cursor: #89b4fa;
+    --color-terminal-selection: #45475a;
+    --color-terminal-bright-white: #ffffff;
+
+    /* Elevation */
+    --color-shadow: rgba(0, 0, 0, 0.4);
+
+    color-scheme: dark;
+}
