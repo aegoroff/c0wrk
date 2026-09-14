@@ -213,7 +213,7 @@ describe('ThemeSelector combobox', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
     expect(document.documentElement.getAttribute('data-custom-theme')).toBe('nord')
     expect(document.getElementById('c0wrk-custom-theme')?.textContent)
-      .toContain(':root[data-custom-theme="nord"]{--color-background:#2e3440')
+      .toContain(':root:root[data-custom-theme="nord"]{--color-background:#2e3440')
   })
 })
 

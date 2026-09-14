@@ -94,9 +94,21 @@ Apply:   themeStore.setTheme(id, css, type)
               → custom:  data-theme = <type>  (dark|light — native controls and the
                            One Light override block key off the TYPE, never a slug)
                          data-custom-theme = <id>
-                         single <style id="c0wrk-custom-theme"> in <head> whose
-                         textContent = css with every :root selector re-scoped to
-                         :root[data-custom-theme="<id>"] (scopeThemeCSS)
+                         single <style id="c0wrk-custom-theme"> at the END of <head>
+                         whose textContent = css with every :root selector re-scoped
+                         to :root:root[data-custom-theme="<id>"] (scopeThemeCSS)
+
+Cascade contract: the One Light override in index.css (:root[data-theme="light"])
+is UNLAYERED with specificity (0,2,0), and the pre-paint script injects the
+custom <style> BEFORE the app stylesheet <link> is parsed — document order
+between the two is not deterministic. The scoped selector therefore doubles
+the :root pseudo-class (:root:root[...] = (0,3,0)) so a light-type custom
+theme outranks the One Light override by specificity, never by order; and
+applyThemeToDocument re-homes the reused <style> element to the end of <head>
+(the order tie-breaker as a second line of defense). Both copies of the
+scoping logic — scopeThemeCSS (themeStore.ts) and the inline join in
+public/prepaint-theme.js — MUST stay in sync: the selector shape is a
+correctness invariant, not a formatting choice.
 
 Startup: index.html loads public/prepaint-theme.js — a blocking EXTERNAL script
               (CSP: script-src 'self'; inline scripts are not allowed) that reads
@@ -181,7 +193,7 @@ stylesheet into a network request.
 ### Slug / identity
 
 - The theme ID is derived from the **source filename**: base name without extension, lowercased, restricted to `[a-z0-9-]` with runs of disallowed characters collapsed to single hyphens and edge hyphens trimmed; the result must be non-empty. `My Cool Theme.css` imports as `my-cool-theme.css`, ID `my-cool-theme`.
-- The reserved IDs `default-dark`, `default-light`, `dark`, and `light` cannot be used by imported themes. `dark`/`light` are the `data-theme` attribute keys; since custom CSS is injected scoped to `:root[data-custom-theme="<id>"]` and `data-theme` only ever carries the TYPE, the aliasing channel is closed twice (reserved slugs AND the separate attribute namespace).
+- The reserved IDs `default-dark`, `default-light`, `dark`, and `light` cannot be used by imported themes. `dark`/`light` are the `data-theme` attribute keys; since custom CSS is injected scoped to `:root:root[data-custom-theme="<id>"]` and `data-theme` only ever carries the TYPE, the aliasing channel is closed twice (reserved slugs AND the separate attribute namespace).
 
 ### Storage
 
@@ -222,7 +234,7 @@ The persisted store key is `localStorage['c0wrk-theme']` (persist version 3). Th
 
 Two pre-React passes exist and both are idempotent:
 
-1. `frontend/public/prepaint-theme.js` — a blocking EXTERNAL script referenced from `index.html`. It replaced the old inline script (which only understood the legacy v1 `{theme}` payload and had become a no-op; inline scripts are now impossible anyway because the production CSP allows `script-src 'self'` only). It reads the persisted store (v3 `themeId`/`themeCss`/`themeType`; the v2 shape is handled by deriving the type: builtin id → its type, else a `color-scheme:` literal in the cached CSS, else `dark`) and mirrors `applyThemeToDocument`: `data-theme=<type>` for built-ins; `data-theme=<type>` + `data-custom-theme=<id>` + a `<style id="c0wrk-custom-theme">` carrying the CSS re-scoped to `:root[data-custom-theme="<id>"]` for a custom id. Vite copies `public/` to the dist root, so the same file is served in dev and production.
+1. `frontend/public/prepaint-theme.js` — a blocking EXTERNAL script referenced from `index.html`. It replaced the old inline script (which only understood the legacy v1 `{theme}` payload and had become a no-op; inline scripts are now impossible anyway because the production CSP allows `script-src 'self'` only). It reads the persisted store (v3 `themeId`/`themeCss`/`themeType`; the v2 shape is handled by deriving the type: builtin id → its type, else a `color-scheme:` literal in the cached CSS, else `dark`) and mirrors `applyThemeToDocument`: `data-theme=<type>` for built-ins; `data-theme=<type>` + `data-custom-theme=<id>` + a `<style id="c0wrk-custom-theme">` carrying the CSS re-scoped to `:root:root[data-custom-theme="<id>"]` for a custom id (same doubled-`:root` shape as `scopeThemeCSS` — keep in sync; see the Cascade contract above). Vite copies `public/` to the dist root, so the same file is served in dev and production.
 2. `main.tsx` — `applyThemeToDocument(themeId, themeCss, selectActiveThemeType(state))` from the synchronously rehydrated store, still before React renders.
 
 Store migrations: v1 `{theme: 'light'|'dark'}` → v3 (`default-light`/`default-dark`); v2 `{themeId, themeCss}` → v3 with `themeType` derived via `deriveThemeType`.

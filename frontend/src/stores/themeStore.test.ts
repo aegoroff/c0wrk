@@ -133,7 +133,9 @@ describe('themeStore', () => {
     const styles = document.querySelectorAll('style#c0wrk-custom-theme')
     expect(styles.length).toBe(1)
     const style = styles[0] as HTMLStyleElement
-    expect(style.textContent).toContain(':root[data-custom-theme="nord"]{--color-background:#2e3440')
+    // The doubled :root:root keeps the scoped selector above the unlayered
+    // :root[data-theme="light"] override regardless of document order.
+    expect(style.textContent).toContain(':root:root[data-custom-theme="nord"]{--color-background:#2e3440')
     expect(style.parentElement).toBe(document.head)
   })
 
@@ -169,7 +171,47 @@ describe('themeStore', () => {
     setTheme('gruvbox', ':root{--color-background:#282828;--color-foreground:#ebdbb2}')
     const styles = document.querySelectorAll('style#c0wrk-custom-theme')
     expect(styles.length).toBe(1)
-    expect(styles[0]?.textContent).toContain(':root[data-custom-theme="gruvbox"]{--color-background:#282828')
+    expect(styles[0]?.textContent).toContain(':root:root[data-custom-theme="gruvbox"]{--color-background:#282828')
+  })
+
+  it('a light custom theme outranks the One Light override regardless of document order', () => {
+    // Regression: the scoped selector must carry specificity (0,3,0) —
+    // :root:root[data-custom-theme] — because index.css ships an UNLAYERED
+    // :root[data-theme="light"] override (0,2,0) and the pre-paint script
+    // injects this <style> BEFORE the app stylesheet <link> exists. Equal
+    // specificity would resolve by document order and a light custom theme
+    // would render as One Light. jsdom does not compute the cascade, so the
+    // guard pins the selector shape that wins by construction.
+    const { setTheme } = useThemeStore.getState()
+    setTheme('nord', NORD_CSS, 'light')
+    const css = document.getElementById('c0wrk-custom-theme')?.textContent ?? ''
+    // The doubled form is the whole point: if this regresses to a single
+    // :root[, the contains below fails and the specificity guard is gone.
+    expect(css).toContain(':root:root[data-custom-theme="nord"]{--color-background:#2e3440')
+  })
+
+  it('re-applying a custom theme re-homes the style element to the end of head', () => {
+    // Regression: the pre-paint script creates #c0wrk-custom-theme during
+    // HTML parse — before the app stylesheet <link> is parsed. When
+    // applyThemeToDocument reuses that early element it must move it to the
+    // END of <head>, so the injected CSS follows the app stylesheet in
+    // document order (the tie-breaker for equal-specificity rules).
+    const early = document.createElement('style')
+    early.id = 'c0wrk-custom-theme'
+    document.head.appendChild(early) // sits before the link the app will add
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    document.head.appendChild(link)
+    expect(document.head.lastElementChild).toBe(link)
+
+    const { setTheme } = useThemeStore.getState()
+    setTheme('nord', NORD_CSS, 'light')
+
+    const styles = document.querySelectorAll('style#c0wrk-custom-theme')
+    expect(styles.length).toBe(1)
+    expect(styles[0]).toBe(early) // reused, not duplicated
+    expect(document.head.lastElementChild).toBe(early) // moved after the link
+    expect(link.compareDocumentPosition(early) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
   })
 
   it('applyThemeToDocument is a no-op without a document', () => {

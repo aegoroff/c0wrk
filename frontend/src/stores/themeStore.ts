@@ -26,8 +26,9 @@ const STORAGE_KEY = 'c0wrk-theme'
  *  override block resolve from the type, never from a custom slug. */
 const DATA_THEME_ATTR = 'data-theme'
 /** Identity attribute for the ACTIVE CUSTOM THEME id ('' removes it). Custom
- *  CSS is injected scoped to :root[data-custom-theme="<id>"] so no custom
- *  theme can ever collide with the built-in attribute namespaces. */
+ *  CSS is injected scoped to :root:root[data-custom-theme="<id>"] so no custom
+ *  theme can ever collide with the built-in attribute namespaces, and the
+ *  doubled :root keeps the specificity above the built-in light override. */
 const DATA_CUSTOM_THEME_ATTR = 'data-custom-theme'
 /** Id of the single <style> element that carries the active custom theme. */
 export const CUSTOM_THEME_STYLE_ID = 'c0wrk-custom-theme'
@@ -53,12 +54,19 @@ function isBuiltinId(id: string): boolean {
 
 /**
  * Re-scopes a sanitized theme body to the active custom id: every `:root`
- * selector in the CSS becomes `:root[data-custom-theme="<id>"]`. The backend
- * sanitizer guarantees the document is a single canonical `:root { … }` rule
- * (plus the header comment), so the replace covers exactly that selector.
+ * selector in the CSS becomes `:root:root[data-custom-theme="<id>"]`. The
+ * backend sanitizer guarantees the document is a single canonical `:root { … }`
+ * rule (plus the header comment), so the replace covers exactly that selector.
+ *
+ * The doubled `:root:root` is deliberate: the scoped selector must outrank
+ * the UNLAYERED `:root[data-theme="light"]` One Light override in index.css
+ * (specificity (0,2,0)) for light-type custom themes, regardless of where
+ * the injected <style> sits relative to the app stylesheet — the pre-paint
+ * script creates the element before the app <link> is parsed. (0,3,0) wins
+ * over (0,2,0) at equal layer standing no matter the document order.
  */
 export function scopeThemeCSS(themeId: string, css: string): string {
-  return css.split(':root').join(`:root[${DATA_CUSTOM_THEME_ATTR}="${themeId}"]`)
+  return css.split(':root').join(`:root:root[${DATA_CUSTOM_THEME_ATTR}="${themeId}"]`)
 }
 
 function removeCustomThemeStyle(): void {
@@ -74,8 +82,11 @@ function removeCustomThemeStyle(): void {
  *
  * Built-in themes remove the custom attributes/style. Custom themes write
  * `<html data-custom-theme="<id>">` and inject the theme CSS scoped to that
- * attribute into a single `<style id="c0wrk-custom-theme">` element in
- * <head>. A no-op when the document is unavailable (e.g. during tests).
+ * attribute into a single `<style id="c0wrk-custom-theme">` element at the
+ * END of <head> (after the app stylesheet — equal-specificity rules resolve
+ * by document order, and the scoped selector itself carries extra
+ * specificity over the built-in light override; see scopeThemeCSS). A no-op
+ * when the document is unavailable (e.g. during tests).
  */
 export function applyThemeToDocument(themeId: string, css: string, type: ThemeType): void {
   if (typeof document === 'undefined') return
@@ -92,6 +103,13 @@ export function applyThemeToDocument(themeId: string, css: string, type: ThemeTy
   if (!style) {
     style = document.createElement('style')
     style.id = CUSTOM_THEME_STYLE_ID
+    document.head.appendChild(style)
+  } else {
+    // The pre-paint script (public/prepaint-theme.js) creates this element
+    // during HTML parse — before the app stylesheet <link> exists. Reuse
+    // must also RE-HOME it to the end of <head> so the injected CSS comes
+    // after the app stylesheet in document order (equal-specificity rules
+    // resolve by order). appendChild moves an existing node, never clones.
     document.head.appendChild(style)
   }
   style.textContent = scopeThemeCSS(themeId, css)

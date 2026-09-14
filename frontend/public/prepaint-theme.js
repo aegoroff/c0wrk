@@ -10,10 +10,16 @@
  *   - data-theme always carries the dark/light TYPE (native controls and the
  *     built-in One Light override block key off the type);
  *   - a custom theme id additionally writes data-custom-theme="<id>" and
- *     injects the cached CSS scoped to :root[data-custom-theme="<id>"] into
- *     a single <style id="c0wrk-custom-theme"> in <head>.
- * main.tsx re-applies the theme from the rehydrated store; both passes are
- * idempotent.
+ *     injects the cached CSS scoped to :root:root[data-custom-theme="<id>"]
+ *     into a single <style id="c0wrk-custom-theme"> in <head>. The doubled
+ *     :root keeps the selector's specificity above the UNLAYERED
+ *     :root[data-theme="light"] override in the app stylesheet — this script
+ *     runs during HTML parse, so the injected <style> lands BEFORE the app
+ *     CSS <link> and document order cannot be relied upon (light-type
+ *     custom themes would otherwise render as One Light). Keep this file in
+ *     sync with scopeThemeCSS in stores/themeStore.ts.
+ * main.tsx re-applies the theme from the rehydrated store (and re-homes the
+ * style element to the end of <head>); both passes are idempotent.
  */
 ;(function () {
   var BUILTIN = {
@@ -50,7 +56,7 @@
       style.id = 'c0wrk-custom-theme'
       document.head.appendChild(style)
     }
-    style.textContent = css.split(':root').join(':root[data-custom-theme="' + themeId + '"]')
+    style.textContent = css.split(':root').join(':root:root[data-custom-theme="' + themeId + '"]')
   } catch (e) {
     /* ignore — fall through to the default One Dark palette */
   }
