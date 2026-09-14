@@ -139,7 +139,15 @@ export function isAgentMetricsRow(msg: ChatMessageUI): boolean {
 const ROUTING_REQUEST_CONTENT = 'Routing request...'
 
 export function isRoutingRequestRow(msg: ChatMessageUI): boolean {
-  return msg.type === 'status' && msg.content === ROUTING_REQUEST_CONTENT
+  // Require the persisted "orchestration" phase too, not the human-readable text
+  // alone: matching on content only would silently drop a future
+  // orchestration-phase service row that happens to carry this exact text.
+  // Legacy boilerplate rows were persisted with phase "orchestration" (the
+  // pre-change production value); the current notice uses phase "routing" and is
+  // deliberately never persisted, so nothing new matches.
+  return msg.type === 'status'
+    && msg.content === ROUTING_REQUEST_CONTENT
+    && msg.metadata?.phase === 'orchestration'
 }
 
 /** Transform a flat list of ChatMessageUI into a display-ready tree. */

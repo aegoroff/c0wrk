@@ -873,6 +873,20 @@ describe('setUnfinishedTaskStatus (the single live unfinished-task overlay)', ()
     expect(useChatStore.getState().unfinishedTaskStatus).toBe(before)
   })
 
+  it('deletes the entry when passed undefined (restores "no live knowledge")', () => {
+    // An optimistic-send rollback whose pre-send overlay was absent must DELETE
+    // the key rather than write a defined '' that would outrank the DB snapshot.
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, undefined)
+    expect(SESSION in useChatStore.getState().unfinishedTaskStatus).toBe(false)
+  })
+
+  it('no-ops (same map reference) when deleting an already-absent entry', () => {
+    const before = useChatStore.getState().unfinishedTaskStatus
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, undefined)
+    expect(useChatStore.getState().unfinishedTaskStatus).toBe(before)
+  })
+
   it('setTaskActive(true) pins the overlay to "" so a stale DB status cannot stick', () => {
     useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
     useChatStore.getState().setTaskActive(SESSION, true)

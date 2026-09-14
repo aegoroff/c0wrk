@@ -78,9 +78,11 @@ export function ResumeActionPanel({ item }: { item: ResumeItem }) {
     // overlay (which every status surface reads) to '' immediately: the radar
     // row and every sidebar/radar dot turn idle at once, without waiting for the
     // 30s safety poll. clearUnfinishedTask additionally freshens the DB snapshot
-    // in place and refresh() re-reads the authoritative value, in case the local
-    // clear raced an older snapshot. Best-effort: the UI is already dismissed, so
-    // a failed RPC stays silent.
+    // in place, and the store drops any fetch that started before the clear
+    // (snapshotGeneration) and re-reads, so an in-flight read cannot resurrect
+    // the cancelled entry and the authoritative value lands without waiting for
+    // the 30s poll. Best-effort: the UI is already dismissed, so a failed RPC
+    // stays silent.
     cancelUnfinishedTask(sessionId)
       .then(() => {
         useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')

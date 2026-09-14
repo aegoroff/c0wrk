@@ -286,6 +286,31 @@ describe('activeSessionsStore', () => {
       useActiveSessionsStore.getState().clearUnfinishedTask('a')
       expect(useActiveSessionsStore.getState().sessions).toBeNull()
     })
+
+    it('a read that started before the clear is dropped and re-read', async () => {
+      // Resume-Cancel path: a snapshot read already in flight (poll / switch)
+      // predates the local clear and must not overwrite it; the guard drops it
+      // and re-reads, so the caller's await ends on the authoritative value.
+      const stale = [makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' })]
+      const fresh = [makeSession({ id: 'a' })]
+      useActiveSessionsStore.setState({ sessions: stale })
+      let resolveStale!: (v: SessionInfo[]) => void
+      mockedList.mockImplementationOnce(() => new Promise<SessionInfo[]>((r) => { resolveStale = r }))
+      mockedList.mockResolvedValueOnce(fresh)
+
+      const pendingFetch = useActiveSessionsStore.getState().refreshNow()
+      useActiveSessionsStore.getState().clearUnfinishedTask('a')
+      resolveStale(stale)
+      await pendingFetch
+
+      expect(mockedList).toHaveBeenCalledTimes(2)
+      const sessions = useActiveSessionsStore.getState().sessions!
+      expect(sessions.find((s) => s.id === 'a')).toMatchObject({
+        has_unfinished_task: false,
+        unfinished_task_status: '',
+      })
+      expect(useActiveSessionsStore.getState().refreshing).toBe(false)
+    })
   })
 
   describe('sweepPendingActions', () => {

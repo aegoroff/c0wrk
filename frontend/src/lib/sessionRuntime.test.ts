@@ -462,6 +462,20 @@ describe('reconcileRuntimeStatus → live unfinished-task overlay', () => {
     expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('failed')
   })
 
+  it('seeds the overlay with the EXACT persisted status when the backend reports it', () => {
+    // An orphaned 'in_progress' task must stay green so a visited session
+    // agrees with an unvisited sibling (whose DB fallback still says
+    // 'in_progress'), instead of collapsing to red 'failed'.
+    reconcileRuntimeStatus(SESSION, {
+      active: false,
+      has_unfinished_task: true,
+      paused: false,
+      unfinished_task_status: 'in_progress',
+    })
+
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('in_progress')
+  })
+
   it('pins the overlay to paused when the snapshot reports a paused task', () => {
     reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: true, paused: true })
 

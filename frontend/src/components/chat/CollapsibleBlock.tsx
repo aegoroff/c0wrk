@@ -44,6 +44,13 @@ export function CollapsibleBlock({
   headerExtra,
   revealId,
 }: CollapsibleBlockProps) {
+  // Uncontrolled fallback — LIVE, not dead code: ToolCard, ThoughtBlock,
+  // ThoughtGroupBlock and ReflectionBlock render this component without
+  // open/onOpenChange and rely on this state. The block starts COLLAPSED and
+  // toggles itself; there is deliberately no `defaultOpen` prop (the controlled
+  // callers — PlanStepBlock / SubAgentBlock — own their open state, and the
+  // former auto-open on error/running was removed on purpose), so no caller
+  // needs a default-open uncontrolled block.
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
 
   const isControlled = controlledOpen !== undefined

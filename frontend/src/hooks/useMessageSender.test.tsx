@@ -103,7 +103,7 @@ beforeEach(() => {
   spies.createSession.mockReset().mockResolvedValue(makeSession('fresh-session'))
   act(() => {
     useSessionStore.setState({ sessions: [], activeSessionId: null })
-    useChatStore.setState({ messages: {}, messageOrder: {}, paused: {}, taskActive: {} })
+    useChatStore.setState({ messages: {}, messageOrder: {}, paused: {}, taskActive: {}, unfinishedTaskStatus: {} })
     useInputModeStore.setState({ goalEnabled: false, goalBudget: '', e2sEnabled: false, selectedModel: null, selectedReasoning: null })
     // Default the experimental E2S gate ON so E2S-specific tests exercise the
     // armed path; tests that cover the gate off override this explicitly.
@@ -300,5 +300,44 @@ describe('useMessageSender optimistic metadata', () => {
     })
     expect(useSessionStore.getState().activeSessionId).toBe('fresh-session')
     expect(sentUser('fresh-session').metadata).toEqual({ goal: true })
+  })
+})
+
+describe('useMessageSender optimistic activation rollback', () => {
+  it('restores the pre-send unfinished-task overlay when the send is rejected', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    act(() => {
+      useChatStore.setState({ unfinishedTaskStatus: { s1: 'failed' } })
+    })
+    spies.sendMessage.mockRejectedValueOnce(new Error('rejected'))
+
+    await act(async () => {
+      await capturedSend!('hello')
+    })
+
+    // The optimistic activation pinned the overlay to ''; a rejected fresh send
+    // must put the original value back so the still-unfinished session keeps its
+    // colour and busy guard.
+    expect(useChatStore.getState().unfinishedTaskStatus['s1']).toBe('failed')
+    expect(useChatStore.getState().taskActive['s1']).toBe(false)
+  })
+
+  it('does not restore the overlay for a failed LIVE interjection', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    // Artificial pre-state (a running task never carries a failed overlay): it
+    // exists only to prove the `wasPaused || !isRunning` guard skips the restore
+    // for a live send — the rollback keeps the running state, so the overlay is
+    // re-pinned to '' (a running session has no unfinished task).
+    act(() => {
+      useChatStore.setState({ taskActive: { s1: true }, unfinishedTaskStatus: { s1: 'failed' } })
+    })
+    spies.sendMessage.mockRejectedValueOnce(new Error('rejected'))
+
+    await act(async () => {
+      await capturedSend!('interject')
+    })
+
+    expect(useChatStore.getState().taskActive['s1']).toBe(true)
+    expect(useChatStore.getState().unfinishedTaskStatus['s1']).toBe('')
   })
 })

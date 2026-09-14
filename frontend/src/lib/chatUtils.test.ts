@@ -433,6 +433,16 @@ describe('isRoutingRequestRow', () => {
     const row = chatMessageToUI(makeMsg({ role: 'status', metadata: JSON.stringify({ skills: ['x'] }) }))
     expect(isRoutingRequestRow(row)).toBe(false)
   })
+
+  it('does not match a same-text status row without the orchestration phase', () => {
+    // The matcher requires the persisted phase, so a service row that merely
+    // happens to carry the text (e.g. the new "routing" phase notice, which is
+    // never persisted but may exist in odd payloads) is not dropped.
+    const meta = JSON.stringify({ content: 'Routing request...', phase: 'routing' })
+    const row = chatMessageToUI(makeMsg({ id: 13, role: 'status', content: meta, metadata: meta }))
+    expect(row.content).toBe('Routing request...')
+    expect(isRoutingRequestRow(row)).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

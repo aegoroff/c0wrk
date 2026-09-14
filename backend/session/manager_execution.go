@@ -1710,6 +1710,17 @@ type SessionRuntimeStatus struct {
 	Active            bool   `json:"active"`
 	HasUnfinishedTask bool   `json:"has_unfinished_task"`
 	UnfinishedTaskID  string `json:"unfinished_task_id,omitempty"`
+	// UnfinishedTaskStatus is the RAW persisted status of the resumable task
+	// ("in_progress", "paused", "failed"), or "" when there is none. It lets the
+	// frontend's reconcile seed its live status overlay with the exact value —
+	// without it every non-paused unfinished task collapses to "failed", which
+	// colours an orphaned in_progress red on a visited session but green on an
+	// unvisited one (whose DB fallback still says "in_progress"). The value is
+	// the task store's status passed through verbatim (no clamping); consumers
+	// must consult it only while Active is false, and apply their own policy for
+	// a status outside the unfinished set (which can only appear if the task
+	// settles between the ID lookup and the state load).
+	UnfinishedTaskStatus string `json:"unfinished_task_status,omitempty"`
 	// Paused is true when the resumable unfinished task is in the "paused"
 	// status — a cooperative pause checkpoint that the user can resume (with
 	// an optional nudge) or send a new message into (treated as a nudge-resume).
@@ -1798,6 +1809,12 @@ func (m *Manager) GetSessionRuntimeStatus(sessionID string) (SessionRuntimeStatu
 			// plain in-progress/failed task. LoadTaskState returns the status
 			// field; a missing state is treated as non-paused.
 			if state, stateErr := adapter.LoadTaskState(taskID); stateErr == nil && state != nil {
+				// Expose the raw persisted status so the frontend can seed its
+				// live overlay with the EXACT value (an orphaned 'in_progress'
+				// stays green, matching the DB fallback of a session that was
+				// never reconciled) instead of collapsing everything non-paused
+				// to 'failed'.
+				status.UnfinishedTaskStatus = state.Status
 				// Invariant: {Active:true, Paused:true} must not exist. A live
 				// task can never be paused — pausing deactivates the session
 				// until the session_paused event lands, so a "paused" status

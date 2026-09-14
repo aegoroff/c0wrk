@@ -269,7 +269,10 @@ describe('isSessionBusy', () => {
     expect(isSessionBusy('sess-1')).toBe(false)
   })
 
-  it('returns false when a running task is blocked on an unresolved HITL prompt (pending)', () => {
+  it('returns true when a running task is blocked on an unresolved HITL prompt (pending)', () => {
+    // A HITL-blocked task is still running/unfinished (taskActive stays true and
+    // the DB task is in_progress), so it must stay busy — archiving/deleting it
+    // would cancel live work and Fork would be server-rejected.
     const m = makeMsg({ type: 'tool_confirm' })
     useSessionStore.setState({ sessions: [makeSessionInfo()] })
     useChatStore.setState({
@@ -277,6 +280,6 @@ describe('isSessionBusy', () => {
       messages: { 'sess-1': { [m.id]: m } },
       messageOrder: { 'sess-1': [m.id] },
     })
-    expect(isSessionBusy('sess-1')).toBe(false)
+    expect(isSessionBusy('sess-1')).toBe(true)
   })
 })

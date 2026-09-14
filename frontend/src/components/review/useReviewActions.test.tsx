@@ -183,6 +183,23 @@ describe('useReviewActions.handleSubmit optimistic presentation', () => {
     expect(spies.setReviewStatus).not.toHaveBeenCalled()
   })
 
+  it('restores the pre-send unfinished-task overlay when the send fails', async () => {
+    seedReviewComment('s1', 'fix the null deref')
+    // A session with a resumable failed task: the optimistic activation pins the
+    // overlay to '', so the rollback must put the original value back — losing
+    // it would render the still-unfinished session idle and drop its busy guard.
+    act(() => {
+      useChatStore.setState({ unfinishedTaskStatus: { s1: 'failed' } })
+    })
+    spies.sendMessage.mockRejectedValue(new Error('router offline'))
+
+    await act(async () => {
+      await capturedSubmit!()
+    })
+
+    expect(useChatStore.getState().unfinishedTaskStatus['s1']).toBe('failed')
+  })
+
   it('clears a stale E2S snapshot once the review task starts', async () => {
     seedReviewComment('s1', 'fix the null deref')
     useE2SStore.getState().applySnapshot('s1', { state: { objective: 'old' }, turn: 3 })

@@ -97,7 +97,7 @@ interface ChatActions {
   clearStreamingText: (sessionId: string) => void
   setActivityStatus: (sessionId: string, status: string | null) => void
   setTaskActive: (sessionId: string, active: boolean) => void
-  setUnfinishedTaskStatus: (sessionId: string, status: string) => void
+  setUnfinishedTaskStatus: (sessionId: string, status: string | undefined) => void
   setPaused: (sessionId: string, paused: boolean) => void
   setPausing: (sessionId: string, pausing: boolean) => void
   setCompacting: (sessionId: string, compacting: boolean) => void
@@ -402,8 +402,22 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
   // runtime-status reconcile consults that stamp before mirroring a snapshot
   // value, so a stale snapshot can never revert a live transition). No-ops when
   // the value already matches to keep the map reference stable (React #185).
+  // `undefined` DELETES the entry, restoring "chatStore holds no live knowledge"
+  // (an ABSENT key falls back to the DB snapshot). Used by an optimistic-send
+  // rollback whose pre-send overlay was itself absent: writing a defined ''
+  // there would outrank the DB snapshot and mask a real failed/in_progress task
+  // as settled.
   setUnfinishedTaskStatus: (sessionId, status) => set((s) => {
-    if (s.unfinishedTaskStatus[sessionId] === status) return s
+    const prev = s.unfinishedTaskStatus[sessionId]
+    if (status === undefined) {
+      if (prev === undefined) return s
+      const { [sessionId]: _dropped, ...rest } = s.unfinishedTaskStatus
+      return {
+        unfinishedTaskStatus: rest,
+        taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
+      }
+    }
+    if (prev === status) return s
     return {
       unfinishedTaskStatus: { ...s.unfinishedTaskStatus, [sessionId]: status },
       taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },

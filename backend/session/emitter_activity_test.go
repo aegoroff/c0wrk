@@ -28,7 +28,7 @@ func TestEventEmitterLastActivity_TracksLifecycleLabels(t *testing.T) {
 		t.Errorf("after StepStart: activity = %q, want %q", got, "Thinking...")
 	}
 
-	emitter.ServiceWithMeta("Routing request...", map[string]any{"phase": "orchestration"})
+	emitter.ServiceWithMeta("Routing request...", map[string]any{"phase": "routing"})
 	if got := emitter.LastActivity(); got != "Routing request..." {
 		t.Errorf("after ServiceWithMeta: activity = %q, want %q", got, "Routing request...")
 	}

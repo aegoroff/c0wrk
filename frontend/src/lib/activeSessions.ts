@@ -113,7 +113,13 @@ export function deriveSessionStatus(input: SessionStatusInput): SessionDisplaySt
  *  when chatStore has live knowledge of the session, otherwise the DB
  *  snapshot's value. `undefined` distinguishes "no live knowledge" from a live
  *  `''` (task settled), so a live clear correctly overrides a stale DB
- *  snapshot. */
+ *  snapshot.
+ *
+ *  The DB fallback reads the STATUS STRING, not the redundant
+ *  `has_unfinished_task` boolean: the list queries always SELECT both columns
+ *  (backend/session/persistence.go), and the string carries strictly more
+ *  information. When the string is absent (older/partial payload) an unfinished
+ *  session reads idle here, matching the pre-existing contract. */
 export function effectiveUnfinishedStatus(session: SessionInfo, live: LiveSessionFlags): string {
   return live.unfinishedTaskStatus ?? session.unfinished_task_status ?? ''
 }

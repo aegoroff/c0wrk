@@ -80,26 +80,54 @@ interface ActiveSessionsState {
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let inflight: Promise<void> | null = null
 
+// Monotonic counter bumped whenever the snapshot is mutated LOCALLY
+// (clearUnfinishedTask). A fetch captures it at start; a fetch that STARTED
+// before a local mutation read a pre-mutation snapshot, so its result is
+// dropped rather than applied — otherwise an already-in-flight read (safety
+// poll / switch refresh) would clobber the newer local state. This is the
+// resume prompt's Cancel path: it clears the snapshot locally and then asks for
+// a refresh, and an older in-flight read would otherwise re-show the cancelled
+// entry until the next (≤30 s) poll.
+let snapshotGeneration = 0
+
 /** Shared fetch path for refresh()/refreshNow(). Deduplicates concurrent
  *  calls into a single RPC so a slow response cannot be clobbered by — or
  *  clobber — an older in-flight one. Always resolves. */
 function fetchSnapshot(): Promise<void> {
   if (inflight) return inflight
   useActiveSessionsStore.setState({ refreshing: true })
-  inflight = (async () => {
+  const startGeneration = snapshotGeneration
+  const run = (async () => {
+    let stale = false
     try {
       const sessions = await listAllSessions()
-      useActiveSessionsStore.setState({ sessions, refreshing: false })
+      // Apply only when no LOCAL mutation landed while this read was in flight
+      // (see snapshotGeneration): a snapshot whose read predates the mutation
+      // does not reflect it and must not overwrite it.
+      if (startGeneration === snapshotGeneration) {
+        useActiveSessionsStore.setState({ sessions })
+      } else {
+        stale = true
+      }
     } catch (err) {
       // Quiet log (the api wrapper already reported the error at error
       // level); badge freshness is best-effort — keep the previous snapshot.
       logger.debug('activeSessionsStore: refresh failed, keeping previous snapshot:', err)
-      useActiveSessionsStore.setState({ refreshing: false })
     } finally {
       inflight = null
     }
+    if (stale) {
+      // The read predated a local mutation: re-read so the authoritative
+      // post-mutation value is applied. The awaiting caller covers the re-read,
+      // so a concurrent notification (resume-Cancel's refresh()) still ends up
+      // with fresh data instead of a dropped promise.
+      await fetchSnapshot()
+      return
+    }
+    useActiveSessionsStore.setState({ refreshing: false })
   })()
-  return inflight
+  inflight = run
+  return run
 }
 
 export const useActiveSessionsStore = create<ActiveSessionsState>((set, get) => ({
@@ -135,16 +163,19 @@ export const useActiveSessionsStore = create<ActiveSessionsState>((set, get) => 
   },
 
   clearUnfinishedTask: (sessionId) => {
-    set((s) => {
-      if (!s.sessions) return s
-      const idx = s.sessions.findIndex((sess) => sess.id === sessionId)
-      if (idx === -1) return s
-      const current = s.sessions[idx]!
-      if (current.unfinished_task_status === '' && !current.has_unfinished_task) return s
-      const sessions = [...s.sessions]
-      sessions[idx] = { ...current, has_unfinished_task: false, unfinished_task_status: '' }
-      return { sessions }
-    })
+    const state = get()
+    if (!state.sessions) return
+    const idx = state.sessions.findIndex((sess) => sess.id === sessionId)
+    if (idx === -1) return
+    const current = state.sessions[idx]!
+    if (current.unfinished_task_status === '' && !current.has_unfinished_task) return
+    // Invalidate any fetch whose read started before this local mutation, so an
+    // in-flight (poll / switch) snapshot cannot clobber the clear (see
+    // snapshotGeneration).
+    snapshotGeneration++
+    const sessions = [...state.sessions]
+    sessions[idx] = { ...current, has_unfinished_task: false, unfinished_task_status: '' }
+    set({ sessions })
   },
 }))
 

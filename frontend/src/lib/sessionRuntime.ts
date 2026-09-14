@@ -119,8 +119,11 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   // task finished while unviewed must not stay red/busy, and a resumable failure
   // must not be lost. The value mirrors the snapshot —
   //   running            → '' (green comes from taskActive)
-  //   paused             → 'paused'
-  //   unfinished (other) → 'failed'
+  //   unfinished         → the EXACT persisted status when the backend reports
+  //                        it (so an orphaned 'in_progress' stays green, matching
+  //                        the DB fallback of a never-reconciled sibling),
+  //                        falling back to 'paused' then 'failed' for older
+  //                        backends (preserves the previous precedence)
   //   settled            → '' (idle)
   // Skipped while compacting (that flow owns the transition) and when a live
   // task-flag event intervened after the snapshot was read (it stamps
@@ -128,11 +131,7 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   if (!hasFresherTaskFlags && !status.compacting) {
     const liveStatus = status.active
       ? ''
-      : status.paused
-        ? 'paused'
-        : status.has_unfinished_task
-          ? 'failed'
-          : ''
+      : status.unfinished_task_status || (status.paused ? 'paused' : status.has_unfinished_task ? 'failed' : '')
     useChatStore.getState().setUnfinishedTaskStatus(sessionId, liveStatus)
   }
 

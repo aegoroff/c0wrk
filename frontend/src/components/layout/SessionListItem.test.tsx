@@ -85,6 +85,20 @@ describe('SessionItem busy-state guards', () => {
     expect(del?.disabled).toBe(false)
   })
 
+  it('disables fork for a pending (HITL-blocked, still-running) session', () => {
+    // A running task blocked on a confirmation prompt is not settled: the
+    // backend rejects a fork of it, so the row must not offer one.
+    statusMock.value = 'pending'
+    const { container } = render(
+      <SessionItem variant="flat" session={makeSession()} isActive={false} onSelect={vi.fn()} onRename={vi.fn()} onArchive={vi.fn()} onPin={vi.fn()} onFork={vi.fn()} onDelete={vi.fn()} />,
+    )
+    const btns = actionButtons(container)
+    const [, fork, , archive, del] = btns
+    expect(fork?.disabled).toBe(true)
+    expect(archive?.disabled).toBe(false)
+    expect(del?.disabled).toBe(false)
+  })
+
   it('still allows pin & rename for a busy session', () => {
     statusMock.value = 'active'
     const { container } = render(

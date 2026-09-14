@@ -1782,6 +1782,30 @@ func TestGetSessionRuntimeStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("exposes the raw unfinished-task status", func(t *testing.T) {
+		manager, _, _ := testManager(t)
+		task := &TaskRecord{
+			ID: "task-ip", SessionID: "sess-ip", Status: "in_progress",
+			RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
+			Reflections: json.RawMessage(`[]`),
+		}
+		manager.SetTaskStore(&mockTaskStoreForResumable{
+			unfinished:     task,
+			loadTaskResult: task,
+		})
+
+		status, err := manager.GetSessionRuntimeStatus("sess-ip")
+		if err != nil {
+			t.Fatalf("GetSessionRuntimeStatus returned error: %v", err)
+		}
+		if status.UnfinishedTaskStatus != "in_progress" {
+			t.Errorf("UnfinishedTaskStatus = %q, want %q", status.UnfinishedTaskStatus, "in_progress")
+		}
+		if status.Paused {
+			t.Errorf("expected Paused=false for an in_progress task, got %+v", status)
+		}
+	})
+
 	t.Run("no task store, no session", func(t *testing.T) {
 		manager, _, _ := testManager(t)
 

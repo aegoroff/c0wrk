@@ -100,10 +100,11 @@ export function useSessionStatusIndicator(sessionId: string | null, dbStatus = '
 
 /**
  * Synchronous (non-hook) busy check for non-render code paths (e.g. session
- * action handlers). Mirrors the row's busy flag: a session is busy when it has
- * a running task, a paused task, or an unfinished task — destructive to
- * archive/delete, so those actions request confirmation. A 'pending' session
- * (awaiting a HITL response) is NOT busy.
+ * action handlers). Mirrors the row's busy flag EXACTLY: a session is busy when
+ * it is in ANY non-idle state — a running task, a paused task, a resumable
+ * failed task, OR a task blocked on a HITL prompt ('pending'). All of those are
+ * destructive to archive/delete (the backend cancels the still-unfinished task
+ * first), so those actions request confirmation.
  */
 export function isSessionBusy(sessionId: string): boolean {
   const chat = useChatStore.getState()
@@ -123,10 +124,11 @@ export function isSessionBusy(sessionId: string): boolean {
   const session = useSessionStore.getState().sessions?.find((s) => s.id === sessionId)
   // SAME single derivation every status surface uses (see deriveSessionStatus):
   // the live unfinished-task overlay first, the DB snapshot as fallback.
-  // `active`/`paused`/`failed` are the unfinished states — 'pending' (awaiting a
-  // HITL response) is deliberately NOT busy. `archived` is not consulted: this
-  // guard exists to protect a still-unfinished task from a destructive
-  // archive/delete.
+  // ANY non-idle status is busy: 'active' (running), 'paused', 'failed'
+  // (resumable), and 'pending' (a running task blocked on a HITL prompt — still
+  // unfinished, so archiving/deleting it would cancel live work). `archived` is
+  // not consulted: this guard exists to protect a still-unfinished task from a
+  // destructive archive/delete.
   const status = deriveSessionStatus({
     archived: false,
     hasPendingHITL: hasUnresolvedHITL(messages),
@@ -134,5 +136,5 @@ export function isSessionBusy(sessionId: string): boolean {
     paused: isPaused,
     unfinishedStatus: chat.unfinishedTaskStatus[sessionId] ?? session?.unfinished_task_status ?? '',
   })
-  return status === 'active' || status === 'paused' || status === 'failed'
+  return status !== 'idle'
 }
