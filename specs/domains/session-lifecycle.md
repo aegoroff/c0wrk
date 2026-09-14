@@ -754,7 +754,8 @@ that accumulates one user/assistant pair per exchange, without truncation:
   (interrupted-task resume) appends the assistant-side outcome the same way.
 - When the assistant output contains tool-call syntax printed as text (failure-mode
   detected by `agent.DetectToolCallSyntaxInContent` — e.g. `` ```bash_exec ``
-  typed as prose instead of a `tool_use` block), the history records a
+  typed as prose, or a leaked JSON tool call such as `{"answer": "..."}` / `{"name":
+  "...", "arguments": {...}}` typed instead of a `tool_use` block), the history records a
   `[Task failed before completion: task ended in failure-mode: model printed
   tool-call syntax as text instead of using tool_use blocks]` note instead of
   the hallucinated text. This ensures future routing/planning sees an honest
