@@ -76,7 +76,17 @@ describe('ChatMessageRenderer bookmark row hover scoping', () => {
     root = null
   })
 
-  const renderStep = () =>
+  // The plan/subagent blocks now render collapsed by default, so the nested
+  // child rows only mount once the block is expanded. Mirror a user click so
+  // the hover-scoping assertions below have parent + children in the DOM.
+  const expandParent = () => {
+    const trigger = container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    })
+  }
+
+  const renderStep = () => {
     act(() => {
       root!.render(
         <TooltipProvider>
@@ -86,6 +96,8 @@ describe('ChatMessageRenderer bookmark row hover scoping', () => {
         </TooltipProvider>,
       )
     })
+    expandParent()
+  }
 
   const star = (row: Element) =>
     row.querySelector<HTMLButtonElement>('button[aria-label="Add bookmark"]')!

@@ -89,6 +89,14 @@ export function useMessageSender(): UseMessageSenderResult {
     const wasPaused = useChatStore.getState().paused[sessionId] ?? false
     const isRunning = useChatStore.getState().taskActive[sessionId] ?? false
     const wasActivity = useChatStore.getState().activityStatus[sessionId] ?? null
+    // Snapshot the live unfinished-task overlay BEFORE the optimistic activation
+    // below. setTaskActive(true) supersedes a stale DB 'failed'/'paused' snapshot
+    // by pinning the overlay to '' (a running session has no unfinished task) —
+    // correct for a CONFIRMED activation, but a REJECTED send must put the old
+    // value back. Without this the overlay stays '' (which outranks the DB
+    // snapshot), so an unfinished session renders idle and silently loses its
+    // busy guard (Fork enablement / archive-delete confirmation).
+    const prevUnfinished = useChatStore.getState().unfinishedTaskStatus[sessionId]
 
     // Optimistic metadata mirroring the SNAKE_CASE blob the backend persists
     // via PendingMessageMetadata: the goal flag, the staged attachments
@@ -186,6 +194,16 @@ export function useMessageSender(): UseMessageSenderResult {
       useChatStore.getState().setTaskActive(sessionId, isRunning)
       useChatStore.getState().setPaused(sessionId, wasPaused)
       useChatStore.getState().setActivityStatus(sessionId, wasActivity)
+      // Restore the unfinished-task overlay the optimistic activation pinned to
+      // '' — only when this send actually activated the session
+      // (`wasPaused || !isRunning`). A failed LIVE interjection never activated
+      // the session, so its overlay is already correct. `prevUnfinished` may be
+      // `undefined` (chatStore held no live knowledge): passing it through
+      // DELETES the key so the DB snapshot again drives the status, rather than
+      // fabricating a defined '' that would mask a real unfinished task.
+      if (wasPaused || !isRunning) {
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, prevUnfinished)
+      }
     } finally {
       setIsProcessing(false)
     }

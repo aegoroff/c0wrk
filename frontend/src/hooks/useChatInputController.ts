@@ -375,6 +375,11 @@ export function useChatInputController(): ChatInputController {
       }
       const modelOverride = useInputModeStore.getState().selectedModel ?? ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
+      // Snapshot the live unfinished-task overlay before the optimistic
+      // activation pins it to '' (a running session has no unfinished task).
+      // A rejected resume must restore it so the pre-resume state survives on
+      // every status surface + the busy guard (mirrors useMessageSender).
+      const prevUnfinished = useChatStore.getState().unfinishedTaskStatus[activeSessionId]
       useChatStore.getState().setPaused(activeSessionId, false)
       useChatStore.getState().setTaskActive(activeSessionId, true)
       try {
@@ -383,6 +388,10 @@ export function useChatInputController(): ChatInputController {
         logger.error('Failed to resume session:', err)
         useChatStore.getState().setPaused(activeSessionId, true)
         useChatStore.getState().setTaskActive(activeSessionId, false)
+        // Restore the overlay the optimistic activation cleared. `undefined`
+        // deletes the key, restoring "no live knowledge" for the DB fallback;
+        // a defined value (e.g. 'paused') is put back verbatim.
+        useChatStore.getState().setUnfinishedTaskStatus(activeSessionId, prevUnfinished)
       }
     } finally {
       resumingRef.current = false

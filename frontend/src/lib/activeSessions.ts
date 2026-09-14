@@ -31,6 +31,15 @@ export interface LiveSessionFlags {
   /** An unresolved HITL prompt (tool_confirm / ask_user / step_limit /
    *  plan_review / goal_proposal) awaits the user. */
   readonly hasPendingHITL: boolean
+  /** Live unfinished-task status (chatStore.unfinishedTaskStatus) — the SAME
+   *  string the DB snapshot carries, but kept authoritative in memory so every
+   *  surface repaints the instant a lifecycle event lands. `undefined` =
+   *  chatStore holds no live knowledge for the session (a webview reload, a
+   *  session never followed), so consumers FALL BACK to the DB snapshot's
+   *  `unfinished_task_status`. `''` = chatStore KNOWS the task settled, which
+   *  overrides a stale DB `in_progress`/`paused`/`failed` left over from a list
+   *  load taken mid-task (the snapshot poll is only every ~30s). */
+  readonly unfinishedTaskStatus?: string
 }
 
 /** Stable "nothing live" flags — returned by lookups for sessions chatStore
@@ -56,46 +65,90 @@ export interface BadgeFlags {
  *  session is live, so selectors can keep a referentially stable value. */
 export const NO_BADGE_FLAGS: BadgeFlags = { error: false, attention: false, active: false, paused: false, anyLive: false }
 
+/** The single status-derivation input, independent of which snapshot a surface
+ *  reads. `unfinishedStatus` is the EFFECTIVE unfinished-task status for the
+ *  session — the live chatStore overlay when known, otherwise the DB snapshot's
+ *  `unfinished_task_status` (see {@link effectiveUnfinishedStatus}). */
+export interface SessionStatusInput {
+  readonly taskActive: boolean
+  readonly paused: boolean
+  readonly hasPendingHITL: boolean
+  readonly archived: boolean
+  /** '' = no unfinished task; 'failed' | 'in_progress' | 'paused' | unknown. */
+  readonly unfinishedStatus: string
+}
+
+/**
+ * THE single per-session status derivation — one implementation shared by every
+ * surface that paints a session-status dot: the sidebar session list
+ * (useSessionStatusIndicator), the live-sessions radar badge
+ * (aggregateBadgeFlags) and the radar dropdown rows (sortedLiveRows). No surface
+ * may reimplement this priority.
+ *
+ * Priority (most urgent first): pending (yellow) > failed (red) > active
+ * (green) > paused (gray) > idle.
+ * - `pending` — an unresolved HITL prompt: the user's response is the next
+ *   step, the most informative signal even while taskActive is still true.
+ * - `failed` — an unfinished task recorded as failed; beats a concurrently
+ *   true running flag so a restart-race never paints failure green.
+ * - `active` — running live, OR the status says in_progress.
+ * - `paused` — live-paused, OR the status says paused.
+ * - Unknown non-empty status values (future backends) render as `active` — the
+ *   session IS unfinished, silently showing idle would hide it.
+ *
+ * Archived sessions always render idle (a dot only surfaces live work).
+ */
+export function deriveSessionStatus(input: SessionStatusInput): SessionDisplayStatus {
+  if (input.archived) return 'idle'
+  if (input.hasPendingHITL) return 'pending'
+  const s = input.unfinishedStatus
+  if (s === 'failed') return 'failed'
+  if (input.taskActive || s === 'in_progress') return 'active'
+  if (input.paused || s === 'paused') return 'paused'
+  if (s !== '') return 'active'
+  return 'idle'
+}
+
+/** The unfinished-task status a surface should color from: the LIVE overlay
+ *  when chatStore has live knowledge of the session, otherwise the DB
+ *  snapshot's value. `undefined` distinguishes "no live knowledge" from a live
+ *  `''` (task settled), so a live clear correctly overrides a stale DB
+ *  snapshot.
+ *
+ *  The DB fallback reads the STATUS STRING, not the redundant
+ *  `has_unfinished_task` boolean: the list queries always SELECT both columns
+ *  (backend/session/persistence.go), and the string carries strictly more
+ *  information. When the string is absent (older/partial payload) an unfinished
+ *  session reads idle here, matching the pre-existing contract. */
+export function effectiveUnfinishedStatus(session: SessionInfo, live: LiveSessionFlags): string {
+  return live.unfinishedTaskStatus ?? session.unfinished_task_status ?? ''
+}
+
 /**
  * Does this session count as "live" for the badge — i.e. worth surfacing to
  * the user because something is unfinished or in flight?
  *
  * True when the session is NOT archived and ANY of:
- * - the DB says it has an unfinished task (unfinished_task_status !== ''),
+ * - the effective status says it has an unfinished task (non-empty),
  * - a task is live-running or live-paused (chatStore flags),
  * - an unresolved HITL prompt awaits the user.
  */
 export function isLiveSession(session: SessionInfo, live: LiveSessionFlags): boolean {
   if (session.archived) return false
   if (live.taskActive || live.paused || live.hasPendingHITL) return true
-  return session.unfinished_task_status !== ''
+  return effectiveUnfinishedStatus(session, live) !== ''
 }
 
-/**
- * Derive the single display status for a session.
- *
- * Priority (most urgent first): pending (yellow) > failed (red) > active
- * (green) > paused (gray) > idle.
- * - `pending` — an unresolved HITL prompt: the user's response is the next
- *   step, the most informative signal even while taskActive is still true.
- * - `failed` — the DB recorded a failed (resumable) unfinished task; beats a
- *   concurrently true running flag so a restart-race never paints failure green.
- * - `active` — running live, OR the DB says in_progress.
- * - `paused` — live-paused, OR the DB says paused.
- * - Unknown non-empty unfinished_task_status values (future backends) render
- *   as `active` — the session IS unfinished, silently showing idle would hide it.
- *
- * Archived sessions always render idle (the badge only surfaces live work).
- */
+/** Derive the single display status for a session — thin adapter over
+ *  {@link deriveSessionStatus} folding a SessionInfo and its live flags. */
 export function sessionDisplayStatus(session: SessionInfo, live: LiveSessionFlags): SessionDisplayStatus {
-  if (session.archived) return 'idle'
-  if (live.hasPendingHITL) return 'pending'
-  const db = session.unfinished_task_status
-  if (db === 'failed') return 'failed'
-  if (live.taskActive || db === 'in_progress') return 'active'
-  if (live.paused || db === 'paused') return 'paused'
-  if (db !== '') return 'active'
-  return 'idle'
+  return deriveSessionStatus({
+    archived: session.archived,
+    hasPendingHITL: live.hasPendingHITL,
+    taskActive: live.taskActive,
+    paused: live.paused,
+    unfinishedStatus: effectiveUnfinishedStatus(session, live),
+  })
 }
 
 /**
@@ -132,12 +185,16 @@ export function aggregateBadgeFlags(
 }
 
 /** The chatStore slices deriveLiveSessionFlags needs. Structural (plain data)
- *  so tests can pass literals without React. */
+ *  so tests can pass literals without React. `unfinishedTaskStatus` is optional
+ *  so existing literals (and older call sites) stay valid — an absent map means
+ *  "no live unfinished-status knowledge", i.e. every session falls back to the
+ *  DB snapshot. */
 export interface LiveChatSnapshot {
   readonly taskActive: Readonly<Record<string, boolean>>
   readonly paused: Readonly<Record<string, boolean>>
   readonly messageOrder: Readonly<Record<string, readonly string[]>>
   readonly messages: Readonly<Record<string, Readonly<Record<string, ChatMessageUI>>>>
+  readonly unfinishedTaskStatus?: Readonly<Record<string, string>>
 }
 
 /**
@@ -178,6 +235,19 @@ export function deriveLiveSessionFlags(chat: LiveChatSnapshot): Readonly<Record<
       if (!existing.hasPendingHITL) result[sessionId] = { ...existing, hasPendingHITL: true }
     } else {
       result[sessionId] = { taskActive: false, paused: false, hasPendingHITL: true }
+    }
+  }
+  // Live unfinished-task status: fold chatStore's authoritative per-session
+  // string in — including the empty-string "settled" value, which lets a live
+  // clear override a stale DB snapshot (in_progress/paused/failed left over
+  // from a list load taken mid-task). A session gets an entry whenever
+  // chatStore holds live knowledge of it, even with no other live signal.
+  for (const [sessionId, status] of Object.entries(chat.unfinishedTaskStatus ?? {})) {
+    const existing = result[sessionId]
+    if (existing) {
+      if (existing.unfinishedTaskStatus !== status) result[sessionId] = { ...existing, unfinishedTaskStatus: status }
+    } else {
+      result[sessionId] = { taskActive: false, paused: false, hasPendingHITL: false, unfinishedTaskStatus: status }
     }
   }
   return result

@@ -279,8 +279,9 @@ export function FileTreePanel() {
   // manual file-tree refresh — the tree already reloads itself on
   // `workspace:tree_changed`). The vector index state drives it: it is disabled
   // and shown spinning while a pass is already in flight (or a request is
-  // pending — see the optimistic latch below), and unavailable for
-  // No Project (CHAT mode), where the vector index is disabled.
+  // pending — see the optimistic latch below). In No Project (CHAT mode), where
+  // the vector index is disabled, the action is hidden entirely instead of
+  // being rendered disabled.
   const indexState = useVectorIndexStore((s) => s.status.state)
   const isIndexing = indexState === 'indexing' || indexState === 'reindexing'
   const reindexUnavailable = isNoProject || !activeProjectId
@@ -292,12 +293,6 @@ export function FileTreePanel() {
   // the project becomes unavailable or the RPC rejects.
   const [reindexRequested, setReindexRequested] = useState(false)
   const reindexBusy = isIndexing || reindexRequested
-  const reindexDisabled = reindexUnavailable || reindexBusy
-  const reindexTitle = reindexBusy
-    ? 'Reindexing...'
-    : reindexUnavailable
-      ? 'Reindex unavailable'
-      : 'Force full project reindex'
 
   useEffect(() => {
     // The backend emits a busy status (indexing/reindexing) as the first event
@@ -450,16 +445,18 @@ export function FileTreePanel() {
         onToggleMode={toggleFilterMode}
         placeholder="Filter files"
         rightSlot={
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2"
-            title={reindexTitle}
-            disabled={reindexDisabled}
-            onClick={handleReindex}
-          >
-            {reindexBusy ? <Loader2 className="size-3.5 animate-spin" /> : <DatabaseZap className="size-3.5" />}
-          </Button>
+          reindexUnavailable ? null : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              title={reindexBusy ? 'Reindexing...' : 'Force full project reindex'}
+              disabled={reindexBusy}
+              onClick={handleReindex}
+            >
+              {reindexBusy ? <Loader2 className="size-3.5 animate-spin" /> : <DatabaseZap className="size-3.5" />}
+            </Button>
+          )
         }
       />
       {isInvalidFilter ? (

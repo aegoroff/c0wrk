@@ -21,6 +21,15 @@ interface ChatState {
   activityStatus: Record<string, string>
   // Task active per session
   taskActive: Record<string, boolean>
+  // Live unfinished-task status per session: sessionId -> '' | 'failed' |
+  // 'in_progress' | 'paused'. THE single live overlay every session-status
+  // surface colors from (sidebar session list, radar badge, radar dropdown
+  // rows); it outranks the DB snapshot's `unfinished_task_status` whenever the
+  // key is PRESENT, so one lifecycle event repaints every dot at once without
+  // waiting for a list refresh. Absent key = chatStore holds no live knowledge
+  // for the session → surfaces fall back to the DB snapshot. An explicit ''
+  // means "the task settled", which overrides a stale snapshot value.
+  unfinishedTaskStatus: Record<string, string>
   // Cooperatively paused per session: sessionId -> true when the running task
   // is suspended at a checkpoint (input unlocked, Resume/Stop controls). The
   // backend's session_paused/session_resumed events and GetSessionRuntimeStatus
@@ -88,6 +97,7 @@ interface ChatActions {
   clearStreamingText: (sessionId: string) => void
   setActivityStatus: (sessionId: string, status: string | null) => void
   setTaskActive: (sessionId: string, active: boolean) => void
+  setUnfinishedTaskStatus: (sessionId: string, status: string | undefined) => void
   setPaused: (sessionId: string, paused: boolean) => void
   setPausing: (sessionId: string, pausing: boolean) => void
   setCompacting: (sessionId: string, compacting: boolean) => void
@@ -163,6 +173,7 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
   streamingText: {},
   activityStatus: {},
   taskActive: {},
+  unfinishedTaskStatus: {},
   paused: {},
   pausing: {},
   compacting: {},
@@ -363,10 +374,55 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
     }
   }),
 
-  setTaskActive: (sessionId, active) => set((s) => ({
-    taskActive: { ...s.taskActive, [sessionId]: active },
-    taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
-  })),
+  setTaskActive: (sessionId, active) => set((s) => {
+    // A deactivation leaves the unfinished-task overlay untouched: the terminal
+    // event that clears taskActive sets the real overlay value right beside it
+    // ('' when the task settled, 'failed' when it stays resumable). An
+    // activation, however, means the session is running NOW, so any
+    // unfinished-task status the DB snapshot still carries (a stale 'failed' /
+    // 'paused' / 'in_progress' from a list load taken before this run) is
+    // superseded — pin the live overlay to '' so every status surface repaints
+    // green without a refresh.
+    if (!active) {
+      return {
+        taskActive: { ...s.taskActive, [sessionId]: active },
+        taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
+      }
+    }
+    return {
+      taskActive: { ...s.taskActive, [sessionId]: active },
+      taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
+      unfinishedTaskStatus: { ...s.unfinishedTaskStatus, [sessionId]: '' },
+    }
+  }),
+
+  // THE single live unfinished-task status write, consumed by every session-
+  // status surface through chatStore → deriveLiveSessionFlags →
+  // deriveSessionStatus. Stamps taskFlagsEventAt (it IS a task flag: the
+  // runtime-status reconcile consults that stamp before mirroring a snapshot
+  // value, so a stale snapshot can never revert a live transition). No-ops when
+  // the value already matches to keep the map reference stable (React #185).
+  // `undefined` DELETES the entry, restoring "chatStore holds no live knowledge"
+  // (an ABSENT key falls back to the DB snapshot). Used by an optimistic-send
+  // rollback whose pre-send overlay was itself absent: writing a defined ''
+  // there would outrank the DB snapshot and mask a real failed/in_progress task
+  // as settled.
+  setUnfinishedTaskStatus: (sessionId, status) => set((s) => {
+    const prev = s.unfinishedTaskStatus[sessionId]
+    if (status === undefined) {
+      if (prev === undefined) return s
+      const { [sessionId]: _dropped, ...rest } = s.unfinishedTaskStatus
+      return {
+        unfinishedTaskStatus: rest,
+        taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
+      }
+    }
+    if (prev === status) return s
+    return {
+      unfinishedTaskStatus: { ...s.unfinishedTaskStatus, [sessionId]: status },
+      taskFlagsEventAt: { ...s.taskFlagsEventAt, [sessionId]: Date.now() },
+    }
+  }),
 
   setPaused: (sessionId, paused) => set((s) => {
     // Clear the entry when un-pausing so the key's absence encodes "not paused"

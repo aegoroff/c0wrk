@@ -847,3 +847,56 @@ describe('setPausing', () => {
     expect(useChatStore.getState().paused[SESSION]).toBe(true)
   })
 })
+
+describe('setUnfinishedTaskStatus (the single live unfinished-task overlay)', () => {
+  const SESSION = 'sess-unfinished'
+
+  beforeEach(() => {
+    useChatStore.setState({ unfinishedTaskStatus: {}, taskActive: {} })
+  })
+
+  it('stores the status verbatim (including the empty-string "settled" value)', () => {
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('failed')
+
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, '')
+    // '' is stored (not deleted) — it is the "settled" signal that overrides a
+    // stale DB snapshot.
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('')
+    expect(SESSION in useChatStore.getState().unfinishedTaskStatus).toBe(true)
+  })
+
+  it('no-ops (same map reference) when the value already matches', () => {
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    const before = useChatStore.getState().unfinishedTaskStatus
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    expect(useChatStore.getState().unfinishedTaskStatus).toBe(before)
+  })
+
+  it('deletes the entry when passed undefined (restores "no live knowledge")', () => {
+    // An optimistic-send rollback whose pre-send overlay was absent must DELETE
+    // the key rather than write a defined '' that would outrank the DB snapshot.
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, undefined)
+    expect(SESSION in useChatStore.getState().unfinishedTaskStatus).toBe(false)
+  })
+
+  it('no-ops (same map reference) when deleting an already-absent entry', () => {
+    const before = useChatStore.getState().unfinishedTaskStatus
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, undefined)
+    expect(useChatStore.getState().unfinishedTaskStatus).toBe(before)
+  })
+
+  it('setTaskActive(true) pins the overlay to "" so a stale DB status cannot stick', () => {
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    useChatStore.getState().setTaskActive(SESSION, true)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('')
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+  })
+
+  it('setTaskActive(false) leaves the overlay untouched (the terminal event owns it)', () => {
+    useChatStore.getState().setUnfinishedTaskStatus(SESSION, 'failed')
+    useChatStore.getState().setTaskActive(SESSION, false)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('failed')
+  })
+})

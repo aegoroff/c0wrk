@@ -487,11 +487,25 @@ User sends a NON-GOAL message to session with unfinished task
 
 ```
 User clicks "Cancel" on the resume prompt
-  → Frontend: CancelUnfinishedTask(sessionId)
+  → Frontend: cancelUnfinishedTask(sessionId)
+      └─ clears the stale live-session state so the session leaves the
+         active-sessions radar immediately:
+           useChatStore.setUnfinishedTaskStatus(sessionId, '')
+           useActiveSessionsStore.clearUnfinishedTask(sessionId)
+         then a debounced snapshot refresh reconciles against the DB
   → Backend: FrontendAPI.CancelUnfinishedTask()
       └─ TaskStoreAdapter.PersistCancellation(taskID)
           (marks the unfinished task as cancelled; no further resume prompt)
 ```
+
+This path emits **no** terminal event (unlike the active-task/Stop-button
+cancel, which emits `task_cancelled`) — the running goroutine is already gone.
+A failed task also carries no live `taskActive`/`paused` flag, so the
+active-sessions store's live-set refresh trigger does not fire for this
+cancel; clearing the single live unfinished-task overlay
+(`chatStore.unfinishedTaskStatus`) turns every status dot idle at once, and the
+frontend also clears the snapshot entry (and the session-list busy
+flag) itself instead of waiting for the 30s safety poll.
 
 ### Task Cancellation
 
@@ -654,7 +668,8 @@ shares no rows with the original.
 ```
 User clicks Fork (GitFork icon) in SessionSelector on a session item
   → Frontend: forkSession(id) → RPC ForkSession
-      (button disabled while task active or when has_unfinished_task)
+      (button disabled whenever the row's derived status is not 'idle' —
+       active, paused, failed, or pending)
   → Backend: FrontendAPI.ForkSession(id)
       ├─ Guard: store.GetUnfinishedTask(id)
       │   └─ non-nil → return error "cannot fork a session with an unfinished task"
@@ -679,8 +694,8 @@ User clicks Fork (GitFork icon) in SessionSelector on a session item
 Forking is rejected when the source session has an unfinished
 (`in_progress` or `failed`) task — copying would duplicate a half-completed
 execution state. The guard runs on the backend (authoritative); the frontend
-also disables the fork button preemptively via the session's
-`has_unfinished_task` flag and the live active status.
+also disables the fork button preemptively from the row's derived status (any
+non-idle status — active, paused, failed, or pending — is busy).
 
 ### Per-Session Terminal Lifetime
 
@@ -893,6 +908,10 @@ type HandleResult struct {
 - `SaveProjectActiveSession` writes ONLY `saved_session_id` (inserting a row with empty tabs when missing): previously persisted `open_tabs`/`active_file` always survive a session-only selection change
 - Session activity for ordering and restore is the effective activity: the newest persisted chat message or terminal command, computed at query time and exposed as `SessionInfo.last_active_at`, falling back to the stored `last_active_at`, then `created_at`; the stored column and its `UpdateSessionActivity` write path are unchanged
 - The session list RPCs never filter archived sessions; every auto-selection path (backend fallback resolution, frontend restore) skips archived rows itself — an archived session is never auto-selected, even when it carries the freshest activity
+- The session list is refreshed by CONTENT, not by id list: `sessionStore.setSessions` no-ops only when the incoming rows are shallow-equal to the current ones (every field except the live `active` overlay, which no consumer reads). A reload that returns the same sessions still applies refreshed fields — notably `unfinished_task_status`/`has_unfinished_task`, which are the DB FALLBACK for the sidebar status dot and `isSessionBusy`. An id-only dedupe silently dropped such refreshes, leaving the sidebar's failure dot (and the busy flag) stale until an app restart
+- **One live mechanism drives every session-status dot.** The sidebar session row, the live-sessions radar badge, and its dropdown rows all derive their colour from ONE function, `deriveSessionStatus` (`lib/activeSessions.ts`) — priority pending > failed > active > paused > idle over `(taskActive, paused, hasPendingHITL, archived, unfinishedStatus)`. `unfinishedStatus` is the EFFECTIVE unfinished-task status: the live overlay `chatStore.unfinishedTaskStatus[sessionId]` when present, else the DB snapshot's `unfinished_task_status` (`effectiveUnfinishedStatus`). Lifecycle events write the overlay — `task_complete`/`task_cancelled`/`error`/`CancelUnfinishedTask` → `''`, `task_failed_resumable` → `'failed'`, `session_paused` → `'paused'`, and any activation via `setTaskActive(true)` pins it to `''` (a running session supersedes a stale DB status). Both DB snapshots (`sessionStore.sessions` for the sidebar, `activeSessionsStore.sessions` for the radar) are FALLBACKS only, consulted when chatStore holds no live knowledge of the session (a webview reload); the switch-time runtime reconcile re-seeds the overlay from the authoritative status, using the EXACT persisted value reported by `SessionRuntimeStatus.unfinished_task_status` (so an orphaned `in_progress` stays green rather than collapsing to `failed`, keeping a visited session consistent with an unvisited sibling). Consequently EVERY dot repaints live, without a list refresh, and the sidebar and radar can never disagree. The superseded per-store mirror `sessionStore.setUnfinishedTask` was removed.
+- **"Busy" = any non-idle derived status.** Both the row's Fork guard (`SessionListItem`) and the non-render `isSessionBusy` used by archive/delete confirmation treat `active`/`paused`/`failed` **and** `pending` as busy: a task blocked on a HITL prompt is still running (`taskActive` true, DB task `in_progress`), so Fork would be server-rejected and archiving/deleting it would cancel live work.
+- An optimistic fresh/nudge send or resume pins the live overlay to `''` via `setTaskActive(true)`; if the send/resume RPC is rejected, the caller restores the captured pre-send overlay value — passing `undefined` (the pre-send key was absent) DELETES the entry so the DB snapshot drives again, rather than fabricating a defined `''` that would mask a real unfinished task.
 - Every session-activating flow (list pick, New Session, fork, implicit create on send/paste/attach/terminal) persists `saved_session_id` immediately (`sessionStore.selectSession` → `SaveProjectActiveSession`, fire-and-forget, keyed under the session's owning project id); restore paths apply the persisted value via `setActiveSessionId` and never echo it back to the backend
 - Startup restores the exact last active context: `useProjectLoader` reopens the `last_active_project_id` from `app_state` when the project still exists (including `__no_project__` → CHAT), otherwise falls back to the most recently active real project (CODE-first), then to the Create Project dialog; No Project is never auto-selected by the fallback, and a failed restore RPC never blocks startup
 - User messages are persisted after the authoritative dispatch, not on receive: the `is_nudge` flag is written only once the live-send/fresh classification is known, and a rejected send (pause window, goal gate, attachment gate) never reaches the store
@@ -918,7 +937,11 @@ type HandleResult struct {
   router clarification decision never short-circuits the pipeline or closes
   a task on its own.
 - The Cancel button on the resume prompt is a hard discard: it persists
-  cancellation on the unfinished task without launching the orchestrator.
+  cancellation on the unfinished task without launching the orchestrator. It
+  emits no terminal event, so the frontend clears the stale live-session state
+  itself (`chatStore.setUnfinishedTaskStatus(id, '')` +
+  `activeSessionsStore.clearUnfinishedTask(id)`) — otherwise the session would
+  keep showing on the active-sessions radar as a failed entry.
 - Every cancellation path (CancelTask, mid-task ctx-cancel, resume-cancel)
   persists the task status as `cancelled` — never `completed` — so the
   persisted status always reflects the real outcome.

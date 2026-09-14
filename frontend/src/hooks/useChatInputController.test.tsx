@@ -587,7 +587,7 @@ describe('handleResume nudge-resume', () => {
   it('restores the paused state when the plain resume RPC fails', async () => {
     render()
     await act(async () => {
-      useChatStore.setState({ paused: { 'sess-a': true } })
+      useChatStore.setState({ paused: { 'sess-a': true }, unfinishedTaskStatus: { 'sess-a': 'paused' } })
     })
     apiMocks.chat.resumeSession.mockRejectedValueOnce(new Error('resume rpc down'))
 
@@ -597,6 +597,9 @@ describe('handleResume nudge-resume', () => {
 
     expect(useChatStore.getState().paused['sess-a']).toBe(true)
     expect(useChatStore.getState().taskActive['sess-a']).toBe(false)
+    // The optimistic activation pinned the overlay to ''; the rollback must put
+    // the pre-resume value back so status surfaces stay correct.
+    expect(useChatStore.getState().unfinishedTaskStatus['sess-a']).toBe('paused')
   })
 
   it('ignores a second Resume activation while the first is still in flight', async () => {

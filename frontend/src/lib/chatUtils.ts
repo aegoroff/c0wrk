@@ -125,6 +125,31 @@ export function isAgentMetricsRow(msg: ChatMessageUI): boolean {
   return msg.type === 'status' && msg.metadata !== undefined && normalizeAgentMetricsData(msg.metadata) !== undefined
 }
 
+/**
+ * The "Routing request..." boilerplate the orchestrator emits once at the
+ * start of every task. It is an activity-only notice (it drives the live
+ * activity label) and is deliberately NOT a chat message: the backend tags it
+ * with a non-"orchestration" service phase so it is neither persisted nor
+ * rendered live (see core/orchestrator_handle.go and
+ * backend/session/event_persister.go). Sessions persisted before that change
+ * still carry the row, so history-load drops it to clean up existing DBs
+ * transparently without a migration. The routing decision itself is a separate
+ * `routing` row and is unaffected.
+ */
+const ROUTING_REQUEST_CONTENT = 'Routing request...'
+
+export function isRoutingRequestRow(msg: ChatMessageUI): boolean {
+  // Require the persisted "orchestration" phase too, not the human-readable text
+  // alone: matching on content only would silently drop a future
+  // orchestration-phase service row that happens to carry this exact text.
+  // Legacy boilerplate rows were persisted with phase "orchestration" (the
+  // pre-change production value); the current notice uses phase "routing" and is
+  // deliberately never persisted, so nothing new matches.
+  return msg.type === 'status'
+    && msg.content === ROUTING_REQUEST_CONTENT
+    && msg.metadata?.phase === 'orchestration'
+}
+
 /** Transform a flat list of ChatMessageUI into a display-ready tree. */
 export function groupMessages(messages: ChatMessageUI[]): GroupedMessages {
   const items: DisplayItem[] = []

@@ -82,6 +82,7 @@ vi.mock('@/hooks/events/goalHandlers', () => ({
 
 const chatStoreState = {
   taskActive: {} as Record<string, boolean>,
+  unfinishedTaskStatus: {} as Record<string, string>,
   activityStatus: {} as Record<string, string>,
   streamingText: {} as Record<string, string>,
   paused: {} as Record<string, boolean>,
@@ -96,6 +97,9 @@ const chatStoreState = {
   },
   setTaskActive: (sid: string, active: boolean) => {
     chatStoreState.taskActive = { ...chatStoreState.taskActive, [sid]: active }
+  },
+  setUnfinishedTaskStatus: (sid: string, status: string) => {
+    chatStoreState.unfinishedTaskStatus = { ...chatStoreState.unfinishedTaskStatus, [sid]: status }
   },
   setPaused: (sid: string, paused: boolean) => {
     if (paused) {
@@ -137,8 +141,6 @@ vi.mock('@/stores/chatStore', () => ({ useChatStore: useChatStoreMock }))
 
 const sessionStoreState = {
   activeSessionId: null as string | null,
-  // Record setUnfinishedTask calls so tests can assert the busy-flag mirror.
-  setUnfinishedTask: vi.fn((_sessionId: string, _value: boolean) => {}),
 }
 
 const useSessionStoreMock = Object.assign(
@@ -176,7 +178,6 @@ vi.mock('@/stores/activeSessionsStore', () => ({ useActiveSessionsStore: useActi
 const { useBackgroundSessionWatcher } = await import('@/hooks/useBackgroundSessionWatcher')
 
 function resetMockState(): void {
-  sessionStoreState.setUnfinishedTask.mockClear()
   subscriptions.clear()
   onSessionEventMock.mockClear()
   reportDroppedEventMock.mockClear()
@@ -193,6 +194,7 @@ function resetMockState(): void {
 
 function resetStores(): void {
   chatStoreState.taskActive = {}
+  chatStoreState.unfinishedTaskStatus = {}
   chatStoreState.activityStatus = {}
   chatStoreState.streamingText = {}
   chatStoreState.paused = {}
@@ -302,18 +304,19 @@ describe('useBackgroundSessionWatcher', () => {
     expect(chatStoreState.activityStatus['active-1']).toBe('Processing...')
   })
 
-  it('mirrors the unfinished-task flag: cleared on completion, re-armed on resumable failure', () => {
+  it('mirrors the unfinished-task overlay: cleared on completion, re-armed on resumable failure', () => {
     chatStoreState.setTaskActive('bg-1', true)
     sessionStoreState.activeSessionId = 'active-1'
     useRenderWatcher()
 
     fireSessionEvent('bg-1', 'task_complete', { output: 'done', success: true })
-    expect(sessionStoreState.setUnfinishedTask).toHaveBeenCalledWith('bg-1', false)
+    expect(chatStoreState.unfinishedTaskStatus['bg-1']).toBe('')
 
     // A degraded completion stays resumable: the backend's follow-up event
-    // re-arms the busy flag so archive/delete keeps protecting the task.
+    // re-arms the live overlay so every status dot repaints red and
+    // archive/delete keeps protecting the task.
     fireSessionEvent('bg-1', 'task_failed_resumable', { task_id: 't1' })
-    expect(sessionStoreState.setUnfinishedTask).toHaveBeenLastCalledWith('bg-1', true)
+    expect(chatStoreState.unfinishedTaskStatus['bg-1']).toBe('failed')
   })
 
   it('resets taskActive to false on task_cancelled', () => {

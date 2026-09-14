@@ -13,7 +13,6 @@ interface CollapsibleBlockProps {
   label: React.ReactNode
   statusIcon?: React.ReactNode
   badge?: React.ReactNode
-  defaultOpen?: boolean
   open?: boolean
   onOpenChange?: (open: boolean) => void
   className?: string
@@ -38,7 +37,6 @@ export function CollapsibleBlock({
   label,
   statusIcon,
   badge,
-  defaultOpen,
   open: controlledOpen,
   onOpenChange,
   className,
@@ -46,7 +44,14 @@ export function CollapsibleBlock({
   headerExtra,
   revealId,
 }: CollapsibleBlockProps) {
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen ?? false)
+  // Uncontrolled fallback — LIVE, not dead code: ToolCard, ThoughtBlock,
+  // ThoughtGroupBlock and ReflectionBlock render this component without
+  // open/onOpenChange and rely on this state. The block starts COLLAPSED and
+  // toggles itself; there is deliberately no `defaultOpen` prop (the controlled
+  // callers — PlanStepBlock / SubAgentBlock — own their open state, and the
+  // former auto-open on error/running was removed on purpose), so no caller
+  // needs a default-open uncontrolled block.
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
 
   const isControlled = controlledOpen !== undefined
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen

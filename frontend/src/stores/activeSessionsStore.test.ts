@@ -240,6 +240,79 @@ describe('activeSessionsStore', () => {
     })
   })
 
+  describe('clearUnfinishedTask', () => {
+    it('clears the matching session status and flag, leaving others untouched', () => {
+      useActiveSessionsStore.setState({
+        sessions: [
+          makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' }),
+          makeSession({ id: 'b', has_unfinished_task: true, unfinished_task_status: 'in_progress' }),
+        ],
+      })
+
+      useActiveSessionsStore.getState().clearUnfinishedTask('a')
+
+      const sessions = useActiveSessionsStore.getState().sessions!
+      expect(sessions.find((s) => s.id === 'a')).toMatchObject({
+        has_unfinished_task: false,
+        unfinished_task_status: '',
+      })
+      expect(sessions.find((s) => s.id === 'b')).toMatchObject({
+        has_unfinished_task: true,
+        unfinished_task_status: 'in_progress',
+      })
+    })
+
+    it('no-ops (same reference) for an unknown session', () => {
+      useActiveSessionsStore.setState({
+        sessions: [makeSession({ id: 'a', unfinished_task_status: 'failed' })],
+      })
+      const before = useActiveSessionsStore.getState().sessions
+
+      useActiveSessionsStore.getState().clearUnfinishedTask('ghost')
+
+      expect(useActiveSessionsStore.getState().sessions).toBe(before)
+    })
+
+    it('no-ops (same reference) when the session already carries no unfinished task', () => {
+      useActiveSessionsStore.setState({ sessions: [makeSession({ id: 'a' })] })
+      const before = useActiveSessionsStore.getState().sessions
+
+      useActiveSessionsStore.getState().clearUnfinishedTask('a')
+
+      expect(useActiveSessionsStore.getState().sessions).toBe(before)
+    })
+
+    it('no-ops before the snapshot loads', () => {
+      useActiveSessionsStore.getState().clearUnfinishedTask('a')
+      expect(useActiveSessionsStore.getState().sessions).toBeNull()
+    })
+
+    it('a read that started before the clear is dropped and re-read', async () => {
+      // Resume-Cancel path: a snapshot read already in flight (poll / switch)
+      // predates the local clear and must not overwrite it; the guard drops it
+      // and re-reads, so the caller's await ends on the authoritative value.
+      const stale = [makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' })]
+      const fresh = [makeSession({ id: 'a' })]
+      useActiveSessionsStore.setState({ sessions: stale })
+      let resolveStale!: (v: SessionInfo[]) => void
+      mockedList.mockImplementationOnce(() => new Promise<SessionInfo[]>((r) => { resolveStale = r }))
+      mockedList.mockResolvedValueOnce(fresh)
+
+      const pendingFetch = useActiveSessionsStore.getState().refreshNow()
+      useActiveSessionsStore.getState().clearUnfinishedTask('a')
+      resolveStale(stale)
+      await pendingFetch
+
+      expect(mockedList).toHaveBeenCalledTimes(2)
+      const sessions = useActiveSessionsStore.getState().sessions!
+      expect(sessions.find((s) => s.id === 'a')).toMatchObject({
+        has_unfinished_task: false,
+        unfinished_task_status: '',
+      })
+      expect(useActiveSessionsStore.getState().refreshing).toBe(false)
+    })
+  })
+
   describe('sweepPendingActions', () => {
     it('queries only live sessions whose pending state is unknown', async () => {
       useActiveSessionsStore.setState({

@@ -456,3 +456,39 @@ func TestEventPersister_PauseCheckpointsPersisted(t *testing.T) {
 		t.Errorf("subagent_paused metadata duration: got %d", subMeta.Duration)
 	}
 }
+
+// TestEventPersister_ServicePhaseGatesPersistence verifies that only the
+// "orchestration" service phase is persisted (as a "status" chat row). The
+// per-task "Routing request..." boilerplate now carries phase "routing" and must
+// stay transient — persisting it would resurrect a redundant chat row on reload.
+func TestEventPersister_ServicePhaseGatesPersistence(t *testing.T) {
+	t.Run("routing phase is transient", func(t *testing.T) {
+		store := &captureStore{}
+		p := NewEventPersister(store)
+
+		p.Persist(Event{SessionID: "s1", Type: "service", Data: map[string]any{
+			"content": "Routing request...", "phase": "routing",
+		}})
+
+		if rows := store.snapshot(); len(rows) != 0 {
+			t.Fatalf("expected 0 persisted rows for a routing-phase service event, got %d: %+v", len(rows), rows)
+		}
+	})
+
+	t.Run("orchestration phase is persisted as a status row", func(t *testing.T) {
+		store := &captureStore{}
+		p := NewEventPersister(store)
+
+		p.Persist(Event{SessionID: "s1", Type: "service", Data: map[string]any{
+			"content": "Queued message could not start a follow-up task", "phase": "orchestration",
+		}})
+
+		rows := store.snapshot()
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 persisted row for an orchestration-phase service event, got %d: %+v", len(rows), rows)
+		}
+		if rows[0].Role != "status" {
+			t.Errorf("role = %q, want %q", rows[0].Role, "status")
+		}
+	})
+}

@@ -279,7 +279,14 @@ func (o *Orchestrator) routeAndActivateSkills(
 	availableTools []sdktools.ToolDescriptor,
 ) (context.Context, *router.RoutingDecision, []skills.SkillDescriptor, *HandleResult, error) {
 	o.logDebug("orchestrator: starting routing")
-	o.emitter.ServiceWithMeta("Routing request...", map[string]any{"phase": "orchestration"})
+	// Activity-only notice: updates the live activity label ("Routing
+	// request...") but must NOT surface as a chat row. The "orchestration"
+	// phase is the chat-visible/persisted discriminator (see
+	// backend/session/event_persister.go and the frontend's service handler);
+	// this per-task boilerplate carries a different phase so it is neither
+	// persisted nor rendered. Only the routing decision itself
+	// (o.emitter.Routing below) shows up in the chat.
+	o.emitter.ServiceWithMeta("Routing request...", map[string]any{"phase": "routing"})
 
 	var skillDescriptors []skills.SkillDescriptor
 	if o.skillManager != nil {

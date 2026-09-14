@@ -174,6 +174,10 @@ export interface SessionRuntimeStatus {
   active: boolean
   has_unfinished_task: boolean
   unfinished_task_id?: string
+  /** Raw persisted status of the resumable task ("in_progress" | "paused" |
+   *  "failed"), or absent when there is none. Lets the reconcile seed the live
+   *  overlay with the exact value instead of collapsing to "failed". */
+  unfinished_task_status?: string
   /** True when the resumable unfinished task is cooperatively paused. */
   paused: boolean
   /** True while a manual context compaction is in flight. */
@@ -202,6 +206,9 @@ function isSessionRuntimeStatus(d: unknown): d is SessionRuntimeStatus {
   return typeof d === 'object' && d !== null
     && typeof (d as Record<string, unknown>).active === 'boolean'
     && typeof (d as Record<string, unknown>).has_unfinished_task === 'boolean'
+    && (!('unfinished_task_status' in d)
+      || (d as Record<string, unknown>).unfinished_task_status === undefined
+      || typeof (d as Record<string, unknown>).unfinished_task_status === 'string')
     && (!('compaction_availability' in d)
       || (d as Record<string, unknown>).compaction_availability === undefined
       || isArrayOf((d as Record<string, unknown>).compaction_availability, isCompactionAvailability))

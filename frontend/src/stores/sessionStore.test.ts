@@ -51,8 +51,8 @@ describe('sessionStore sorting', () => {
   })
 
   it('keeps pinned-first order stable when activity updates', () => {
-    // setSessions dedupes by id list when unchanged; use distinct ids and
-    // verify ordering via the returned store after a touch.
+    // setSessions no-ops on an identical reload; use distinct ids and verify
+    // ordering via the returned store after a touch.
     useSessionStore.getState().setSessions([
       makeSession({ id: 'a', pinned: true, last_active_at: '2026-01-01T00:00:00Z' }),
       makeSession({ id: 'b', pinned: false, last_active_at: '2026-09-01T00:00:00Z' }),
@@ -81,55 +81,62 @@ describe('sessionStore sorting', () => {
   })
 })
 
-describe('setUnfinishedTask', () => {
+describe('setSessions freshness', () => {
   beforeEach(resetStore)
 
-  it('clears the flag for the matching session and leaves others untouched', () => {
-    // The runtime reconcile / terminal task events push the authoritative
-    // value through here so isSessionBusy() stays truthful without a restart.
+  it('applies a refreshed status when the session ids are unchanged', () => {
+    // Regression: the guard used to compare only the id list, so a reload that
+    // returned the same sessions with a refreshed unfinished_task_status
+    // silently dropped it — leaving the sidebar's failure dot stale until an
+    // app restart.
     useSessionStore.getState().setSessions([
-      makeSession({ id: 'a', has_unfinished_task: true }),
-      makeSession({ id: 'b', has_unfinished_task: true }),
+      makeSession({ id: 'a', has_unfinished_task: false, unfinished_task_status: '' }),
     ])
 
-    useSessionStore.getState().setUnfinishedTask('a', false)
+    useSessionStore.getState().setSessions([
+      makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' }),
+    ])
 
-    const sessions = useSessionStore.getState().sessions!
-    expect(sessions.find((s) => s.id === 'a')!.has_unfinished_task).toBe(false)
-    expect(sessions.find((s) => s.id === 'b')!.has_unfinished_task).toBe(true)
+    const session = useSessionStore.getState().sessions![0]!
+    expect(session.unfinished_task_status).toBe('failed')
+    expect(session.has_unfinished_task).toBe(true)
   })
 
-  it('sets the flag true when a task becomes resumable', () => {
-    useSessionStore.getState().setSessions([makeSession({ id: 'a' })])
+  it('applies a refreshed field when only that field changed', () => {
+    useSessionStore.getState().setSessions([makeSession({ id: 'a', name: 'Old name' })])
 
-    useSessionStore.getState().setUnfinishedTask('a', true)
+    useSessionStore.getState().setSessions([makeSession({ id: 'a', name: 'New name' })])
 
-    expect(useSessionStore.getState().sessions![0]!.has_unfinished_task).toBe(true)
+    expect(useSessionStore.getState().sessions![0]!.name).toBe('New name')
   })
 
-  it('keeps the sessions reference when the value already matches (stable selectors)', () => {
-    // A new array on a no-op update would needlessly re-render every
-    // subscriber of `sessions` — the guard must return the same reference.
-    useSessionStore.getState().setSessions([makeSession({ id: 'a', has_unfinished_task: true })])
+  it('keeps the sessions reference when the reloaded list is identical (stable selectors)', () => {
+    // A duplicate delivery (e.g. an event push plus the RPC response) with
+    // equal content must be a no-op: a new array would needlessly re-render
+    // every subscriber of `sessions`.
+    useSessionStore.getState().setSessions([
+      makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' }),
+      makeSession({ id: 'b' }),
+    ])
     const before = useSessionStore.getState().sessions
 
-    useSessionStore.getState().setUnfinishedTask('a', true)
+    useSessionStore.getState().setSessions([
+      makeSession({ id: 'a', has_unfinished_task: true, unfinished_task_status: 'failed' }),
+      makeSession({ id: 'b' }),
+    ])
 
     expect(useSessionStore.getState().sessions).toBe(before)
   })
 
-  it('no-ops for an unknown session id', () => {
-    useSessionStore.getState().setSessions([makeSession({ id: 'a' })])
+  it('ignores an active-only change (live flag owned by chatStore)', () => {
+    // SessionInfo.active is a live in-memory flag no consumer reads; only it
+    // changing must not force a store update.
+    useSessionStore.getState().setSessions([makeSession({ id: 'a', active: false })])
     const before = useSessionStore.getState().sessions
 
-    useSessionStore.getState().setUnfinishedTask('missing', false)
+    useSessionStore.getState().setSessions([makeSession({ id: 'a', active: true })])
 
     expect(useSessionStore.getState().sessions).toBe(before)
-  })
-
-  it('no-ops before the session list is loaded', () => {
-    useSessionStore.getState().setUnfinishedTask('a', true)
-    expect(useSessionStore.getState().sessions).toBeNull()
   })
 })
 

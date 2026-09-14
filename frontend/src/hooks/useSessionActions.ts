@@ -10,8 +10,9 @@
 // inline in the row). This hook owns only the state + async commit.
 //
 // Archive/delete are gated on confirmation for busy sessions: a session with
-// a running, paused, or unfinished task has its task cancelled by the backend
-// first, which is destructive to the resumable state, so we ask first.
+// a running, paused, unfinished (resumable), or HITL-blocked ('pending') task
+// has its task cancelled by the backend first, which is destructive to the
+// resumable state, so we ask first.
 
 import { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'

@@ -70,6 +70,7 @@ export function ActiveSessionsIndicator() {
   const pendingOverride = useActiveSessionsStore((s) => s.pendingOverride)
   const taskActive = useChatStore((s) => s.taskActive)
   const paused = useChatStore((s) => s.paused)
+  const unfinishedTaskStatus = useChatStore((s) => s.unfinishedTaskStatus)
   const messageOrder = useChatStore((s) => s.messageOrder)
   const messages = useChatStore((s) => s.messages)
   const projects = useProjectStore((s) => s.projects)
@@ -81,8 +82,8 @@ export function ActiveSessionsIndicator() {
   const [open, setOpen] = useState(false)
 
   const chatSnapshot: LiveChatSnapshot = useMemo(
-    () => ({ taskActive, paused, messageOrder, messages }),
-    [taskActive, paused, messageOrder, messages],
+    () => ({ taskActive, paused, messageOrder, messages, unfinishedTaskStatus }),
+    [taskActive, paused, messageOrder, messages, unfinishedTaskStatus],
   )
   const flags = useMemo(
     () => deriveBadgeFlags(sessions, chatSnapshot, pendingOverride),

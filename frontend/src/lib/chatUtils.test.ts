@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { roleToType, chatMessageToUI, rebuildPlanFromHistory, rebuildGoalFromHistory, groupMessages, isPersistableHistoryMessage, lastAgentMetricsFromHistory, isAgentMetricsRow } from './chatUtils'
+import { roleToType, chatMessageToUI, rebuildPlanFromHistory, rebuildGoalFromHistory, groupMessages, isPersistableHistoryMessage, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from './chatUtils'
 import type { ChatMessage } from '@/types/models'
 import type { ChatMessageUI } from '@/types/messages'
 
@@ -400,6 +400,48 @@ describe('lastAgentMetricsFromHistory / isAgentMetricsRow', () => {
     expect(got?.invalid_tool_calls).toBe(0)
     expect(got?.nudges.truncation).toBe(0)
     expect(got?.aborts.truncation).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3b. routing-request activity boilerplate rows
+// ---------------------------------------------------------------------------
+
+describe('isRoutingRequestRow', () => {
+  it('matches a legacy persisted "Routing request..." status row', () => {
+    // The Go persister writes the raw JSON payload as the row content and the
+    // same payload as metadata (role "status"); chatMessageToUI reconstructs
+    // the human-readable text from metadata.content.
+    const meta = JSON.stringify({ content: 'Routing request...', phase: 'orchestration' })
+    const row = chatMessageToUI(makeMsg({ id: 11, role: 'status', content: meta, metadata: meta }))
+    expect(row.content).toBe('Routing request...')
+    expect(isRoutingRequestRow(row)).toBe(true)
+  })
+
+  it('does not match the routing decision row (the results must stay)', () => {
+    const row = chatMessageToUI(makeMsg({
+      id: 12,
+      role: 'routing',
+      content: '',
+      metadata: JSON.stringify({ domain: 'code', complexity: '3' }),
+    }))
+    expect(row.content).toContain('Domain: code')
+    expect(isRoutingRequestRow(row)).toBe(false)
+  })
+
+  it('does not match other status rows (e.g. skills_activated)', () => {
+    const row = chatMessageToUI(makeMsg({ role: 'status', metadata: JSON.stringify({ skills: ['x'] }) }))
+    expect(isRoutingRequestRow(row)).toBe(false)
+  })
+
+  it('does not match a same-text status row without the orchestration phase', () => {
+    // The matcher requires the persisted phase, so a service row that merely
+    // happens to carry the text (e.g. the new "routing" phase notice, which is
+    // never persisted but may exist in odd payloads) is not dropped.
+    const meta = JSON.stringify({ content: 'Routing request...', phase: 'routing' })
+    const row = chatMessageToUI(makeMsg({ id: 13, role: 'status', content: meta, metadata: meta }))
+    expect(row.content).toBe('Routing request...')
+    expect(isRoutingRequestRow(row)).toBe(false)
   })
 })
 

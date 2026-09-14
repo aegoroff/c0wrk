@@ -103,6 +103,12 @@ export function useReviewActions(sessionId: string) {
       const wasPaused = useChatStore.getState().paused[sessionId] ?? false
       const isRunning = useChatStore.getState().taskActive[sessionId] ?? false
       const wasActivity = useChatStore.getState().activityStatus[sessionId] ?? null
+      // Snapshot the live unfinished-task overlay BEFORE the optimistic
+      // activation below pins it to '' (setTaskActive(true) supersedes a stale
+      // DB snapshot). A rejected submit must restore it, or the cleared overlay
+      // outranks the DB and the unfinished session renders idle with no busy
+      // guard (mirrors useMessageSender).
+      const prevUnfinished = useChatStore.getState().unfinishedTaskStatus[sessionId]
       const pendingAttachments =
         useAttachmentsStore.getState().attachmentsBySession[sessionId] ?? EMPTY_ATTACHMENTS
       const metadata = buildUserMessageMeta(false, pendingAttachments, wasPaused || isRunning)
@@ -159,6 +165,13 @@ export function useReviewActions(sessionId: string) {
         useChatStore.getState().setTaskActive(sessionId, isRunning)
         useChatStore.getState().setPaused(sessionId, wasPaused)
         useChatStore.getState().setActivityStatus(sessionId, wasActivity)
+        // Restore the overlay the optimistic activation pinned to '' — only when
+        // this submit actually activated the session (a live interjection, which
+        // is `isRunning`, never activated it). `undefined` deletes the key,
+        // restoring "no live knowledge" so the DB snapshot drives again.
+        if (wasPaused || !isRunning) {
+          useChatStore.getState().setUnfinishedTaskStatus(sessionId, prevUnfinished)
+        }
         exitReviewLoop(sessionId)
         throw err
       }

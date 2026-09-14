@@ -21,6 +21,7 @@ function resetStore(): void {
     messages: {},
     messageOrder: {},
     taskActive: {},
+    unfinishedTaskStatus: {},
     streamingText: {},
     activityStatus: {},
     paused: {},
@@ -30,8 +31,8 @@ function resetStore(): void {
     runtimeEventAt: {},
     taskFlagsEventAt: {},
   })
-  // reconcileRuntimeStatus mirrors has_unfinished_task into the session list;
-  // reset it so tests start from a clean (null) snapshot state.
+  // reconcileRuntimeStatus re-seeds the live unfinished-task overlay; reset the
+  // session list so tests start from a clean (null) snapshot state.
   useSessionStore.setState({ sessions: null, activeSessionId: null })
 }
 
@@ -418,7 +419,7 @@ describe('reconcileRuntimeStatus', () => {
   })
 })
 
-describe('reconcileRuntimeStatus → has_unfinished_task mirror', () => {
+describe('reconcileRuntimeStatus → live unfinished-task overlay', () => {
   beforeEach(resetStore)
 
   function seedSession(flag: boolean): void {
@@ -442,40 +443,52 @@ describe('reconcileRuntimeStatus → has_unfinished_task mirror', () => {
     })
   }
 
-  it('clears a stale unfinished flag when the snapshot reports no unfinished task', () => {
-    // Bug: the list flag was a snapshot from list-load time; a session whose
-    // task finished while unviewed stayed "busy" for archive/delete until an
-    // app restart. The switch reconcile must refresh it from the snapshot.
+  it('clears the overlay when the snapshot reports no unfinished task (stale status superseded)', () => {
+    // The switch-time snapshot is authoritative for the live overlay: a session
+    // whose task finished while unviewed must not keep every status dot red and
+    // the session busy.
     seedSession(true)
 
     reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: false, paused: false })
 
-    expect(useSessionStore.getState().sessions![0]!.has_unfinished_task).toBe(false)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('')
   })
 
-  it('restores the unfinished flag when the snapshot reports a resumable task', () => {
+  it('re-seeds the overlay as failed when the snapshot reports a resumable task', () => {
     seedSession(false)
 
     reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: true, paused: false })
 
-    expect(useSessionStore.getState().sessions![0]!.has_unfinished_task).toBe(true)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('failed')
   })
 
-  it('mirrors the flag for an actively running session too (snapshot authoritative)', () => {
-    seedSession(false)
+  it('seeds the overlay with the EXACT persisted status when the backend reports it', () => {
+    // An orphaned 'in_progress' task must stay green so a visited session
+    // agrees with an unvisited sibling (whose DB fallback still says
+    // 'in_progress'), instead of collapsing to red 'failed'.
+    reconcileRuntimeStatus(SESSION, {
+      active: false,
+      has_unfinished_task: true,
+      paused: false,
+      unfinished_task_status: 'in_progress',
+    })
+
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('in_progress')
+  })
+
+  it('pins the overlay to paused when the snapshot reports a paused task', () => {
+    reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: true, paused: true })
+
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('paused')
+  })
+
+  it('pins the overlay to idle for a running session (green comes from taskActive)', () => {
+    seedSession(true)
 
     reconcileRuntimeStatus(SESSION, { active: true, has_unfinished_task: true, paused: false })
 
-    expect(useSessionStore.getState().sessions![0]!.has_unfinished_task).toBe(true)
-  })
-
-  it('keeps the sessions reference when the flag value is unchanged (stable selectors)', () => {
-    seedSession(true)
-    const before = useSessionStore.getState().sessions
-
-    reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: true, paused: false })
-
-    expect(useSessionStore.getState().sessions).toBe(before)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('')
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
   })
 })
 
@@ -708,16 +721,14 @@ describe('reconcileRuntimeStatus → stale-snapshot guard for mirror flags', () 
     expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
   })
 
-  it('still mirrors the flags when no live event intervened', () => {
-    seedSession(true)
-
+  it('skips the overlay re-seed while compacting (the flow owns the transition)', () => {
     reconcileRuntimeStatus(
       SESSION,
-      { active: false, has_unfinished_task: false, paused: false, compacting: true },
+      { active: false, has_unfinished_task: true, paused: false, compacting: true },
       Date.now() + 1000, // snapshot newer than any live mark
     )
 
-    expect(useSessionStore.getState().sessions![0]!.has_unfinished_task).toBe(false)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBeUndefined()
     expect(useChatStore.getState().compacting[SESSION]).toBe(true)
   })
 })

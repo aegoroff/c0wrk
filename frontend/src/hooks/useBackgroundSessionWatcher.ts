@@ -144,22 +144,23 @@ export function useBackgroundSessionWatcher(): void {
         // sessions before the step boundary) is superseded by the terminal
         // event — clear its spinner flag.
         store.setPausing(sessionId, false)
-        // Mirror the active-session terminal handler (useChatEvents): the
-        // session list's `has_unfinished_task` snapshot is stale the moment
-        // the task settles, so isSessionBusy() stops reporting the session
-        // as busy without waiting for a switch-back reconcile. A failure
-        // that stays resumable is followed by the task_failed_resumable
-        // subscription below, which re-sets the flag.
-        useSessionStore.getState().setUnfinishedTask(sessionId, false)
+        // Mirror the active-session terminal handler (useChatEvents): clear the
+        // single live unfinished-task overlay so every status surface (sidebar
+        // list, radar badge, radar dropdown) repaints idle live and the busy
+        // check releases the session — no switch-back reconcile needed. A
+        // failure that stays resumable is followed by the task_failed_resumable
+        // subscription below, which re-arms the overlay as 'failed'.
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')
       }
 
       cleanups.push(
         onSessionEvent(sessionId, 'task_failed_resumable', () => {
-          // Degraded background completion: the task stays resumable, so the
-          // session IS busy again (mirrors useActionEvents' active-session
-          // handling of the flag; the resume banner itself is rebuilt by the
-          // switch-back history load + runtime reconcile).
-          useSessionStore.getState().setUnfinishedTask(sessionId, true)
+          // Degraded background completion: the task stays resumable — re-arm
+          // the SINGLE live unfinished-task overlay as 'failed' so every status
+          // surface repaints red live (mirrors useActionEvents' active-session
+          // handling; the resume banner itself is rebuilt by the switch-back
+          // history load + runtime reconcile).
+          useChatStore.getState().setUnfinishedTaskStatus(sessionId, 'failed')
         }),
       )
 

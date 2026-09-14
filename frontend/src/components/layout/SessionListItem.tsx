@@ -33,10 +33,14 @@ export interface SessionItemSummary {
   archived: boolean
   pinned: boolean
   last_active_at: string
-  has_unfinished_task: boolean
-  /** Persisted task status (SessionInfo.unfinished_task_status). Drives the red
-   *  failure dot: 'failed' → a resumable failed task. Optional so callers that
-   *  only need the selection/busy fields may omit it. */
+  /** Persisted task status (SessionInfo.unfinished_task_status) — the DB
+   *  FALLBACK for the live unfinished-task overlay (chatStore.unfinishedTaskStatus,
+   *  which the indicator prefers). Drives the red failure dot: 'failed' → a
+   *  resumable failed task. Optional so callers that only need the selection
+   *  fields may omit it. The busy/fork guard deliberately keys off this STATUS
+   *  STRING rather than SessionInfo.has_unfinished_task: the session list
+   *  queries always SELECT both columns, so the boolean is redundant, and a
+   *  status string carries strictly more information (which unfinished state). */
   unfinished_task_status?: string
 }
 
@@ -61,9 +65,15 @@ function SessionRowContent({ session, isActive, status, onPin, onFork, onRename,
   // Fork is the only action that requires a settled session: it deep-copies the
   // execution state, which is impossible while a task is running or unfinished.
   // Archive and delete are always allowed — the backend cancels/completes any
-  // in-flight or unfinished task as needed before archiving/deleting.
-  const busy = status === 'active' || status === 'paused' || session.has_unfinished_task
-  const forkReason = status === 'active' ? 'Cannot fork while a task is running' : 'Cannot fork a session with an unfinished task'
+  // in-flight or unfinished task as needed before archiving/deleting. Busy is
+  // read from the row's derived status alone (the SAME single mechanism every
+  // dot uses): every non-idle status means the session is NOT settled. This
+  // deliberately includes 'pending' — a task blocked on a HITL prompt is still
+  // RUNNING (taskActive stays true and the DB task is in_progress), so the
+  // backend rejects a fork of it; enumerating only active/paused/failed would
+  // leave Fork enabled-but-doomed for a pending row.
+  const busy = status !== 'idle'
+  const forkReason = status === 'active' || status === 'pending' ? 'Cannot fork while a task is running' : 'Cannot fork a session with an unfinished task'
 
   return (
     <>
