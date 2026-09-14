@@ -106,7 +106,12 @@ export interface CompactionFinishedData {
   nothing_compacted?: boolean; deferred_to_resume?: boolean; compaction_availability?: CompactionAvailability[]
 }
 export interface SessionTokensData { session_input_tokens: number; session_output_tokens: number; model: string; family: string; fill_percent?: number; used_tokens?: number; max_tokens?: number }
-export interface AssistantChunkData { content: string; accumulated_content?: string }
+export interface AssistantChunkData { content: string; accumulated_content?: string; plan_step_id?: string }
+/** Final assistant response for one executor step. `plan_step_id` is set when
+ *  the answer belongs to a plan-step/subagent block (scoped emitter) rather
+ *  than the Conductor's own turn — the frontend must nest it in that block,
+ *  never in the root Conductor chat. */
+export interface AssistantDoneData { content: string; input_tokens: number; output_tokens: number; plan_step_id?: string }
 export interface TaskCompleteData {
   session_id?: string; output?: string; attempt_count?: number; routing_decision?: Record<string, unknown>
   /** Typed success contract: false for partial/failed/aborted executions delivered as task_complete. */
@@ -424,7 +429,7 @@ export interface SessionEventMap {
    *  completion — no success field, completed_count untouched). */
   readonly plan_step_paused: PlanStepPausedData
   readonly assistant_chunk: AssistantChunkData
-  readonly assistant_done: { readonly content: string; readonly input_tokens: number; readonly output_tokens: number }
+  readonly assistant_done: AssistantDoneData
   readonly error: ErrorData
   readonly task_complete: TaskCompleteData
   readonly task_cancelled: void
@@ -692,6 +697,9 @@ export function isAssistantChunkData(d: unknown): d is AssistantChunkData {
   const hasContent = 'content' in d && typeof d.content === 'string'
   const hasAccumulated = 'accumulated_content' in d && typeof d.accumulated_content === 'string'
   return hasContent || hasAccumulated
+}
+export function isAssistantDoneData(d: unknown): d is AssistantDoneData {
+  return isObjLocal(d) && 'content' in d && typeof d.content === 'string'
 }
 export function isErrorData(d: unknown): d is ErrorData { return isObj(d) && has(d, 'error') }
 export function isTaskCompleteData(d: unknown): d is TaskCompleteData {

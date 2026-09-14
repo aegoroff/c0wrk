@@ -3,9 +3,8 @@
 
 import { useEffect } from 'react'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isAssistantChunkData, isThoughtData, isErrorData, isTaskCompleteData, isReflectionData } from '@/types/events'
+import { isAssistantChunkData, isAssistantDoneData, isThoughtData, isErrorData, isTaskCompleteData, isReflectionData } from '@/types/events'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { useReviewStore } from '@/stores/reviewStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
@@ -62,6 +61,14 @@ export function useChatEvents(sessionId: string | null): void {
         if (!isAssistantChunkData(data)) { reportDroppedEvent('assistant_chunk', data); return }
         const store = useChatStore.getState()
         store.setActivityStatus(sessionId, 'Generating response...')
+        // A plan-step/subagent-scoped chunk (plan_step_id set) belongs to that
+        // block, never the Conductor's root chat. The scoped emitter flushes
+        // chunk+done together as one full-output emission, so nothing needs to
+        // stream into the session-global buffer here — the committed message
+        // arrives via assistant_done and nests under the block. Streaming it
+        // to the root buffer would surface a subagent's answer in the root
+        // chat (and it then vanish when the buffer is cleared/overwritten).
+        if (data.plan_step_id) return
         if (data.accumulated_content !== undefined) {
           store.setStreamingText(sessionId, data.accumulated_content)
         } else if (data.content) {
@@ -77,8 +84,27 @@ export function useChatEvents(sessionId: string | null): void {
 
     // --- assistant_done ---
     cleanups.push(
-      onSessionEvent(sessionId, 'assistant_done', () => {
+      onSessionEvent(sessionId, 'assistant_done', (data) => {
         const store = useChatStore.getState()
+        // A plan-step/subagent-scoped answer (plan_step_id set) belongs to its
+        // block: stamp the plan_step_id so groupMessages nests it under the
+        // step/subagent. Without this the answer was committed to the root
+        // Conductor chat live and then vanished on reload — the persisted
+        // assistant row carries plan_step_id and nests, a live/reload mismatch.
+        const scoped = isAssistantDoneData(data) ? data : undefined
+        if (scoped?.plan_step_id) {
+          if (scoped.content) {
+            store.addMessage(sessionId, {
+              id: generateMessageId(),
+              sessionId,
+              type: 'assistant',
+              content: scoped.content,
+              metadata: { plan_step_id: scoped.plan_step_id },
+              timestamp: Date.now(),
+            })
+          }
+          return
+        }
         const text = store.streamingText[sessionId]
         if (text) {
           store.addMessage(sessionId, {
@@ -125,12 +151,13 @@ export function useChatEvents(sessionId: string | null): void {
         store.setActivityStatus(sessionId, null)
         store.setTaskActive(sessionId, false)
         store.setPausing(sessionId, false)
-        // Terminal event: no unfinished task survives an errored run — the
-        // session is no longer busy for the archive/delete confirmation (the
-        // list's flag was a stale snapshot). A failure that stays resumable is
-        // immediately followed by the backend's task_failed_resumable event,
-        // which re-sets the flag (see useActionEvents).
-        useSessionStore.getState().setUnfinishedTask(sessionId, false)
+        // Terminal event: no unfinished task survives an errored run — clear
+        // the single live unfinished-task overlay so every status dot turns
+        // idle live (and the busy check stops protecting the session). A
+        // failure that stays resumable is immediately followed by the
+        // backend's task_failed_resumable event, which re-arms it as 'failed'
+        // (see useActionEvents).
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')
         // The failed exchange still grew the conversation history — refresh
         // the compaction no-op flag (the compact button's disabled state).
         refreshCompactionAvailability(sessionId)
@@ -146,13 +173,13 @@ export function useChatEvents(sessionId: string | null): void {
         store.setActivityStatus(sessionId, null)
         store.setTaskActive(sessionId, false)
         store.setPausing(sessionId, false)
-        // The task settled: refresh the session list's stale `has_unfinished_task`
-        // snapshot so isSessionBusy() stops reporting the session as busy
-        // without an app restart. Degraded completions (success === false) are
-        // still cleared here — the backend emits its task_failed_resumable
-        // event right AFTER this one when the task stays resumable, and that
-        // handler re-sets the flag (see useActionEvents).
-        useSessionStore.getState().setUnfinishedTask(sessionId, false)
+        // The task settled: clear the single live unfinished-task overlay so
+        // every status dot repaints idle live. Degraded completions
+        // (success === false) are still cleared here — the backend emits its
+        // task_failed_resumable event right AFTER this one when the task stays
+        // resumable, and that handler re-arms the overlay as 'failed' (see
+        // useActionEvents).
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')
         // The completed exchange was appended to the conversation history
         // (the orchestrator records the outcome before this event fires), so
         // a previously-no-op session may be compactable again — refresh the
@@ -270,10 +297,10 @@ export function useChatEvents(sessionId: string | null): void {
         store.setPaused(sessionId, false)
         store.setPausing(sessionId, false)
         // A user-initiated cancel persists the task as cancelled in the task
-        // store, so no unfinished task survives it — refresh the session
-        // list's stale `has_unfinished_task` snapshot (busy check for
-        // archive/delete) without waiting for an app restart.
-        useSessionStore.getState().setUnfinishedTask(sessionId, false)
+        // store, so no unfinished task survives it — clear the single live
+        // unfinished-task overlay so every status dot repaints idle live and
+        // the busy check releases the session.
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')
         // A cancelled task still records its exchange in the conversation
         // history (the orchestrator's cancellation epilogue appends the user
         // message + cancellation note), so a previously-no-op session may be

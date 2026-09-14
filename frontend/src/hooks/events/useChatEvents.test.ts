@@ -4,7 +4,9 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { shouldAddTaskCompleteOutput, shouldTriggerReview, useChatEvents } from '@/hooks/events/useChatEvents'
-import { useChatStore } from '@/stores/chatStore'
+import { useSubagentEvents } from '@/hooks/events/useSubagentEvents'
+import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
+import { groupMessages } from '@/lib/chatUtils'
 import { useSessionStore } from '@/stores/sessionStore'
 import { isSessionBusy } from '@/hooks/useSessionStatusIndicator'
 import type { SessionInfo } from '@/types/models'
@@ -125,7 +127,7 @@ describe('shouldTriggerReview', () => {
   })
 })
 
-describe('useChatEvents terminal events → has_unfinished_task refresh', () => {
+describe('useChatEvents terminal events → live unfinished-task overlay', () => {
   const SESSION = 'sess-1'
 
   function makeSessionInfo(overrides: Partial<SessionInfo>): SessionInfo {
@@ -149,18 +151,22 @@ describe('useChatEvents terminal events → has_unfinished_task refresh', () => 
   }
 
   function seedBusySession(): void {
-    // Mirror the stale-list-snapshot bug: the flag says "unfinished" while the
-    // task is no longer running (taskActive false, no pending prompts).
+    // Mirror the stale-list-snapshot bug: the DB snapshot still says the task
+    // is unfinished while no live overlay is set and the task is no longer
+    // running (taskActive false, no pending prompts).
     useChatStore.setState({
       messages: {},
       messageOrder: {},
       taskActive: { [SESSION]: false },
+      unfinishedTaskStatus: {},
       paused: {},
       pausing: {},
       streamingText: {},
       activityStatus: {},
     })
-    useSessionStore.setState({ sessions: [makeSessionInfo({ has_unfinished_task: true })] })
+    useSessionStore.setState({
+      sessions: [makeSessionInfo({ has_unfinished_task: true, unfinished_task_status: 'in_progress' })],
+    })
   }
 
   function emit(event: string, data?: unknown): void {
@@ -169,8 +175,8 @@ describe('useChatEvents terminal events → has_unfinished_task refresh', () => 
     })
   }
 
-  function unfinishedFlag(): boolean {
-    return useSessionStore.getState().sessions![0]!.has_unfinished_task
+  function liveStatus(): string | undefined {
+    return useChatStore.getState().unfinishedTaskStatus[SESSION]
   }
 
   let container: HTMLDivElement
@@ -198,35 +204,116 @@ describe('useChatEvents terminal events → has_unfinished_task refresh', () => 
     container.remove()
   })
 
-  it('task_complete clears the flag and the session passes isSessionBusy', () => {
-    expect(isSessionBusy(SESSION)).toBe(true) // stale snapshot: busy before the event
+  it('task_complete clears the overlay and the session passes isSessionBusy', () => {
+    expect(isSessionBusy(SESSION)).toBe(true) // stale DB snapshot: busy before the event
 
     emit('task_complete', { success: true, output: 'done' })
 
-    expect(unfinishedFlag()).toBe(false)
+    expect(liveStatus()).toBe('')
     expect(isSessionBusy(SESSION)).toBe(false) // no app restart needed
   })
 
-  it('a degraded task_complete also clears the flag (task_failed_resumable re-sets it, see useActionEvents)', () => {
+  it('a degraded task_complete also clears the overlay (task_failed_resumable re-arms it, see useActionEvents)', () => {
     // The backend emits task_failed_resumable right AFTER a degraded
     // completion whenever the task stays resumable — that handler owns
-    // restoring the flag.
+    // restoring the overlay as 'failed'.
     emit('task_complete', { success: false, output: 'partial' })
 
-    expect(unfinishedFlag()).toBe(false)
+    expect(liveStatus()).toBe('')
   })
 
-  it('task_cancelled clears the flag', () => {
+  it('task_cancelled clears the overlay', () => {
     emit('task_cancelled')
 
-    expect(unfinishedFlag()).toBe(false)
+    expect(liveStatus()).toBe('')
     expect(isSessionBusy(SESSION)).toBe(false)
   })
 
-  it('a terminal error clears the flag', () => {
+  it('a terminal error clears the overlay', () => {
     emit('error', { error: 'boom' })
 
-    expect(unfinishedFlag()).toBe(false)
+    expect(liveStatus()).toBe('')
     expect(isSessionBusy(SESSION)).toBe(false)
+  })
+})
+
+describe('useChatEvents scoped assistant answer (subagent / plan step)', () => {
+  const SESSION = 'sess-1'
+
+  function emit(event: string, data?: unknown): void {
+    act(() => {
+      for (const cb of runtimeHandlers.get(event) ?? []) cb(data)
+    })
+  }
+
+  let container: HTMLDivElement
+  let root: Root
+
+  // Both hooks register their handlers with the mocked runtime; the scoped
+  // subagent launch/complete events come from useSubagentEvents while the
+  // assistant stream comes from useChatEvents — render both so the integration
+  // path (launch → scoped answer → grouping) is exercised end to end.
+  function Harness(): null {
+    useChatEvents(SESSION)
+    useSubagentEvents(SESSION)
+    return null
+  }
+
+  beforeEach(() => {
+    useChatStore.setState({
+      messages: {},
+      messageOrder: {},
+      streamingText: {},
+      activityStatus: {},
+      taskActive: {},
+      paused: {},
+      pausing: {},
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    act(() => {
+      root.render(createElement(Harness))
+    })
+  })
+
+  afterEach(() => {
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  const messages = () => selectSessionMessages(useChatStore.getState(), SESSION)
+
+  it('nests a subagent-scoped final answer in its block and keeps it out of the root chat', () => {
+    emit('subagent_launch', { step_id: 'del_1', description: 'Research topic' })
+    // The scoped emitter flushes chunk+done together, both tagged plan_step_id.
+    emit('assistant_chunk', { content: 'the answer', accumulated_content: 'the answer', plan_step_id: 'del_1' })
+    emit('assistant_done', { content: 'the answer', input_tokens: 1, output_tokens: 1, plan_step_id: 'del_1' })
+
+    // The scoped chunk must not leak into the session-global streaming buffer
+    // (which ChatArea renders at the root of the Conductor chat).
+    expect(useChatStore.getState().streamingText[SESSION]).toBeUndefined()
+
+    const { items } = groupMessages(messages())
+    const sub = items.find(it => it.kind === 'subagent') as
+      { children: Array<{ kind: string; message?: { content: string } }> } | undefined
+    expect(sub).toBeDefined()
+    // The answer nests INSIDE the subagent block...
+    expect(sub!.children.some(c => c.kind === 'assistant' && c.message?.content === 'the answer')).toBe(true)
+    // ...and no assistant item leaked into the root (Conductor) stream.
+    expect(items.some(it => it.kind === 'assistant')).toBe(false)
+  })
+
+  it('still flushes a root (Conductor) assistant answer to the chat', () => {
+    emit('assistant_chunk', { content: 'conductor answer', accumulated_content: 'conductor answer' })
+    expect(useChatStore.getState().streamingText[SESSION]).toBe('conductor answer')
+
+    emit('assistant_done', { content: 'conductor answer', input_tokens: 1, output_tokens: 1 })
+
+    const { items } = groupMessages(messages())
+    expect(items.some(it => it.kind === 'assistant')).toBe(true)
+    expect(useChatStore.getState().streamingText[SESSION]).toBeUndefined()
   })
 })

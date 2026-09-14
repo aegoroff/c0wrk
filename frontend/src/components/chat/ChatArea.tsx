@@ -1,7 +1,7 @@
 import { useEffect, useRef, useMemo } from 'react'
 import { useChatStore, useSessionMessages } from '@/stores/chatStore'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
-import { groupMessages, chatMessageToUI, rebuildPlanFromHistory, rebuildGoalFromHistory, isPersistableHistoryMessage, lastAgentMetricsFromHistory, isAgentMetricsRow } from '@/lib/chatUtils'
+import { groupMessages, chatMessageToUI, rebuildPlanFromHistory, rebuildGoalFromHistory, isPersistableHistoryMessage, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from '@/lib/chatUtils'
 import { useSessionStore } from '@/stores/sessionStore'
 import { usePlanStore } from '@/stores/planStore'
 import { useGoalStore } from '@/stores/goalStore'
@@ -98,7 +98,10 @@ export function ChatArea() {
         if (agentMetrics) {
           usePlanStore.getState().setSessionStats(activeSessionId, { lastAgentMetrics: agentMetrics })
         }
-        const chatMessages = uiMessages.filter((m) => !isAgentMetricsRow(m))
+        // Drop store-state rows (agent_metrics) and the legacy per-task
+        // "Routing request..." activity boilerplate so the chat shows only the
+        // routing decision itself.
+        const chatMessages = uiMessages.filter((m) => !isAgentMetricsRow(m) && !isRoutingRequestRow(m))
         // Merge (not replace) so live events delivered while the RPC was in
         // flight — e.g. a terminal `error` — are not clobbered.
         useChatStore.getState().mergeHistoryMessages(activeSessionId, chatMessages, loadStartedAt)

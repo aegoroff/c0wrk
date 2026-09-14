@@ -19,7 +19,6 @@
 import type { PendingActionsResponse, SessionRuntimeStatus } from '@/api/chat'
 import { getSessionRuntimeStatus } from '@/api/chat'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { useGoalStore } from '@/stores/goalStore'
 import type { ChatMessageUI, MessageType } from '@/types/messages'
 import { HITL_PROMPT_TYPES } from '@/lib/hitlTypes'
@@ -114,15 +113,27 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   const hasFresherTaskFlags =
     snapshotReadAt !== undefined && (useChatStore.getState().taskFlagsEventAt[sessionId] ?? 0) > snapshotReadAt
 
-  // The session list's `has_unfinished_task` is a snapshot from the last list
-  // load — nothing refreshed it since, so a session whose task finished while
-  // unviewed stayed "busy" for the archive/delete confirmation until an app
-  // restart. The runtime snapshot is authoritative for this flag in every
-  // branch below (running, paused, compacting, idle): mirror it into the
-  // session store. No-op when the value already matches. Skipped when a live
-  // terminal event already updated the flag after the snapshot was read.
-  if (!hasFresherLiveState) {
-    useSessionStore.getState().setUnfinishedTask(sessionId, status.has_unfinished_task === true)
+  // Re-seed the SINGLE live unfinished-task overlay (chatStore.unfinishedTaskStatus)
+  // every status surface reads. After a reload chatStore's map is empty, so the
+  // switch-time runtime snapshot is the authoritative source: a session whose
+  // task finished while unviewed must not stay red/busy, and a resumable failure
+  // must not be lost. The value mirrors the snapshot —
+  //   running            → '' (green comes from taskActive)
+  //   paused             → 'paused'
+  //   unfinished (other) → 'failed'
+  //   settled            → '' (idle)
+  // Skipped while compacting (that flow owns the transition) and when a live
+  // task-flag event intervened after the snapshot was read (it stamps
+  // taskFlagsEventAt, the task-flag freshness mark).
+  if (!hasFresherTaskFlags && !status.compacting) {
+    const liveStatus = status.active
+      ? ''
+      : status.paused
+        ? 'paused'
+        : status.has_unfinished_task
+          ? 'failed'
+          : ''
+    useChatStore.getState().setUnfinishedTaskStatus(sessionId, liveStatus)
   }
 
   // Manual compaction in flight: mirror the flag so a switch back to the

@@ -67,6 +67,7 @@ beforeEach(() => {
     messages: {},
     messageOrder: {},
     taskActive: { [SESSION]: false },
+    unfinishedTaskStatus: {},
     paused: {},
     pausing: {},
     streamingText: {},
@@ -89,10 +90,10 @@ afterEach(() => {
   container.remove()
 })
 
-describe('useActionEvents task_failed_resumable → has_unfinished_task', () => {
-  it('re-sets the flag after the terminal event cleared it (degraded completion sequence)', () => {
+describe('useActionEvents task_failed_resumable → live unfinished-task overlay', () => {
+  it('re-arms the overlay after the terminal event cleared it (degraded completion sequence)', () => {
     // Sequence the backend guarantees: task_complete(success=false) or error
-    // first (clears the flag via useChatEvents), then task_failed_resumable.
+    // first (clears the overlay via useChatEvents), then task_failed_resumable.
     expect(isSessionBusy(SESSION)).toBe(false)
 
     act(() => {
@@ -101,8 +102,7 @@ describe('useActionEvents task_failed_resumable → has_unfinished_task', () => 
       }
     })
 
-    const sessions = useSessionStore.getState().sessions!
-    expect(sessions[0]!.has_unfinished_task).toBe(true)
+    expect(useChatStore.getState().unfinishedTaskStatus[SESSION]).toBe('failed')
     // The resumable task makes the session busy again — archive/delete must
     // still ask for confirmation.
     expect(isSessionBusy(SESSION)).toBe(true)

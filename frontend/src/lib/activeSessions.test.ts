@@ -8,6 +8,8 @@ import {
   aggregateBadgeFlags,
   deriveBadgeFlags,
   deriveLiveSessionFlags,
+  deriveSessionStatus,
+  effectiveUnfinishedStatus,
   hasPendingActions,
   isLiveSession,
   liveSessionsSignature,
@@ -432,5 +434,124 @@ describe('sortedLiveRows', () => {
     })
     expect(rows.map((r) => r.session.id)).toEqual(['s1'])
     expect(rows[0]!.status).toBe('paused')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The SINGLE mechanism: deriveSessionStatus + the live unfinished-task overlay.
+// Every status surface (sidebar list, radar badge, radar dropdown) funnels here,
+// so these tests pin the shared contract.
+// ---------------------------------------------------------------------------
+
+function liveChat(overrides: Partial<LiveChatSnapshot> = {}): LiveChatSnapshot {
+  return { taskActive: {}, paused: {}, messageOrder: {}, messages: {}, ...overrides }
+}
+
+describe('deriveSessionStatus — the one shared derivation', () => {
+  const base = { archived: false, hasPendingHITL: false, taskActive: false, paused: false, unfinishedStatus: '' }
+
+  it('renders idle when nothing is live and nothing is unfinished', () => {
+    expect(deriveSessionStatus(base)).toBe('idle')
+  })
+
+  it('renders pending for an unresolved HITL prompt (outranks failed/active/paused)', () => {
+    expect(deriveSessionStatus({ ...base, hasPendingHITL: true })).toBe('pending')
+    expect(deriveSessionStatus({ ...base, hasPendingHITL: true, taskActive: true })).toBe('pending')
+    expect(deriveSessionStatus({ ...base, hasPendingHITL: true, unfinishedStatus: 'failed' })).toBe('pending')
+  })
+
+  it('renders failed for a failed unfinished task, beating a live running flag', () => {
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'failed' })).toBe('failed')
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'failed', taskActive: true })).toBe('failed')
+  })
+
+  it('renders active for a live run or an in_progress status (beating paused)', () => {
+    expect(deriveSessionStatus({ ...base, taskActive: true })).toBe('active')
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'in_progress' })).toBe('active')
+    expect(deriveSessionStatus({ ...base, taskActive: true, paused: true })).toBe('active')
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'in_progress', paused: true })).toBe('active')
+  })
+
+  it('renders paused for a live pause or a paused status', () => {
+    expect(deriveSessionStatus({ ...base, paused: true })).toBe('paused')
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'paused' })).toBe('paused')
+  })
+
+  it('renders an unknown non-empty status as active, never idle', () => {
+    expect(deriveSessionStatus({ ...base, unfinishedStatus: 'queued' })).toBe('active')
+  })
+
+  it('archived always renders idle', () => {
+    expect(deriveSessionStatus({ ...base, archived: true, taskActive: true })).toBe('idle')
+    expect(deriveSessionStatus({ ...base, archived: true, unfinishedStatus: 'failed' })).toBe('idle')
+    expect(deriveSessionStatus({ ...base, archived: true, hasPendingHITL: true })).toBe('idle')
+  })
+})
+
+describe('effectiveUnfinishedStatus — live overlay outranks the DB snapshot', () => {
+  it('falls back to the DB status when chatStore has no live knowledge', () => {
+    expect(effectiveUnfinishedStatus(makeSession({ unfinished_task_status: 'failed' }), NO_LIVE_FLAGS)).toBe('failed')
+  })
+
+  it('prefers the live overlay when present', () => {
+    const session = makeSession({ unfinished_task_status: 'failed' })
+    expect(effectiveUnfinishedStatus(session, flags({ unfinishedTaskStatus: '' }))).toBe('')
+  })
+
+  it('lets a live clear override a stale DB status (the whole point)', () => {
+    // DB loaded mid-task says in_progress; the live overlay knows it settled.
+    const session = makeSession({ unfinished_task_status: 'in_progress' })
+    expect(effectiveUnfinishedStatus(session, flags({ unfinishedTaskStatus: '' }))).toBe('')
+  })
+})
+
+describe('deriveLiveSessionFlags — folds the live unfinished-task overlay', () => {
+  it('creates an entry for a session known only by its live overlay', () => {
+    const out = deriveLiveSessionFlags(liveChat({ unfinishedTaskStatus: { s1: 'failed' } }))
+    expect(out.s1).toEqual({ taskActive: false, paused: false, hasPendingHITL: false, unfinishedTaskStatus: 'failed' })
+  })
+
+  it('keeps the empty-string "settled" value (it must override a stale DB status)', () => {
+    const out = deriveLiveSessionFlags(liveChat({ unfinishedTaskStatus: { s1: '' } }))
+    expect(out.s1!.unfinishedTaskStatus).toBe('')
+  })
+
+  it('merges the overlay into an entry that also has live flags', () => {
+    const out = deriveLiveSessionFlags(liveChat({ taskActive: { s1: true }, unfinishedTaskStatus: { s1: '' } }))
+    expect(out.s1).toEqual({ taskActive: true, paused: false, hasPendingHITL: false, unfinishedTaskStatus: '' })
+  })
+})
+
+describe('live overlay end to end (radar surfaces)', () => {
+  it('sessionDisplayStatus repaints from a live overlay without a DB refresh', () => {
+    // DB snapshot is stale (loaded mid-run); the live overlay already knows the
+    // task failed → the row turns red immediately.
+    const session = makeSession({ unfinished_task_status: 'in_progress' })
+    expect(sessionDisplayStatus(session, flags({ unfinishedTaskStatus: 'failed' }))).toBe('failed')
+    // And a live clear overrides a stale in_progress.
+    expect(sessionDisplayStatus(session, flags({ unfinishedTaskStatus: '' }))).toBe('idle')
+  })
+
+  it('aggregateBadgeFlags turns the radar red live when the overlay reports a failure', () => {
+    const stale = [makeSession({ id: 's1', unfinished_task_status: '' })]
+    const live = deriveLiveSessionFlags(liveChat({ unfinishedTaskStatus: { s1: 'failed' } }))
+    expect(aggregateBadgeFlags(stale, live)).toEqual({
+      error: true, attention: false, active: false, paused: false, anyLive: true,
+    })
+  })
+
+  it('sortedLiveRows surfaces a session that only the live overlay marks live', () => {
+    const rows = sortedLiveRows([makeSession({ id: 's1', unfinished_task_status: '' })], {
+      s1: flags({ unfinishedTaskStatus: 'failed' }),
+    })
+    expect(rows.map((r) => r.session.id)).toEqual(['s1'])
+    expect(rows[0]!.status).toBe('failed')
+  })
+
+  it('sortedLiveRows drops a session whose stale DB status the live overlay cleared', () => {
+    const rows = sortedLiveRows([makeSession({ id: 's1', unfinished_task_status: 'in_progress' })], {
+      s1: flags({ unfinishedTaskStatus: '' }),
+    })
+    expect(rows).toEqual([])
   })
 })

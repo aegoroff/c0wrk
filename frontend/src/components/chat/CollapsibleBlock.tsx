@@ -13,7 +13,6 @@ interface CollapsibleBlockProps {
   label: React.ReactNode
   statusIcon?: React.ReactNode
   badge?: React.ReactNode
-  defaultOpen?: boolean
   open?: boolean
   onOpenChange?: (open: boolean) => void
   className?: string
@@ -38,7 +37,6 @@ export function CollapsibleBlock({
   label,
   statusIcon,
   badge,
-  defaultOpen,
   open: controlledOpen,
   onOpenChange,
   className,
@@ -46,7 +44,7 @@ export function CollapsibleBlock({
   headerExtra,
   revealId,
 }: CollapsibleBlockProps) {
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen ?? false)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
 
   const isControlled = controlledOpen !== undefined
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen

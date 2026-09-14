@@ -162,7 +162,6 @@ export const ToolCard = React.memo(function ToolCard({ item }: { item: ToolItem 
       badge={<>{cachedBadge}{batchedBadge}{mcpBadge}</>}
       headerExtra={cacheRangeNode}
       revealId={bookmarkKey(item)}
-      defaultOpen={item.status === 'error'}
     >
       <Body
         parsedArgs={item.parsedArgs}

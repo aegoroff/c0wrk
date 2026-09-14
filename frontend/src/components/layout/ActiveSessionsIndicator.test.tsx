@@ -105,7 +105,7 @@ function dots(within: HTMLElement): HTMLElement[] {
 
 beforeEach(() => {
   useActiveSessionsStore.setState({ sessions: null, pendingOverride: {}, refreshing: false })
-  useChatStore.setState({ taskActive: {}, paused: {}, messages: {}, messageOrder: {} })
+  useChatStore.setState({ taskActive: {}, unfinishedTaskStatus: {}, paused: {}, messages: {}, messageOrder: {} })
   useProjectStore.setState({ projects: null, activeProjectId: null, lastRealProjectId: null })
   useSessionStore.setState({ sessions: null, activeSessionId: null, selectSession: selectSessionMock })
   // refreshNow() fires the moment the dropdown opens — pin that RPC to a
@@ -232,6 +232,31 @@ describe('ActiveSessionsIndicator', () => {
     const classes = dots(radarButton(container)).map((d) => d.className)
     expect(classes).toHaveLength(1)
     expect(classes[0]).toContain('bg-destructive')
+  })
+
+  it('repaints red LIVE from the chatStore overlay, before any list refresh', () => {
+    // The snapshot was loaded BEFORE the task failed (status ''), but the live
+    // lifecycle event already recorded the failure in chatStore — the badge must
+    // turn red immediately, not wait for the next list reload.
+    useActiveSessionsStore.setState({ sessions: [makeSession({ unfinished_task_status: '' })] })
+    useChatStore.setState({ unfinishedTaskStatus: { s1: 'failed' } })
+    const container = render(<ActiveSessionsIndicator />)
+    const button = radarButton(container)
+    expect(button.disabled).toBe(false)
+    const classes = dots(button).map((d) => d.className)
+    expect(classes).toHaveLength(1)
+    expect(classes[0]).toContain('bg-destructive')
+  })
+
+  it('drops a session whose stale DB status the live overlay cleared', () => {
+    // Snapshot says in_progress (loaded mid-run); the live overlay knows the task
+    // settled → the radar hides it without a refresh.
+    useActiveSessionsStore.setState({ sessions: [makeSession({ unfinished_task_status: 'in_progress' })] })
+    useChatStore.setState({ unfinishedTaskStatus: { s1: '' } })
+    const container = render(<ActiveSessionsIndicator />)
+    const button = radarButton(container)
+    expect(button.disabled).toBe(true)
+    expect(dots(button)).toHaveLength(0)
   })
 
   it('shows a yellow dot for a session blocked on HITL via the pending override', () => {

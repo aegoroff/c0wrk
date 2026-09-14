@@ -144,7 +144,7 @@ describe('FileTreePanel — force full project reindex action', () => {
     expect(button!.disabled).toBe(true)
   })
 
-  it('is unavailable in No Project (CHAT) mode', async () => {
+  it('is hidden (not merely disabled) in No Project (CHAT) mode', async () => {
     useProjectStore.setState({
       projects: [makeProject({ id: 'np', is_no_project: true, workspace_path: '/np' })],
       activeProjectId: 'np',
@@ -152,9 +152,10 @@ describe('FileTreePanel — force full project reindex action', () => {
     await renderPanel()
     await act(async () => {})
 
-    const button = findButton(container, 'Reindex unavailable')
-    expect(button).not.toBeNull()
-    expect(button!.disabled).toBe(true)
+    // The reindex affordance is not rendered at all in CHAT mode — the vector
+    // index is disabled there, so a disabled button would be misleading.
+    expect(findButton(container, 'Reindex unavailable')).toBeNull()
+    expect(findButton(container, 'Force full project reindex')).toBeNull()
     expect(reindexMock).not.toHaveBeenCalled()
   })
 
@@ -242,7 +243,7 @@ describe('FileTreePanel — force full project reindex action', () => {
     expect(readyButton!.disabled).toBe(false)
   })
 
-  it('releases the optimistic latch when the project becomes unavailable', async () => {
+  it('releases the optimistic latch and hides the action when the project becomes unavailable', async () => {
     await renderPanel()
     await act(async () => {})
 
@@ -253,15 +254,16 @@ describe('FileTreePanel — force full project reindex action', () => {
     expect(reindexMock).toHaveBeenCalledTimes(1)
     expect(findButton(container, 'Reindexing...')!.disabled).toBe(true)
 
-    // Switching to No Project invalidates the pending request.
+    // Switching to No Project invalidates the pending request and hides the
+    // action entirely (CHAT mode has no vector index to reindex).
     await act(async () => {
       useProjectStore.setState({
         projects: [makeProject({ id: 'np', is_no_project: true, workspace_path: '/np' })],
         activeProjectId: 'np',
       })
     })
-    const unavailable = findButton(container, 'Reindex unavailable')
-    expect(unavailable).not.toBeNull()
-    expect(unavailable!.disabled).toBe(true)
+    expect(findButton(container, 'Reindex unavailable')).toBeNull()
+    expect(findButton(container, 'Reindexing...')).toBeNull()
+    expect(findButton(container, 'Force full project reindex')).toBeNull()
   })
 })

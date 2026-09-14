@@ -148,4 +148,25 @@ describe('ToolCard', () => {
     expect(container.textContent).toContain('plain.ts')
     expect(badges()).toHaveLength(0)
   })
+
+  it('renders an error card collapsed by default (no auto-open on remount)', () => {
+    render(makeItem({
+      toolName: 'read_file',
+      args: '{"path":"/repo/error.ts"}',
+      parsedArgs: { path: '/repo/error.ts' },
+      result: 'ERROR_BODY_MARKER',
+      status: 'error',
+    }))
+    // A failed card must not force its body open — on session switch / reload
+    // the card remounts and defaultOpen would otherwise expand every error.
+    // Radix keeps the content mounted and toggles data-state, so assert on it.
+    const state = () =>
+      container.querySelector('[data-slot="collapsible-content"]')?.getAttribute('data-state')
+    expect(state()).toBe('closed')
+    const trigger = container.querySelector('[data-slot="collapsible-trigger"]') as HTMLElement
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(state()).toBe('open')
+  })
 })

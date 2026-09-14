@@ -33,10 +33,11 @@ export interface SessionItemSummary {
   archived: boolean
   pinned: boolean
   last_active_at: string
-  has_unfinished_task: boolean
-  /** Persisted task status (SessionInfo.unfinished_task_status). Drives the red
-   *  failure dot: 'failed' → a resumable failed task. Optional so callers that
-   *  only need the selection/busy fields may omit it. */
+  /** Persisted task status (SessionInfo.unfinished_task_status) — the DB
+   *  FALLBACK for the live unfinished-task overlay (chatStore.unfinishedTaskStatus,
+   *  which the indicator prefers). Drives the red failure dot: 'failed' → a
+   *  resumable failed task. Optional so callers that only need the selection
+   *  fields may omit it. */
   unfinished_task_status?: string
 }
 
@@ -61,8 +62,11 @@ function SessionRowContent({ session, isActive, status, onPin, onFork, onRename,
   // Fork is the only action that requires a settled session: it deep-copies the
   // execution state, which is impossible while a task is running or unfinished.
   // Archive and delete are always allowed — the backend cancels/completes any
-  // in-flight or unfinished task as needed before archiving/deleting.
-  const busy = status === 'active' || status === 'paused' || session.has_unfinished_task
+  // in-flight or unfinished task as needed before archiving/deleting. Busy is
+  // read from the row's derived status alone (the SAME single mechanism every
+  // dot uses — active/paused/failed are the unfinished states), so the guard
+  // tracks live transitions instead of a stale snapshot boolean.
+  const busy = status === 'active' || status === 'paused' || status === 'failed'
   const forkReason = status === 'active' ? 'Cannot fork while a task is running' : 'Cannot fork a session with an unfinished task'
 
   return (

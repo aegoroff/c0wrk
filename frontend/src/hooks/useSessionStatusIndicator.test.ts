@@ -227,7 +227,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
 
 describe('isSessionBusy', () => {
   beforeEach(() => {
-    useChatStore.setState({ taskActive: {}, paused: {}, messages: {}, messageOrder: {} })
+    useChatStore.setState({ taskActive: {}, paused: {}, messages: {}, messageOrder: {}, unfinishedTaskStatus: {} })
     useSessionStore.setState({ sessions: null })
   })
 
@@ -248,9 +248,25 @@ describe('isSessionBusy', () => {
     expect(isSessionBusy('sess-1')).toBe(true)
   })
 
-  it('returns true for a session with an unfinished task', () => {
-    useSessionStore.setState({ sessions: [makeSessionInfo({ has_unfinished_task: true })] })
+  it('returns true for a session with a failed (unfinished) task in the DB snapshot', () => {
+    useSessionStore.setState({ sessions: [makeSessionInfo({ has_unfinished_task: true, unfinished_task_status: 'failed' })] })
     expect(isSessionBusy('sess-1')).toBe(true)
+  })
+
+  it('returns true for a live unfinished-task overlay even when the DB snapshot is stale/empty', () => {
+    // The single live overlay (chatStore.unfinishedTaskStatus) is authoritative:
+    // a resumable failure leaves no taskActive/paused flag, so it is the only
+    // signal that keeps the session protected without a list refresh.
+    useSessionStore.setState({ sessions: [makeSessionInfo()] })
+    useChatStore.setState({ unfinishedTaskStatus: { 'sess-1': 'failed' } })
+    expect(isSessionBusy('sess-1')).toBe(true)
+  })
+
+  it('returns false when the live overlay CLEARS a stale DB unfinished status', () => {
+    // A live '' (task settled) must outrank a DB snapshot loaded mid-task.
+    useSessionStore.setState({ sessions: [makeSessionInfo({ has_unfinished_task: true, unfinished_task_status: 'in_progress' })] })
+    useChatStore.setState({ unfinishedTaskStatus: { 'sess-1': '' } })
+    expect(isSessionBusy('sess-1')).toBe(false)
   })
 
   it('returns false when a running task is blocked on an unresolved HITL prompt (pending)', () => {

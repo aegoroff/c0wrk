@@ -16,6 +16,34 @@ function sortByActivity(sessions: SessionInfo[]): SessionInfo[] {
   })
 }
 
+/**
+ * SessionInfo fields that must NOT, by themselves, force a `setSessions`
+ * update. `active` is the live in-memory task flag the backend overlays on the
+ * list (Manager.ListSessionsByProject / ListSessionsAll); every consumer reads
+ * live task state from `chatStore` instead (see `useSessionStatusIndicator` /
+ * `isSessionBusy`), so an active-only change is not worth a store write and the
+ * re-render it would trigger.
+ */
+const IGNORED_SESSION_FIELDS: ReadonlySet<string> = new Set(['active'])
+
+/**
+ * Shallow content equality for two sessions, ignoring `IGNORED_SESSION_FIELDS`.
+ * Every SessionInfo field is a primitive, so a shallow compare is exact. Used
+ * by `setSessions` to tell a genuinely refreshed list from a duplicate
+ * delivery of the same list.
+ */
+function sameSessionContent(a: SessionInfo, b: SessionInfo): boolean {
+  if (a === b) return true
+  const aRecord = a as unknown as Record<string, unknown>
+  const bRecord = b as unknown as Record<string, unknown>
+  const keys = new Set([...Object.keys(aRecord), ...Object.keys(bRecord)])
+  for (const key of keys) {
+    if (IGNORED_SESSION_FIELDS.has(key)) continue
+    if (aRecord[key] !== bRecord[key]) return false
+  }
+  return true
+}
+
 // --- State types ---
 
 export interface SessionState {
@@ -30,7 +58,6 @@ interface SessionActions {
   addSession: (session: SessionInfo) => void
   removeSession: (id: string) => void
   updateSession: (id: string, updates: Partial<SessionInfo>) => void
-  setUnfinishedTask: (id: string, value: boolean) => void
   touchSession: (id: string) => void
   resetForProjectSwitch: () => void
 }
@@ -43,14 +70,23 @@ export const useSessionStore = create<SessionState & SessionActions>((set, get) 
 
   setSessions: (sessions) => set((s) => {
     const sorted = sortByActivity(sessions)
-    // Skip if session IDs haven't changed (avoids duplicate event/RPC updates).
-    // The live "task running" state is owned by chatStore.taskActive and read
-    // via useSessionStatusIndicator — not by SessionInfo.active — so active
-    // toggles no longer need to force a store update here.
-    if (s.sessions && s.sessions.length === sorted.length &&
-        s.sessions.every((sess, i) => sess.id === sorted[i]?.id)) {
-      return s
-    }
+    // Skip only when the incoming list is genuinely unchanged (avoids
+    // duplicate event/RPC deliveries and the needless re-render each would
+    // trigger). The check must compare CONTENT, not just the id list: a reload
+    // that returns the same sessions can still carry refreshed fields —
+    // `unfinished_task_status` / `has_unfinished_task` in particular — and the
+    // former id-only guard silently dropped them, leaving the sidebar's status
+    // dot stale until an app restart. `active` is excluded (see
+    // IGNORED_SESSION_FIELDS): no consumer reads it, so it must not force an
+    // update on its own.
+    const current = s.sessions
+    const unchanged = current !== null &&
+      current.length === sorted.length &&
+      current.every((sess, i) => {
+        const next = sorted[i]
+        return next !== undefined && sameSessionContent(sess, next)
+      })
+    if (unchanged) return s
     return { sessions: sorted }
   }),
 
@@ -100,24 +136,12 @@ export const useSessionStore = create<SessionState & SessionActions>((set, get) 
     ),
   })),
 
-  // Refresh a session's `has_unfinished_task` outside the list-load snapshot.
-  // The list value goes stale the moment a task finishes or a session switch
-  // fetches a fresh runtime status — the runtime reconcile (session switch)
-  // and the terminal task events push the authoritative value through here so
-  // isSessionBusy() stays truthful without an app restart. No-ops when the
-  // session is unknown or the value already matches, keeping the `sessions`
-  // array reference stable (stable-selector principle: a new array on every
-  // call would needlessly re-render every subscriber of `sessions`).
-  setUnfinishedTask: (id, value) => set((s) => {
-    if (!s.sessions) return s
-    const idx = s.sessions.findIndex(sess => sess.id === id)
-    if (idx === -1 || s.sessions[idx]!.has_unfinished_task === value) return s
-    const sessions = [...s.sessions]
-    sessions[idx] = { ...sessions[idx]!, has_unfinished_task: value }
-    // The flag change cannot affect activity ordering — return the copy as-is.
-    return { sessions }
-  }),
-
+  // NOTE: there is deliberately no `setUnfinishedTask` mirror here. The live
+  // unfinished-task state lives in chatStore.unfinishedTaskStatus — the SINGLE
+  // live overlay every session-status surface reads (sidebar list, radar badge,
+  // radar dropdown) — and the `sessions` snapshot's `unfinished_task_status` /
+  // `has_unfinished_task` fields are DB-side fallbacks only. A per-store mirror
+  // here was the second live-update path that drifted from the dots.
   touchSession: (id) => set((s) => {
     const now = new Date().toISOString()
     return {

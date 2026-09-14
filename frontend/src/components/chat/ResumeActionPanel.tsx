@@ -2,6 +2,7 @@ import { AlertTriangle, RefreshCw, X, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useChatStore } from '@/stores/chatStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
+import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { resumeTask, cancelUnfinishedTask } from '@/api/chat'
 import { generateMessageId } from '@/lib/ids'
 import type { DisplayItem } from '@/types/messages'
@@ -72,7 +73,21 @@ export function ResumeActionPanel({ item }: { item: ResumeItem }) {
 
   const handleCancel = () => {
     updateMessage(sessionId, item.message.id, { metadata: resumeResolved('cancelled') })
-    cancelUnfinishedTask(sessionId).catch(() => { /* best-effort: UI is already dismissed */ })
+    // The backend marks the unfinished task cancelled and emits NO terminal
+    // event on this hard-discard path — so clear the SINGLE live unfinished-task
+    // overlay (which every status surface reads) to '' immediately: the radar
+    // row and every sidebar/radar dot turn idle at once, without waiting for the
+    // 30s safety poll. clearUnfinishedTask additionally freshens the DB snapshot
+    // in place and refresh() re-reads the authoritative value, in case the local
+    // clear raced an older snapshot. Best-effort: the UI is already dismissed, so
+    // a failed RPC stays silent.
+    cancelUnfinishedTask(sessionId)
+      .then(() => {
+        useChatStore.getState().setUnfinishedTaskStatus(sessionId, '')
+        useActiveSessionsStore.getState().clearUnfinishedTask(sessionId)
+        useActiveSessionsStore.getState().refresh()
+      })
+      .catch(() => { /* best-effort: UI is already dismissed */ })
   }
 
   return (

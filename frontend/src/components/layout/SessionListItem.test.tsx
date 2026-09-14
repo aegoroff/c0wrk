@@ -20,7 +20,6 @@ function makeSession(overrides: Partial<SessionItemSummary> = {}): SessionItemSu
     archived: false,
     pinned: false,
     last_active_at: new Date(Date.now() - 60_000).toISOString(),
-    has_unfinished_task: false,
     ...overrides,
   }
 }
@@ -74,9 +73,10 @@ describe('SessionItem busy-state guards', () => {
     expect(del?.disabled).toBe(false)
   })
 
-  it('disables only fork for a session with an unfinished task; archive/delete stay enabled', () => {
+  it('disables only fork for a session whose task failed (unfinished); archive/delete stay enabled', () => {
+    statusMock.value = 'failed'
     const { container } = render(
-      <SessionItem variant="flat" session={makeSession({ has_unfinished_task: true })} isActive={false} onSelect={vi.fn()} onRename={vi.fn()} onArchive={vi.fn()} onPin={vi.fn()} onFork={vi.fn()} onDelete={vi.fn()} />,
+      <SessionItem variant="flat" session={makeSession()} isActive={false} onSelect={vi.fn()} onRename={vi.fn()} onArchive={vi.fn()} onPin={vi.fn()} onFork={vi.fn()} onDelete={vi.fn()} />,
     )
     const btns = actionButtons(container)
     const [, fork, , archive, del] = btns

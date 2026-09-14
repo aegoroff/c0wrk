@@ -63,6 +63,17 @@ interface ActiveSessionsState {
   /** Convenience: apply a raw GetPendingActions response (or null on RPC
    *  failure) as the pending override for one session. */
   applyPendingActions: (sessionId: string, response: PendingActionsResponse | null) => void
+  /** Drop one session's DB-derived unfinished-task status from the snapshot in
+   *  place, so the live-sessions radar stops surfacing it without waiting for
+   *  the debounced refresh. Used after a user action settles the session's
+   *  unfinished task on the backend (the resume prompt's Cancel) — that path
+   *  emits no terminal event AND leaves no live taskActive/paused flag, so the
+   *  store's live-set refresh trigger never fires and the session would keep
+   *  showing (red "failed") until the 30s safety poll. No-op (same `sessions`
+   *  reference) when the snapshot is unloaded, the session is unknown, or it
+   *  carries no unfinished task. The next snapshot refresh re-reads the
+   *  authoritative value. */
+  clearUnfinishedTask: (sessionId: string) => void
 }
 
 // Module-scoped debounce/in-flight bookkeeping (not reactive state).
@@ -122,6 +133,19 @@ export const useActiveSessionsStore = create<ActiveSessionsState>((set, get) => 
   applyPendingActions: (sessionId, response) => {
     get().setPendingOverride(sessionId, hasPendingActions(response))
   },
+
+  clearUnfinishedTask: (sessionId) => {
+    set((s) => {
+      if (!s.sessions) return s
+      const idx = s.sessions.findIndex((sess) => sess.id === sessionId)
+      if (idx === -1) return s
+      const current = s.sessions[idx]!
+      if (current.unfinished_task_status === '' && !current.has_unfinished_task) return s
+      const sessions = [...s.sessions]
+      sessions[idx] = { ...current, has_unfinished_task: false, unfinished_task_status: '' }
+      return { sessions }
+    })
+  },
 }))
 
 /** Cancel a scheduled (debounced) refresh. Public for tests and for teardown
@@ -158,6 +182,7 @@ export async function sweepPendingActions(): Promise<void> {
       paused: chat.paused,
       messageOrder: chat.messageOrder,
       messages: chat.messages,
+      unfinishedTaskStatus: chat.unfinishedTaskStatus,
     }),
     store.pendingOverride,
   )

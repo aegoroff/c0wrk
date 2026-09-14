@@ -29,10 +29,11 @@ export function PlanStepBlock({ item }: PlanStepBlockProps) {
     return fills ? fills[stepId] : undefined
   })
 
-  // Derived open state — auto-opens when running, auto-closes otherwise
-  const isAutoOpen = status === 'running'
+  // Collapsed by default; the user can expand it. Reset the override whenever
+  // the status changes so a settled/failed step re-collapses to the default
+  // closed state instead of staying open.
   const [userOverride, setUserOverride] = useState<boolean | null>(null)
-  const isOpen = userOverride ?? isAutoOpen
+  const isOpen = userOverride ?? false
 
   // Reset user override when status changes
   useEffect(() => { setUserOverride(null) }, [status])
