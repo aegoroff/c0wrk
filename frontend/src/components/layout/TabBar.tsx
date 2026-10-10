@@ -5,8 +5,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useTabStore, useTabs, useActiveTabId, type Tab } from '@/stores/tabStore'
-import { selectTitleScopeFor } from '@/hooks/useWindowTitle'
-import { selectSessionNameFor } from '@/hooks/useWindowTitle'
+import { selectSessionNameFor, selectTitleScopeFor } from '@/hooks/useWindowTitle'
 import { useSessionStatusIndicator } from '@/hooks/useSessionStatusIndicator'
 import type { SessionDisplayStatus } from '@/lib/activeSessions'
 import { buildTabLabel } from '@/lib/tabLabel'
@@ -94,6 +93,45 @@ export function TabBar({ controller }: TabBarProps) {
     controller.writeBack()
   }, [controller])
 
+  // Keyboard interaction on the tab strip (WAI-ARIA APG Tabs, manual
+  // activation): ←/→ move FOCUS to the neighbor row (wrapping both ends),
+  // Home/End jump to the first/last, Enter/Space activate the focused row —
+  // mirroring the system cycling shortcuts' wrap-around. Focus-only arrows
+  // keep switching an explicit commitment (Enter/Space/click); the row is a
+  // div, so button semantics don't apply natively. Row keys work only when
+  // the row ITSELF is focused — the nested close button is a real button
+  // and keeps its native behavior.
+  const handleTablistKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const row = (e.target as HTMLElement).closest<HTMLElement>('[role="tab"]')
+      if (row === null || e.target !== row) return
+      switch (e.key) {
+        case 'Enter':
+        case ' ':
+          e.preventDefault()
+          void controller.activate(row.dataset.tabId ?? '')
+          return
+        case 'ArrowRight':
+        case 'ArrowLeft':
+        case 'Home':
+        case 'End':
+          break
+        default:
+          return
+      }
+      e.preventDefault()
+      const rows = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]'))
+      const nextIndex =
+        e.key === 'Home'
+          ? 0
+          : e.key === 'End'
+            ? rows.length - 1
+            : (rows.indexOf(row) + (e.key === 'ArrowRight' ? 1 : -1) + rows.length) % rows.length
+      rows[nextIndex]?.focus()
+    },
+    [controller],
+  )
+
   return (
     // Zoom-safe by construction: fixed token heights, no viewport units — the
     // bar is a plain flex row shrinking to zero under the h-full app shell.
@@ -102,6 +140,7 @@ export function TabBar({ controller }: TabBarProps) {
       <div
         role="tablist"
         aria-label="Workspace tabs"
+        onKeyDown={handleTablistKeyDown}
         className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
       >
         {tabs.map((tab) => (
@@ -167,6 +206,7 @@ function TabRow({ tab, active, controller, onClose }: TabRowProps) {
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
+      data-tab-id={tab.id}
       title={label}
       onClick={() => void controller.activate(tab.id)}
       onMouseDown={(e) => {

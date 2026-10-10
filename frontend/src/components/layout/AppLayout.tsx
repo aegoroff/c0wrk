@@ -3,6 +3,7 @@ import { useUIStore, SIDEBAR_MIN, SIDEBAR_MAX } from '@/stores/uiStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useResize } from '@/hooks/useResize'
 import { useTabController } from '@/hooks/useTabController'
+import { useTabHotkeys } from '@/hooks/useTabHotkeys'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Sidebar } from './Sidebar'
 import { TabBar } from './TabBar'
@@ -51,6 +52,13 @@ export function AppLayout() {
   // the layer runs unconditionally (with the flag off the single tab is the
   // live workspace mirror; enabling the flag merely reveals the bar above it).
   const tabController = useTabController()
+
+  // System-standard tab-cycling shortcuts (Cmd+Shift+]/[ on macOS,
+  // Ctrl+Tab / Ctrl+PageDown-PgUp on Windows/Linux). Mounted unconditionally
+  // next to the single controller mount — the hook reads the flag and the
+  // tab layer at event time, so a disabled or single-tab layer leaves the
+  // keypress untouched. Every activation rides the same engine chain.
+  useTabHotkeys(tabController)
 
   const sidebarResize = useResize({
     initialWidth: sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth,

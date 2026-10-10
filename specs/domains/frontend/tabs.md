@@ -10,6 +10,7 @@ The workspace tab layer is the outermost context layer of the app shell: each ta
 - `frontend/src/lib/tabEngine.ts` — the single activation engine: `activate` (never rejects), `writeBack` (live stores → active tab), `attachWriteBack` (write-back subscriptions). A plain lib module (no React); it never reads the flag.
 - `frontend/src/lib/tabSnapshot.ts` — the v1 snapshot slices: `captureTabUI` / `restoreTabUI` / `sanitizeTabUI` (fail-closed validation) and `isSameTabUI` (content equality behind reference-stable no-ops). Pure functions — no store access.
 - `frontend/src/hooks/useTabController.ts` — the React seam: one engine instance per mount, `attachWriteBack` mounted in an effect, exposes `{activate, writeBack}`.
+- `frontend/src/hooks/useTabHotkeys.ts` — the system-standard tab-cycling shortcuts (host-platform pairs), routed through the app's single TabController; the pure matchers (`tabSwitchDelta`, `selectNeighborTabId`) are exported for tests.
 - `frontend/src/components/layout/AppLayout.tsx` — THE single controller mount for the app plus the `{tabsEnabled && <TabBar/>}` render gate.
 - `frontend/src/components/layout/TabBar.tsx` — the presentational tab strip; every interaction routes through the `TabController` prop; labels and task-status dots derive LIVE from the project/session/chat stores by id, so renames and lifecycle events repaint without a stale copy on the tab.
 - `frontend/src/lib/tabLabel.ts` — `buildTabLabel`, the pure label algebra behind the strip: `Project: Session`, `Project`, `CHAT: Session`, `New Tab` (absent segments are dropped, never rendered as empty text).
@@ -85,6 +86,22 @@ The file viewer is deliberately NOT a slice: its open tabs and active file remai
 
 With the flag ON, a `notification_clicked` payload routes through the tab engine: prefer the exact `{projectId, sessionId}` tab, else any tab already showing the session (session ids are globally unique), and `activate` it; no match creates a tab for the clicked context carrying a capture of the CURRENT live slices (`captureLiveUI`) — the activation's restore step then re-applies what the workspace already shows, so the input panel is left untouched exactly like a «+»-created tab (`addTab` auto-activates, the handler steps back to the previous tab, then `activate` materializes the context). With the flag OFF, the pre-tab radar pattern runs (switch-when-needed → `selectSession`) and the tab layer is never read or written. See [system-notifications.md](system-notifications.md) § Click routing.
 
+### Keyboard cycling (the host platform's tab shortcuts)
+
+`AppLayout` mounts `useTabHotkeys` right next to THE single TabController mount: a window-level `keydown` listener whose every activation routes through that controller, so hotkey cycling travels the exact same single-engine path — and the same module-level serialization chain — as tab-bar clicks. The shortcuts are the HOST PLATFORM's system conventions, not one hardcoded web combo:
+
+| Host | Next tab | Previous tab |
+| ---- | -------- | ------------ |
+| macOS | `Cmd+Shift+]` | `Cmd+Shift+[` |
+| macOS (alias) | `Ctrl+Tab` | `Ctrl+Shift+Tab` |
+| Windows / Linux | `Ctrl+Tab` / `Ctrl+PageDown` | `Ctrl+Shift+Tab` / `Ctrl+PageUp` |
+
+The macOS pair is matched on the physical key (`code` `BracketRight`/`BracketLeft`), so any keyboard layout works, and `Cmd+]` / `Cmd+[` stay untouched (the web-history pair). Cycling wraps around over the CURRENT tab order, read via `getState()` at event time. With the flag off, or with fewer than two tabs, the keypress is left completely untouched — no activation and no `preventDefault` — so the pre-tab shell keeps its byte-identical keyboard behavior. A held shortcut firing repeated keydowns is well-defined: each keydown enqueues one wrap-around step on the shared chain.
+
+### Tab-strip keyboard interaction (APG tabs, manual activation)
+
+The rendered strip is itself a keyboard surface: the rows are `role="tab"` inside a `role="tablist"`, only the ACTIVE row is tabbable (roving `tabindex`, each row carries `data-tab-id`), and `←`/`→` move DOM FOCUS to the neighbor row with wrap-around over the current order; `Home`/`End` jump to the first/last row. Activation stays MANUAL — focus-only arrows never switch tabs; `Enter`/`Space` on the focused row routes through the same single-engine controller as clicks (the row is a `div`, so the keys are handled explicitly and preventDefaulted, which also stops Space's page scroll). Row keys apply only while the row ITSELF has focus: the nested close button is a real button and keeps its native semantics. The whole surface exists only with the flag on — off renders no bar at all.
+
 ### Edge handling
 
 | Situation | Behavior |
@@ -95,6 +112,7 @@ With the flag ON, a `notification_clicked` payload routes through the tab engine
 | `activate` on the already-active id | No-op (nothing captured, nothing restored) |
 | Tab closed while its activation sat in the queue | No-op |
 | No Project entry unavailable | The activation fails and rolls back (see Error Handling) |
+| Cycling shortcut with the flag off or a single tab | No-op; the keydown is left unprevented (the pre-tab keyboard behavior) |
 
 ## Error Handling
 
@@ -109,6 +127,8 @@ With the flag ON, a `notification_clicked` payload routes through the tab engine
 - `activeTabId` always references an element of `tabs`.
 - The ACTIVE tab always mirrors the live workspace context — project id, session id, and the three snapshot slices — kept converged by the write-back subscriptions under any `tabsEnabled` value.
 - Every tab activation travels the single engine path, and the engine stays flag-agnostic — it reads only the tab layer and the live stores.
+- Keyboard cycling acts only while the tab bar is enabled and at least two tabs exist, and it travels the single engine path; any gated-out or non-matching keypress stays unprevented.
+- Tab-strip keys (`←`/`→`/`Home`/`End`/`Enter`/`Space`) work only when a tab row itself is focused; arrows move focus without switching (manual activation), and the nested close button keeps native button semantics.
 - Tab actions that change nothing return the same state object (reference-stable no-ops).
 - Tab arrangements stay app-lifetime: `tabStore` keeps its state in memory only, and a restart always starts from a single default tab.
 - The `tabsEnabled` flag persists across restarts (`c0wrk-sidebar-collapsed`, uiStore persist version 7, default off).

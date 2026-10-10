@@ -275,3 +275,108 @@ describe('TabBar', () => {
     expect(rowByLabel('Demo').querySelector('.bg-destructive')).not.toBeNull()
   })
 })
+
+// --- keyboard interaction on the strip (APG tabs, manual activation) ---
+
+describe('TabBar keyboard', () => {
+  /** Dispatch a bubbling, cancelable keydown; false when preventDefaulted. */
+  function press(el: Element, key: string): boolean {
+    let delivered = true
+    act(() => {
+      delivered = el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    })
+    return delivered
+  }
+
+  function setup(controller = fakeController()) {
+    const t1 = createTab()
+    const t2 = createTab({ projectId: PROJ.id })
+    useTabStore.setState({ tabs: [t1, t2], activeTabId: t1.id })
+    renderBar(controller)
+    return { controller, t1, t2 }
+  }
+
+  it('carries data-tab-id so keyboard activation targets the right tab', () => {
+    const { t1, t2 } = setup()
+    expect(rowByLabel('New Tab').dataset.tabId).toBe(t1.id)
+    expect(rowByLabel('Demo').dataset.tabId).toBe(t2.id)
+  })
+
+  it('Enter and Space activate the focused row, default suppressed', () => {
+    const { controller, t2 } = setup()
+    const row = rowByLabel('Demo')
+    act(() => {
+      row.focus()
+    })
+    expect(document.activeElement).toBe(row)
+
+    expect(press(row, 'Enter')).toBe(false)
+    expect(press(row, ' ')).toBe(false)
+    expect(controller.activate).toHaveBeenNthCalledWith(1, t2.id)
+    expect(controller.activate).toHaveBeenNthCalledWith(2, t2.id)
+  })
+
+  it('arrows move focus between rows without switching tabs', () => {
+    const { controller, t1 } = setup()
+    const rows = tabRows()
+    act(() => {
+      rows[0].focus()
+    })
+
+    press(rows[0]!, 'ArrowRight')
+    expect(document.activeElement).toBe(rows[1])
+    press(rows[1]!, 'ArrowLeft')
+    expect(document.activeElement).toBe(rows[0])
+    // Manual activation: focus-only arrows never switch.
+    expect(controller.activate).not.toHaveBeenCalled()
+    expect(useTabStore.getState().activeTabId).toBe(t1.id)
+  })
+
+  it('arrow navigation wraps around both ends', () => {
+    setup()
+    const rows = tabRows()
+    act(() => {
+      rows[0].focus()
+    })
+    press(rows[0]!, 'ArrowLeft')
+    expect(document.activeElement).toBe(rows[1])
+    press(rows[1]!, 'ArrowRight')
+    expect(document.activeElement).toBe(rows[0])
+  })
+
+  it('Home/End jump to the first/last row', () => {
+    setup()
+    const rows = tabRows()
+    act(() => {
+      rows[0].focus()
+    })
+    press(rows[0]!, 'End')
+    expect(document.activeElement).toBe(rows[1])
+    press(rows[1]!, 'Home')
+    expect(document.activeElement).toBe(rows[0])
+  })
+
+  it('keys on the nested close button keep native semantics', () => {
+    const { controller } = setup()
+    const closeButton = buttonByLabel('Close Demo')
+    act(() => {
+      closeButton.focus()
+    })
+    // Not intercepted: no preventDefault, no tab switch, no focus move.
+    expect(press(closeButton, 'Enter')).toBe(true)
+    expect(press(closeButton, 'ArrowRight')).toBe(true)
+    expect(document.activeElement).toBe(closeButton)
+    expect(controller.activate).not.toHaveBeenCalled()
+  })
+
+  it('unrelated keys are ignored entirely', () => {
+    const { controller } = setup()
+    const row = rowByLabel('New Tab')
+    act(() => {
+      row.focus()
+    })
+    expect(press(row, 'a')).toBe(true)
+    expect(document.activeElement).toBe(row)
+    expect(controller.activate).not.toHaveBeenCalled()
+  })
+})
