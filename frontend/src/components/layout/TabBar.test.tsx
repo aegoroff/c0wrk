@@ -320,7 +320,7 @@ describe('TabBar keyboard', () => {
     const { controller, t1 } = setup()
     const rows = tabRows()
     act(() => {
-      rows[0].focus()
+      rows[0]!.focus()
     })
 
     press(rows[0]!, 'ArrowRight')
@@ -336,7 +336,7 @@ describe('TabBar keyboard', () => {
     setup()
     const rows = tabRows()
     act(() => {
-      rows[0].focus()
+      rows[0]!.focus()
     })
     press(rows[0]!, 'ArrowLeft')
     expect(document.activeElement).toBe(rows[1])
@@ -348,7 +348,7 @@ describe('TabBar keyboard', () => {
     setup()
     const rows = tabRows()
     act(() => {
-      rows[0].focus()
+      rows[0]!.focus()
     })
     press(rows[0]!, 'End')
     expect(document.activeElement).toBe(rows[1])

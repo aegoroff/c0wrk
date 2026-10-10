@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
@@ -16,10 +16,17 @@ vi.mock('@/hooks/useProjectSwitchState', () => ({
 
 import { PromoteSessionDialog } from './PromoteSessionDialog'
 
+// Every mounted root is tracked so the afterEach below can unmount it inside
+// act(); an unmount outside act (or a leaked root) makes Radix internals
+// (Presence/FocusScope/DismissableLayer) flush state updates outside act and
+// spam act(...) warnings attributed to whichever test runs next.
+const mountedRoots: Root[] = []
+
 function renderDialog(open: boolean, handlers: { onOpenChange: (o: boolean) => void }): { root: Root; container: HTMLElement } {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
+  mountedRoots.push(root)
   act(() => {
     root.render(
       <PromoteSessionDialog
@@ -48,11 +55,19 @@ beforeEach(() => {
   switchStateMock.mockResolvedValue(undefined)
 })
 
+afterEach(() => {
+  act(() => {
+    for (const r of mountedRoots) r.unmount()
+  })
+  mountedRoots.length = 0
+  document.body.innerHTML = ''
+})
+
 describe('PromoteSessionDialog', () => {
   it('pre-fills the session name and promotes with the trimmed name, then switches project', async () => {
     promoteMock.mockResolvedValue({ id: 'proj-9', name: 'My Chat', workspace_path: '/ws', is_external: false, is_no_project: false, research_pins: { research: [], hypotheses: {} }, created_at: '', last_active_at: '' })
     const onOpenChange = vi.fn()
-    const { root } = renderDialog(true, { onOpenChange })
+    renderDialog(true, { onOpenChange })
 
     const input = findInput()
     expect(input?.value).toBe('My Chat')
@@ -65,7 +80,6 @@ describe('PromoteSessionDialog', () => {
     expect(promoteMock).toHaveBeenCalledWith('s1', 'My Chat')
     expect(switchStateMock).toHaveBeenCalledWith('proj-9')
     expect(onOpenChange).toHaveBeenCalledWith(false)
-    root.unmount()
   })
 
   it('keeps the dialog open and shows the backend error when the promotion fails', async () => {
