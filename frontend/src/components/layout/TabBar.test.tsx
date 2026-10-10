@@ -274,6 +274,66 @@ describe('TabBar', () => {
     })
     expect(rowByLabel('Demo').querySelector('.bg-destructive')).not.toBeNull()
   })
+
+  // --- cross-project label fallback (inactive tabs keep their full title) ---
+
+  it('keeps the full title on an inactive tab of another project via the global snapshot', () => {
+    const PROJ2: ProjectInfo = { ...PROJ, id: 'proj-2', name: 'Other' }
+    const SESS2: SessionInfo = { ...SESS, id: 'sess-2', project_id: 'proj-2', name: 'Other task' }
+    const inactiveTab = createTab({ projectId: PROJ.id, sessionId: SESS.id })
+    const activeTab = createTab({ projectId: PROJ2.id, sessionId: SESS2.id })
+    // The switch to proj-2 replaced the per-project list: only the ACTIVE
+    // project's sessions are loaded (exactly what a real switch produces).
+    useProjectStore.setState({
+      projects: [NO_PROJECT, PROJ, PROJ2],
+      activeProjectId: PROJ2.id,
+      lastRealProjectId: PROJ2.id,
+    })
+    useSessionStore.setState({ sessions: [SESS2], activeSessionId: SESS2.id })
+    // The global snapshot (kept across switches) still knows both sessions.
+    useActiveSessionsStore.setState({ sessions: [SESS, SESS2], pendingOverride: {} })
+    useTabStore.setState({ tabs: [inactiveTab, activeTab], activeTabId: activeTab.id })
+    renderBar()
+
+    expect(rowByLabel('Other: Other task')).toBeDefined()
+    // Regression: without the snapshot fallback the inactive tab of the OTHER
+    // project lost its session segment and degraded to the bare 'Demo'.
+    expect(rowByLabel('Demo: Fix the bug')).toBeDefined()
+  })
+
+  it('keeps the CHAT tab session name while a real project is active', () => {
+    const CHAT_SESS: SessionInfo = {
+      ...SESS,
+      id: 'sess-chat',
+      project_id: NO_PROJECT.id,
+      name: 'Quick question',
+    }
+    const chatTab = createTab({ projectId: NO_PROJECT.id, sessionId: CHAT_SESS.id })
+    const projTab = createTab({ projectId: PROJ.id, sessionId: SESS.id })
+    useActiveSessionsStore.setState({ sessions: [CHAT_SESS, SESS], pendingOverride: {} })
+    useTabStore.setState({ tabs: [chatTab, projTab], activeTabId: projTab.id })
+    renderBar()
+
+    // sessionStore holds only the CODE project's list; the CHAT session
+    // resolves from the snapshot — the inactive CHAT tab is not demoted to
+    // the bare 'CHAT'.
+    expect(rowByLabel('CHAT: Quick question')).toBeDefined()
+    expect(rowByLabel('Demo: Fix the bug')).toBeDefined()
+  })
+
+  it('prefers the live per-project name over a stale snapshot copy', () => {
+    const tab = createTab({ projectId: PROJ.id, sessionId: SESS.id })
+    useActiveSessionsStore.setState({ sessions: [{ ...SESS, name: 'Stale copy' }], pendingOverride: {} })
+    useTabStore.setState({ tabs: [tab], activeTabId: tab.id })
+    renderBar()
+
+    // The live store hit wins over the snapshot.
+    expect(rowByLabel('Demo: Fix the bug')).toBeDefined()
+    act(() => {
+      useSessionStore.setState({ sessions: [{ ...SESS, name: 'Renamed' }] })
+    })
+    expect(rowByLabel('Demo: Renamed')).toBeDefined()
+  })
 })
 
 // --- keyboard interaction on the strip (APG tabs, manual activation) ---

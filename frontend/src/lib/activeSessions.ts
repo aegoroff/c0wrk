@@ -151,6 +151,30 @@ export function sessionDisplayStatus(session: SessionInfo, live: LiveSessionFlag
   })
 }
 
+/** Name of a session found in the GLOBAL cross-project snapshot, or null.
+ *  The exact `selectSessionNameFor` semantics (null id / null list / not
+ *  found / blank-after-trim → null), applied to the activeSessionsStore
+ *  snapshot instead of the per-project session list.
+ *
+ *  Why it exists: the per-project sessionStore holds ONLY the active
+ *  project's sessions, so a workspace tab of ANOTHER project cannot resolve
+ *  its remembered sessionId there — its label degraded to the bare project
+ *  scope the moment the tab went inactive, and only recovered on
+ *  re-activation. Inactive tabs fall back to this snapshot (kept across
+ *  switches, refreshed on them and by the ~30s poll), so a label survives
+ *  deactivation; the live per-project store still wins when it has the id,
+ *  so renames in the ACTIVE project repaint instantly. */
+export function sessionNameFromSnapshot(
+  sessions: readonly SessionInfo[] | null,
+  sessionId: string | null,
+): string | null {
+  if (sessionId === null || sessions === null) return null
+  const session = sessions.find((sess) => sess.id === sessionId)
+  if (!session) return null
+  const name = session.name.trim()
+  return name === '' ? null : name
+}
+
 /**
  * Fold per-session statuses into the aggregate badge flags: each flag is true
  * when at least one live session shows the corresponding status. Archived and

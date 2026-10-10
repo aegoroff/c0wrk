@@ -5,9 +5,10 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useTabStore, useTabs, useActiveTabId, type Tab } from '@/stores/tabStore'
+import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { selectSessionNameFor, selectTitleScopeFor } from '@/hooks/useWindowTitle'
 import { useSessionStatusIndicator } from '@/hooks/useSessionStatusIndicator'
-import type { SessionDisplayStatus } from '@/lib/activeSessions'
+import { sessionNameFromSnapshot, type SessionDisplayStatus } from '@/lib/activeSessions'
 import { buildTabLabel } from '@/lib/tabLabel'
 import type { TabController } from '@/hooks/useTabController'
 import { cn } from '@/lib/utils'
@@ -185,7 +186,18 @@ function TabRow({ tab, active, controller, onClose }: TabRowProps) {
   // Live title segments by the tab's ids — primitives, so unrelated store
   // updates (activity bumps, ui snapshots) never re-render the row.
   const scope = useProjectStore((s) => selectTitleScopeFor(s, tab.projectId))
-  const sessionName = useSessionStore((s) => selectSessionNameFor(s, tab.sessionId))
+  // The per-project store holds ONLY the active project's sessions, so an
+  // inactive tab's remembered sessionId is gone from it the moment another
+  // tab (different project) is activated — the label degraded to the bare
+  // project scope until re-activation. Fall back to the global cross-project
+  // snapshot (kept across switches, refreshed on them + ~30s poll); the live
+  // store still wins when it has the id, so renames in the ACTIVE project
+  // repaint instantly. Both selectors return primitives (React #185 safe).
+  const liveName = useSessionStore((s) => selectSessionNameFor(s, tab.sessionId))
+  const snapshotName = useActiveSessionsStore((s) =>
+    sessionNameFromSnapshot(s.sessions, tab.sessionId),
+  )
+  const sessionName = liveName ?? snapshotName
   // The SessionInfo backing the dot's DB fallback (may be absent for another
   // project's session — the live chatStore flags still apply).
   const session = useSessionStore((s) =>
