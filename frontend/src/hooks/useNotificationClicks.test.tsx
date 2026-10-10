@@ -6,7 +6,7 @@
 // project-switch hook are mocked; the api/notifications subscription is
 // captured so each test can push an event through the REAL subscription path.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
@@ -36,6 +36,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useTabStore, createTab } from '@/stores/tabStore'
 import { useUIStore } from '@/stores/uiStore'
+import { useInputModeStore } from '@/stores/inputModeStore'
 import type { SessionInfo } from '@/types/models'
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -127,6 +128,19 @@ beforeEach(() => {
   useTabStore.setState({ tabs: [freshTab], activeTabId: freshTab.id })
   useUIStore.setState({ tabsEnabled: false })
   mount()
+})
+
+// Every test mounts its own root: unmount them all and clear the body so no
+// stale Probe (or accumulated container) survives into a later test — the
+// same cleanup contract the sibling harnesses (useTabController, TabBar,
+// useWindowTitle) follow.
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    act(() => {
+      root.unmount()
+    })
+  }
+  document.body.innerHTML = ''
 })
 
 describe('useNotificationClicks', () => {
@@ -284,6 +298,40 @@ describe('useNotificationClicks', () => {
     const outgoing = state.tabs.find((t) => t.id === tabCur)
     expect(outgoing?.projectId).toBe('p-cur')
     expect(outgoing?.sessionId).toBe('s-cur')
+  })
+
+  it('flag on: a created tab carries the live input slice and the panel is left untouched', async () => {
+    useUIStore.setState({ tabsEnabled: true })
+    useActiveSessionsStore.setState({
+      sessions: [makeSession({ id: 's-2', project_id: 'p-2' })],
+    } as never)
+    useSessionStore.setState({ activeSessionId: 's-cur' })
+    seedTabs([{ projectId: 'p-cur', sessionId: 's-cur' }])
+    // A non-default live panel: the pre-fix default-snapshot path reset it
+    // to chat/200/200/false on exactly this click.
+    useInputModeStore.setState({ mode: 'terminal', height: 432, collapsedHeight: 96, isExpanded: true })
+    switchProjectWithStateMock.mockImplementation(async (pid: string) => {
+      useProjectStore.setState({ activeProjectId: pid })
+      useSessionStore.setState({ activeSessionId: 's-2' })
+    })
+
+    await click({ notification_id: 'n19', session_id: 's-2', project_id: 'p-2' })
+
+    // The live input panel survived the banner click untouched.
+    const input = useInputModeStore.getState()
+    expect(input.mode).toBe('terminal')
+    expect(input.height).toBe(432)
+    expect(input.collapsedHeight).toBe(96)
+    expect(input.isExpanded).toBe(true)
+    // The created tab remembers exactly the panel it materialized from.
+    const state = useTabStore.getState()
+    const active = state.tabs.find((t) => t.id === state.activeTabId)
+    expect(active?.ui.inputMode).toEqual({
+      mode: 'terminal',
+      height: 432,
+      collapsedHeight: 96,
+      isExpanded: true,
+    })
   })
 
   it('flag on: a same-project session tab routes through selectSession without a switch', async () => {

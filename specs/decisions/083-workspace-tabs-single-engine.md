@@ -1,4 +1,4 @@
-# ADR-082: Workspace Tabs — Single Engine, Flag-Only Visibility, Snapshot Slices
+# ADR-083: Workspace Tabs — Single Engine, Flag-Only Visibility, Snapshot Slices
 
 ## Status
 
@@ -15,7 +15,7 @@ The app gained optional workspace tabs: several simultaneously remembered worksp
 ## Decision
 
 1. **The tab layer always lives; disabled mode is the one-tab special case.** There is no "tabs off" state machine: the layer runs unconditionally, and `uiStore.tabsEnabled` gates only what the user sees and how banner clicks route — the tab bar's rendering (and, with it, the sidebar Settings gear, which the bar replaces when shown) and the notification-click branch. The activation engine never reads the flag; flipping it creates and destroys nothing. With the flag off the layer degenerates to exactly one tab that the write-back keeps as an invisible live mirror of the workspace, so flag-off output stays byte-identical to the pre-tab UI.
-2. **One engine over snapshot slices, not a parallel tree.** Exactly one engine instance with write-back subscriptions exists per app (the `AppLayout` controller mount). A tab stores only ids (`projectId`, `sessionId`) plus a validated snapshot of three slices — `workspaceTabByProject`, `researchSegmentByProject`, `inputMode` — captured from the live stores at switch time (`captureTabUI`) and reapplied on activation (`restoreTabUI`, per-project maps merged entry-by-entry). The global stores remain the single source of truth: the ACTIVE tab is, by construction, their mirror (`writeBack` + subscriptions keep it converged); non-active tabs hold only remembered snapshots. Activations serialize through the engine's internal chain and roll back the optimistic `activeTabId` flip on failure.
+2. **One engine over snapshot slices, not a parallel tree.** Exactly one engine instance with write-back subscriptions exists per app (the `AppLayout` controller mount). A tab stores only ids (`projectId`, `sessionId`) plus a validated snapshot of three slices — `workspaceTabByProject`, `researchSegmentByProject`, `inputMode` — captured from the live stores at switch time (`captureTabUI`) and reapplied on activation (`restoreTabUI`, per-project maps merged entry-by-entry). The global stores remain the single source of truth: the ACTIVE tab is, by construction, their mirror (`writeBack` + subscriptions keep it converged); non-active tabs hold only remembered snapshots. Activations serialize through the engine's module-level activation chain — every engine instance (the controller and the notification hook's bare engine) enqueues on the same queue — and roll back the optimistic `activeTabId` flip on failure.
 3. **The file viewer remains per-project.** Viewer tabs and the active file stay owned by the project-switch persistence and are never captured into a workspace tab's snapshot. A v1 snapshot therefore has exactly three slices, and every payload crosses the fail-closed `sanitizeTabUI` contract before storage or restore.
 
 Supporting choices: `tabStore` is transient (a restart always starts from a single default tab — an app-lifetime UI arrangement is not durable state; the durable per-context context already persists in uiStore/inputModeStore and the project switch state); the one behavioral flag branch lives in `useNotificationClicks` (flag ON routes a click through the engine's single activation path, flag OFF keeps the pre-tab radar pattern); only `tabsEnabled` itself persists (uiStore `c0wrk-sidebar-collapsed`, v6→v7, default off).
@@ -26,7 +26,7 @@ Positive:
 
 - No dual bookkeeping: tabs never clone the live workspace context; the write-back makes "active tab = global stores" a structural invariant instead of a sync obligation, and consumers (window title, tab labels) already read the live stores by id.
 - The flag is reversible at runtime with zero migration and no flag-dependent code outside the three documented gates; enabling tabs reveals a bar above an already-correct single tab rather than bootstrapping state.
-- Cross-engine safety is structural: a second bare engine (the notification hook's) cannot install a second write-back, and the project switcher serializes both engines' chains.
+- Cross-engine safety is structural: a second bare engine (the notification hook's) cannot install a second write-back, and all engines enqueue on one module-level activation chain, so their activations can never interleave — the shared project switcher alone could not provide this, since a same-project activation makes no switch call at all.
 - Corrupt or future-shaped snapshot payloads fail closed at the `sanitizeTabUI` boundary instead of poisoning the stores.
 
 Negative:

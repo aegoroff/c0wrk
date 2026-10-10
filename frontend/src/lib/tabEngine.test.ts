@@ -455,6 +455,42 @@ describe('tabEngine.activate — rollback & serialization', () => {
     expect(useTabStore.getState().activeTabId).toBe(cId)
   })
 
+  it('parallel activations ACROSS engine instances serialize on the shared chain (banner-click bare engine vs controller)', async () => {
+    // Two engines exactly like production: the AppLayout controller and the
+    // bare notification-click engine (useNotificationClicks builds its own).
+    const controller = createTabEngine(switchMock)
+    const bare = createTabEngine(switchMock)
+    useSessionStore.setState({ selectSession: selectSessionMock })
+
+    const aId = useTabStore.getState().tabs[0]!.id
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+    const bId = useTabStore.getState().addTab({ projectId: 'p2' })
+    const cId = useTabStore.getState().addTab({ projectId: 'p1', sessionId: 's2' })
+    useTabStore.getState().activateTab(aId)
+
+    // Controller: cross-project activation held in flight by a gated switch.
+    const gate = deferred()
+    switchMock.mockImplementationOnce(() => gate.promise)
+    const first = controller.activate(bId)
+    await flush()
+    expect(useTabStore.getState().activeTabId).toBe(bId)
+    expect(switchMock).toHaveBeenCalledTimes(1)
+
+    // The bare engine's SAME-PROJECT activation (no switcher call at all —
+    // the switch chain cannot serialize it) must still wait for the
+    // controller's in-flight body to complete before touching any store.
+    const second = bare.activate(cId)
+    await flush()
+    expect(useTabStore.getState().activeTabId).toBe(bId)
+    expect(selectSessionMock).not.toHaveBeenCalled()
+
+    gate.resolve()
+    await Promise.all([first, second])
+
+    expect(useTabStore.getState().activeTabId).toBe(cId)
+    expect(selectSessionMock).toHaveBeenCalledExactlyOnceWith('s2', 'p1')
+  })
+
   it('a failed activation does not poison the chain: the next activation still runs', async () => {
     switchMock.mockRejectedValueOnce(new Error('switch failed'))
     const aId = useTabStore.getState().tabs[0]!.id

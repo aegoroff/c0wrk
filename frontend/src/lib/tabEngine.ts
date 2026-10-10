@@ -61,8 +61,13 @@ function liveInputSnapshot(): TabInputSnapshot {
   return { mode: s.mode, height: s.height, collapsedHeight: s.collapsedHeight, isExpanded: s.isExpanded }
 }
 
-/** A validated capture of the three live snapshot slices. */
-function captureLiveUI(): TabUIState {
+/**
+ * A validated capture of the three live snapshot slices. Exported for the
+ * banner-click tab creation (useNotificationClicks): the one creation path
+ * whose new tab must REMEMBER the current live context, so its activation
+ * restores exactly what the workspace already shows.
+ */
+export function captureLiveUI(): TabUIState {
   const ui = useUIStore.getState()
   return captureTabUI({
     workspaceTabByProject: ui.workspaceTabByProject,
@@ -202,17 +207,21 @@ async function runActivation(switchProjectWithState: ProjectSwitcher, tabId: str
   writeBack()
 }
 
+// Activation chain — MODULE-level, shared by every engine instance (the
+// AppLayout controller AND the bare engine in useNotificationClicks). Each
+// activation's full body (capture → flip → switch/select → restore →
+// write-back) completes before the next one starts — across ALL engines — so
+// a banner-click activation can never interleave its store writes with an
+// in-flight tab-click activation: the shared project switcher serializes only
+// the project-switch segment, and the same-project branch has no switch (and
+// therefore no serialization) at all. runActivation never rejects (all
+// failures are caught and rolled back), but the chain link guards both
+// settlements anyway so a future edit can never poison the queue.
+let chain: Promise<void> = Promise.resolve()
+
 // --- Engine factory ---
 
 export function createTabEngine(switchProjectWithState: ProjectSwitcher): TabEngine {
-  // Activation chain: each activation's full body (capture → flip → switch/
-  // select → restore → write-back) completes before the next one starts, so
-  // rapid tab clicks cannot interleave their store writes. runActivation
-  // never rejects (all failures are caught and rolled back), but the chain
-  // link guards both settlements anyway so a future edit can never poison
-  // the queue.
-  let chain: Promise<void> = Promise.resolve()
-
   const activate = (tabId: string): Promise<void> => {
     const run = chain.then(
       () => runActivation(switchProjectWithState, tabId),

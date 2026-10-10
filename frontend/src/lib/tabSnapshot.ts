@@ -59,8 +59,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * A fresh, fully-default TabUIState (used for new tabs whose context starts
- * empty: restoring it falls back to the live slice values, i.e. "leave
- * everything as-is").
+ * empty). Restoring the two EMPTY per-project maps is a no-op, but the
+ * input snapshot carries concrete boot defaults: every field is present and
+ * valid, so restoreTabUI applies them as-is rather than falling back to the
+ * live values — restoring this object does NOT leave the input panel
+ * untouched. Creation paths that must preserve the live panel either
+ * converge the fresh tab immediately (TabBar's write-back) or seed it with
+ * a live capture (tabEngine's captureLiveUI — the banner-click path).
  */
 export function createDefaultTabUI(): TabUIState {
   return {

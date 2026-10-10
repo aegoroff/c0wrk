@@ -6,7 +6,7 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import { useTabStore, type Tab } from '@/stores/tabStore'
 import { useUIStore } from '@/stores/uiStore'
-import { createTabEngine } from '@/lib/tabEngine'
+import { captureLiveUI, createTabEngine } from '@/lib/tabEngine'
 import { logger } from '@/lib/logger'
 import type { SessionInfo } from '@/types/models'
 
@@ -39,7 +39,10 @@ function findSessionTab(tabs: Tab[], projectId: string, sessionId: string): Tab 
  * click routes through the tab engine's single activation path instead of
  * the direct switch/select pair. A tab already showing the session is
  * activated; otherwise a fresh tab is created carrying the clicked
- * {projectId, sessionId} context and the engine materializes it (project
+ * {projectId, sessionId} context plus a capture of the current live UI
+ * slices — its activation then restores what the workspace already shows,
+ * leaving the input panel untouched (the same contract the «+» button's
+ * write-back gives a new tab) — and the engine materializes it (project
  * switch and session restore happen inside the activation). The hook owns a
  * bare engine — write-back mirroring stays the tab-controller's job, so a
  * flag-off click never touches the tab store.
@@ -102,12 +105,22 @@ export function useNotificationClicks(): void {
             return
           }
           // No tab shows the session: create one carrying the clicked
-          // context. addTab auto-activates, so step back to the previous tab
-          // and let the engine's full activation materialize the context
-          // (its already-active guard would skip the whole path otherwise).
+          // context plus a capture of the CURRENT live slices. The bare
+          // default snapshot would not do: its input fields are all present
+          // and valid, so the activation's restore applies them as-is and
+          // resets the panel; the live capture makes the restore re-apply
+          // what the workspace already shows — the same outcome the «+»
+          // path's write-back convergence gives a fresh tab.
+          // addTab auto-activates, so step back to the previous tab and let
+          // the engine's full activation materialize the context (its
+          // already-active guard would skip the whole path otherwise).
           // All synchronous — no intermediate state can be painted.
           const outgoingId = tabLayer.activeTabId
-          const newTabId = tabLayer.addTab({ projectId, sessionId: data.session_id })
+          const newTabId = tabLayer.addTab({
+            projectId,
+            sessionId: data.session_id,
+            ui: captureLiveUI(),
+          })
           useTabStore.getState().activateTab(outgoingId)
           await engine.activate(newTabId)
           return

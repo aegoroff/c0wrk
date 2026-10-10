@@ -2,7 +2,7 @@
 
 ## Role
 
-The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible and how notification clicks route (see [ADR-082](../../decisions/082-workspace-tabs-single-engine.md)).
+The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible and how notification clicks route (see [ADR-083](../../decisions/083-workspace-tabs-single-engine.md)).
 
 ## Key Files
 
@@ -53,7 +53,7 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
         (the global stores stay the SINGLE source of truth)
 ```
 
-`AppLayout` mounts the one controller whose engine owns the write-back subscriptions ("exactly one engine per app"). `useNotificationClicks` instantiates its own BARE engine (no `attachWriteBack`), so a banner click can never install a second write-back; the project switcher itself serializes both engines' chains.
+`AppLayout` mounts the one controller whose engine owns the write-back subscriptions ("exactly one engine per app"). `useNotificationClicks` instantiates its own BARE engine (no `attachWriteBack`), so a banner click can never install a second write-back. All engine instances enqueue on ONE module-level activation chain (`lib/tabEngine`), so a banner-click activation can never interleave its store writes with an in-flight tab-click activation — the shared project switcher alone could not provide this, since a same-project activation makes no switch call at all.
 
 ### Activation sequence (`runActivation`)
 
@@ -63,7 +63,7 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
 4. **Restore** — the remembered slices are applied to the live stores: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), and the input-panel fields are written as one unit.
 5. **Converge** — a final `writeBack()` mirrors whatever the context move landed on (restored session included) into the now-active tab; content-equal against the remembered snapshot, so a clean activation is a reference-stable no-op.
 
-Activations serialize through the engine's internal chain: each activation's full body completes before the next one starts, so rapid tab clicks never interleave their store writes.
+Activations serialize through the engine's module-level chain, shared by every engine instance: each activation's full body completes before the next one starts — including activations from a DIFFERENT engine instance (the notification hook's bare engine) — so rapid tab clicks and a banner click landing mid-switch never interleave their store writes.
 
 ### Write-back: the active tab is a live mirror
 
@@ -83,7 +83,7 @@ The file viewer is deliberately NOT a slice: its open tabs and active file remai
 
 ### Banner-click routing (the one flag branch)
 
-With the flag ON, a `notification_clicked` payload routes through the tab engine: prefer the exact `{projectId, sessionId}` tab, else any tab already showing the session (session ids are globally unique), and `activate` it; no match creates a tab for the clicked context (`addTab` auto-activates, the handler steps back to the previous tab, then `activate` materializes the context). With the flag OFF, the pre-tab radar pattern runs (switch-when-needed → `selectSession`) and the tab layer is never read or written. See [system-notifications.md](system-notifications.md) § Click routing.
+With the flag ON, a `notification_clicked` payload routes through the tab engine: prefer the exact `{projectId, sessionId}` tab, else any tab already showing the session (session ids are globally unique), and `activate` it; no match creates a tab for the clicked context carrying a capture of the CURRENT live slices (`captureLiveUI`) — the activation's restore step then re-applies what the workspace already shows, so the input panel is left untouched exactly like a «+»-created tab (`addTab` auto-activates, the handler steps back to the previous tab, then `activate` materializes the context). With the flag OFF, the pre-tab radar pattern runs (switch-when-needed → `selectSession`) and the tab layer is never read or written. See [system-notifications.md](system-notifications.md) § Click routing.
 
 ### Edge handling
 
@@ -123,4 +123,4 @@ With the flag ON, a `notification_clicked` payload routes through the tab engine
 - [stores.md](stores.md) — `tabStore` in the store catalog; `uiStore` owns the persisted flag (v7) and the per-project maps the snapshot slices capture
 - [system-notifications.md](system-notifications.md) — the flag-on banner-click branch of `useNotificationClicks`
 - [README.md](README.md) — the app shell the tab bar sits above and the project-switch flow the engine drives
-- [ADR-082](../../decisions/082-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision
+- [ADR-083](../../decisions/083-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision
