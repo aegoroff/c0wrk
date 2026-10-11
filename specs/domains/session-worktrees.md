@@ -13,7 +13,7 @@ session-lifecycle wiring that drives them from the session RPC flows
 (`backend/frontend_api_worktrees.go`: creation, restore, fork, deletion,
 archive), and the Git-panel focus model that consumes the separation
 (`backend/frontend_api_git_focus.go`: focus-target resolution behind every
-git RPC, the worktree listing RPC, and the pinned-branch refusal).
+git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) — including `DeleteWorktree` (removes any linked tree) and `CreateBranchInWorktree` (a branch born directly in a fresh managed tree, focus untouched).
 
 ## Key Files
 
@@ -28,13 +28,14 @@ git RPC, the worktree listing RPC, and the pinned-branch refusal).
 - `backend/session/persistence_fork.go` — `ForkSessionWithBinding` (managed fork requires a new tree + derived branch)
 - `backend/session/manager.go` — `CreateSessionFromDraft` (commit a prepared workspace), `SetWorkspaceEnsurer` + the restore-time ensure inside `getOrRestoreSession`'s single-flight, `HasSession` (non-restoring existence), binding-aware lazy restore and `WorkspacePathFor`
 - `backend/config/paths.go` — `ManagedWorktreesDir`, `ManagedWorktreePath` (the only place `.worktrees` paths are constructed or validated)
-- `backend/frontend_api_git_focus.go` — the Git-panel focus model: `SetGitPanelFocus`/`GetGitPanelFocus`/`ListProjectWorktrees` RPCs, `resolveGitFocusRoot` (the focus resolution behind `resolveGitRepoRoot`), owning-session metadata, the pinned-branch guard (`ErrPinnedWorktreeBranch`, `refusePinnedBranchSwitch`), and the fail-soft vector-registry re-point every accepted focus move carries (`focusVectorRoots` → `ApplyFocus`)
+- `backend/frontend_api_git_focus.go` — the Git-panel focus model: `SetGitPanelFocus`/`GetGitPanelFocus`/`ListProjectWorktrees` RPCs, `resolveGitFocusRoot` (the focus resolution behind `resolveGitRepoRoot`), owning-session metadata, the pinned-branch guard (`ErrPinnedWorktreeBranch`, `refusePinnedBranchSwitch`), the fail-soft vector-registry re-point every accepted focus move carries (`focusVectorRoots` → `ApplyFocus`), and `DeleteWorktree` (removes any linked tree of the active project with the session-release cleanup contract)
+- `backend/frontend_api_git.go` — `CreateBranchInWorktree`, the Git-panel RPC that births a branch and its managed tree atomically from a base ref (through `worktrees.Owner.ProvisionNewBranch`), never switching or consulting the focus
 - `backend/frontend_api_vector.go` — vector-index RPC surface (`SearchVectorStore`/`GetVectorIndexStatus`/`ReindexVectorIndex`, all routed to the Git-panel FOCUS root), focus-target resolution (`resolveVectorIndexTarget` — the project switch resolves the saved session's tree), worktree-scoped storage (`config.WorktreeVectorIndexPath`), release cleanup (`deleteWorktreeVectorIndex`: registry release → storage → per-tree cache) and provisioning seeding (`seedWorktreeEmbeddingCache`: copies the checkout's embedding cache into a fresh tree's cache root)
 - `backend/vector_roots.go` — the per-root registry (ADR-081): one `vectorindex.Manager` per workspace root (single-flight creation, LRU-bounded live set with the focus pinned), agent-side routing by the executor context's workspace root, `ApplyFocus`/`LeaveFocus`, `Release`/`ReleaseProject`/`ShutdownAll`, and `Application.buildVectorRouter` (the shared search closures)
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions) and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions) and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout; the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
 
 ## Core Types
 
@@ -203,7 +204,11 @@ never resurrects: `Manager.DeleteSession` operates only on in-memory sessions
 tree the pre-flight just released; store-only sessions release their tree via
 the same pre-flight and finish through the store-only fallback. The branch is
 never deleted (primitive-level invariant). Archiving a session retains its
-tree and branch untouched.
+tree and branch untouched. This release protocol is triggered by SESSION
+deletion only; the Git panel's `DeleteWorktree`
+([Git-panel focus model](#git-panel-focus-model)) is a separate, explicit
+worktree-removal path that may delete any linked tree — including a managed
+one with bound sessions — on direct user confirmation.
 
 ### Fork
 
@@ -232,6 +237,8 @@ frontend (useGitFocusSync, mounted at the App root)  backend
                             └► SetGitPanelFocus(session workspace)   // default target
   worktree switcher ────────► SetGitPanelFocus(tree path)            // explicit
   focus button ─────────────► SetGitPanelFocus(session workspace)     // snap back
+  worktree delete ──────────► DeleteWorktree(path, force, unlock)     // any linked tree; focus re-resolved
+  branch-in-new-worktree ───► CreateBranchInWorktree(name, base)      // focus neither switched nor consulted
   any git RPC ◄──────────── resolveGitRepoRoot() = resolveGitFocusRoot()
   vector RPCs/status ◄───── vectorRootsRegistry().ApplyFocus(root)    // rides every accepted
                                                                       // move (fail-soft)
@@ -256,6 +263,47 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   (`kind`: main/managed/external) and owning session; `ListProjectWorktrees`
   returns the full decorated list (`managed`/`pinned`, session id/name,
   `is_focus`) via `worktrees.Owner.List`.
+- Worktree deletion (`DeleteWorktree(path, force, unlock)`): removes ANY
+  linked tree of the active project — a managed session tree or an external
+  one; the main checkout is refused by the removal primitive (it is the
+  project's registration root and is never removed). The path is validated
+  against the live `git worktree list` (a foreign path fails with
+  `ErrWorktreeNotLinked`); `force` confirms the loss of uncommitted changes
+  and `unlock` authorizes removing a locked tree — neither is ever taken
+  implicitly (`ErrWorktreeDirty` / `ErrWorktreeLocked` name the missing
+  confirmation). Managed trees are removed REGARDLESS of bound sessions —
+  an explicit user decision: the session rows and their immutable bindings
+  stay, the tree under them is gone, and each bound session's next restore
+  re-creates the tree from its still-existing pinned branch (the branch
+  itself is never deleted). Cleanup mirrors the session-release flow: the
+  vector-registry root is released first (open chromem handles dropped so
+  removal is Windows-safe) and a managed tree's derived index storage +
+  embedding cache are dropped (`deleteWorktreeVectorIndex`); an external
+  tree only releases its registry root. `git:status_changed` is emitted for
+  the checkout — the refresh re-resolves the focus server-side, so a focus
+  pointing at the deleted tree rolls back to the checkout through the
+  stale-focus fallback.
+- Branch born in a new worktree (`CreateBranchInWorktree(name, base)`): the
+  branch and its tree are created atomically (`git worktree add -b <branch>
+  <tree> [<base>]`; empty base = the checkout's HEAD) at a
+  managed-container path whose name is derived from the branch (portable
+  slug, numeric suffix when taken). The base is pre-validated
+  (`rev-parse … ^{commit}` → `ErrInvalidBaseRef`) and branch pre-existence
+  fails with `ErrBranchExists` before git runs. The focus is NEITHER
+  switched NOR consulted — the focused tree is never checked out into the
+  new branch, so a managed-tree focus does not block the operation, and
+  entering the new tree stays the user's decision. On success
+  `git:status_changed` refreshes the branch list and status while the
+  frontend's Git-focus refresh (`refreshGitFocus`) re-reads the worktree
+  list, landing the new tree in the Worktrees section; the tree's embedding
+  cache is seeded best-effort, same contract as session provisioning.
+- The Worktrees section is shown in draft mode too: the draft picks a
+  BRANCH, but an existing worktree (e.g. a stale managed tree) can still be
+  deleted — through the mandatory `WorktreeDeleteConfirmDialog` — without
+  leaving the chat-side draft picker; the deletion never touches the draft.
+  In draft mode `NewBranchSection`'s Worktree checkbox is disabled ("The
+  session always gets its own worktree"): the drafted session's branch
+  always lands in its own provisioned tree.
 - The pinned-branch decision: `CheckoutBranch`, `CreateBranch`,
   `CheckoutRemoteBranch`, and renaming the pinned branch are refused with
   `ErrPinnedWorktreeBranch` while the focus is a managed session worktree
@@ -313,6 +361,15 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   `ErrPinnedWorktreeBranch` while the Git panel is focused on a managed
   session worktree and the resulting branch differs from the pin; the local
   checkout and external linked trees always keep normal checkout.
+- Worktree deletion removes any linked tree — managed or external — but
+  never the main checkout; a managed tree goes even with bound sessions
+  (their rows and immutable bindings survive; the next restore re-creates
+  the tree from the surviving pinned branch), and the branch is never
+  deleted.
+- `CreateBranchInWorktree` never moves or consults the Git-panel focus: the
+  branch and its tree are born atomically from the base in the managed
+  container, and the currently focused tree is never checked out into the
+  new branch.
 - `.worktrees` paths are constructed exclusively via `backend/config`
   helpers; the name is validated (portable, no traversal, no device names) and
   the container/tree must not be a symlink and must be inside the repo.
@@ -361,7 +418,13 @@ No `config.yaml` keys. The managed container is always
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
   (BranchPicker + BranchDropdown), the header focus button, and the
-  follow-the-session sync (`useGitFocusSync`, mounted at the App root).
+  follow-the-session sync (`useGitFocusSync`, mounted at the App root) —
+  together with the panel-side management RPCs and their UI: `DeleteWorktree`
+  behind the Worktrees section's hover delete (mandatory
+  `WorktreeDeleteConfirmDialog`, section shown in draft mode too) and
+  `CreateBranchInWorktree` behind `NewBranchSection`'s Worktree checkbox
+  (branch + tree created from the base, focus never switched; disabled in
+  draft mode — a drafted session always gets its own worktree).
   Extensions keep the same
   contract: the focus target stays UI state resolved server-side and is
   never written back into the session binding; `Owner.List`/`Inspect` back

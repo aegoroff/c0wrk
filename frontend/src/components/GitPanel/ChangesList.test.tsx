@@ -241,3 +241,87 @@ describe('ChangesList — tree mode file naming', () => {
     expect(rows[0]!.textContent).toBe('f.txt')
   })
 })
+
+// ─────────────────────── Worktree focus display root ─────────────────────────
+
+describe('ChangesList — worktree focus display root', () => {
+  const WORKTREE = '/repo/.worktrees/s-abc12345'
+  const WORKTREE_FILE = `${WORKTREE}/src/f.txt`
+
+  function makeFocus() {
+    return {
+      path: WORKTREE,
+      name: 's-abc12345',
+      kind: 'managed' as const,
+      branch: 'sess/s-abc12345',
+      managed: true,
+      pinned: true,
+    }
+  }
+
+  it('displays paths relative to the focused worktree and passes absolute paths to callbacks', () => {
+    useGitPanelStore.getState().loadEntries([
+      makeEntry({ path: WORKTREE_FILE, status: 'M', staged: false, indexStatus: ' ', worktreeStatus: 'M' }),
+    ])
+    // The backend keys the status onto the focus worktree root; the display
+    // root is that same root (NOT the project workspace path, which would
+    // leave a `.worktrees/s-abc12345/` prefix on every row).
+    useGitPanelStore.setState({ focus: makeFocus() })
+    useProjectStore.setState({
+      projects: [{
+        id: 'p1',
+        name: 'repo',
+        workspace_path: '/repo',
+        is_external: false,
+        is_no_project: false,
+        created_at: '',
+        last_active_at: '',
+      }],
+      activeProjectId: 'p1',
+    })
+
+    const el = render()
+    const onToggle = vi.fn()
+    // Re-render with a spying toggle callback (mirrors the two-axis test above).
+    act(() => {
+      root!.render(<ChangesList onToggleFile={onToggle} onOpenDiff={noop} />)
+    })
+
+    // The row renders with the worktree-relative display path…
+    const rows = nameSpans(el, 'src/f.txt')
+    expect(rows).toHaveLength(1)
+    // …and never with the checkout-relative (`.worktrees/…`) or absolute path.
+    expect(nameSpans(el, '.worktrees/s-abc12345/src/f.txt')).toHaveLength(0)
+    expect(nameSpans(el, WORKTREE_FILE)).toHaveLength(0)
+
+    // The staging checkbox still dispatches the ABSOLUTE entry path.
+    act(() => {
+      rowCheckbox(sectionRoot(el, 'Changes')!).click()
+    })
+    expect(onToggle).toHaveBeenCalledWith(WORKTREE_FILE, 'stage')
+  })
+
+  it('falls back to the project workspace path when no focus is resolved', () => {
+    useGitPanelStore.getState().loadEntries([
+      makeEntry({ path: '/repo/src/f.txt', status: 'M', staged: false, indexStatus: ' ', worktreeStatus: 'M' }),
+    ])
+    // focus stays null (pre-resolve); the workspace path stands in.
+    useProjectStore.setState({
+      projects: [{
+        id: 'p1',
+        name: 'repo',
+        workspace_path: '/repo',
+        is_external: false,
+        is_no_project: false,
+        created_at: '',
+        last_active_at: '',
+      }],
+      activeProjectId: 'p1',
+    })
+
+    const el = render()
+
+    expect(nameSpans(el, 'src/f.txt')).toHaveLength(1)
+    expect(nameSpans(el, '/repo/src/f.txt')).toHaveLength(0)
+  })
+})

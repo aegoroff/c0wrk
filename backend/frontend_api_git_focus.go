@@ -304,6 +304,69 @@ func (f *FrontendAPI) ListProjectWorktrees() ([]GitWorktree, error) {
 	return out, nil
 }
 
+// DeleteWorktree removes a linked worktree of the active project's
+// repository — an app-managed session tree or an external linked tree.
+// The path must be a worktree of the active project (validated against the
+// live `git worktree list`; a foreign path fails with ErrWorktreeNotLinked)
+// and the local checkout is refused by the removal primitive itself: the
+// main worktree is the project's registration root and is never removed.
+// force confirms the loss of uncommitted changes in the tree, unlock
+// authorizes removing a locked tree — neither is ever taken implicitly
+// (ErrWorktreeDirty / ErrWorktreeLocked name the missing confirmation).
+// The branch the tree was on is never deleted. Managed trees are removed
+// regardless of bound sessions (an explicit user decision): the session
+// rows stay, the tree under them is gone.
+//
+// Cleanup mirrors the session-release flow: the tree's vector-registry
+// root is released first (shutting its live per-root manager so no open
+// handle keeps the removed directory alive on Windows), and a managed
+// tree's derived index storage + embedding cache are dropped as well
+// (deleteWorktreeVectorIndex). git:status_changed is emitted for the
+// project checkout — the refresh re-resolves the focus server-side, so a
+// focus pointing at the deleted tree rolls back to the checkout through
+// resolveGitFocusRoot's stale-focus fallback.
+func (f *FrontendAPI) DeleteWorktree(worktreePath string, force, unlock bool) error {
+	projectPath, projectID, err := f.activeGitProjectRoot()
+	if err != nil {
+		return err
+	}
+	target := strings.TrimSpace(worktreePath)
+	if target == "" {
+		return fmt.Errorf("%w: empty worktree path", workspace.ErrWorktreePathInvalid)
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("invalid worktree path: %w", err)
+	}
+	trees, err := f.listWorktreesBounded(projectPath)
+	if err != nil {
+		return fmt.Errorf("listing worktrees of the active project: %w", err)
+	}
+	entry := workspace.FindWorktree(trees, abs)
+	if entry == nil {
+		return fmt.Errorf("%w: %s is not a worktree of the active project", workspace.ErrWorktreeNotLinked, abs)
+	}
+	ctx, cancel := context.WithTimeout(f.ctx(), gitCmdTimeout)
+	defer cancel()
+	if err := workspace.RemoveWorktree(ctx, projectPath, entry.Path, workspace.RemoveWorktreeOptions{
+		Force:  force,
+		Unlock: unlock,
+	}); err != nil {
+		return err
+	}
+	switch entry.Kind {
+	case workspace.WorktreeManaged:
+		f.deleteWorktreeVectorIndex(projectPath, projectID, entry.Name)
+	case workspace.WorktreeExternal:
+		// An external tree may have been the panel's focus and picked up a
+		// live manager; release it. c0wrk never provisioned one, so no
+		// worktree-scoped storage exists to clean.
+		f.vectorRootsRegistry().Release(canonicalRoot(entry.Path))
+	}
+	f.emitGitStatusChanged(projectPath)
+	return nil
+}
+
 // managedTreeOwner resolves the session bound to the managed worktree name,
 // if any session claims it — since the shared-tree revision of ADR-080
 // several sessions may execute in one tree, and this returns one of them

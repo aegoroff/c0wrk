@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { collectAllDirPaths } from './buildTree'
+import { buildTree, collectAllDirPaths } from './buildTree'
 import type { GitPanelEntry } from '@/stores/gitPanelStore'
 
 // --- Test helpers ---
@@ -96,5 +96,71 @@ describe('collectAllDirPaths', () => {
       'src',
       'src/components',
     ])
+  })
+
+  it('strips the focus worktree root, not the project checkout prefix', () => {
+    // With the Git panel focused on a managed worktree the backend keys every
+    // entry onto the WORKTREE root; the display root is that same root, so the
+    // `.worktrees/<name>/` prefix disappears from the collected dir keys.
+    const entries = [
+      makeEntry('/repo/.worktrees/s-abc/src/components/Button.tsx'),
+      makeEntry('/repo/.worktrees/s-abc/README.md'),
+    ]
+    expect(collectAllDirPaths(entries, '/repo/.worktrees/s-abc')).toEqual([
+      'src',
+      'src/components',
+    ])
+  })
+
+  it('does not strip a sibling of the worktree root sharing its prefix', () => {
+    const entries = [makeEntry('/repo/.worktrees/s-abcd/src/file.ts')]
+    // "s-abcd" is a SIBLING of the root "s-abc", not a child: the raw absolute
+    // path is kept, so the leading slash produces an empty first segment
+    // (same behaviour as buildTree).
+    expect(collectAllDirPaths(entries, '/repo/.worktrees/s-abc')).toEqual([
+      '',
+      'repo',
+      'repo/.worktrees',
+      'repo/.worktrees/s-abcd',
+      'repo/.worktrees/s-abcd/src',
+    ])
+  })
+})
+
+// ───────────────────── buildTree ⇄ collectAllDirPaths parity ─────────────────
+
+describe('buildTree/collectAllDirPaths key parity', () => {
+  /** Collect the tree's directory keys exactly as TreeRow reads expandedDirs. */
+  function treeDirPaths(entries: GitPanelEntry[], displayRoot: string): string[] {
+    const dirs = new Set<string>()
+    const walk = (nodes: ReturnType<typeof buildTree>): void => {
+      for (const node of nodes) {
+        if (node.isDir) {
+          dirs.add(node.fullPath)
+          walk(node.children)
+        }
+      }
+    }
+    walk(buildTree(entries, displayRoot))
+    return Array.from(dirs).sort()
+  }
+
+  it('produces identical expandedDirs keys for both helpers', () => {
+    const entries = [
+      makeEntry('/repo/src/a.ts'),
+      makeEntry('/repo/src/components/X.tsx'),
+      makeEntry('/repo/lib/util.ts'),
+    ]
+    expect(treeDirPaths(entries, '/repo')).toEqual(collectAllDirPaths(entries, '/repo'))
+  })
+
+  it('stays key-identical when the display root is a focus worktree', () => {
+    const entries = [
+      makeEntry('/repo/.worktrees/s-abc/src/a.ts'),
+      makeEntry('/repo/.worktrees/s-abc/src/deep/b.ts'),
+    ]
+    const root = '/repo/.worktrees/s-abc'
+    expect(treeDirPaths(entries, root)).toEqual(collectAllDirPaths(entries, root))
+    expect(collectAllDirPaths(entries, root)).toEqual(['src', 'src/deep'])
   })
 })

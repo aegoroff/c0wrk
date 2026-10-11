@@ -25,6 +25,7 @@ import {
   getCurrentBranch,
   checkoutBranch,
   createBranch,
+  createBranchInWorktree,
   getBranchBases,
   renameBranch,
   deleteBranch,
@@ -470,6 +471,41 @@ describe('createBranch', () => {
     )
     await expect(createBranch('feature/new', '')).rejects.toThrow(
       'branch "feature/new" already exists',
+    )
+  })
+})
+
+describe('createBranchInWorktree', () => {
+  beforeEach(() => {
+    Object.keys(mockApp).forEach(k => delete mockApp[k])
+  })
+
+  it('calls app.CreateBranchInWorktree with the branch name and base', async () => {
+    mockApp.CreateBranchInWorktree = vi.fn().mockResolvedValue(undefined)
+    await createBranchInWorktree('feature/wt', 'develop')
+    expect(mockApp.CreateBranchInWorktree).toHaveBeenCalledWith('feature/wt', 'develop')
+  })
+
+  it('trims the branch name before the RPC', async () => {
+    mockApp.CreateBranchInWorktree = vi.fn().mockResolvedValue(undefined)
+    await createBranchInWorktree('  feature/wt  ', '')
+    expect(mockApp.CreateBranchInWorktree).toHaveBeenCalledWith('feature/wt', '')
+  })
+
+  it('rejects a blank name at the boundary without calling the backend', async () => {
+    mockApp.CreateBranchInWorktree = vi.fn().mockResolvedValue(undefined)
+    await expect(createBranchInWorktree('   ', '')).rejects.toThrow(
+      'createBranchInWorktree: branch name is required',
+    )
+    expect(mockApp.CreateBranchInWorktree).not.toHaveBeenCalled()
+  })
+
+  it('propagates errors from backend', async () => {
+    mockApp.CreateBranchInWorktree = vi.fn().mockRejectedValue(
+      new Error('branch "feature/wt" already exists'),
+    )
+    await expect(createBranchInWorktree('feature/wt', '')).rejects.toThrow(
+      'branch "feature/wt" already exists',
     )
   })
 })

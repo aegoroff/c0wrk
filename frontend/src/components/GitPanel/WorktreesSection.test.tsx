@@ -13,6 +13,8 @@ function renderSection(
   worktrees: GitWorktree[],
   onSelect: (w: GitWorktree) => void = vi.fn(),
   busyPath: string | null = null,
+  onDelete: ((w: GitWorktree) => void) | undefined = undefined,
+  deleteBusyPath: string | null = null,
 ): void {
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -20,7 +22,13 @@ function renderSection(
   root = r
   act(() => {
     r.render(
-      <WorktreesSection worktrees={worktrees} onSelect={onSelect} busyPath={busyPath} />,
+      <WorktreesSection
+        worktrees={worktrees}
+        onSelect={onSelect}
+        busyPath={busyPath}
+        onDelete={onDelete}
+        deleteBusyPath={deleteBusyPath}
+      />,
     )
   })
 }
@@ -125,7 +133,84 @@ describe('WorktreesSection (list variant)', () => {
     const rows = Array.from(container!.querySelectorAll('[data-testid="worktree-row"]'))
     expect(rows[0]!.querySelector('[aria-label="Locked"]')).not.toBeNull()
     // The busy row is disabled while its focus switch is in flight.
-    expect((rows[1]! as HTMLButtonElement).disabled).toBe(true)
-    expect((rows[0]! as HTMLButtonElement).disabled).toBe(false)
+    expect(rows[1]!.getAttribute('aria-disabled')).toBe('true')
+    expect(rows[0]!.getAttribute('aria-disabled')).toBeNull()
+  })
+})
+
+describe('WorktreesSection — delete action (list variant)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('exposes the delete action on linked trees but never on the local checkout', () => {
+    const onDelete = vi.fn()
+    const main = makeWorktree({
+      path: '/repo', name: 'repo', kind: 'main', branch: 'main',
+      managed: false, pinned: false,
+    })
+    const managed = makeWorktree()
+    const external = makeWorktree({
+      path: '/elsewhere/ext', name: 'ext', kind: 'external',
+      managed: false, pinned: false,
+    })
+    renderSection([main, managed, external], vi.fn(), null, onDelete)
+
+    const rows = Array.from(container!.querySelectorAll('[data-testid="worktree-row"]'))
+    // The checkout has no delete button; each linked tree has one.
+    expect(rows[0]!.querySelectorAll('button')).toHaveLength(0)
+    expect(rows[1]!.querySelectorAll('button')).toHaveLength(1)
+    expect(rows[2]!.querySelectorAll('button')).toHaveLength(1)
+    expect(rows[1]!.querySelector('button')!.getAttribute('title')).toContain('Delete s-abc12345')
+  })
+
+  it('offers no delete actions at all when onDelete is not provided', () => {
+    renderSection([makeWorktree()])
+
+    expect(container!.querySelectorAll('[data-testid="worktree-row"] button')).toHaveLength(0)
+  })
+
+  it('raises onDelete with the worktree without selecting it', () => {
+    const onSelect = vi.fn()
+    const onDelete = vi.fn()
+    const tree = makeWorktree()
+    renderSection([tree], onSelect, null, onDelete)
+
+    const action = container!.querySelector<HTMLButtonElement>('[data-testid="worktree-row"] button')!
+    act(() => {
+      action.click()
+    })
+
+    expect(onDelete).toHaveBeenCalledTimes(1)
+    expect(onDelete).toHaveBeenCalledWith(tree)
+    // The delete click must never double as a focus switch.
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('shows a spinner action and disables the row while its deletion is in flight', () => {
+    const onDelete = vi.fn()
+    const tree = makeWorktree()
+    renderSection([tree], vi.fn(), null, onDelete, tree.path)
+
+    const row = container!.querySelector('[data-testid="worktree-row"]')!
+    const action = row.querySelector('button')!
+    // The deleting row cannot be focus-switched and the action is disabled
+    // (the spinner replaces the trash icon inside it).
+    expect(row.getAttribute('aria-disabled')).toBe('true')
+    expect(action.disabled).toBe(true)
+    expect(action.querySelector('.animate-spin')).not.toBeNull()
+  })
+
+  it('keeps the delete actions usable for untouched trees after the in-flight deletion ends', () => {
+    const onDelete = vi.fn()
+    const tree = makeWorktree()
+    renderSection([tree], vi.fn(), null, onDelete, null)
+
+    const action = container!.querySelector<HTMLButtonElement>('[data-testid="worktree-row"] button')!
+    expect(action.disabled).toBe(false)
+    act(() => {
+      action.click()
+    })
+    expect(onDelete).toHaveBeenCalledTimes(1)
   })
 })
