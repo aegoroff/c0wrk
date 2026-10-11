@@ -51,10 +51,10 @@ func (f *FrontendAPI) DeleteProject(id string) error {
 	// Per-root vector managers (ADR-080) are released FIRST — shutdown drops
 	// their open chromem handles so the directory removal below works on
 	// Windows too. Managed-session worktree indexes live under
-	// <projectVI>/worktrees/<name> with per-tree embedding caches under
-	// <projectVI>/embedding_cache-worktrees/<name>: drop each worktree
-	// storage explicitly, then the project root removes everything left
-	// (caches included). Any live manager can run the deletion (it is a
+	// <projectVI>/worktrees/<name> with the per-tree embedding cache inside
+	// that storage (<projectVI>/worktrees/<name>/embedding_cache): drop each
+	// worktree storage explicitly, then the project root removes everything
+	// left. Any live manager can run the deletion (it is a
 	// plain fs + park-slot operation); without one there is nothing this app
 	// run can be holding open, so the best-effort pass is skipped exactly
 	// like the nil-manager case before it. Releasing before removal is the

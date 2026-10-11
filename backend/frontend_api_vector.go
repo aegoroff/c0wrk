@@ -143,11 +143,23 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		}
 	}
 
-	// The per-tree embedding cache is a sibling of the tree's storage (its
-	// content-addressed entries are meaningless without the tree) — drop it.
+	// The per-tree embedding cache lives INSIDE the tree's storage root
+	// (WorktreeEmbeddingCachePath → <storage>/embedding_cache), so the
+	// DeleteProjectData removal above already dropped it. The explicit
+	// removal stays as belt-and-braces, and the LEGACY sibling location used
+	// by builds before the containment fix (issue #137 step 1) is removed
+	// too: trees provisioned by those builds carry seed copies there that
+	// nothing ever read — drop them so the stale directories do not outlive
+	// the tree.
 	if cache, cerr := config.WorktreeEmbeddingCachePath(f.agentDir, projectID, name); cerr == nil {
 		if err := os.RemoveAll(cache); err != nil {
 			f.log().Warn("vector index: failed to remove released worktree embedding cache",
+				"project", projectID, "worktree", name, "error", err)
+		}
+	}
+	if legacy, lerr := config.LegacyWorktreeEmbeddingCachePath(f.agentDir, projectID, name); lerr == nil {
+		if err := os.RemoveAll(legacy); err != nil {
+			f.log().Warn("vector index: failed to remove legacy worktree embedding cache",
 				"project", projectID, "worktree", name, "error", err)
 		}
 	}
