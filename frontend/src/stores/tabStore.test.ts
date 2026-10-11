@@ -20,7 +20,7 @@ vi.hoisted(() => {
 })
 
 import { createTab, selectActiveTab, useTabStore, type Tab } from './tabStore'
-import { createDefaultTabUI } from '@/lib/tabSnapshot'
+import { createDefaultTabUI, defaultTabUIFallback } from '@/lib/tabSnapshot'
 
 function resetStore(): void {
   const initial = createTab()
@@ -87,6 +87,26 @@ describe('tabStore addTab', () => {
       collapsedHeight: 200,
       isExpanded: false,
     })
+  })
+
+  it('discards garbage v2 slices on createTab and falls back to boot defaults', () => {
+    const newId = useTabStore.getState().addTab({
+      ui: {
+        sidebar: { collapsed: 'yes', width: 'wide' },
+        viewer: { pinned: 1, collapsed: true, width: 500 },
+        gitPanelTabByProject: { p1: 'changes', p2: 'graph' },
+        chatSessionListRatio: Number.NaN,
+        showSessionStats: 7,
+      },
+    })
+
+    const added = useTabStore.getState().tabs.find((t) => t.id === newId)
+    expect(added?.ui.sidebar).toEqual(defaultTabUIFallback().sidebar)
+    // Valid v2 fields pass through, garbage siblings fall back per field.
+    expect(added?.ui.viewer).toEqual({ pinned: false, collapsed: true, width: 500 })
+    expect(added?.ui.gitPanelTabByProject).toEqual({ p1: 'changes' })
+    expect(added?.ui.chatSessionListRatio).toBe(0.5)
+    expect(added?.ui.showSessionStats).toBe(false)
   })
 })
 
@@ -239,6 +259,54 @@ describe('tabStore updateActiveContext', () => {
       collapsedHeight: 420,
       isExpanded: true,
     })
+  })
+
+  it('falls back to the tab\'s remembered scalar slices for missing v2 fields', () => {
+    // Give the active tab a non-default remembered shell.
+    useTabStore.getState().updateActiveContext({
+      ui: {
+        sidebar: { collapsed: true, width: 300 },
+        viewer: { pinned: true, collapsed: false, width: 640 },
+        gitPanelTabByProject: { p1: 'history' },
+        chatSessionListRatio: 0.3,
+        showSessionStats: true,
+      },
+    })
+    const remembered = activeTab().ui
+    expect(remembered.sidebar.width).toBe(300)
+
+    // A partial payload (scalar v2 fields absent) must keep every remembered
+    // scalar — a partial re-capture never wipes a remembered value with a
+    // boot default. The per-project MAPS have no fallback (same contract as
+    // the v1 maps): an absent map restores to empty, and the engine's
+    // write-back always captures the full slice set anyway.
+    useTabStore.getState().updateActiveContext({
+      ui: { workspaceTabByProject: { p1: 'git' } },
+    })
+    const after = activeTab()
+    expect(after.ui.workspaceTabByProject).toEqual({ p1: 'git' })
+    expect(after.ui.sidebar).toEqual(remembered.sidebar)
+    expect(after.ui.viewer).toEqual(remembered.viewer)
+    expect(after.ui.gitPanelTabByProject).toEqual({})
+    expect(after.ui.chatSessionListRatio).toBe(0.3)
+    expect(after.ui.showSessionStats).toBe(true)
+  })
+
+  it('keeps the stored ui reference when only content-equal v2 slices are re-captured', () => {
+    const shell = {
+      sidebar: { collapsed: true, width: 300 },
+      viewer: { pinned: true, collapsed: false, width: 640 },
+      chatSessionListRatio: 0.3,
+      showSessionStats: true,
+    }
+    useTabStore.getState().updateActiveContext({ ui: shell })
+    const before = activeTab()
+
+    // A fresh capture of unchanged slices produces an equal-but-new object —
+    // the action must recognize equality and keep the stored reference.
+    useTabStore.getState().updateActiveContext({ ui: shell })
+
+    expect(activeTab()).toBe(before)
   })
 })
 

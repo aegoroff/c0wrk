@@ -8,7 +8,7 @@ The workspace tab layer is the outermost context layer of the app shell: each ta
 
 - `frontend/src/stores/tabStore.ts` — the tab layer state: the `Tab {id, projectId, sessionId, ui}` list plus `activeTabId`; actions `addTab` / `closeTab` / `activateTab` / `updateActiveContext`; the pure `selectActiveTab` selector. TRANSIENT — never persisted.
 - `frontend/src/lib/tabEngine.ts` — the single activation engine: `activate` (never rejects), `writeBack` (live stores → active tab), `attachWriteBack` (write-back subscriptions). A plain lib module (no React); it never reads the flag.
-- `frontend/src/lib/tabSnapshot.ts` — the v1 snapshot slices: `captureTabUI` / `restoreTabUI` / `sanitizeTabUI` (fail-closed validation) and `isSameTabUI` (content equality behind reference-stable no-ops). Pure functions — no store access.
+- `frontend/src/lib/tabSnapshot.ts` — the v2 snapshot slices: `captureTabUI` / `restoreTabUI` / `sanitizeTabUI` (fail-closed validation) and `isSameTabUI` (content equality behind reference-stable no-ops). Pure functions — no store access.
 - `frontend/src/hooks/useTabController.ts` — the React seam: one engine instance per mount, `attachWriteBack` mounted in an effect, exposes `{activate, writeBack}`.
 - `frontend/src/hooks/useTabHotkeys.ts` — the system-standard tab-cycling shortcuts (host-platform pairs), routed through the app's single TabController; the pure matchers (`tabSwitchDelta`, `selectNeighborTabId`) are exported for tests.
 - `frontend/src/components/layout/AppLayout.tsx` — THE single controller mount for the app plus the `{tabsEnabled && <TabBar/>}` render gate.
@@ -46,7 +46,7 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
         │  tabEngine.activate      │   │  tabEngine.writeBack        │
         │  capture → flip →        │   │  live stores → active tab   │
         │  switch/select →         │   │  (project id, session id,   │
-        │  restore → converge      │   │  the three UI slices)       │
+        │  restore → converge      │   │  the UI slices)             │
         └──────────────┬───────────┘   └───────────▲─────────────────┘
                        │                           │ attachWriteBack:
                        ▼                           │ subscriptions on project /
@@ -61,26 +61,33 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
 1. **Capture** — `writeBack()` mirrors the live context into the outgoing tab while it is still active.
 2. **Optimistic flip** — `activateTab(tabId)` paints the incoming tab immediately; the incoming tab's remembered `ui` snapshot is copied BEFORE any await, so a mid-switch write-back (the incoming tab is now active and the subscriptions fire) cannot overwrite what the tab remembered.
 3. **Context move** — different project: `switchProjectWithState(dest)` (the switch flow owns the session restore: saved session → latest → fresh), with `null` resolving to the No Project pseudo-project entry; same project: `selectSession(sessionId)` when the session differs.
-4. **Restore** — the remembered slices are applied to the live stores: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), and the input-panel fields are written as one unit.
+4. **Restore** — the remembered slices are applied to the live stores: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), and the scalar shell slices (sidebar, viewer geometry, input panel, ratio, stats) are written through their store setters, the viewer under the empty-floating invariant.
 5. **Converge** — a final `writeBack()` mirrors whatever the context move landed on (restored session included) into the now-active tab; content-equal against the remembered snapshot, so a clean activation is a reference-stable no-op.
 
 Activations serialize through the engine's module-level chain, shared by every engine instance: each activation's full body completes before the next one starts — including activations from a DIFFERENT engine instance (the notification hook's bare engine) — so rapid tab clicks and a banner click landing mid-switch never interleave their store writes.
 
 ### Write-back: the active tab is a live mirror
 
-`writeBack()` copies the live workspace context (`activeProjectId`, `activeSessionId`, the two per-project uiStore maps, the input-panel slice) into the ACTIVE tab via `updateActiveContext`. `attachWriteBack()` adopts the context synchronously on attach, then keeps the mirror converged through subscriptions on the four source stores. Content-equal writes keep the stored references, so unrelated store churn costs nothing.
+`writeBack()` copies the live workspace context (`activeProjectId`, `activeSessionId`, and all eight snapshot slices: the uiStore per-project maps and scalar shell slices, the input-panel slice, the viewer geometry, the git-panel map) into the ACTIVE tab via `updateActiveContext`. `attachWriteBack()` adopts the context synchronously on attach, then keeps the mirror converged through subscriptions on the project, session, ui, input, file-viewer and git-panel stores. Content-equal writes keep the stored references, so unrelated store churn costs nothing.
 
-### Snapshot slices (v1 composition)
+### Snapshot slices (v2 composition)
 
 | Slice | Source | Content |
 | ----- | ------ | ------- |
 | `workspaceTabByProject` | `uiStore` | `'explorer'` \| `'git'` \| `'semantics'` \| `'research'` per project id |
 | `researchSegmentByProject` | `uiStore` | `'dashboard'` \| `'papers'` per project id |
 | `inputMode` | `inputModeStore` | `{mode, height, collapsedHeight, isExpanded}` — exactly the panel's persisted fields; the transient `pending*` fields are excluded |
+| `sidebar` | `uiStore` | `{collapsed, width}` — the left sidebar's geometry (v2, [ADR-084](../../decisions/084-tab-snapshot-v2-ui-slices.md)) |
+| `viewer` | `fileViewerStore` | `{pinned, collapsed, width}` — the right panel's geometry (v2); its OPEN FILE TABS are deliberately excluded |
+| `gitPanelTabByProject` | `gitPanelStore` | `'files'` \| `'changes'` \| `'history'` per project id (v2) |
+| `chatSessionListRatio` | `uiStore` | the CHAT session-list/workspace split ratio (v2) |
+| `showSessionStats` | `uiStore` | the session-stats row visibility toggle (v2) |
 
-Every payload crosses `sanitizeTabUI` (the same fail-closed contract as `mergeUIStore`): per-project maps rebuild from valid entries only, scalar input fields fall back to the caller-supplied fallback, results are freshly allocated so later store mutations never leak into a stored snapshot. `captureTabUI` captures the live slices; `restoreTabUI` validates a remembered snapshot against the live input slice; `isSameTabUI` powers the content-equality no-ops.
+Restore semantics follow the slice's shape: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), while every scalar slice — sidebar, viewer, input panel, ratio, stats — restores as an OVERWRITE through its owning store's setters (the setters' clamps stay in force); overwriting the live value is exactly what makes the scalar shell state per-tab ([ADR-084](../../decisions/084-tab-snapshot-v2-ui-slices.md)). The viewer restore additionally respects the empty-floating auto-collapse invariant: an unpinned viewer with zero open tabs recedes to the docked rail regardless of what the snapshot remembers.
 
-The file viewer is deliberately NOT a slice: its open tabs and active file remain per-project state, restored by the project-switch persistence (`ProjectSwitchState`), never captured per workspace tab.
+Every payload crosses `sanitizeTabUI` (the same fail-closed contract as `mergeUIStore`): per-project maps rebuild from valid entries only, scalar fields fall back to the caller-supplied live fallback (widths/heights/ratio must be finite numbers, modes must be known modes, booleans must be booleans), results are freshly allocated so later store mutations never leak into a stored snapshot. `captureTabUI` captures the live slices; `restoreTabUI` validates a remembered snapshot against the live fallback; `isSameTabUI` powers the content-equality no-ops.
+
+The file viewer's open tabs and active file are deliberately NOT a slice: they remain per-project state, restored by the project-switch persistence (`ProjectSwitchState`), never captured per workspace tab — two tabs on the same project intentionally share the project's viewer ([ADR-083](../../decisions/083-workspace-tabs-single-engine.md) D3).
 
 ### Banner-click routing (the one flag branch)
 
@@ -125,7 +132,7 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 
 - The tab layer always holds at least one tab; closing the last tab replaces it with a fresh default tab.
 - `activeTabId` always references an element of `tabs`.
-- The ACTIVE tab always mirrors the live workspace context — project id, session id, and the three snapshot slices — kept converged by the write-back subscriptions under any `tabsEnabled` value.
+- The ACTIVE tab always mirrors the live workspace context — project id, session id, and the eight snapshot slices of the v2 composition — kept converged by the write-back subscriptions under any `tabsEnabled` value.
 - Every tab activation travels the single engine path, and the engine stays flag-agnostic — it reads only the tab layer and the live stores.
 - Keyboard cycling acts only while the tab bar is enabled and at least two tabs exist, and it travels the single engine path; any gated-out or non-matching keypress stays unprevented.
 - Tab-strip keys (`←`/`→`/`Home`/`End`/`Enter`/`Space`) work only when a tab row itself is focused; arrows move focus without switching (manual activation), and the nested close button keeps native button semantics.
@@ -133,9 +140,9 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 - Tab arrangements stay app-lifetime: `tabStore` keeps its state in memory only, and a restart always starts from a single default tab.
 - The `tabsEnabled` flag persists across restarts (`c0wrk-sidebar-collapsed`, uiStore persist version 7, default off).
 - A snapshot payload is validated fail-closed both before storage and before restore, so the stores receive validated values only.
-- A snapshot restore always merges the per-project maps entry-by-entry and preserves other projects' entries.
+- A snapshot restore always merges the per-project maps entry-by-entry and preserves other projects' entries; scalar slices restore as an overwrite, and the viewer restore never floats an empty unpinned panel (the empty-floating invariant outranks the snapshot).
 - Exactly one engine with write-back subscriptions exists per app (the `AppLayout` controller mount); every other engine instance runs bare, without `attachWriteBack`.
-- The file viewer stays per-project: viewer tabs and the active file ride the project-switch persistence, outside every workspace tab's snapshot.
+- The file viewer's open tabs stay per-project: viewer tabs and the active file ride the project-switch persistence, outside every workspace tab's snapshot; only the viewer panel's geometry (pinned/collapsed/width) is a snapshot slice.
 - With the flag off, the shell layout stays byte-identical to the pre-tab UI: no bar, no wrapper artifacts, and the single tab remains the invisible live mirror.
 
 ## Related Specs
@@ -144,3 +151,4 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 - [system-notifications.md](system-notifications.md) — the flag-on banner-click branch of `useNotificationClicks`
 - [README.md](README.md) — the app shell the tab bar sits above and the project-switch flow the engine drives
 - [ADR-083](../../decisions/083-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision
+- [ADR-084](../../decisions/084-tab-snapshot-v2-ui-slices.md) — the v2 snapshot composition: per-tab shell geometry, git-panel tab and chat-view toggles

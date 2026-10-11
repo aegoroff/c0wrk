@@ -1,5 +1,13 @@
 import { logger } from '@/lib/logger'
-import { captureTabUI, restoreTabUI, type TabInputSnapshot, type TabUIState } from '@/lib/tabSnapshot'
+import {
+  captureTabUI,
+  restoreTabUI,
+  type TabInputSnapshot,
+  type TabUIFallback,
+  type TabUIState,
+} from '@/lib/tabSnapshot'
+import { useFileViewerStore } from '@/stores/fileViewerStore'
+import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -62,17 +70,40 @@ function liveInputSnapshot(): TabInputSnapshot {
 }
 
 /**
- * A validated capture of the three live snapshot slices. Exported for the
- * banner-click tab creation (useNotificationClicks): the one creation path
- * whose new tab must REMEMBER the current live context, so its activation
- * restores exactly what the workspace already shows.
+ * The live scalar-slice fallback for a restore: a remembered snapshot with a
+ * missing/wrong-typed scalar falls back to what the workspace shows right
+ * now (the "wrong-typed scalar falls back to current" contract).
+ */
+function liveTabUIFallback(): TabUIFallback {
+  const ui = useUIStore.getState()
+  const viewer = useFileViewerStore.getState()
+  return {
+    inputMode: liveInputSnapshot(),
+    sidebar: { collapsed: ui.sidebarCollapsed, width: ui.sidebarWidth },
+    viewer: { pinned: viewer.pinned, collapsed: viewer.collapsed, width: viewer.width },
+    chatSessionListRatio: ui.chatSessionListRatio,
+    showSessionStats: ui.showSessionStats,
+  }
+}
+
+/**
+ * A validated capture of the live snapshot slices (the v2 composition).
+ * Exported for the banner-click tab creation (useNotificationClicks): the one
+ * creation path whose new tab must REMEMBER the current live context, so its
+ * activation restores exactly what the workspace already shows.
  */
 export function captureLiveUI(): TabUIState {
   const ui = useUIStore.getState()
+  const viewer = useFileViewerStore.getState()
   return captureTabUI({
     workspaceTabByProject: ui.workspaceTabByProject,
     researchSegmentByProject: ui.researchSegmentByProject,
     inputMode: liveInputSnapshot(),
+    sidebar: { collapsed: ui.sidebarCollapsed, width: ui.sidebarWidth },
+    viewer: { pinned: viewer.pinned, collapsed: viewer.collapsed, width: viewer.width },
+    gitPanelTabByProject: useGitPanelStore.getState().activeTabByProject,
+    chatSessionListRatio: ui.chatSessionListRatio,
+    showSessionStats: ui.showSessionStats,
   })
 }
 
@@ -92,8 +123,11 @@ function writeBack(): void {
  * Apply a tab's remembered slices to the live stores. The per-project maps
  * merge entry-by-entry (the maps are shared across tabs; a restore layers
  * this tab's remembered entries over the live map without erasing other
- * projects' entries), and the input-panel fields are written as a unit —
- * the same four persisted fields the persist middleware restores on boot.
+ * projects' entries), the scalar shell slices (sidebar, viewer geometry,
+ * chat-view toggles) are written through their own store setters — the
+ * setters' clamps stay in force — and the input-panel fields are written as
+ * a unit, the same four persisted fields the persist middleware restores on
+ * boot.
  */
 function restoreSlices(ui: TabUIState): void {
   const uiStore = useUIStore.getState()
@@ -103,6 +137,23 @@ function restoreSlices(ui: TabUIState): void {
   for (const [projectId, segment] of Object.entries(ui.researchSegmentByProject)) {
     uiStore.setResearchSegment(projectId, segment)
   }
+  for (const [projectId, tab] of Object.entries(ui.gitPanelTabByProject)) {
+    useGitPanelStore.getState().setActiveTab(projectId, tab)
+  }
+  uiStore.setSidebarCollapsed(ui.sidebar.collapsed)
+  uiStore.setSidebarWidth(ui.sidebar.width)
+  uiStore.setChatSessionListRatio(ui.chatSessionListRatio)
+  uiStore.setShowSessionStats(ui.showSessionStats)
+
+  const viewer = useFileViewerStore.getState()
+  viewer.setPinned(ui.viewer.pinned)
+  viewer.setWidth(ui.viewer.width)
+  // The empty-floating auto-collapse invariant outranks the snapshot: an
+  // unpinned viewer with zero open tabs recedes to the docked rail (the same
+  // rule closeFile/closeAllFiles/restoreProjectFiles enforce), so a restore
+  // can never float an empty panel over the chat.
+  viewer.setCollapsed(ui.viewer.collapsed || (!ui.viewer.pinned && viewer.openTabs.length === 0))
+
   useInputModeStore.setState({
     mode: ui.inputMode.mode,
     height: ui.inputMode.height,
@@ -198,8 +249,8 @@ async function runActivation(switchProjectWithState: ProjectSwitcher, tabId: str
   }
 
   // 3. Restore the remembered sync slices (validated fail-closed against the
-  //    live input snapshot — garbage can never reach the stores).
-  restoreSlices(restoreTabUI(rememberedUI, liveInputSnapshot()))
+  //    live scalar slices — garbage can never reach the stores).
+  restoreSlices(restoreTabUI(rememberedUI, liveTabUIFallback()))
 
   // 4. Converge: mirror the live context (restored session ids included)
   //    into the active tab. Content-equal against the remembered snapshot,
@@ -242,7 +293,11 @@ export function createTabEngine(switchProjectWithState: ProjectSwitcher): TabEng
     const detachUI = useUIStore.subscribe((s, prev) => {
       if (
         s.workspaceTabByProject !== prev.workspaceTabByProject ||
-        s.researchSegmentByProject !== prev.researchSegmentByProject
+        s.researchSegmentByProject !== prev.researchSegmentByProject ||
+        s.sidebarCollapsed !== prev.sidebarCollapsed ||
+        s.sidebarWidth !== prev.sidebarWidth ||
+        s.chatSessionListRatio !== prev.chatSessionListRatio ||
+        s.showSessionStats !== prev.showSessionStats
       ) {
         writeBack()
       }
@@ -257,11 +312,21 @@ export function createTabEngine(switchProjectWithState: ProjectSwitcher): TabEng
         writeBack()
       }
     })
+    const detachViewer = useFileViewerStore.subscribe((s, prev) => {
+      if (s.pinned !== prev.pinned || s.collapsed !== prev.collapsed || s.width !== prev.width) {
+        writeBack()
+      }
+    })
+    const detachGitPanel = useGitPanelStore.subscribe((s, prev) => {
+      if (s.activeTabByProject !== prev.activeTabByProject) writeBack()
+    })
     return () => {
       detachProject()
       detachSession()
       detachUI()
       detachInput()
+      detachViewer()
+      detachGitPanel()
     }
   }
 

@@ -34,6 +34,8 @@ vi.mock('@/stores/uiStore', () => ({
   useUIStore: (select: (s: Record<string, unknown>) => unknown) => select(uiMock.state),
   SIDEBAR_MIN: 180,
   SIDEBAR_MAX: 500,
+  // lib/tabSnapshot (via tabStore) builds its default snapshots from these.
+  getDefaultSidebarWidth: () => 280,
 }))
 vi.mock('@/stores/fileViewerStore', () => ({
   useFileViewerStore: (select: (s: Record<string, unknown>) => unknown) =>
@@ -44,6 +46,7 @@ vi.mock('@/stores/fileViewerStore', () => ({
       setWidth: () => {},
       setCollapsed: () => {},
     }),
+  getDefaultViewerWidth: () => 400,
 }))
 
 // --- shell dependencies: stubbed, not under test ---

@@ -53,7 +53,9 @@ const SORT_BY_VALUES = new Set<SortBy>(['path', 'status', 'extension'])
 const GROUP_BY_VALUES = new Set<GroupBy>(['none', 'status', 'directory'])
 
 /** Valid GitPanelTab values — used by persist `merge` to validate localStorage. */
-const GIT_PANEL_TAB_VALUES = new Set<GitPanelTab>(['files', 'changes', 'history'])
+// Exported for the tab-snapshot validation in lib/tabSnapshot (same
+// single-source-of-truth contract as uiStore's WORKSPACE_TAB_VALUES).
+export const GIT_PANEL_TAB_VALUES = new Set<GitPanelTab>(['files', 'changes', 'history'])
 
 /**
  * Per-project state for the commit box: the draft message, the AI-generation

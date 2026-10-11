@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import {
   createDefaultTabUI,
+  fallbackFromTabUI,
   isSameTabUI,
   sanitizeTabUI,
   type TabUIState,
@@ -156,8 +157,12 @@ export const useTabStore = create<TabState & TabActions>()((set) => {
         if (active === undefined) return s
         const projectId = patch.projectId !== undefined ? patch.projectId : active.projectId
         const sessionId = patch.sessionId !== undefined ? patch.sessionId : active.sessionId
+        // Re-sanitize against the active tab's own stored snapshot: every
+        // scalar slice (input/sidebar/viewer/ratio/stats) falls back to what
+        // the tab already remembers, so a partial payload never wipes a
+        // remembered value with a boot default.
         const sanitized =
-          patch.ui !== undefined ? sanitizeTabUI(patch.ui, active.ui.inputMode) : active.ui
+          patch.ui !== undefined ? sanitizeTabUI(patch.ui, fallbackFromTabUI(active.ui)) : active.ui
         // A content-equal snapshot keeps the stored reference (no-op stays a
         // reference-stable no-op even when the caller re-captured the slices).
         const ui = sanitized !== active.ui && isSameTabUI(sanitized, active.ui) ? active.ui : sanitized

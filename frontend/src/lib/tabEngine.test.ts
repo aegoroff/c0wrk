@@ -13,12 +13,14 @@ vi.mock('@/lib/logger', () => ({
 const { saveProjectActiveSessionMock } = vi.hoisted(() => ({ saveProjectActiveSessionMock: vi.fn() }))
 vi.mock('@/api/projects', () => ({ saveProjectActiveSession: saveProjectActiveSessionMock }))
 
-import { createTabEngine, type TabEngine } from './tabEngine'
+import { captureLiveUI, createTabEngine, type TabEngine } from './tabEngine'
+import { useFileViewerStore, getDefaultViewerWidth } from '@/stores/fileViewerStore'
+import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { createTab, useTabStore, type TabInit } from '@/stores/tabStore'
-import { useUIStore } from '@/stores/uiStore'
+import { useUIStore, getDefaultSidebarWidth } from '@/stores/uiStore'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
 
 const NO_PROJECT_ID = '__no_project__'
@@ -97,8 +99,29 @@ function resetStores(): void {
     activeSessionId: 's1',
     selectSession: realSelectSession,
   })
-  useUIStore.setState({ workspaceTabByProject: {}, researchSegmentByProject: {}, tabsEnabled: false })
+  useUIStore.setState({
+    workspaceTabByProject: {},
+    researchSegmentByProject: {},
+    tabsEnabled: false,
+    // The scalar shell slices reset to the stores' own boot defaults so a
+    // fresh default tab's createDefaultTabUI snapshot stays content-equal
+    // with a live capture (the reference-stable no-op contract).
+    sidebarCollapsed: false,
+    sidebarWidth: getDefaultSidebarWidth(),
+    chatSessionListRatio: 0.5,
+    showSessionStats: false,
+  })
   useInputModeStore.setState({ mode: 'chat', height: 200, collapsedHeight: 200, isExpanded: false })
+  useFileViewerStore.setState({
+    files: {},
+    openTabs: [],
+    activeFile: null,
+    fileIcons: {},
+    width: getDefaultViewerWidth(),
+    collapsed: false,
+    pinned: false,
+  })
+  useGitPanelStore.setState({ activeTabByProject: {} })
   selectSessionMock = vi.fn<(id: string | null, projectId?: string) => void>()
   switchMock.mockReset()
   switchMock.mockResolvedValue(undefined)
@@ -276,6 +299,96 @@ describe('tabEngine.activate — same project', () => {
       setStateSpy.mock.invocationCallOrder[0]!,
     )
     setStateSpy.mockRestore()
+  })
+})
+
+describe('tabEngine.activate — v2 shell slices', () => {
+  it('restores the remembered sidebar/viewer/git-panel/chat toggles into the live stores', async () => {
+    const { bId } = twoTabs({
+      projectId: 'p1',
+      sessionId: 's1',
+      ui: {
+        sidebar: { collapsed: true, width: 300 },
+        viewer: { pinned: true, collapsed: false, width: 640 },
+        gitPanelTabByProject: { p1: 'history' },
+        chatSessionListRatio: 0.3,
+        showSessionStats: true,
+      },
+    })
+
+    await engine.activate(bId)
+
+    const ui = useUIStore.getState()
+    expect(ui.sidebarCollapsed).toBe(true)
+    expect(ui.sidebarWidth).toBe(300)
+    expect(ui.chatSessionListRatio).toBe(0.3)
+    expect(ui.showSessionStats).toBe(true)
+    const viewer = useFileViewerStore.getState()
+    expect(viewer.pinned).toBe(true)
+    expect(viewer.collapsed).toBe(false)
+    expect(viewer.width).toBe(640)
+    expect(useGitPanelStore.getState().activeTabByProject).toEqual({ p1: 'history' })
+  })
+
+  it('merges the remembered git-panel map entry-by-entry without erasing other projects', async () => {
+    useGitPanelStore.setState({ activeTabByProject: { p1: 'changes' } })
+    const { bId } = twoTabs({
+      projectId: 'p1',
+      sessionId: 's1',
+      ui: { gitPanelTabByProject: { p2: 'files' } },
+    })
+
+    await engine.activate(bId)
+
+    expect(useGitPanelStore.getState().activeTabByProject).toEqual({ p1: 'changes', p2: 'files' })
+  })
+
+  it('the empty-floating invariant outranks the snapshot: an unpinned restore cannot float an empty viewer', async () => {
+    // Live viewer: unpinned with NO open tabs (the docked-rail state).
+    useFileViewerStore.setState({ openTabs: [], activeFile: null, pinned: false, collapsed: true })
+    const { bId } = twoTabs({
+      projectId: 'p1',
+      sessionId: 's1',
+      ui: { viewer: { pinned: false, collapsed: false, width: 640 } },
+    })
+
+    await engine.activate(bId)
+
+    const viewer = useFileViewerStore.getState()
+    expect(viewer.pinned).toBe(false)
+    expect(viewer.width).toBe(640)
+    // …but the viewer stays collapsed: an unpinned viewer with zero open tabs
+    // recedes to the docked rail, exactly like restoreProjectFiles enforces.
+    expect(viewer.collapsed).toBe(true)
+  })
+
+  it('restores an expanded viewer when the invariant does not apply (tabs are open)', async () => {
+    useFileViewerStore.setState({ openTabs: ['/ws/x.ts'], activeFile: '/ws/x.ts', pinned: false, collapsed: true })
+    const { bId } = twoTabs({
+      projectId: 'p1',
+      sessionId: 's1',
+      ui: { viewer: { pinned: false, collapsed: false, width: 640 } },
+    })
+
+    await engine.activate(bId)
+
+    expect(useFileViewerStore.getState().collapsed).toBe(false)
+  })
+
+  it('captures the live v2 slices into the OUTGOING tab before the flip', async () => {
+    useUIStore.setState({ sidebarCollapsed: true, sidebarWidth: 280, chatSessionListRatio: 0.25, showSessionStats: true })
+    useFileViewerStore.setState({ pinned: true, collapsed: false, width: 720 })
+    useGitPanelStore.setState({ activeTabByProject: { p1: 'changes' } })
+    const { aId, bId } = twoTabs({ projectId: 'p1', sessionId: 's1' })
+
+    await engine.activate(bId)
+
+    const a = tabById(aId)
+    expect(a.ui.sidebar).toEqual({ collapsed: true, width: 280 })
+    expect(a.ui.viewer).toEqual({ pinned: true, collapsed: false, width: 720 })
+    expect(a.ui.gitPanelTabByProject).toEqual({ p1: 'changes' })
+    expect(a.ui.chatSessionListRatio).toBe(0.25)
+    expect(a.ui.showSessionStats).toBe(true)
   })
 })
 
@@ -548,6 +661,30 @@ describe('tabEngine write-back', () => {
     }
   })
 
+  it('mirrors live sidebar/viewer/git-panel/chat-toggle changes into the active tab', () => {
+    const detach = engine.attachWriteBack()
+    try {
+      const tabId = useTabStore.getState().tabs[0]!.id
+
+      useUIStore.getState().setSidebarCollapsed(true)
+      useUIStore.getState().setSidebarWidth(320)
+      useUIStore.getState().setChatSessionListRatio(0.2)
+      useUIStore.getState().setShowSessionStats(true)
+      useFileViewerStore.getState().setPinned(true)
+      useFileViewerStore.getState().setWidth(760)
+      useGitPanelStore.getState().setActiveTab('p1', 'history')
+
+      const tab = tabById(tabId)
+      expect(tab.ui.sidebar).toEqual({ collapsed: true, width: 320 })
+      expect(tab.ui.viewer).toEqual({ pinned: true, collapsed: false, width: 760 })
+      expect(tab.ui.gitPanelTabByProject).toEqual({ p1: 'history' })
+      expect(tab.ui.chatSessionListRatio).toBe(0.2)
+      expect(tab.ui.showSessionStats).toBe(true)
+    } finally {
+      detach()
+    }
+  })
+
   it('works with the flag ON too — the write-back never reads tabsEnabled', async () => {
     useUIStore.setState({ tabsEnabled: true })
     const detach = engine.attachWriteBack()
@@ -604,5 +741,24 @@ describe('tabEngine write-back', () => {
     } finally {
       detach()
     }
+  })
+})
+
+describe('captureLiveUI (the banner-click creation seed)', () => {
+  it('captures the full v2 composition from the live stores', () => {
+    useUIStore.setState({ sidebarCollapsed: true, sidebarWidth: 280, chatSessionListRatio: 0.6, showSessionStats: true })
+    useFileViewerStore.setState({ pinned: true, collapsed: false, width: 720 })
+    useGitPanelStore.setState({ activeTabByProject: { p1: 'history' } })
+    useInputModeStore.setState({ mode: 'terminal', height: 380 })
+
+    const ui = captureLiveUI()
+
+    expect(ui.sidebar).toEqual({ collapsed: true, width: 280 })
+    expect(ui.viewer).toEqual({ pinned: true, collapsed: false, width: 720 })
+    expect(ui.gitPanelTabByProject).toEqual({ p1: 'history' })
+    expect(ui.chatSessionListRatio).toBe(0.6)
+    expect(ui.showSessionStats).toBe(true)
+    expect(ui.inputMode.mode).toBe('terminal')
+    expect(ui.workspaceTabByProject).toEqual({})
   })
 })
