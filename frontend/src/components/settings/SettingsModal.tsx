@@ -269,9 +269,6 @@ export function SettingsModal() {
           <TabsContent value="appearance" className={TAB_CONTENT_CLASS}>
             <div className="space-y-6">
               <ThemeSelector />
-              <div className="border-t border-border pt-4">
-                <TabsSettings />
-              </div>
               <div className="border-t border-border pt-4 flex flex-col gap-6">
                 <UIScaleSelector />
                 {/* FontSettings always renders: its comboboxes are free-text
@@ -279,6 +276,12 @@ export function SettingsModal() {
                     reports no system font the dropdown simply offers Default
                     and the typed input carries the rest. */}
                 <FontSettings />
+              </div>
+              {/* Tabs sits last on the tab: a master switch that reshapes the
+                  whole workspace reads best after the pure appearance knobs
+                  (theme / scale / fonts) above it. */}
+              <div className="border-t border-border pt-4">
+                <TabsSettings />
               </div>
             </div>
           </TabsContent>

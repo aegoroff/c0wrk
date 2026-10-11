@@ -443,7 +443,7 @@ describe('SettingsModal layout: vertical left nav and fixed height', () => {
 })
 
 describe('SettingsModal appearance — Tabs block', () => {
-  it('renders the Tabs switch after Theme and toggles uiStore.tabsEnabled', async () => {
+  it('renders the Tabs switch at the bottom of the tab and toggles uiStore.tabsEnabled', async () => {
     useUIStore.setState({ tabsEnabled: false })
     useSettingsStore.setState({ open: true, activeTab: 'appearance' })
     act(() => {
@@ -452,6 +452,23 @@ describe('SettingsModal appearance — Tabs block', () => {
     await flush()
 
     expect(bannerText()).toContain('Tabs')
+    // Order lock-in: the Tabs section is the LAST block on the Appearance
+    // tab — after the Theme section and the UI Scale + Fonts section — in
+    // the shared space-y-6 stack.
+    const spans = Array.from(document.body.querySelectorAll('span'))
+    const tabsHeader = spans.find((s) => s.textContent === 'Tabs')
+    expect(tabsHeader).toBeDefined()
+    const tabsBlock = tabsHeader!.closest('div.flex.flex-col')
+    expect(tabsBlock).not.toBeNull()
+    const tabsSection = tabsBlock!.parentElement as HTMLElement
+    expect(tabsSection.className).toContain('border-t')
+    const appearanceStack = tabsSection.parentElement as HTMLElement
+    expect(appearanceStack.className).toContain('space-y-6')
+    expect(appearanceStack.lastElementChild).toBe(tabsSection)
+    const prevSection = tabsSection.previousElementSibling
+    expect(prevSection?.textContent).toContain('UI Scale')
+    expect(prevSection?.textContent).toContain('Fonts')
+
     // The Toggle's peer-switch checkbox is the appearance tab's only checkbox.
     const toggle = document.body.querySelector<HTMLInputElement>('input[type="checkbox"]')
     expect(toggle).not.toBeNull()
