@@ -183,7 +183,7 @@ Dark color-scheme. Focus outlines globally suppressed. Custom scrollbar (8px, se
 └──────────────────────────────────────────────────────────┘
 ```
 
-Project switching is orchestrated by `useProjectSwitchState`: it saves source-project UI state through project RPC wrappers (`saveProjectSwitchState`), calls `switchProject`, restores destination tabs/files from `getProjectSwitchState`, and then applies session fallback (saved session → latest session → create session).
+Project switching is orchestrated by `useProjectSwitchState`: it saves source-project UI state through project RPC wrappers (`saveProjectSwitchState`), calls `switchProject`, restores destination tabs/files from `getProjectSwitchState`, and then applies session fallback (saved session → latest session → create session). The saved-session pointer is PROJECT-scoped (one value per project; the No Project pseudo-project is one bucket for all CHAT sessions) — when the switch is driven by the workspace tab engine, the engine re-selects the activating tab's own remembered session on top of whatever the pointer landed on (see [tabs.md](tabs.md) § Activation sequence).
 
 ## Invariants
 

@@ -146,6 +146,23 @@ function twoTabs(bInit?: TabInit): { aId: string; bId: string } {
   return { aId, bId }
 }
 
+/**
+ * selectSession spy that ALSO applies the real store effect (activeSessionId
+ * move; the RPC persist is the module-level mock). Needed where a test
+ * asserts the tab's converged context after activation: the engine's final
+ * write-back mirrors the LIVE active id into the tab, so a spy-only
+ * selectSession would leave the live session on the switch flow's landed
+ * value instead of the re-selected one.
+ */
+function spyRealSelectSession(): void {
+  useSessionStore.setState({
+    selectSession: (id: string | null, projectId?: string) => {
+      selectSessionMock(id, projectId)
+      realSelectSession(id, projectId)
+    },
+  })
+}
+
 // --- Console hygiene: zero console noise across the whole file ---
 
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>
@@ -401,7 +418,7 @@ describe('tabEngine.activate — cross project', () => {
     })
   }
 
-  it('switches the project and never calls selectSession (the switch flow owns session restore)', async () => {
+  it('switches the project; a session-less tab keeps the switch flow\'s restore (no selectSession)', async () => {
     switchMovesProject()
     useSessionStore.setState({ selectSession: selectSessionMock })
     const { bId } = twoTabs({ projectId: 'p2', sessionId: null })
@@ -414,6 +431,128 @@ describe('tabEngine.activate — cross project', () => {
     // Final write-back converges the tab with the (session-less) live context.
     expect(tabById(bId).projectId).toBe('p2')
     expect(tabById(bId).sessionId).toBeNull()
+  })
+
+  it('restores the tab\'s OWN remembered session after the switch (the project\'s shared pointer does not win)', async () => {
+    // The switch flow lands on the project's SHARED saved-session pointer —
+    // deliberately a DIFFERENT session than the tab remembers (the shape
+    // behind the same-project tab-convergence bug).
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      useSessionStore.getState().setSessions([
+        makeSession({ id: 'p2-own', project_id: 'p2' }),
+        makeSession({ id: 'p2-pointer', project_id: 'p2' }),
+      ])
+      useSessionStore.getState().setActiveSessionId('p2-pointer')
+    })
+    spyRealSelectSession()
+    const { bId } = twoTabs({ projectId: 'p2', sessionId: 'p2-own' })
+
+    await engine.activate(bId)
+
+    expect(selectSessionMock).toHaveBeenCalledExactlyOnceWith('p2-own', 'p2')
+    expect(useSessionStore.getState().activeSessionId).toBe('p2-own')
+    expect(tabById(bId).sessionId).toBe('p2-own')
+  })
+
+  it('does NOT re-select when the switch already landed on the remembered session (no redundant persist)', async () => {
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      useSessionStore.getState().setSessions([makeSession({ id: 's9', project_id: 'p2' })])
+      useSessionStore.getState().setActiveSessionId('s9')
+    })
+    useSessionStore.setState({ selectSession: selectSessionMock })
+    const { bId } = twoTabs({ projectId: 'p2', sessionId: 's9' })
+
+    await engine.activate(bId)
+
+    expect(selectSessionMock).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().activeSessionId).toBe('s9')
+  })
+
+  it('drops a remembered session that no longer exists in the destination project', async () => {
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      useSessionStore.getState().setSessions([makeSession({ id: 'p2-live', project_id: 'p2' })])
+      useSessionStore.getState().setActiveSessionId('p2-live')
+    })
+    useSessionStore.setState({ selectSession: selectSessionMock })
+    const { bId } = twoTabs({ projectId: 'p2', sessionId: 'p2-deleted' })
+
+    await engine.activate(bId)
+
+    expect(selectSessionMock).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().activeSessionId).toBe('p2-live')
+    // The dead id is gone from the tab; it converged with the live session.
+    expect(tabById(bId).sessionId).toBe('p2-live')
+  })
+
+  it('two same-project tabs keep their own sessions across a CHAT round trip (no convergence onto the shared pointer)', async () => {
+    spyRealSelectSession()
+    const aId = useTabStore.getState().tabs[0]!.id
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+    const bId = useTabStore.getState().addTab({ projectId: 'p1', sessionId: 's2' })
+    const cId = useTabStore.getState().addTab({ projectId: null, sessionId: null })
+    useTabStore.getState().activateTab(aId)
+
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      if (id === NO_PROJECT_ID) {
+        useSessionStore.getState().setSessions([makeSession({ id: 'np1', project_id: NO_PROJECT_ID })])
+        useSessionStore.getState().setActiveSessionId('np1')
+        return
+      }
+      // Switching BACK to p1: the shared saved-session pointer lands on s2
+      // (it was persisted while tab B was last live) — NOT tab A's s1.
+      useSessionStore.getState().setSessions([
+        makeSession({ id: 's1', project_id: 'p1' }),
+        makeSession({ id: 's2', project_id: 'p1' }),
+      ])
+      useSessionStore.getState().setActiveSessionId('s2')
+    })
+
+    await engine.activate(cId)
+    await engine.activate(aId)
+
+    // The engine re-selected tab A's OWN session over the landed pointer.
+    expect(selectSessionMock).toHaveBeenCalledExactlyOnceWith('s1', 'p1')
+    expect(useProjectStore.getState().activeProjectId).toBe('p1')
+    expect(useSessionStore.getState().activeSessionId).toBe('s1')
+    expect(tabById(aId).sessionId).toBe('s1')
+    // Tab B's memory is untouched — activating it later must not land on s1.
+    expect(tabById(bId).sessionId).toBe('s2')
+  })
+
+  it('two CHAT tabs keep their own sessions (the single CHAT saved-session bucket does not win)', async () => {
+    spyRealSelectSession()
+    const aId = useTabStore.getState().tabs[0]!.id
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+    const c1Id = useTabStore.getState().addTab({ projectId: null, sessionId: 'np1' })
+    const c2Id = useTabStore.getState().addTab({ projectId: null, sessionId: 'np2' })
+    useTabStore.getState().activateTab(aId)
+
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      if (id === NO_PROJECT_ID) {
+        useSessionStore.getState().setSessions([
+          makeSession({ id: 'np1', project_id: NO_PROJECT_ID }),
+          makeSession({ id: 'np2', project_id: NO_PROJECT_ID }),
+        ])
+        // The single CHAT pointer lands on np1 (the OTHER chat tab's session).
+        useSessionStore.getState().setActiveSessionId('np1')
+        return
+      }
+      useSessionStore.getState().setSessions([makeSession({ id: 's1', project_id: 'p1' })])
+      useSessionStore.getState().setActiveSessionId('s1')
+    })
+
+    await engine.activate(c2Id)
+
+    expect(selectSessionMock).toHaveBeenCalledExactlyOnceWith('np2', NO_PROJECT_ID)
+    expect(useSessionStore.getState().activeSessionId).toBe('np2')
+    expect(tabById(c2Id).sessionId).toBe('np2')
+    // The other CHAT tab's memory is untouched.
+    expect(tabById(c1Id).sessionId).toBe('np1')
   })
 
   it('flips activeTabId optimistically: the tab is active while the switch is still in flight', async () => {
@@ -484,10 +623,14 @@ describe('tabEngine.activate — cross project', () => {
 
   it('a tab whose project was deleted is retargeted to the CHAT pseudo-project and activated there', async () => {
     switchMovesProject()
+    useSessionStore.setState({ selectSession: selectSessionMock })
     const { bId } = twoTabs({ projectId: 'deleted-project', sessionId: 'ghost' })
 
     await engine.activate(bId)
 
+    // The retarget clears the remembered session — the ghost id must not be
+    // re-selected into the CHAT pseudo-project.
+    expect(selectSessionMock).not.toHaveBeenCalled()
     expect(switchMock).toHaveBeenCalledExactlyOnceWith(NO_PROJECT_ID)
     expect(useProjectStore.getState().activeProjectId).toBe(NO_PROJECT_ID)
     // The stale project/session references were reset; the tab converged with CHAT.

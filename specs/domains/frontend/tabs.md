@@ -60,7 +60,7 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
 
 1. **Capture** — `writeBack()` mirrors the live context into the outgoing tab while it is still active.
 2. **Optimistic flip** — `activateTab(tabId)` paints the incoming tab immediately; the incoming tab's remembered `ui` snapshot is copied BEFORE any await, so a mid-switch write-back (the incoming tab is now active and the subscriptions fire) cannot overwrite what the tab remembered.
-3. **Context move** — different project: `switchProjectWithState(dest)` (the switch flow owns the session restore: saved session → latest → fresh), with `null` resolving to the No Project pseudo-project entry; same project: `selectSession(sessionId)` when the session differs.
+3. **Context move** — different project: `switchProjectWithState(dest)` first lands the workspace on the project's SHARED saved-session pointer (saved session → latest → fresh), with `null` resolving to the No Project pseudo-project entry; the engine then restores the tab's OWN remembered session over that landed pointer (same contract as the same-project branch: already-landed is a no-op, a session missing from the destination list is dropped, a live one is `selectSession`-ed under the resolved project). The shared pointer is one value per project — and the CHAT pseudo-project is one bucket for every CHAT tab — so without this re-selection a round trip through another mode would converge same-project (or CHAT) tabs onto one session. Same project: `selectSession(sessionId)` when the session differs.
 4. **Restore** — the remembered slices are applied to the live stores: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), and the scalar shell slices (sidebar, viewer geometry, input panel, ratio, stats) are written through their store setters, the viewer under the empty-floating invariant.
 5. **Converge** — a final `writeBack()` mirrors whatever the context move landed on (restored session included) into the now-active tab; content-equal against the remembered snapshot, so a clean activation is a reference-stable no-op.
 
@@ -115,7 +115,7 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 | --------- | -------- |
 | Tab's project was deleted | The tab retargets to the CHAT pseudo-project (session cleared) and completes activation there |
 | Tab's project is `null` (CHAT) | Switches to the No Project pseudo-project entry |
-| Tab's session was deleted | The dead id is dropped from the tab; the live session stays put |
+| Tab's session was deleted | The dead id is dropped from the tab; the live session stays put — in BOTH the same-project branch and the cross-project branch (checked against the destination list after the switch) |
 | `activate` on the already-active id | No-op (nothing captured, nothing restored) |
 | Tab closed while its activation sat in the queue | No-op |
 | No Project entry unavailable | The activation fails and rolls back (see Error Handling) |

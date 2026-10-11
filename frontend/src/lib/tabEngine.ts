@@ -215,11 +215,33 @@ async function runActivation(switchProjectWithState: ProjectSwitcher, tabId: str
         }
         switchTarget = chat.id
       }
-      // Different project (null = CHAT pseudo-project): the switch flow owns
-      // the session restore (saved session → latest → fresh session), so no
-      // explicit session selection happens here; the final write-back
-      // converges the tab with whatever the restore landed on.
+      // Different project (null = CHAT pseudo-project): the switch flow first
+      // lands the workspace on the project's SHARED saved-session pointer
+      // (saved session → latest → fresh session). That pointer is one value
+      // per project — and the CHAT pseudo-project is one bucket for every
+      // CHAT tab — so it cannot distinguish two same-project tabs. The tab's
+      // OWN remembered session is restored explicitly below, mirroring the
+      // same-project branch, so a round trip through another mode never
+      // converges same-project (or CHAT) tabs onto one session. The final
+      // write-back then converges the tab with whatever actually landed.
       await switchProjectWithState(switchTarget)
+
+      // A deleted-project retarget cleared the tab's session above (the
+      // remembered id belonged to a project that no longer exists) — the
+      // switch flow's restore stands untouched for that edge.
+      if (target.sessionId !== null && destProjectId === target.projectId) {
+        const sessions = useSessionStore.getState()
+        if (target.sessionId !== sessions.activeSessionId) {
+          const deleted =
+            sessions.sessions !== null &&
+            !sessions.sessions.some((s) => s.id === target.sessionId)
+          if (deleted) {
+            useTabStore.getState().updateActiveContext({ sessionId: null })
+          } else {
+            sessions.selectSession(target.sessionId, switchTarget)
+          }
+        }
+      }
     } else {
       // Same project: only the session may need to move. A deleted session is
       // dropped from the tab instead of being force-selected; the live
