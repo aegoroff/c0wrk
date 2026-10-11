@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Download, RefreshCw, Check, AlertCircle, ShieldAlert, Sparkles } from 'lucide-react'
+import { ArrowUpCircle, Download, RefreshCw, Check, AlertCircle, ShieldAlert, Sparkles } from 'lucide-react'
 import { checkForUpdates, getUpdateSettings, setUpdateSettings } from '@/api/updater'
 import type { UpdateSettings as UpdateSettingsData } from '@/api/updater'
 import { DownloadProgressBar } from '@/components/update/DownloadProgressBar'
@@ -110,7 +110,10 @@ export function UpdateSettings() {
 
   return (
     <div className="border-t border-border pt-4">
-      <h3 className="mb-3 text-sm font-medium text-foreground">Updates</h3>
+      <h3 className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
+        <ArrowUpCircle className="h-4 w-4 text-muted-foreground" />
+        Updates
+      </h3>
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div>

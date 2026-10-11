@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { Type } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StringCombobox } from '@/components/ui/StringCombobox'
 import { listFontFamilies } from '@/api/fonts'
@@ -244,7 +245,10 @@ export function FontSettings() {
   return (
     <div className="flex flex-col gap-3" data-testid="font-settings">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">Fonts</span>
+        <div className="flex items-center gap-2">
+          <Type className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm font-medium">Fonts</span>
+        </div>
         <Button
           variant="outline"
           size="sm"

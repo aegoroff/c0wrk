@@ -234,6 +234,10 @@ export function GetBranches() {
   return window['go']['desktop']['App']['GetBranches']();
 }
 
+export function GetCapabilityModes() {
+  return window['go']['desktop']['App']['GetCapabilityModes']();
+}
+
 export function GetChatGPTAuthStatus() {
   return window['go']['desktop']['App']['GetChatGPTAuthStatus']();
 }
@@ -860,6 +864,10 @@ export function UnstageFile(arg1) {
 
 export function UnwatchDirectory(arg1) {
   return window['go']['desktop']['App']['UnwatchDirectory'](arg1);
+}
+
+export function UpdateCapabilityModes(arg1, arg2) {
+  return window['go']['desktop']['App']['UpdateCapabilityModes'](arg1, arg2);
 }
 
 export function UpdateExperimentalFeatures(arg1) {

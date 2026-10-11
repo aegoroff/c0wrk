@@ -1,4 +1,5 @@
 import { useCallback } from 'react'
+import { ZoomIn } from 'lucide-react'
 import { EditableCombobox } from '@/components/ui/EditableCombobox'
 import { useUiScaleStore, UI_SCALE_MIN, UI_SCALE_MAX } from '@/stores/uiScaleStore'
 
@@ -25,7 +26,8 @@ export function UIScaleSelector() {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <ZoomIn className="h-4 w-4 text-muted-foreground" />
         <span className="text-sm font-medium">UI Scale</span>
       </div>
       {/*

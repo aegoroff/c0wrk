@@ -124,6 +124,8 @@ export function GetBranchBases():Promise<Array<workspace.BranchBase>>;
 
 export function GetBranches():Promise<Array<workspace.Branch>>;
 
+export function GetCapabilityModes():Promise<backend.CapabilitiesInfo>;
+
 export function GetChatGPTAuthStatus():Promise<backend.ChatGPTAuthStatusResponse>;
 
 export function GetChatGPTModelPreset():Promise<backend.ChatGPTModelPresetResponse>;
@@ -437,6 +439,8 @@ export function UnstageAll():Promise<void>;
 export function UnstageFile(arg1:string):Promise<void>;
 
 export function UnwatchDirectory(arg1:string):Promise<void>;
+
+export function UpdateCapabilityModes(arg1:string,arg2:Record<string, backend.CapabilityModesInfo>):Promise<void>;
 
 export function UpdateExperimentalFeatures(arg1:boolean):Promise<void>;
 
