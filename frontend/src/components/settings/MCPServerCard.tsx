@@ -2,16 +2,9 @@ import { ChevronDown, ChevronRight, CheckCircle2, AlertCircle, TriangleAlert, Ci
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Combobox } from '@/components/ui/combobox'
-import type { MCPServerConfig, MCPServerStatus, ToolInfo } from '@/types/models'
-
-type ServerMode = NonNullable<MCPServerConfig['mode']>
-const MODE_OPTIONS = ['auto', 'manual', 'disabled'].map((value) => ({ value, label: value }))
-const MODE_EXPLANATIONS: Record<ServerMode, string> = {
-  auto: 'Connects at startup; tools are always available.',
-  manual: 'Connects at startup; tools are available for a task only after a /server-name or /mcp: server-name mention.',
-  disabled: 'Never connects or starts a process; configuration is kept.',
-}
+import { CapabilityModeExplanations, CapabilityModeSelect } from './CapabilityModeSelect'
+import { isDisabledInBothContexts, isManualAnywhere } from '@/lib/capabilityModes'
+import type { MCPServerMode, MCPServerStatus, ToolInfo } from '@/types/models'
 
 interface MCPServerCardProps {
   server: MCPServerStatus
@@ -20,12 +13,16 @@ interface MCPServerCardProps {
   onToggleExpand: () => void
   onEdit: () => void
   onDelete: () => void
-  mode: ServerMode
+  /** Configured activation mode for CHAT sessions (capabilities.mcp). */
+  chatMode: MCPServerMode
+  /** Configured activation mode for CODE sessions (capabilities.mcp). */
+  codeMode: MCPServerMode
   isSaving: boolean
-  onModeChange: (mode: ServerMode) => void
+  onChatModeChange: (mode: MCPServerMode) => void
+  onCodeModeChange: (mode: MCPServerMode) => void
 }
 
-export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit, onDelete, mode, isSaving, onModeChange }: MCPServerCardProps) {
+export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit, onDelete, chatMode, codeMode, isSaving, onChatModeChange, onCodeModeChange }: MCPServerCardProps) {
   // The "_gateway" sentinel is a synthetic gateway-wide entry produced by
   // GetMCPStatus — NOT a real, user-configured server. It surfaces two
   // transient states and must never reach the editable/deletable Collapsible:
@@ -61,6 +58,12 @@ export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit,
     )
   }
 
+  // The backend neutralizes the live status of a server disabled in BOTH
+  // contexts (the only never-dialed combination) — mirror that on the card:
+  // neutral icon, no red state. A single disabled context keeps the server
+  // live for the other one, so its status stays meaningful.
+  const neutralDisabled = isDisabledInBothContexts(chatMode, codeMode)
+
   return (
     <Collapsible open={expanded} onOpenChange={onToggleExpand}>
       <div className="border rounded-lg overflow-hidden">
@@ -70,7 +73,7 @@ export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit,
               ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
               : <ChevronRight className="h-4 w-4 text-muted-foreground" />
             }
-            {server.mode === 'disabled'
+            {neutralDisabled
               ? <CircleOff className="h-4 w-4 text-muted-foreground" />
               : server.connected
                 ? (server.unhealthy
@@ -79,16 +82,17 @@ export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit,
                 : <AlertCircle className="h-4 w-4 text-destructive" />
             }
             <span className="font-medium text-sm flex-1">{server.name}</span>
-            {/* Mode badge: only the non-default modes carry one — "auto" is
+            {/* Mode badges: only the non-default modes carry one — "auto" is
                 the implicit default and would be noise on every card. Manual
-                is the mention-driven mode, disabled is inert-by-design (and
-                renders neutrally: no red state, see the icon above). */}
-            {server.mode === 'manual' && (
+                (in either context) is the mention-driven mode; disabled-in-
+                both is inert-by-design (and renders neutrally: no red state,
+                see the icon above). */}
+            {isManualAnywhere(chatMode, codeMode) && (
               <Badge variant="outline" className="text-xs text-info border-info/50 gap-1">
                 manual
               </Badge>
             )}
-            {server.mode === 'disabled' && (
+            {neutralDisabled && (
               <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
                 disabled
               </Badge>
@@ -148,18 +152,24 @@ export function MCPServerCard({ server, tools, expanded, onToggleExpand, onEdit,
                 <Trash2 className="h-3 w-3 mr-1" />
                 Delete
               </Button>
-              <Combobox
-                ariaLabel={`${server.name} activation mode`}
-                value={mode}
-                options={MODE_OPTIONS}
+              {/* One activation selector per session type: chat_mode gates
+                  CHAT sessions, code_mode gates CODE sessions. */}
+              <CapabilityModeSelect
+                name={server.name}
+                context="chat"
+                mode={chatMode}
                 disabled={isSaving}
-                onChange={(value) => onModeChange(value as ServerMode)}
-                fitToOptions
-                contentClassName="min-w-36"
-                className="h-8 px-2 text-xs"
+                onChange={onChatModeChange}
               />
-              <span className="text-xs text-muted-foreground flex-1 min-w-[180px]">{MODE_EXPLANATIONS[mode]}</span>
+              <CapabilityModeSelect
+                name={server.name}
+                context="code"
+                mode={codeMode}
+                disabled={isSaving}
+                onChange={onCodeModeChange}
+              />
             </div>
+            <CapabilityModeExplanations chatMode={chatMode} codeMode={codeMode} />
           </div>
         </CollapsibleContent>
       </div>

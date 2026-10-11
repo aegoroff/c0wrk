@@ -140,30 +140,36 @@ describe('MCPServerForm timeout fields', () => {
   })
 })
 
-// Activation is managed on the card; editing transport details must preserve it.
-describe('MCPServerForm activation mode preservation', () => {
-  it('has no activation controls and creates new servers in auto mode', async () => {
+// Activation modes live in the capabilities section, not on the server
+// config — the form edits transport details only and must never (re)introduce
+// a per-server mode key into the payload.
+describe('MCPServerForm payload has no activation mode', () => {
+  it('has no activation controls and creates a mode-free config for new servers', async () => {
     const onSave = vi.fn(async () => null)
     render({ onSave })
     expect(document.body.textContent).not.toContain('Activation Mode')
     expect(document.querySelector('[aria-label*="activation"]')).toBeNull()
+    expect(document.querySelector('[aria-label$="chat mode"]')).toBeNull()
+    expect(document.querySelector('[aria-label$="code mode"]')).toBeNull()
     typeInto(nameInput()!, 'new-server')
     await act(async () => { saveButton()!.click() })
-    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
-      'new-server': expect.objectContaining({ mode: 'auto' }),
+    expect(onSave).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      'new-server': expect.not.objectContaining({ mode: expect.anything() }),
     }), null)
   })
 
-  it.each(['auto', 'manual', 'disabled', undefined] as const)('preserves stored mode %s when saving an existing server', async (mode) => {
-    const cfg: MCPServerConfig = {
+  it('drops a stray legacy mode key when saving an existing server', async () => {
+    const cfg = {
       transport: 'stdio', command: 'cmd', args: [], env: {}, url: '', headers: {},
-      timeout: '30s', call_timeout: '2m', mode,
-    }
-    const onSave = vi.fn(async () => null)
+      timeout: '30s', call_timeout: '2m', mode: 'manual',
+    } as MCPServerConfig
+    const onSave = vi.fn<(config: Record<string, MCPServerConfig>, editName: string | null) => Promise<string | null>>(async () => null)
     render({ editingName: 'srv', serverConfigs: { srv: cfg }, editServer: { name: 'srv', transport: 'stdio' }, onSave })
     expect(document.body.textContent).not.toContain('Activation Mode')
     typeInto(timeoutInputs()[0]!, '45s')
     await act(async () => { saveButton()!.click() })
-    expect(onSave).toHaveBeenCalledWith({ srv: { ...cfg, timeout: '45s', mode: mode ?? 'auto' } }, 'srv')
+    expect(onSave).toHaveBeenCalledExactlyOnceWith({ srv: { transport: 'stdio', command: 'cmd', args: [], env: {}, url: '', headers: {}, timeout: '45s', call_timeout: '2m' } }, 'srv')
+    const saved = onSave.mock.calls[0]![0] as Record<string, MCPServerConfig>
+    expect(saved['srv']).not.toHaveProperty('mode')
   })
 })

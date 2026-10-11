@@ -23,6 +23,7 @@ type appBuilder interface {
 	UpdateModelOverrides(*core.BuilderConfig)
 	UpdateSearchTool(*core.BuilderConfig)
 	UpdateSecurityPolicies(*core.BuilderConfig)
+	UpdateCapabilities(*core.BuilderConfig)
 	UpdateShellBlocklist(*core.BuilderConfig) error
 	ReconfigureMCP(context.Context, *core.BuilderConfig) error
 	ListProviderModels(context.Context, string, *core.BuilderConfig) ([]string, error)

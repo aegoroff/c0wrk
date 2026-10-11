@@ -535,16 +535,23 @@ or task execution. A legacy task with no mention rows loads successfully as
 empty. Names survive pause, continuation and restart; a fresh task inherits
 none of another task's selections.
 
-The builder publishes a copied current mode map on accepted reconfiguration
-before fallible gateway readiness/network reconciliation. Preparation reads
-that map exactly once (direct constructors without a resolver use the static
-mode map), derives the gated complement of `auto ∪ (manual ∩ mentioned)`, and
-replaces both mention and gate context values even when empty. Resume prepares
-before `resumePausedWork` and `resumeUnits`; the wave, delegated subagents
+The builder publishes a copied current mode map (per-context chat/code pairs)
+on accepted reconfiguration before fallible gateway readiness/network
+reconciliation. Preparation reads that map exactly once (direct constructors
+without a resolver use the static mode map), resolves the session's capability
+context — CHAT for No Project, CODE for a real project — and projects the
+pairs onto that context's flat mode map, then derives the gated complement of
+`auto ∪ (manual ∩ mentioned)` **in that context** and replaces both mention
+and gate context values even when empty. Resume prepares before
+`resumePausedWork` and `resumeUnits`; the wave, delegated subagents
 (including `all` and MCP-group grants), E2S catalog, Conductor, verifier and
 registry dispatch inherit one entry's gate. In-flight contexts stay unchanged;
-settings changes take effect at the next entry, and a persisted name does not
-override a current `disabled` mode.
+settings changes (and a chat↔code promotion) take effect at the next entry,
+and a persisted name does not override a `disabled` mode in the session's
+context. Skills and agent profiles ride the same per-entry snapshots
+(`attachCapabilitySnapshots`): manual stays mentionable, disabled mentions are
+discarded and disabled agents refuse delegation (see
+[capabilities.md](capabilities.md)).
 
 Durable load, union-write or reload failures return `ErrMCPAuthorizationState`
 before task work. The backend preserves the same task for retry and excludes
@@ -1252,7 +1259,7 @@ type HandleResult struct {
   Workspace Binding), and deletion never resurrects: `Manager.DeleteSession`
   refuses sessions that are not live in memory instead of restoring them.
 - Task-owned MCP server names accumulate monotonically in durable state and survive restart; legacy state is empty, fork copies are independent and task/session deletion cascades mention rows
-- Every send/resume prepares durable MCP intent and one current mode snapshot before task work, including the plan/delegate auto-resume wave; `ErrMCPAuthorizationState` preserves the task for retry without memory or fresh-task fallback
+- Every send/resume prepares durable MCP intent and one current mode snapshot — projected through the session's chat/code context — before task work, including the plan/delegate auto-resume wave; `ErrMCPAuthorizationState` preserves the task for retry without memory or fresh-task fallback
 - Session state survives app restart (SQLite persistence)
 - Project switch session restore order is deterministic: valid (non-archived) saved session for destination project, otherwise latest non-archived destination session, otherwise new destination session. Archived sessions are never auto-selected — a saved selection pointing at one resolves to empty and falls through to the latest-live fallback
 - Destination project switch state always persists the resolved `saved_session_id` in `project_ui_state` when project persistence is wired
@@ -1443,7 +1450,9 @@ type HandleResult struct {
 ## Related Specs
 
 - [tool-system/mcp-gateway.md](tool-system/mcp-gateway.md) — durable task selections and current-mode authorization before resume waves
-- [../decisions/077-explicit-mcp-server-mentions.md](../decisions/077-explicit-mcp-server-mentions.md) — task-wide MCP mentions
+- [../decisions/084-per-capability-chat-code-activation-modes.md](../decisions/084-per-capability-chat-code-activation-modes.md) — per-capability chat/code activation modes resolved at each task entry
+- [../decisions/077-explicit-mcp-server-mentions.md](../decisions/077-explicit-mcp-server-mentions.md) — task-wide MCP mentions (superseded by ADR-084 for the mode model; mention durability unchanged)
+- [../domains/capabilities.md](capabilities.md) — cross-kind capability semantics
 - [../contracts/backend-core.md](../contracts/backend-core.md) — synchronous task-intent persistence contract and retry-preserving errors
 - [orchestration/README.md](orchestration/README.md) — orchestration cycle
 - [memory/blackboard.md](memory/blackboard.md) — blackboard persistence

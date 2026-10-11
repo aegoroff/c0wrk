@@ -48,7 +48,13 @@ import (
 // the core layer. The backend.Application wraps it without importing sp4rk.
 type OrchestratorBuilder struct {
 	mu       sync.RWMutex
-	mcpModes map[string]string // immutable snapshots published under mu
+	mcpModes map[string]CapabilityModes // immutable snapshots published under mu
+	// skillModes / agentModes are the capability snapshots for the skill and
+	// agent catalogs (capabilities.skills / capabilities.agents) — the same
+	// immutable-snapshot pattern as mcpModes, read only via the cloning
+	// currentSkillModes / currentAgentModes getters.
+	skillModes map[string]CapabilityModes
+	agentModes map[string]CapabilityModes
 	// reconfigureMu serializes ReconfigureMCP calls end to end. Its reason to
 	// exist is the start branch: two concurrent callers that both find no
 	// gateway would each dial one, and the loser would be orphaned with its
@@ -233,6 +239,8 @@ func NewOrchestratorBuilder(cfg *BuilderConfig, askUserFunc tools.AskUserFunc, p
 		initDone:       make(chan struct{}),
 		mcpDone:        make(chan struct{}),
 		mcpModes:       mcpServerModesFromConfig(cfg),
+		skillModes:     capabilityModesFromConfig(cfg.Capabilities.Skills),
+		agentModes:     capabilityModesFromConfig(cfg.Capabilities.Agents),
 		serviceMetrics: newServiceMetrics(),
 	}
 	// Parent the MCP startup goroutine's context so StopGateway can abort an
@@ -753,6 +761,14 @@ func (b *OrchestratorBuilder) Build(
 		// hidden and rejected at dispatch). Empty map = nothing gated.
 		MCPServerModes:         mcpServerModesFromConfig(cfg),
 		MCPServerModesResolver: b.currentMCPServerModes,
+		// Per-capability skill/agent modes drive the same three-state
+		// semantics over their catalogs: auto = implicit discovery + mentions,
+		// manual = explicit /-mention only, disabled = fully unavailable.
+		// Empty maps gate nothing (zero regression).
+		SkillModes:         capabilityModesFromConfig(cfg.Capabilities.Skills),
+		SkillModesResolver: b.currentSkillModes,
+		AgentModes:         capabilityModesFromConfig(cfg.Capabilities.Agents),
+		AgentModesResolver: b.currentAgentModes,
 	}
 
 	// Create tool result cache (per-session lifetime).

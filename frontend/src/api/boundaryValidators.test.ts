@@ -93,7 +93,7 @@ describe('#88 getMCPServers per-entry object validation', () => {
     }))
     const servers = await getMCPServers()
     expect(Object.keys(servers)).toEqual(['good'])
-    expect(servers['good']).toEqual({ transport: 'stdio', command: 'c', timeout: '', call_timeout: '', mode: 'auto' })
+    expect(servers['good']).toEqual({ transport: 'stdio', command: 'c', timeout: '', call_timeout: '' })
     // The skip is warn-level (the load still succeeds — no error banner in
     // MCPSettings) and names the offending key without logging payloads.
     expect(logger.warn).toHaveBeenCalledTimes(1)
@@ -105,7 +105,7 @@ describe('#88 getMCPServers per-entry object validation', () => {
     mockApp.GetMCPServers = vi.fn(() => Promise.resolve({ srv: { transport: 'stdio', command: 'c' } }))
     const servers = await getMCPServers()
     expect(servers['srv']!.timeout).toBe('')
-    expect(servers['srv']!.mode).toBe('auto')
+    expect(servers['srv']!.call_timeout).toBe('')
     expect(logger.warn).not.toHaveBeenCalled()
   })
 })

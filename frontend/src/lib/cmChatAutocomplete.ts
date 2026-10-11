@@ -7,7 +7,8 @@ import {
 import type { Extension } from '@codemirror/state'
 import { listSkills } from '@/api/skills'
 import { listAgents } from '@/api/agents'
-import { getMCPMentionableServers, isMentionableMCPMode } from '@/api/mcp'
+import { getMCPMentionableServers } from '@/api/mcp'
+import { getCapabilityModes } from '@/api/capabilities'
 import { listDirectory, getSessionWorkspace } from '@/api/workspace'
 import { subscribe } from '@/api/runtime'
 import { logger } from '@/lib/logger'
@@ -17,8 +18,10 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { fuzzyFilter } from '@/lib/fuzzyMatch'
 import { formatFileRefPath } from '@/lib/parseReferences'
+import { isMentionableInContext, mentionableNamesInContext } from './capabilityModes'
+import { activeSessionKind } from './sessionKind'
 import { mentionTooltip, type MentionCompletion } from './cmMentionTooltip'
-import type { SkillDescriptor, AgentDescriptor, MCPMentionableServer, FileEntry } from '@/types/models'
+import type { SkillDescriptor, AgentDescriptor, CapabilitiesInfo, MCPMentionableServer, FileEntry } from '@/types/models'
 
 const DEFAULT_FILE_ICON = '\uf15b'
 const DEFAULT_FOLDER_ICON = '\uf07b'
@@ -36,6 +39,12 @@ let agentsLoaded = false
 
 let mcpCache: MCPMentionableServer[] = []
 let mcpLoaded = false
+
+// The capabilities section (skills/agents activation modes). The MCP modes
+// ride on the mentionable servers themselves; the two file-backed catalogs
+// need this listing to know what is disabled for the active session kind.
+let capsCache: CapabilitiesInfo | null = null
+let capsLoaded = false
 
 let filesCache: FileEntry[] = []
 let filesLoaded = false
@@ -121,6 +130,10 @@ function invalidateMCPCache() {
   mcpLoaded = false
 }
 
+function invalidateCapabilitiesCache() {
+  capsLoaded = false
+}
+
 // Subscribe once to rootPath changes and filesystem/skills events.
 let rootSubActive = false
 function ensureRootSubscription() {
@@ -139,6 +152,7 @@ function ensureRootSubscription() {
       invalidateSkillsCache()
       invalidateAgentsCache()
       invalidateMCPCache()
+      invalidateCapabilitiesCache()
     }
   })
   // Project and session switches change which workspace the backend expects
@@ -154,6 +168,7 @@ function ensureRootSubscription() {
       invalidateSkillsCache()
       invalidateAgentsCache()
       invalidateMCPCache()
+      invalidateCapabilitiesCache()
     }
   })
   let prevSessionId = useSessionStore.getState().activeSessionId
@@ -164,6 +179,7 @@ function ensureRootSubscription() {
       invalidateSkillsCache()
       invalidateAgentsCache()
       invalidateMCPCache()
+      invalidateCapabilitiesCache()
     }
   })
   // Filesystem changes inside the workspace (including project-local skills
@@ -174,6 +190,7 @@ function ensureRootSubscription() {
     invalidateSkillsCache()
     invalidateAgentsCache()
     invalidateMCPCache()
+    invalidateCapabilitiesCache()
   })
   // Global skill directory changes (outside the workspace) invalidate the
   // skills cache only — files and agents are unaffected.
@@ -219,11 +236,36 @@ async function getMCPServers(): Promise<MCPMentionableServer[]> {
   if (mcpLoaded) return mcpCache
   // getMCPMentionableServers degrades to [] on failure (logged there), so a
   // transient RPC hiccup hides the section for one trigger, never blocks it.
-  // Only auto/manual servers are mentionable — a disabled server is inert by
-  // design and must not be offered.
-  mcpCache = (await getMCPMentionableServers()).filter((s) => isMentionableMCPMode(s.mode))
+  // The FULL listing is cached; the per-kind filtering (auto/manual offered,
+  // disabled hidden for the ACTIVE session's kind) happens at use time in
+  // slashSource, so a session switch re-filters without a refetch.
+  mcpCache = await getMCPMentionableServers()
   mcpLoaded = true
   return mcpCache
+}
+
+/**
+ * The capabilities section (skills/agents activation modes). A failure
+ * resolves to null — the callers then filter nothing, because a transient
+ * capabilities hiccup must degrade to "everything offered", never to
+ * silently hiding whole catalogs. (GetCapabilityModes itself only throws on
+ * an RPC failure; a malformed shape is already degraded to empty sections,
+ * which likewise filter nothing — every missing entry reads as auto.)
+ */
+async function getCapabilities(): Promise<CapabilitiesInfo | null> {
+  if (capsLoaded) return capsCache
+  try {
+    capsCache = await getCapabilityModes()
+    capsLoaded = true
+  } catch (err) {
+    logger.warn('completion: GetCapabilityModes failed; offering all skills/agents', err)
+    // A failed REFETCH must not resurrect the previous context's cache: after
+    // an invalidation (project/session switch) the stale modes would keep
+    // filtering the NEW catalogs. null — like the [] siblings above — filters
+    // nothing, and capsLoaded stays false so the next trigger retries.
+    capsCache = null
+  }
+  return capsCache
 }
 
 async function getFiles(): Promise<{ entries: FileEntry[]; root: string | null }> {
@@ -294,8 +336,12 @@ function chatApplyPath(absPath: string, rootPath: string | null, suffix: string,
 // name present in more than one catalog is a collision — every colliding
 // entry is offered in its collision-qualified spelling (`/agent: name`,
 // `/mcp: name`, `/skill: name`, the canonical spaced form) so the applied
-// text is unambiguous on the send path. Only auto/manual MCP servers are
-// offered; a disabled server is inert and hidden.
+// text is unambiguous on the send path. The sets are SESSION-KIND-AWARE:
+// the kind of the ACTIVE session (No Project → chat, a real project → code)
+// picks the capabilities column, so `auto` + `manual` entries are offered
+// and `disabled` ones are hidden — mirroring what the backend would honor
+// for a task started from this input. A session switch re-reads the kind on
+// the next trigger and flips the offered sets.
 async function slashSource(ctx: CompletionContext): Promise<CompletionResult | null> {
   // Scan backward for '/' trigger.
   const line = ctx.state.doc.lineAt(ctx.pos)
@@ -318,17 +364,30 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
   const from = line.from + triggerIdx + 1
   const query = textBefore.slice(triggerIdx + 1)
 
-  const [agents, mcpServers, skills] = await Promise.all([getAgents(), getMCPServers(), getSkills()])
-  const skillNames = new Set(skills.map((s) => s.name))
-  const agentNames = new Set(agents.map((a) => a.name))
-  const mcpNames = new Set(mcpServers.map((s) => s.name))
+  const kind = activeSessionKind()
+  const [agents, mcpServers, skills, caps] = await Promise.all([
+    getAgents(),
+    getMCPServers(),
+    getSkills(),
+    getCapabilities(),
+  ])
+  const visibleAgentNames = new Set(mentionableNamesInContext(agents.map((a) => a.name), caps?.agents, kind))
+  const visibleSkillNames = new Set(mentionableNamesInContext(skills.map((s) => s.name), caps?.skills, kind))
+  const agentNames = visibleAgentNames
+  const skillNames = visibleSkillNames
+  // Collision detection runs over the KIND-VISIBLE sets: a name whose MCP
+  // entry is disabled for the active session's kind no longer collides with
+  // its skill/agent namesake there — the completion then offers the plain
+  // spelling, exactly what the send path would resolve it to.
+  const mcpNames = new Set(mcpServers.filter((m) => isMentionableInContext(kind, m)).map((m) => m.name))
+  const visibleMCPServers = mcpServers.filter((m) => mcpNames.has(m.name))
 
   const options: MentionCompletion[] = []
 
   // Subagents first: section rank 0 orders the section above MCP Servers and
   // Skills, and the array order keeps agents ahead within the unfiltered
   // list.
-  for (const a of fuzzyFilter(query, agents, (a) => a.name)) {
+  for (const a of fuzzyFilter(query, agents.filter((a) => agentNames.has(a.name)), (a) => a.name)) {
     const collides = skillNames.has(a.name) || mcpNames.has(a.name)
     options.push({
       label: collides ? `/agent: ${a.name}` : a.name,
@@ -342,12 +401,15 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
       apply: (collides ? `agent: ${a.name}` : a.name) + ' ',
     })
   }
-  // MCP Servers between Subagents and Skills (rank 1): manual servers are
-  // the mention-triggered ones (the detail says so), auto servers are
-  // always connected but still mentionable to surface the soft directive.
-  for (const m of fuzzyFilter(query, mcpServers, (m) => m.name)) {
+  // MCP Servers between Subagents and Skills (rank 1): the kind-aware filter
+  // above already dropped servers disabled for the active session's kind; a
+  // server parked in `manual` THERE is the mention-triggered one (the detail
+  // says so), an auto server is always connected but still mentionable to
+  // surface the soft directive.
+  for (const m of fuzzyFilter(query, visibleMCPServers, (m) => m.name)) {
     const collides = agentNames.has(m.name) || skillNames.has(m.name)
-    const summary = m.mode === 'manual' ? 'MCP server — mention to enable' : 'MCP server'
+    const manual = (kind === 'chat' ? m.chat_mode : m.code_mode) === 'manual'
+    const summary = manual ? 'MCP server — mention to enable' : 'MCP server'
     options.push({
       label: collides ? `/mcp: ${m.name}` : m.name,
       detail: summary,
@@ -357,7 +419,7 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
       apply: (collides ? `mcp: ${m.name}` : m.name) + ' ',
     })
   }
-  for (const s of fuzzyFilter(query, skills, (s) => s.name)) {
+  for (const s of fuzzyFilter(query, skills.filter((s) => skillNames.has(s.name)), (s) => s.name)) {
     const collides = agentNames.has(s.name) || mcpNames.has(s.name)
     options.push({
       label: collides ? `/skill: ${s.name}` : s.name,

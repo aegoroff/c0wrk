@@ -31,7 +31,13 @@ vi.mock('@/api/agents', () => ({
 }))
 vi.mock('@/api/mcp', () => ({
   getMCPMentionableServers: (...args: unknown[]) => getMCPMentionableServersMock(...args),
-  isMentionableMCPMode: (mode: string) => mode === 'auto' || mode === 'manual',
+  // Pure helper mirrored verbatim: the chip-display predicate (≥1 context) is
+  // what refCatalogs uses for persisted-message kind resolution.
+  isMentionableMCPServer: (s: { chat_mode: string; code_mode: string }) =>
+    s.chat_mode !== 'disabled' || s.code_mode !== 'disabled',
+}))
+vi.mock('@/api/capabilities', () => ({
+  getCapabilityModes: vi.fn().mockResolvedValue({ skills: {}, agents: {}, mcp: {} }),
 }))
 vi.mock('@/api/runtime', () => ({
   subscribe: vi.fn(() => () => {}),

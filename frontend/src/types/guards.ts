@@ -12,6 +12,9 @@ import type {
     ConfigResponse,
     MCPServerStatus,
     MCPMentionableServer,
+    MCPServerMode,
+    CapabilityModes,
+    CapabilitiesInfo,
     AutonomyMode,
     SecuritySettingsResponse,
     ShellExecSettingsResponse,
@@ -191,22 +194,52 @@ export function isConfigResponse(v: unknown): v is ConfigResponse {
 export function isMCPServerStatus(v: unknown): v is MCPServerStatus {
     // `name` is rendered as a React child (MCPServerCard) and `connected`
     // drives the status indicator — type-check both instead of trusting key
-    // presence. (The remaining fields stay presence-only: `tools` is a Go
-    // slice the backend legitimately marshals as null when empty, and the
-    // card tolerates that today.)
-    return isObj(v) && has(v, 'name', 'connected')
+    // presence. The per-context modes key the card's neutral "disabled"
+    // rendering, so both must be present enum members (the backend always
+    // sets them; rejecting here would drop the entry rather than render a
+    // wrong mode). (`tools` stays presence-only: it is a Go slice the
+    // backend legitimately marshals as null when empty.)
+    return isObj(v) && has(v, 'name', 'connected', 'chat_mode', 'code_mode')
         && typeof v.name === 'string'
         && typeof v.connected === 'boolean'
+        && isMCPServerMode(v.chat_mode)
+        && isMCPServerMode(v.code_mode)
 }
 
-/** Validates one GetMCPMentionableServers entry: a name plus a normalized
- *  mode. An unrecognized mode string (older/hand-edited backend payload)
- *  rejects the entry so the caller degrades to "no mentionable servers"
- *  instead of threading an unknown mode into completion filtering. */
+/** Whether v is one of the three per-context capability mode values
+ *  (config.ValidMCPServerMode — the same enum skills/agents/mcp share). */
+export function isMCPServerMode(v: unknown): v is MCPServerMode {
+    return v === 'auto' || v === 'manual' || v === 'disabled'
+}
+
+/** Validates one GetMCPMentionableServers entry: a name plus the normalized
+ *  per-context modes. An unrecognized mode string (older/hand-edited backend
+ *  payload) rejects the entry so the caller degrades to "no mentionable
+ *  servers" instead of threading an unknown mode into completion filtering. */
 export function isMCPMentionableServer(v: unknown): v is MCPMentionableServer {
     return isObj(v)
         && typeof v.name === 'string'
-        && (v.mode === 'auto' || v.mode === 'manual' || v.mode === 'disabled')
+        && isMCPServerMode(v.chat_mode)
+        && isMCPServerMode(v.code_mode)
+}
+
+/** Validates one CapabilitiesInfo entry — both per-context modes are always
+ *  populated canonical enum values on the wire. */
+export function isCapabilityModes(v: unknown): v is CapabilityModes {
+    return isObj(v) && isMCPServerMode(v.chat_mode) && isMCPServerMode(v.code_mode)
+}
+
+/** Validates the GetCapabilityModes payload: all three sections present,
+ *  each a map of name → per-context modes (an empty section is a plain
+ *  empty object, never null). A missing section rejects the whole payload —
+ *  the caller falls back to empty maps rather than half a catalog. */
+export function isCapabilitiesInfo(v: unknown): v is CapabilitiesInfo {
+    if (!isObj(v) || !has(v, 'skills', 'agents', 'mcp')) return false
+    return (['skills', 'agents', 'mcp'] as const).every((section) => {
+        const map = v[section]
+        if (!isObj(map)) return false
+        return Object.values(map).every(isCapabilityModes)
+    })
 }
 
 /** Whether v is one of the three autonomy-mode enum values (config.AutonomyMode*). */

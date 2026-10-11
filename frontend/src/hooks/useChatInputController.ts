@@ -9,12 +9,15 @@ import { useMessageSender } from '@/hooks/useMessageSender'
 import { useChatEditor, type ChatEditorAPI } from '@/hooks/useChatEditor'
 import { usePasteHandler } from '@/hooks/usePasteHandler'
 import { extractRefs, partitionRefs } from '@/lib/parseReferences'
+import { mentionableNamesInContext } from '@/lib/capabilityModes'
+import { sessionKindForSession } from '@/lib/sessionKind'
 import { optimizePrompt } from '@/api/prompt'
 import { pauseSession, resumeSession } from '@/api/chat'
 import { computeChatInputDisabled, computeChatPlaceholder } from '@/lib/chatInputLock'
 import { createSessionFromDraft } from '@/lib/sessionDraft'
 import { listAgents } from '@/api/agents'
 import { listSkills } from '@/api/skills'
+import { getCapabilityModes } from '@/api/capabilities'
 import { getMCPMentionableServers, mentionableMCPNames } from '@/api/mcp'
 import { logger } from '@/lib/logger'
 
@@ -288,11 +291,19 @@ export function useChatInputController(): ChatInputController {
     // non-empty plain-ref list so the common no-mention send adds no
     // round-trip; all three RPCs are cheap (two server-cached, one
     // secret-free name+mode listing).
+    //
+    // The catalogs are SESSION-KIND-AWARE: the origin session's kind (its
+    // project_id — No Project → chat, a real project → code) picks the
+    // capabilities column, so a capability disabled there is filtered out and
+    // a plain ref never partitions into a mention it could not enable — the
+    // same view the completion offered for this input (the backend drops
+    // disabled mentions anyway; this keeps the client honest about it).
     let agentNames: string[] = []
     let skillNames: string[] = []
     let mcpNames: string[] = []
     if (refs.some((r) => !r.qualified)) {
-      const [agentCatalog, skillCatalog, mcpCatalog] = await Promise.all([
+      const kind = sessionKindForSession(originSessionId)
+      const [agentCatalog, skillCatalog, mcpCatalog, caps] = await Promise.all([
         listAgents()
           .then((l) => l.map((a) => a.name))
           .catch((err) => {
@@ -306,14 +317,21 @@ export function useChatInputController(): ChatInputController {
             return []
           }),
         getMCPMentionableServers()
-          .then(mentionableMCPNames)
+          .then((servers) => mentionableMCPNames(servers, kind))
           .catch((err) => {
             logger.warn('Could not load MCP servers for ref partitioning; treating plain refs as skills:', err)
             return []
           }),
+        // A failed capabilities fetch must not hide anything (a mention of a
+        // disabled capability is dropped server-side; failing OPEN here keeps
+        // a transient RPC error from silently rerouting the user's refs).
+        getCapabilityModes().catch((err) => {
+          logger.warn('Could not load capability modes for ref partitioning; offering all catalogs:', err)
+          return null
+        }),
       ])
-      agentNames = agentCatalog
-      skillNames = skillCatalog
+      agentNames = mentionableNamesInContext(agentCatalog, caps?.agents, kind)
+      skillNames = mentionableNamesInContext(skillCatalog, caps?.skills, kind)
       mcpNames = mcpCatalog
     }
     const { agents, skills, mcpServers, ambiguous } = partitionRefs(refs, agentNames, skillNames, mcpNames)

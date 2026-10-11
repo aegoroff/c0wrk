@@ -296,37 +296,89 @@ func TestToBuilderConfig_MCPTimeouts(t *testing.T) {
 	}
 }
 
-// TestToBuilderConfig_MCPMode verifies the per-server activation mode is
-// carried verbatim into BuilderMCPServer. The adapter deliberately does NOT
-// normalize (empty/invalid → "auto" is owned by the load pipeline's
-// normalizeMCPModes; the frontend rebuild paths start from that validated
-// config), and core only skips "disabled" when building the gateway config —
-// every other value, including empty, behaves as "auto" there by construction.
-func TestToBuilderConfig_MCPMode(t *testing.T) {
+// TestToBuilderConfig_MCPCapabilityModes verifies the per-context activation
+// modes are carried verbatim from capabilities.mcp into BuilderMCPServer's
+// ChatMode/CodeMode. The adapter deliberately does NOT normalize (folding the
+// legacy key into capabilities and canonicalizing values is owned by the load
+// pipeline's migrateLegacyMCPServerModes + normalizeCapabilities; the frontend
+// rebuild paths start from that validated config), and core only skips a
+// BOTH-contexts-disabled server when building the gateway config — every
+// other value, including empty, behaves as "auto" there by construction. A
+// name absent from the section maps to the zero CapabilityModes, and a
+// residual legacy Mode (a programmatic config that bypassed the load
+// pipeline) is ignored: the capabilities section is the only source read.
+func TestToBuilderConfig_MCPCapabilityModes(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.MCP.Servers = map[string]config.MCPServerConfig{
-		"autoMode":     {Command: "cmd", Mode: config.MCPServerModeAuto},
-		"manualMode":   {Command: "cmd", Mode: config.MCPServerModeManual},
-		"disabledMode": {Command: "cmd", Mode: config.MCPServerModeDisabled},
-		"emptyMode":    {Command: "cmd"},
+		"autoMode":     {Command: "cmd"},
+		"manualMode":   {Command: "cmd"},
+		"splitMode":    {Command: "cmd"},
+		"disabledBoth": {Command: "cmd"},
+		"absentCaps":   {Command: "cmd"},
+		"legacyOnly":   {Command: "cmd", Mode: config.MCPServerModeManual},
+	}
+	cfg.Capabilities.MCP = map[string]config.CapabilityModes{
+		"autoMode":     {ChatMode: config.MCPServerModeAuto, CodeMode: config.MCPServerModeAuto},
+		"manualMode":   {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeManual},
+		"splitMode":    {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeManual},
+		"disabledBoth": {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeDisabled},
 	}
 
 	bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles())
 
-	want := map[string]string{
-		"autoMode":     config.MCPServerModeAuto,
-		"manualMode":   config.MCPServerModeManual,
-		"disabledMode": config.MCPServerModeDisabled,
-		"emptyMode":    "",
+	want := map[string]core.CapabilityModes{
+		"autoMode":     {ChatMode: config.MCPServerModeAuto, CodeMode: config.MCPServerModeAuto},
+		"manualMode":   {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeManual},
+		"splitMode":    {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeManual},
+		"disabledBoth": {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeDisabled},
+		"absentCaps":   {},
+		"legacyOnly":   {},
 	}
-	for name, mode := range want {
+	for name, modes := range want {
 		got, ok := bc.MCP.Servers[name]
 		if !ok {
 			t.Fatalf("server %q missing from BuilderConfig.MCP.Servers", name)
 		}
-		if got.Mode != mode {
-			t.Errorf("BuilderMCPServer(%q).Mode = %q, want %q (verbatim carry)", name, got.Mode, mode)
+		if got.ChatMode != modes.ChatMode || got.CodeMode != modes.CodeMode {
+			t.Errorf("BuilderMCPServer(%q) = {%q, %q}, want {%q, %q} (verbatim carry)",
+				name, got.ChatMode, got.CodeMode, modes.ChatMode, modes.CodeMode)
 		}
+	}
+}
+
+// TestToBuilderConfig_SkillAgentCapabilities verifies the config→builder
+// mapping for capabilities.skills / capabilities.agents: entries are carried
+// value-for-value into the core mirror type, and an absent section maps to
+// nil (everything auto — zero regression).
+func TestToBuilderConfig_SkillAgentCapabilities(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Capabilities.Skills = map[string]config.CapabilityModes{
+		"study":  {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeManual},
+		"split":  {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeManual},
+		"absent": {},
+	}
+	cfg.Capabilities.Agents = map[string]config.CapabilityModes{
+		"reviewer": {ChatMode: config.MCPServerModeAuto, CodeMode: config.MCPServerModeDisabled},
+	}
+
+	bc := ToBuilderConfig(cfg, config.PredefinedModelProfiles())
+
+	if len(bc.Capabilities.Skills) != 3 {
+		t.Fatalf("Capabilities.Skills = %v, want 3 entries carried verbatim", bc.Capabilities.Skills)
+	}
+	if got := bc.Capabilities.Skills["study"]; got != (core.CapabilityModes{ChatMode: "manual", CodeMode: "manual"}) {
+		t.Errorf("Capabilities.Skills[study] = %v, want {manual, manual}", got)
+	}
+	if got := bc.Capabilities.Skills["split"]; got != (core.CapabilityModes{ChatMode: "disabled", CodeMode: "manual"}) {
+		t.Errorf("Capabilities.Skills[split] = %v, want {disabled, manual}", got)
+	}
+	if got := bc.Capabilities.Agents["reviewer"]; got != (core.CapabilityModes{ChatMode: "auto", CodeMode: "disabled"}) {
+		t.Errorf("Capabilities.Agents[reviewer] = %v, want {auto, disabled}", got)
+	}
+
+	empty := ToBuilderConfig(&config.Config{}, config.PredefinedModelProfiles())
+	if empty.Capabilities.Skills != nil || empty.Capabilities.Agents != nil {
+		t.Errorf("absent sections = (%v, %v), want nil (everything auto)", empty.Capabilities.Skills, empty.Capabilities.Agents)
 	}
 }
 

@@ -47,31 +47,45 @@ func TestConfigToGatewayConfig_MCPTimeouts(t *testing.T) {
 }
 
 // TestConfigToGatewayConfig_DisabledServerSkipped pins the never-dialed
-// contract: a "disabled" server is omitted from the gateway config entirely
-// (so no process spawns and no connection opens, at startup and on
-// reconfigure alike), while "auto", "manual" and empty (the default) all
-// stay — manual's on-demand behavior is layered above the gateway, not by
-// skipping it here.
+// contract: a server disabled in BOTH contexts is omitted from the gateway
+// config entirely (so no process spawns and no connection opens, at startup
+// and on reconfigure alike), while any other combination — auto, manual,
+// empty (the default), or a single-context disabled — stays. A one-context
+// disabled server must remain dialable for the other context; its tools are
+// withheld per task by the orchestrator's mode gating, not by skipping it
+// here.
 func TestConfigToGatewayConfig_DisabledServerSkipped(t *testing.T) {
 	cfg := &BuilderConfig{
 		MCP: BuilderMCPConfig{
 			Servers: map[string]BuilderMCPServer{
-				"auto":     {Transport: "stdio", Command: "cmd-a", Mode: "auto"},
-				"manual":   {Transport: "stdio", Command: "cmd-m", Mode: "manual"},
-				"empty":    {Transport: "stdio", Command: "cmd-e"},
-				"disabled": {Transport: "stdio", Command: "cmd-d", Mode: "disabled"},
+				"auto":          {Transport: "stdio", Command: "cmd-a", ChatMode: "auto", CodeMode: "auto"},
+				"manual":        {Transport: "stdio", Command: "cmd-m", ChatMode: "manual", CodeMode: "manual"},
+				"empty":         {Transport: "stdio", Command: "cmd-e"},
+				"chat-disabled": {Transport: "stdio", Command: "cmd-cd", ChatMode: "disabled", CodeMode: "manual"},
+				"code-disabled": {Transport: "stdio", Command: "cmd-dd", ChatMode: "auto", CodeMode: "disabled"},
+				"both-disabled": {Transport: "stdio", Command: "cmd-bd", ChatMode: "disabled", CodeMode: "disabled"},
 			},
 		},
 	}
 
 	gw := configToGatewayConfig(cfg)
-	if _, ok := gw.Servers["disabled"]; ok {
-		t.Error(`"disabled" server must NOT be present in the gateway config — it is never dialed`)
+	if _, ok := gw.Servers["both-disabled"]; ok {
+		t.Error(`server disabled in both contexts must NOT be present in the gateway config — it is never dialed`)
 	}
-	for _, name := range []string{"auto", "manual", "empty"} {
+	for _, name := range []string{"auto", "manual", "empty", "chat-disabled", "code-disabled"} {
 		if _, ok := gw.Servers[name]; !ok {
-			t.Errorf("server %q missing from gateway config: only disabled is skipped", name)
+			t.Errorf("server %q missing from gateway config: only both-contexts-disabled is skipped", name)
 		}
+	}
+}
+
+// TestConfigToGatewayConfig_EmptyServersMap pins the empty-map zero
+// regression: no servers configured produces an empty (non-nil-less) gateway
+// server map with no dial attempts.
+func TestConfigToGatewayConfig_EmptyServersMap(t *testing.T) {
+	gw := configToGatewayConfig(&BuilderConfig{})
+	if len(gw.Servers) != 0 {
+		t.Errorf("gateway servers = %v, want empty for an empty builder config", gw.Servers)
 	}
 }
 

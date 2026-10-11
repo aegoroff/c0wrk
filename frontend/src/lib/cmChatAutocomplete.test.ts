@@ -5,13 +5,18 @@ import { EditorView } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { startCompletion, currentCompletions, completionStatus } from '@codemirror/autocomplete'
 import type { FileEntry } from '@/types/models'
+import { NO_PROJECT_ID } from '@/types/models'
 import { useFileTreeStore } from '@/stores/fileTreeStore'
 
-const { listDirectoryMock, getSessionWorkspaceMock, getMCPMentionableServersMock } = vi.hoisted(() => ({
-  listDirectoryMock: vi.fn(),
-  getSessionWorkspaceMock: vi.fn(),
-  getMCPMentionableServersMock: vi.fn(),
-}))
+const { listDirectoryMock, getSessionWorkspaceMock, getMCPMentionableServersMock, getCapabilityModesMock } =
+  vi.hoisted(() => ({
+    listDirectoryMock: vi.fn(),
+    getSessionWorkspaceMock: vi.fn(),
+    getMCPMentionableServersMock: vi.fn(),
+    // Empty sections = every catalog entry reads as auto = nothing filtered.
+    // clearAllMocks keeps this implementation; tests override per fixture.
+    getCapabilityModesMock: vi.fn().mockResolvedValue({ skills: {}, agents: {}, mcp: {} }),
+  }))
 
 vi.mock('@/api/workspace', () => ({
   listDirectory: (...args: unknown[]) => listDirectoryMock(...args),
@@ -25,9 +30,9 @@ vi.mock('@/api/agents', () => ({
 }))
 vi.mock('@/api/mcp', () => ({
   getMCPMentionableServers: (...args: unknown[]) => getMCPMentionableServersMock(...args),
-  // Pure helpers are mirrored verbatim so the filter behavior under test is
-  // the production one.
-  isMentionableMCPMode: (mode: string) => mode === 'auto' || mode === 'manual',
+}))
+vi.mock('@/api/capabilities', () => ({
+  getCapabilityModes: (...args: unknown[]) => getCapabilityModesMock(...args),
 }))
 vi.mock('@/api/runtime', () => ({
   subscribe: vi.fn(() => () => {}),
@@ -506,6 +511,33 @@ describe('cmChatAutocomplete unified /-source', () => {
     return view
   }
 
+  /**
+   * Activate a session of a given kind — the kind source is
+   * SessionInfo.project_id (NO_PROJECT_ID → chat, a real id → code).
+   */
+  function activateSession(id: string, projectId: string): void {
+    useSessionStore.setState({
+      sessions: [
+        {
+          id,
+          project_id: projectId,
+          name: 'S',
+          created_at: '2026-01-01T00:00:00Z',
+          last_active_at: '2026-01-01T00:00:00Z',
+          archived: false,
+          pinned: false,
+          active: false,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          model: 'test-model',
+          family: 'test',
+          has_unfinished_task: false,
+        },
+      ],
+      activeSessionId: id,
+    })
+  }
+
   it('opens one combined list: Subagents, MCP Servers, Skills; plain insert without collision', async () => {
     // A distinct project id per test guarantees a store transition → cache
     // invalidation → fresh catalog fetch (the previous afterEach reset it to
@@ -513,7 +545,7 @@ describe('cmChatAutocomplete unified /-source', () => {
     useProjectStore.setState({ projects: [], activeProjectId: 'slash-sections' })
     vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
     vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
-    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', mode: 'auto' }])
+    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', chat_mode: 'auto', code_mode: 'auto' }])
 
     const view = newSlashView()
     typeAndComplete(view, '/')
@@ -561,14 +593,16 @@ describe('cmChatAutocomplete unified /-source', () => {
     expect(view.state.doc.toString()).toBe('/code-reviewer ')
   })
 
-  it('hides disabled MCP servers and marks manual ones as mention-to-enable', async () => {
-    useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-modes' })
+  it('offers auto+manual servers and hides disabled ones for the ACTIVE session kind (chat)', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-modes-chat' })
+    activateSession('sess-chat', NO_PROJECT_ID)
     vi.mocked(listAgents).mockResolvedValue([])
     vi.mocked(listSkills).mockResolvedValue([])
     getMCPMentionableServersMock.mockResolvedValue([
-      { name: 'auto-srv', mode: 'auto' },
-      { name: 'manual-srv', mode: 'manual' },
-      { name: 'off-srv', mode: 'disabled' },
+      { name: 'auto-srv', chat_mode: 'auto', code_mode: 'auto' },
+      { name: 'manual-srv', chat_mode: 'manual', code_mode: 'auto' },
+      { name: 'chat-off-srv', chat_mode: 'disabled', code_mode: 'auto' },
+      { name: 'off-srv', chat_mode: 'disabled', code_mode: 'disabled' },
     ])
 
     const view = newSlashView()
@@ -579,20 +613,189 @@ describe('cmChatAutocomplete unified /-source', () => {
     )
 
     const labels = currentCompletions(view.state).map((c) => c.label)
+    // auto and manual are both offered…
     expect(labels).toContain('auto-srv')
     expect(labels).toContain('manual-srv')
-    // A disabled server is inert — never offered.
+    // …disabled-for-CHAT is hidden even though code keeps it…
+    expect(labels).not.toContain('chat-off-srv')
+    // …and the inert both-disabled combination never is.
     expect(labels).not.toContain('off-srv')
 
+    // The mention-to-enable hint keys on the ACTIVE context's column.
     const manual = currentCompletions(view.state).find((c) => c.label === 'manual-srv')!
     expect(manual.detail).toContain('mention')
+    const auto = currentCompletions(view.state).find((c) => c.label === 'auto-srv')!
+    expect(auto.detail).not.toContain('mention')
+  })
+
+  it('flips the offered MCP set when the active session switches kind (chat ↔ code)', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-modes-code' })
+    activateSession('sess-code', 'proj-1')
+    vi.mocked(listAgents).mockResolvedValue([])
+    vi.mocked(listSkills).mockResolvedValue([])
+    getMCPMentionableServersMock.mockResolvedValue([
+      { name: 'manual-srv', chat_mode: 'manual', code_mode: 'auto' },
+      { name: 'chat-only', chat_mode: 'auto', code_mode: 'disabled' },
+    ])
+
+    const view = newSlashView()
+
+    // CODE session: the code column decides — chat-only is disabled there.
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'manual-srv'),
+      'code-kind completions to appear',
+    )
+    expect(currentCompletions(view.state).map((c) => c.label)).not.toContain('chat-only')
+    // manual-in-chat reads as auto here — no mention hint.
+    expect(currentCompletions(view.state).find((c) => c.label === 'manual-srv')!.detail).not.toContain('mention')
+
+    // Switching to a CHAT session flips the filter on the next trigger.
+    activateSession('sess-chat', NO_PROJECT_ID)
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '/' } })
+    startCompletion(view)
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'chat-only'),
+      'chat-kind completions after the session switch',
+    )
+    const labels = currentCompletions(view.state).map((c) => c.label)
+    expect(labels).toContain('chat-only')
+    expect(labels).toContain('manual-srv')
+    // And the manual hint follows the now-active chat column.
+    expect(currentCompletions(view.state).find((c) => c.label === 'manual-srv')!.detail).toContain('mention')
+  })
+
+  it('hides skills and subagents disabled for the active session kind (capabilities section)', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-skill-modes' })
+    activateSession('sess-chat', NO_PROJECT_ID)
+    vi.mocked(listAgents).mockResolvedValue([
+      { name: 'chat-agent', description: 'Chat agent' },
+      { name: 'code-agent', description: 'Code agent' },
+      { name: 'manual-agent', description: 'Manual agent' },
+    ])
+    vi.mocked(listSkills).mockResolvedValue([
+      { name: 'commit', description: 'Commit helper' },
+      { name: 'review-pr', description: 'Reviews a PR' },
+    ])
+    getCapabilityModesMock.mockResolvedValue({
+      skills: {
+        commit: { chat_mode: 'auto', code_mode: 'auto' },
+        'review-pr': { chat_mode: 'disabled', code_mode: 'auto' },
+      },
+      agents: {
+        'chat-agent': { chat_mode: 'manual', code_mode: 'auto' },
+        'code-agent': { chat_mode: 'disabled', code_mode: 'auto' },
+        // manual stays mentionable — the mention flow is how it activates.
+        'manual-agent': { chat_mode: 'manual', code_mode: 'auto' },
+      },
+      mcp: {},
+    })
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'chat-agent'),
+      'kind-visible agents to appear',
+    )
+
+    const labels = currentCompletions(view.state).map((c) => c.label)
+    // Chat session: chat-auto + chat-manual visible, chat-disabled hidden…
+    expect(labels).toEqual(expect.arrayContaining(['commit', 'chat-agent', 'manual-agent']))
+    expect(labels).not.toContain('review-pr')
+    expect(labels).not.toContain('code-agent')
+  })
+
+  it('keeps everything offered when the capabilities fetch fails (fail open, logged once)', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-caps-fail' })
+    activateSession('sess-code', 'proj-1')
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
+    getCapabilityModesMock.mockRejectedValue(new Error('caps rpc down'))
+    vi.mocked(logger.warn).mockClear()
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'reviewer'),
+      'unfiltered catalogs after a capabilities failure',
+    )
+
+    // A failed capabilities RPC degrades to NO filtering — a transient error
+    // must never silently hide whole catalogs.
+    const labels = currentCompletions(view.state).map((c) => c.label)
+    expect(labels).toContain('reviewer')
+    expect(labels).toContain('commit')
+    // The expected diagnostic is intercepted at its source with an assertion.
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      'completion: GetCapabilityModes failed; offering all skills/agents',
+      expect.any(Error),
+    )
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('does not serve the stale capabilities cache after a failed refetch and retries the next trigger', async () => {
+    // Phase 1 — a successful fetch populates the cache: 'reviewer' is
+    // disabled for chat and must be hidden.
+    useProjectStore.setState({ projects: [], activeProjectId: 'caps-stale-a' })
+    activateSession('sess-chat', NO_PROJECT_ID)
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
+    getMCPMentionableServersMock.mockResolvedValue([])
+    getCapabilityModesMock.mockResolvedValue({
+      skills: {},
+      agents: { reviewer: { chat_mode: 'disabled', code_mode: 'auto' } },
+      mcp: {},
+    })
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'commit'),
+      'first successful fetch to populate the cache',
+    )
+    expect(currentCompletions(view.state).map((c) => c.label)).not.toContain('reviewer')
+
+    // Phase 2 — a context transition invalidates the cache and the refetch
+    // FAILS. Serving the stale cache would keep 'reviewer' hidden in the NEW
+    // context; the failure must degrade to null — everything offered.
+    useProjectStore.setState({ projects: [], activeProjectId: 'caps-stale-b' })
+    getCapabilityModesMock.mockRejectedValue(new Error('caps rpc down'))
+    vi.mocked(logger.warn).mockClear()
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '/' } })
+    startCompletion(view)
+    await until(() => getCapabilityModesMock.mock.calls.length >= 2, 'failed refetch to happen')
+    await settledCompletion(view)
+    const failLabels = currentCompletions(view.state).map((c) => c.label)
+    expect(failLabels).toContain('reviewer')
+    expect(failLabels).toContain('commit')
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      'completion: GetCapabilityModes failed; offering all skills/agents',
+      expect.any(Error),
+    )
+
+    // Phase 3 — capsLoaded stayed false, so the next trigger RETRIES the
+    // fetch instead of replaying the failure or a stale snapshot; the fresh
+    // modes are applied (a different name is now hidden).
+    getCapabilityModesMock.mockResolvedValue({
+      skills: { commit: { chat_mode: 'disabled', code_mode: 'auto' } },
+      agents: {},
+      mcp: {},
+    })
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '/' } })
+    startCompletion(view)
+    await until(() => getCapabilityModesMock.mock.calls.length >= 3, 'retry after the failed refetch')
+    await settledCompletion(view)
+    expect(getCapabilityModesMock).toHaveBeenCalledTimes(3)
+    const retryLabels = currentCompletions(view.state).map((c) => c.label)
+    expect(retryLabels).toContain('reviewer')
+    expect(retryLabels).not.toContain('commit')
   })
 
   it('offers the /mcp: qualified spelling for a name colliding with a skill and inserts it', async () => {
     useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-collision' })
     vi.mocked(listAgents).mockResolvedValue([])
     vi.mocked(listSkills).mockResolvedValue([{ name: 'context7', description: 'Context7 skill' }])
-    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', mode: 'auto' }])
+    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', chat_mode: 'auto', code_mode: 'auto' }])
 
     const view = newSlashView()
     typeAndComplete(view, '/con')
@@ -640,7 +843,7 @@ describe('cmChatAutocomplete unified /-source', () => {
     useProjectStore.setState({ projects: [], activeProjectId: 'slash-hash-inert' })
     vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
     vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
-    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', mode: 'auto' }])
+    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', chat_mode: 'auto', code_mode: 'auto' }])
 
     const view = newSlashView()
     typeAndComplete(view, '#co')
@@ -660,8 +863,8 @@ describe('cmChatAutocomplete unified /-source', () => {
       { name: 'review-pr', description: 'Reviews a PR' },
     ])
     getMCPMentionableServersMock.mockResolvedValue([
-      { name: 'review-mcp', mode: 'manual' },
-      { name: 'zeta-mcp', mode: 'auto' },
+      { name: 'review-mcp', chat_mode: 'manual', code_mode: 'auto' },
+      { name: 'zeta-mcp', chat_mode: 'auto', code_mode: 'auto' },
     ])
 
     const view = newSlashView()

@@ -119,7 +119,16 @@ Between the collapse and settings buttons sits a CHAT/CODE segmented toggle:
 - **CODE**: switches to `lastRealProjectId` (the most recent non-No-Project project) or the first available real project
 - The toggle is hidden when no projects are loaded yet
 
-Chat input uses a CodeMirror 6 editor in Markdown mode (`@codemirror/lang-markdown`), providing syntax highlighting for Markdown constructs (headings, bold, italic, code, links) and custom token decorations for `/skill` references (warning color) and `@file` references (info color) via a `StateField`. Autocomplete is powered by `@codemirror/autocomplete` with two custom `CompletionSource` functions: typing `/` at a word boundary triggers fuzzy-filtered skill suggestions, and `@` triggers workspace file/directory suggestions. Open file viewer tabs are boosted to the top of file completions. On send, skill refs are extracted as `activeSkills[]` and file refs are converted to `fileref://` URIs by the core preprocessor (see `core/message_preprocess.go`). An `@file` ref accepts an optional line anchor in GitHub-canonical forms — `#L20`, `#L20-36`, `#L20-L36`, or legacy bare-number `#20-36`; the anchor survives into the `fileref://` URI and positions the viewer on open. Paths containing spaces use the single-quoted form `@'my file.go'` — the canonical insert of the `@`-autocomplete and of the file viewer's "Add to chat" action (anchor allowed after the closing quote or inside it); the legacy backslash-escaped form `@my\ file.go` remains recognized.
+Chat input uses a CodeMirror 6 editor in Markdown mode (`@codemirror/lang-markdown`), providing syntax highlighting for Markdown constructs (headings, bold, italic, code, links) and custom token decorations for `/skill` references (warning color) and `@file` references (info color) via a `StateField`. Autocomplete is powered by `@codemirror/autocomplete` with two custom `CompletionSource` functions: typing `/` at a word boundary triggers fuzzy-filtered skill suggestions, and `@` triggers workspace file/directory suggestions. Open file viewer tabs are boosted to the top of file completions. On send, skill refs are extracted as `activeSkills[]` and file refs are converted to `fileref://` URIs by the core preprocessor (see `core/message_preprocess.go`). An `@file` ref accepts an optional line anchor in GitHub-canonical forms — `#L20`, `#L20-36`, `#L20-L36`, or legacy bare-number `#20-36`; the anchor survives into the `fileref://` URI and positions the viewer on open. Paths containing spaces use the single-quoted form `@'my file.go'` — the canonical insert of the `@`-autocomplete and of the file viewer's "Add to chat" action (anchor allowed after the closing quote or inside it); the legacy backslash-escaped form `@my\ file.go` remains recognized. The `/` completion is session-kind-aware: it filters all three sections (Subagents, MCP Servers, Skills) through the active session's chat/code capability context — a capability hidden in that context is not offered, and a manual-in-context entry carries the "mention to enable" detail (see [capabilities.md](../capabilities.md)).
+
+### Settings → Capabilities
+
+The former MCP settings tab is the **Capabilities** tab: three subsections in the completion-list order — **Subagents → MCP Servers → Skills** — each rendering every configured capability with **two chat/code mode selectors** (`auto` | `manual` | `disabled` per context, [ADR-084](../../decisions/084-per-capability-chat-code-activation-modes.md)):
+
+- **MCP Servers** keeps add/edit/delete/reload on `updateMCPServers` (the wire format carries no mode key); mode edits go through `updateCapabilityModes('mcp', …)` with the **full replacement section**. A card renders its live gateway status except when **both** slots are disabled — the only never-dialed combination renders neutrally (a "disabled" badge, no red state); a partially-disabled server keeps its live status.
+- **Subagents** and **Skills** are view-only (existence is owned by `.agents/` profiles and the skills directories): name, description, and the two selectors — no add/edit/delete.
+- Mode state loads through `getCapabilityModes()`; a failed read leaves the selectors disabled rather than letting the UI write a half-known map (failing lists render, only mode editing is blocked).
+- The `/`-completion and send-path filters read the same modes keyed on the active session's context (`lib/capabilityModes.ts` + `lib/sessionKind.ts`): a capability is mentionable unless `disabled` in that context; an unknown session falls open to the active project's context.
 
 ## Design System
 
@@ -218,6 +227,7 @@ Frontend configuration is derived from backend (no separate frontend config file
 | `GetConfig()` RPC              | provider `.models` | Per-provider enabled models|
 | `GetLogLevel()` RPC            | log level          | Console/log verbosity      |
 | `GetSecuritySettings()` RPC    | `security.groups`  | Tool-group policy UI state (per-group policy + execute blacklist, ADR-024) |
+| `GetCapabilityModes()` RPC     | `capabilities.*`   | Capability chat/code activation modes UI (ADR-084) |
 | `ListSkills()` RPC             | skills             | `/skill` autocomplete      |
 | `localStorage`                 | sidebar width + collapsed state | Persistent left-panel layout |
 | `localStorage`                 | file-viewer width + collapsed + pinned state | Persistent docked/floating right-panel layout |
@@ -240,6 +250,7 @@ Frontend configuration is derived from backend (no separate frontend config file
 ## Related Specs
 
 - [ui-scale.md](ui-scale.md) — UI scale feature and the zoom-safety invariant
+- [../capabilities.md](../capabilities.md) — capability activation-mode semantics the Capabilities settings surface and the mention filters consume
 - [fonts.md](fonts.md) — user font selection: UI/mono family pickers (free text + detected + installed options) plus per-scope select-only smoothing pickers over the persisted `fontStore`, once-per-launch dual system-font detection, and the inline `--font-sans`/`--font-mono` `@theme`-token + `--font-smoothing-*` delivery on `<html>` ([ADR-078](../../decisions/078-user-font-selection.md), [ADR-079](../../decisions/079-font-smoothing-selection.md))
 - [button-tooltips.md](button-tooltips.md) — the button tooltip convention: a `title=`, a Radix `TooltipTrigger` wrapper, or a statically visible label on every button — exactly one, the channels never combine (both AST guards flag a `title` under a `TooltipTrigger`); buttons that may hide their label always carry a `title`, always-labeled buttons never carry an echo, picker triggers follow the heading rule
 - [stores.md](stores.md) — Zustand store catalog
