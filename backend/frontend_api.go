@@ -750,11 +750,25 @@ const switchLockTimeout = 5 * time.Second
 // persistence warns and continues), so on a saturated machine — a worktree
 // full reindex saturating disk I/O while every store op queues behind the
 // shared SQLite pool — the holds stack up to minutes even though no single
-// step is unbounded. Every store round-trip in the critical section is derived
-// from one ctx carrying this deadline (see SwitchProject), so the total hold
-// is bounded and a wedged switch fails fast enough for the NEXT switch's
-// 5s acquireSwitchLock to recover the UI instead of compounding into
-// "Another project switch is still finishing" loops.
+// step is unbounded. Every store round-trip in the critical section is
+// derived from one ctx carrying this deadline (see SwitchProject and
+// switchStoreOpCtx; the vector leg's root-resolution listing rides the same
+// ctx via switchProjectSetupVector → ApplyFocus → resolveRootPlan →
+// ListProjectsCtx), so no store read can outlive the section. Two known
+// waits inside the section are deliberately NOT derived from it:
+//   - createSessionForProject pre-checks the deadline (switchCtx.Err) and
+//     then runs the deadline-less full orchestrator build — a build that
+//     started with budget left still runs to completion and can hold
+//     switchMu past this timeout;
+//   - the vector leg's ManagerForRoot can wait out an in-flight eviction
+//     drain for up to vectorRootsEvictWait (25s, time-bounded).
+//
+// Overruns still surface: a hold at or above switchHeldWarnThreshold logs a
+// WARN with the total, which keeps the section observable exactly where the
+// deadline does not reach. This is what lets a wedged switch fail fast
+// enough for the NEXT switch's 5s acquireSwitchLock to recover the UI
+// instead of compounding into "Another project switch is still finishing"
+// loops.
 const switchSectionTimeout = 30 * time.Second
 
 // switchHeldWarnThreshold is the hold duration at or above which SwitchProject

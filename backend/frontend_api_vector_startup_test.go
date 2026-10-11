@@ -165,7 +165,7 @@ func TestSwitchProjectSetupVector_FactoryReadyClearsDeferred(t *testing.T) {
 		t.Fatalf("a ready factory must clear the deferred setup, got %+v", f.deferredVectorProject)
 	}
 
-	mgr, err := f.vectorRootsRegistry().FocusManager()
+	mgr, err := f.vectorRootsRegistry().FocusManager(context.Background())
 	if err != nil {
 		t.Fatalf("focus manager: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestInitVectorIndexForActiveProject_AppliesDeferredSetup(t *testing.T) {
 	if f.deferredVectorProject != nil {
 		t.Fatal("the drain must clear the deferred setup")
 	}
-	mgr, err := f.vectorRootsRegistry().FocusManager()
+	mgr, err := f.vectorRootsRegistry().FocusManager(context.Background())
 	if err != nil {
 		t.Fatalf("focus manager: %v", err)
 	}

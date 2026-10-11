@@ -328,8 +328,7 @@ func (f *FrontendAPI) SearchVectorStore(req SearchRequest) ([]VectorStoreEntry, 
 		return []VectorStoreEntry{}, nil
 	}
 
-	vr := f.vectorRootsRegistry()
-	vm, err := vr.FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return nil, errVectorNoTarget
 	}
@@ -429,7 +428,7 @@ func (f *FrontendAPI) GetVectorIndexStatus() VectorIndexStatus {
 		return st
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		result := VectorIndexStatus{State: "unavailable", Indices: []string{}}
 		f.applyEmbedderInfo(&result)
@@ -491,7 +490,7 @@ func (f *FrontendAPI) ReindexVectorIndex() error {
 		return errors.New("vector index is unavailable in No Project mode")
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return errors.New("vector index not available")
 	}

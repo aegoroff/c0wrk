@@ -926,8 +926,14 @@ func (f *FrontendAPI) switchProjectSetupVector(switchCtx context.Context, p *pro
 	// Fail-soft: a focus that cannot be indexed (unresolvable root, factory
 	// failure) must not fail the project switch — the vector_index:status
 	// stream carries the actionable state instead.
+	//
+	// switchCtx flows into ApplyFocus so the vector leg's one store
+	// round-trip (root resolution → ListProjectsCtx) is derived from the
+	// section deadline like every other store op in the switch; the manager
+	// build and the eviction-drain wait stay time-bounded, not ctx-bounded
+	// (see switchSectionTimeout for the honest exception list).
 	target := f.resolveVectorIndexTarget(switchCtx, p)
-	if err := vr.ApplyFocus(canonicalRoot(target.workspacePath)); err != nil {
+	if err := vr.ApplyFocus(switchCtx, canonicalRoot(target.workspacePath)); err != nil {
 		f.log().Warn("vector focus unavailable for project target",
 			"project", p.ID, "root", target.workspacePath, "error", err)
 	}

@@ -373,7 +373,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrB, "focus-beta")
 
 	// Focus B: the status RPC reports B's branch...
-	if err := h.roots.ApplyFocus(canonicalRoot(treeB)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeB)); err != nil {
 		t.Fatalf("focus tree B: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-beta" {
@@ -383,7 +383,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrA, "focus-alpha")
 
 	// Focus back to A: the visible identity flips, B's manager survives.
-	if err := h.roots.ApplyFocus(canonicalRoot(treeA)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeA)); err != nil {
 		t.Fatalf("focus tree A: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-alpha" {

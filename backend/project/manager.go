@@ -268,7 +268,8 @@ func (m *Manager) ListProjects() ([]ProjectInfo, error) {
 }
 
 // ListProjectsCtx is the caller-deadline variant of ListProjects. It exists so
-// the project-switch critical section can derive every store round-trip from
+// the project-switch critical section can derive every store round-trip —
+// its own, and the vector leg's root resolution (resolveRootPlan) — from
 // ONE switch-scoped deadline: individually bounded operations (each with its
 // own opCtx) still sum to minutes of switchMu hold time when the shared
 // SQLite pool is saturated and every one of them burns its full budget. See
