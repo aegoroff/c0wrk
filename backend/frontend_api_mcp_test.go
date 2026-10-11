@@ -246,6 +246,113 @@ func TestUpdateMCPServers_WipesLegacyMode(t *testing.T) {
 	}
 }
 
+// yamlCapabilitiesMCP parses a persisted config file and returns its
+// capabilities.mcp mapping, for key-level assertions on the raw stored
+// section (config.Load would normalize the section on the way in and hide
+// orphans, so the durable bytes must be checked directly).
+func yamlCapabilitiesMCP(t *testing.T, path string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse persisted config: %v", err)
+	}
+	caps, _ := doc["capabilities"].(map[string]any)
+	mcpSection, _ := caps["mcp"].(map[string]any)
+	return mcpSection
+}
+
+// TestUpdateMCPServers_TrimsOrphanedCapabilities pins the name invariant
+// between the two sections: a capabilities.mcp entry exists only for a name
+// in mcp.servers. UpdateMCPServers replaces the server set wholesale, so a
+// server dropped from the payload must lose its modes entry too — from the
+// in-memory config, from the persisted YAML (Save writes the section
+// verbatim, so only this trim keeps the durable bytes clean), and from the
+// GetCapabilityModes wire view. A stale entry predating the update is
+// included to prove the trim is a full sweep against the new server set,
+// not just the payload delta.
+func TestUpdateMCPServers_TrimsOrphanedCapabilities(t *testing.T) {
+	f, mock, cfgPath := newTestAPI(t)
+	f.config.MCP = config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"keeper": {Transport: "stdio", Command: "cmd"},
+		"doomed": {Transport: "stdio", Command: "cmd"},
+	}}
+	f.config.Capabilities.MCP = map[string]config.CapabilityModes{
+		"keeper": {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeDisabled},
+		"doomed": {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeDisabled},
+		"ghost":  {ChatMode: config.MCPServerModeManual}, // orphaned before the update
+	}
+
+	err := f.UpdateMCPServers(map[string]config.MCPServerConfig{
+		"keeper": {Transport: "stdio", Command: "cmd"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.reconfigureMCPCalls != 1 {
+		t.Errorf("ReconfigureMCP called %d times, want 1", mock.reconfigureMCPCalls)
+	}
+
+	for _, name := range []string{"doomed", "ghost"} {
+		if _, ok := f.config.Capabilities.MCP[name]; ok {
+			t.Errorf("in-memory capabilities.mcp still has %q after its server was removed", name)
+		}
+	}
+	if got, ok := f.config.Capabilities.MCP["keeper"]; !ok {
+		t.Error("in-memory capabilities.mcp lost keeper — surviving names must keep their entry")
+	} else if got != (config.CapabilityModes{ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeDisabled}) {
+		t.Errorf("keeper modes = %+v, want the stored values untouched", got)
+	}
+
+	persisted := yamlCapabilitiesMCP(t, cfgPath)
+	for _, name := range []string{"doomed", "ghost"} {
+		if _, ok := persisted[name]; ok {
+			t.Errorf("persisted capabilities.mcp still has orphan %q: %+v", name, persisted)
+		}
+	}
+	if _, ok := persisted["keeper"]; !ok {
+		t.Errorf("persisted capabilities.mcp lost keeper: %+v", persisted)
+	}
+
+	got := f.GetCapabilityModes()
+	for _, name := range []string{"doomed", "ghost"} {
+		if _, ok := got.MCP[name]; ok {
+			t.Errorf("GetCapabilityModes still reports %q after its server was removed", name)
+		}
+	}
+	if _, ok := got.MCP["keeper"]; !ok {
+		t.Error("GetCapabilityModes lost keeper")
+	}
+}
+
+// TestUpdateMCPServers_NilServersClearCapabilities pins the nil-payload
+// reading of the same invariant: replacing the server set with nothing
+// clears the whole capabilities.mcp section — nil in memory and absent from
+// the persisted YAML — rather than leaving modes for servers that no longer
+// exist.
+func TestUpdateMCPServers_NilServersClearCapabilities(t *testing.T) {
+	f, _, cfgPath := newTestAPI(t)
+	f.config.MCP = config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"srv": {Transport: "stdio", Command: "cmd"},
+	}}
+	f.config.Capabilities.MCP = map[string]config.CapabilityModes{
+		"srv": {ChatMode: config.MCPServerModeManual},
+	}
+
+	if err := f.UpdateMCPServers(nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.config.Capabilities.MCP) != 0 {
+		t.Errorf("in-memory capabilities.mcp = %+v, want empty after a nil server payload", f.config.Capabilities.MCP)
+	}
+	if persisted := yamlCapabilitiesMCP(t, cfgPath); len(persisted) != 0 {
+		t.Errorf("persisted capabilities.mcp = %+v, want absent/empty after a nil server payload", persisted)
+	}
+}
+
 // --- GetMCPServers ---
 
 func TestGetMCPServers_DeepCopy(t *testing.T) {
@@ -262,6 +369,73 @@ func TestGetMCPServers_DeepCopy(t *testing.T) {
 	// Internal config must NOT be affected.
 	if f.config.MCP.Servers["srv"].Command != "cmd" {
 		t.Error("GetMCPServers returned a live reference instead of a deep copy")
+	}
+}
+
+// --- mcpConfigSnapshot ---
+
+// TestMCPConfigSnapshot verifies the coherent one-lock view behind
+// GetMCPStatus and GetMCPMentionableServers: the server map is a deep copy,
+// the capabilities.mcp copy drops stale names, and both maps describe the
+// same moment of the config (every caps key resolves to a configured server
+// in the same snapshot). Reading the two maps via separate lock acquisitions
+// (the former GetMCPServers + capabilitiesSnapshot pairing) let a concurrent
+// UpdateMCPServers / UpdateCapabilityModes land in between and pair servers
+// of one moment with modes of another.
+func TestMCPConfigSnapshot(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+	f.config.MCP = config.MCPConfig{
+		Servers: map[string]config.MCPServerConfig{
+			"srv": {Command: "cmd", Args: []string{"a"}, Env: map[string]string{"K": "V"}},
+		},
+	}
+	f.config.Capabilities = config.CapabilitiesConfig{
+		MCP: map[string]config.CapabilityModes{
+			"srv":   {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeAuto},
+			"ghost": {ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeDisabled},
+		},
+	}
+
+	servers, caps := f.mcpConfigSnapshot()
+
+	// Deep copy: mutating the returned snapshot must not touch the live
+	// config. Slice elements and map entries are mutated through the shared
+	// backing storage; the struct entry itself is replaced wholesale.
+	servers["srv"].Args[0] = "HACK"
+	servers["srv"].Env["K"] = "HACK"
+	servers["srv"] = config.MCPServerConfig{Command: "HACK"}
+	if f.config.MCP.Servers["srv"].Command != "cmd" ||
+		f.config.MCP.Servers["srv"].Args[0] != "a" ||
+		f.config.MCP.Servers["srv"].Env["K"] != "V" {
+		t.Error("mcpConfigSnapshot shared the returned map or its args/env backing arrays with the live config")
+	}
+	if _, ok := caps["ghost"]; ok {
+		t.Error("mcpConfigSnapshot kept a capabilities entry for an unconfigured server")
+	}
+	if got := caps["srv"]; got.ChatMode != config.MCPServerModeManual || got.CodeMode != config.MCPServerModeAuto {
+		t.Errorf("caps[srv] = %+v, want chat=%s code=%s", got, config.MCPServerModeManual, config.MCPServerModeAuto)
+	}
+	// Coherence: every capabilities name has its server in the same snapshot.
+	for name := range caps {
+		if _, ok := servers[name]; !ok {
+			t.Errorf("caps entry %q has no configured server in the same snapshot", name)
+		}
+	}
+}
+
+// TestMCPConfigSnapshot_NoConfig verifies the uninitialized-config safety of
+// the snapshot: both maps come back empty, never nil.
+func TestMCPConfigSnapshot_NoConfig(t *testing.T) {
+	f := &FrontendAPI{} // f.config == nil
+	f.seedPublished.Store(true)
+	f.seedPublished.Store(true)
+
+	servers, caps := f.mcpConfigSnapshot()
+	if servers == nil || caps == nil {
+		t.Fatalf("expected non-nil empty maps, got servers=%v caps=%v", servers, caps)
+	}
+	if len(servers) != 0 || len(caps) != 0 {
+		t.Errorf("expected empty maps, got servers=%v caps=%v", servers, caps)
 	}
 }
 

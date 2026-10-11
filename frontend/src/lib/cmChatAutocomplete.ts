@@ -259,6 +259,11 @@ async function getCapabilities(): Promise<CapabilitiesInfo | null> {
     capsLoaded = true
   } catch (err) {
     logger.warn('completion: GetCapabilityModes failed; offering all skills/agents', err)
+    // A failed REFETCH must not resurrect the previous context's cache: after
+    // an invalidation (project/session switch) the stale modes would keep
+    // filtering the NEW catalogs. null — like the [] siblings above — filters
+    // nothing, and capsLoaded stays false so the next trigger retries.
+    capsCache = null
   }
   return capsCache
 }

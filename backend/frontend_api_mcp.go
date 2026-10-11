@@ -56,7 +56,9 @@ func mcpModesDisabled(chatMode, codeMode string) bool {
 // mergeConfiguredMCPServers). While gateway startup is still in flight (the
 // "_gateway" starting placeholder) nothing is merged: availability is
 // genuinely unknown, and the frontend refreshes on the mcp:ready event once
-// startup completes.
+// startup completes. The configured servers and their modes are captured
+// under a single configMu read lock (mcpConfigSnapshot), so the merged
+// response always reflects one moment of the config.
 // Returns an empty slice if the backend application is not initialized.
 func (f *FrontendAPI) GetMCPStatus() []MCPServerStatusInfo {
 	if f.appCell() == nil {
@@ -72,7 +74,8 @@ func (f *FrontendAPI) GetMCPStatus() []MCPServerStatusInfo {
 		}
 		return out
 	}
-	return mergeConfiguredMCPServers(status, f.GetMCPServers(), f.capabilitiesSnapshot().mcp)
+	configured, caps := f.mcpConfigSnapshot()
+	return mergeConfiguredMCPServers(status, configured, caps)
 }
 
 // isMCPStartupPlaceholder reports whether status is the synthetic
@@ -148,14 +151,17 @@ func mergeConfiguredMCPServers(status []mcp.ServerStatus, configured map[string]
 func (f *FrontendAPI) GetMCPServers() map[string]config.MCPServerConfig {
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
+	return f.configMCPServersCopy()
+}
 
-	if f.config == nil {
-		return map[string]config.MCPServerConfig{}
-	}
-
-	// Deep-copy to avoid external modifications
-	result := make(map[string]config.MCPServerConfig, len(f.config.MCP.Servers))
-	for name, cfg := range f.config.MCP.Servers {
+// configMCPServersCopy deep-copies the configured MCP servers (args, env and
+// headers cloned) so the map can leave the config lock without exposing the
+// live config to external modification. Callers MUST hold configMu; a nil
+// config yields an empty map.
+func (f *FrontendAPI) configMCPServersCopy() map[string]config.MCPServerConfig {
+	servers := f.configMCPServers()
+	result := make(map[string]config.MCPServerConfig, len(servers))
+	for name, cfg := range servers {
 		srv := cfg
 		if cfg.Args != nil {
 			srv.Args = make([]string, len(cfg.Args))
@@ -175,8 +181,19 @@ func (f *FrontendAPI) GetMCPServers() map[string]config.MCPServerConfig {
 		}
 		result[name] = srv
 	}
-
 	return result
+}
+
+// mcpConfigSnapshot returns a coherent one-lock view of the configured MCP
+// servers (deep-copied) and their capabilities.mcp activation modes (stale
+// names removed). Both maps are captured under a single configMu read lock,
+// so a concurrent UpdateMCPServers / UpdateCapabilityModes cannot land
+// between them and make a consumer merge servers from one moment with modes
+// from another. Safe on a nil config: both maps come back empty (never nil).
+func (f *FrontendAPI) mcpConfigSnapshot() (servers map[string]config.MCPServerConfig, caps map[string]config.CapabilityModes) {
+	f.configMu.RLock()
+	defer f.configMu.RUnlock()
+	return f.configMCPServersCopy(), f.configMCPCapsCopy()
 }
 
 // MCPMentionableServer is the minimal identity of one configured MCP server
@@ -197,11 +214,12 @@ type MCPMentionableServer struct {
 // secret-free {name, chat_mode, code_mode} triple, sorted by name. It is the
 // lightweight read behind the chat-input completion and the send path — no
 // transport details, no gateway status, no credentials. Modes are normalized
-// (empty/invalid resolve to "auto"), matching the load pipeline.
+// (empty/invalid resolve to "auto"), matching the load pipeline. Servers and
+// modes are captured under a single configMu read lock (mcpConfigSnapshot),
+// so the listing always reflects one moment of the config.
 // Returns an empty slice if config is not initialized.
 func (f *FrontendAPI) GetMCPMentionableServers() []MCPMentionableServer {
-	servers := f.GetMCPServers()
-	caps := f.capabilitiesSnapshot().mcp
+	servers, caps := f.mcpConfigSnapshot()
 	names := make([]string, 0, len(servers))
 	for name := range servers {
 		names = append(names, name)
@@ -286,7 +304,9 @@ func effectiveGroupPolicy(policies map[sdktools.ToolGroup]sdktools.ToolPolicy, g
 const mcpReconfigureTimeout = 30 * time.Second
 
 // UpdateMCPServers updates MCP server configuration and hot-reloads the
-// gateway.
+// gateway. The payload is a full replacement of mcp.servers; a server absent
+// from it is deleted, and its capabilities.mcp entry is trimmed with it so
+// no stored modes outlive their server.
 //
 // Locking contract (mirrors UpdateProxySettings): saveMu serializes whole
 // save sequences, while configMu is held only for the field mutation and the
@@ -316,7 +336,7 @@ func (f *FrontendAPI) UpdateMCPServers(servers map[string]config.MCPServerConfig
 	}
 
 	// Deep-copy the servers map to avoid external modifications
-	f.config.MCP.Servers = make(map[string]config.MCPServerConfig, len(servers))
+	newMCP := make(map[string]config.MCPServerConfig, len(servers))
 	for name, cfg := range servers {
 		srv := cfg
 		// The wire format no longer carries mode (json:"-"), so a Wails
@@ -340,8 +360,28 @@ func (f *FrontendAPI) UpdateMCPServers(servers map[string]config.MCPServerConfig
 				srv.Headers[hk] = hv
 			}
 		}
-		f.config.MCP.Servers[name] = srv
+		newMCP[name] = srv
 	}
+	f.config.MCP.Servers = newMCP
+
+	// capabilities.mcp is keyed by server name, and the replacement above
+	// orphans the entry of every server the payload dropped (a nil payload
+	// orphans all of them). Trim the stale names before persisting — Save
+	// writes the section verbatim, so a deleted server's modes would
+	// otherwise survive on disk and silently re-attach to a future server
+	// of the same name. Survivors keep their stored modes; an emptied
+	// section becomes nil so it disappears from the YAML entirely, the same
+	// shape the load normalization and UpdateCapabilityModes leave it in.
+	validModes := make(map[string]config.CapabilityModes, len(f.config.Capabilities.MCP))
+	for name, modes := range f.config.Capabilities.MCP {
+		if _, known := newMCP[name]; known {
+			validModes[name] = modes
+		}
+	}
+	if len(validModes) == 0 {
+		validModes = nil
+	}
+	f.config.Capabilities.MCP = validModes
 
 	// Persist config
 	if err := f.persistConfig(); err != nil {

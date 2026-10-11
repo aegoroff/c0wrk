@@ -147,6 +147,70 @@ func TestCurrentSkillAgentModes_ImmutableSnapshots(t *testing.T) {
 	}
 }
 
+// TestUpdateCapabilities_RepublishesAllSnapshots reproduces the MUST FIX
+// finding behind UpdateCapabilities: the immutable snapshots are read at
+// every task entry through the resolver getters, and before the runtime
+// republish existed they only ever reflected the config the builder was
+// CONSTRUCTED with (mcpModes got a later refresh from ReconfigureMCP, but
+// skillModes/agentModes had none) — so a saved capabilities change stayed
+// invisible to live orchestrators until the next app restart. The test
+// seeds the stale-snapshot state, republishes from a new BuilderConfig the
+// way UpdateCapabilityModes does, and verifies all three snapshots track it:
+// new entries appear, dropped (stale) names disappear, the published maps
+// are private clones (later input mutation cannot leak in), and a cleared
+// section publishes nil (gates nothing).
+func TestUpdateCapabilities_RepublishesAllSnapshots(t *testing.T) {
+	b := &OrchestratorBuilder{
+		mcpModes:   map[string]CapabilityModes{"stale-srv": bothCtxModes(mcpModeManual)},
+		skillModes: map[string]CapabilityModes{"stale-skill": bothCtxModes(mcpModeManual)},
+		agentModes: map[string]CapabilityModes{"stale-agent": bothCtxModes(mcpModeDisabled)},
+	}
+	cfg := &BuilderConfig{
+		MCP: BuilderMCPConfig{Servers: map[string]BuilderMCPServer{
+			"srv": {Transport: "stdio", Command: "cmd", ChatMode: mcpModeManual, CodeMode: mcpModeDisabled},
+		}},
+		Capabilities: BuilderCapabilitiesConfig{
+			Skills: map[string]CapabilityModes{"study": bothCtxModes(mcpModeManual)},
+			Agents: map[string]CapabilityModes{"ghost": bothCtxModes(mcpModeDisabled)},
+		},
+	}
+
+	b.UpdateCapabilities(cfg)
+
+	if got := b.currentMCPServerModes(); len(got) != 1 || got["srv"] != (CapabilityModes{ChatMode: mcpModeManual, CodeMode: mcpModeDisabled}) {
+		t.Errorf("currentMCPServerModes() = %v, want only srv {manual, disabled} (stale-srv replaced)", got)
+	}
+	if got := b.currentSkillModes(); len(got) != 1 || got["study"] != (CapabilityModes{ChatMode: mcpModeManual, CodeMode: mcpModeManual}) {
+		t.Errorf("currentSkillModes() = %v, want only study {manual, manual} (stale-skill replaced)", got)
+	}
+	if got := b.currentAgentModes(); len(got) != 1 || got["ghost"] != (CapabilityModes{ChatMode: mcpModeDisabled, CodeMode: mcpModeDisabled}) {
+		t.Errorf("currentAgentModes() = %v, want only ghost {disabled, disabled} (stale-agent replaced)", got)
+	}
+
+	// The snapshots are private clones: mutating the caller's config maps
+	// after the publish must not leak into the builder's state.
+	cfg.Capabilities.Skills["study"] = bothCtxModes(mcpModeAuto)
+	cfg.Capabilities.Agents["ghost"] = bothCtxModes(mcpModeAuto)
+	cfg.MCP.Servers["srv"] = BuilderMCPServer{Transport: "stdio", Command: "cmd"}
+	if got := b.currentSkillModes()["study"]; got.ChatMode != mcpModeManual {
+		t.Errorf("skill snapshot leaked later input mutation: %v", got)
+	}
+	if got := b.currentAgentModes()["ghost"]; got.ChatMode != mcpModeDisabled {
+		t.Errorf("agent snapshot leaked later input mutation: %v", got)
+	}
+	if got := b.currentMCPServerModes()["srv"]; got.CodeMode != mcpModeDisabled {
+		t.Errorf("mcp snapshot leaked later input mutation: %v", got)
+	}
+
+	// A cleared section publishes nil — the "gates nothing" default — rather
+	// than leaving the previous section's entries in place.
+	cfg.Capabilities.Skills = nil
+	b.UpdateCapabilities(cfg)
+	if got := b.currentSkillModes(); got != nil {
+		t.Errorf("currentSkillModes() after a cleared section = %v, want nil", got)
+	}
+}
+
 // TestNewOrchestratorBuilder_CapabilitySnapshots pins the constructor wiring:
 // the builder's immutable skill/agent snapshots are projected from
 // BuilderConfig.Capabilities at construction (the seam Build() hands the

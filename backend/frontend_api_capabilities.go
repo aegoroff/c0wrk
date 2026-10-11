@@ -53,23 +53,29 @@ type capabilitiesSnapshot struct {
 func (f *FrontendAPI) capabilitiesSnapshot() capabilitiesSnapshot {
 	f.configMu.RLock()
 	defer f.configMu.RUnlock()
-	snap := capabilitiesSnapshot{
+	return capabilitiesSnapshot{
 		caps: config.CapabilitiesConfig{
 			Skills: copyCapabilityModesMap(f.configCapSkills()),
 			Agents: copyCapabilityModesMap(f.configCapAgents()),
 		},
-		mcp: make(map[string]config.CapabilityModes, len(f.configCapMCP())),
+		mcp: f.configMCPCapsCopy(),
 	}
-	// capabilities.mcp is name-checked against mcp.servers here — the same
-	// staleness rule the load normalization (normalizeCapabilities) applies —
-	// so the read surface can never resurrect a deleted server's entry.
+}
+
+// configMCPCapsCopy returns a copy of the capabilities.mcp section with
+// stale names (servers no longer configured) already removed — the same
+// staleness rule the load normalization (normalizeCapabilities) applies —
+// so the read surface can never resurrect a deleted server's entry.
+// Callers MUST hold configMu; reading a nil section yields an empty map.
+func (f *FrontendAPI) configMCPCapsCopy() map[string]config.CapabilityModes {
+	out := make(map[string]config.CapabilityModes, len(f.configCapMCP()))
 	for name, modes := range f.configCapMCP() {
 		if _, known := f.configMCPServerNames()[name]; !known {
 			continue
 		}
-		snap.mcp[name] = modes
+		out[name] = modes
 	}
-	return snap
+	return out
 }
 
 // The configCap* accessors read the raw sections. They exist so the snapshot
@@ -164,8 +170,12 @@ func capabilityModesInfo(m map[string]config.CapabilityModes) map[string]Capabil
 // server was deleted or renamed), and entries whose values are both empty
 // are dropped (no explicit value to store). The remainder is normalized
 // (empty → "auto") exactly like normalizeCapabilities, then persisted
-// through the common config pipeline. No gateway reconfiguration here: the
-// MCP server SET is unchanged, and mode consumption is a separate concern.
+// through the common config pipeline and republished to the live builder
+// (UpdateCapabilities — a pure in-memory snapshot write), so the change
+// reaches running orchestrators at their next task entry. No gateway
+// reconfiguration: the MCP server SET is unchanged, and mode edits are
+// policy, not topology (ADR-084) — a newly both-disabled server stays
+// dialed until the next full reconfigure or restart, by design.
 func (f *FrontendAPI) UpdateCapabilityModes(kind string, modes map[string]CapabilityModesInfo) error {
 	converted := make(map[string]config.CapabilityModes, len(modes))
 	for name, m := range modes {
@@ -227,6 +237,19 @@ func (f *FrontendAPI) UpdateCapabilityModes(kind string, modes map[string]Capabi
 
 	if err := f.persistConfig(); err != nil {
 		f.log().Warn("failed to persist capability modes", "error", err)
+	}
+
+	// Publish the edited modes to the live builder while configMu is still
+	// held — the same discipline as the UpdateSecurityPolicies push in
+	// UpdateSecuritySettings. Orchestrators read modes from the builder's
+	// immutable snapshots at task entry via the resolver getters, so without
+	// this push a saved change would not take effect until the next app
+	// restart. The publication is a bounded in-memory write (no network, no
+	// readiness wait), so it stays inside the lock; a builder that is not up
+	// yet is a no-op — construction projects the same section from the
+	// persisted config.
+	if b := f.builder(); b != nil {
+		b.UpdateCapabilities(f.toBuilderConfigLocked())
 	}
 
 	return nil

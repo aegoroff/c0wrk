@@ -733,6 +733,64 @@ describe('cmChatAutocomplete unified /-source', () => {
     expect(logger.error).not.toHaveBeenCalled()
   })
 
+  it('does not serve the stale capabilities cache after a failed refetch and retries the next trigger', async () => {
+    // Phase 1 — a successful fetch populates the cache: 'reviewer' is
+    // disabled for chat and must be hidden.
+    useProjectStore.setState({ projects: [], activeProjectId: 'caps-stale-a' })
+    activateSession('sess-chat', NO_PROJECT_ID)
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
+    getMCPMentionableServersMock.mockResolvedValue([])
+    getCapabilityModesMock.mockResolvedValue({
+      skills: {},
+      agents: { reviewer: { chat_mode: 'disabled', code_mode: 'auto' } },
+      mcp: {},
+    })
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'commit'),
+      'first successful fetch to populate the cache',
+    )
+    expect(currentCompletions(view.state).map((c) => c.label)).not.toContain('reviewer')
+
+    // Phase 2 — a context transition invalidates the cache and the refetch
+    // FAILS. Serving the stale cache would keep 'reviewer' hidden in the NEW
+    // context; the failure must degrade to null — everything offered.
+    useProjectStore.setState({ projects: [], activeProjectId: 'caps-stale-b' })
+    getCapabilityModesMock.mockRejectedValue(new Error('caps rpc down'))
+    vi.mocked(logger.warn).mockClear()
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '/' } })
+    startCompletion(view)
+    await until(() => getCapabilityModesMock.mock.calls.length >= 2, 'failed refetch to happen')
+    await settledCompletion(view)
+    const failLabels = currentCompletions(view.state).map((c) => c.label)
+    expect(failLabels).toContain('reviewer')
+    expect(failLabels).toContain('commit')
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith(
+      'completion: GetCapabilityModes failed; offering all skills/agents',
+      expect.any(Error),
+    )
+
+    // Phase 3 — capsLoaded stayed false, so the next trigger RETRIES the
+    // fetch instead of replaying the failure or a stale snapshot; the fresh
+    // modes are applied (a different name is now hidden).
+    getCapabilityModesMock.mockResolvedValue({
+      skills: { commit: { chat_mode: 'disabled', code_mode: 'auto' } },
+      agents: {},
+      mcp: {},
+    })
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '/' } })
+    startCompletion(view)
+    await until(() => getCapabilityModesMock.mock.calls.length >= 3, 'retry after the failed refetch')
+    await settledCompletion(view)
+    expect(getCapabilityModesMock).toHaveBeenCalledTimes(3)
+    const retryLabels = currentCompletions(view.state).map((c) => c.label)
+    expect(retryLabels).toContain('reviewer')
+    expect(retryLabels).not.toContain('commit')
+  })
+
   it('offers the /mcp: qualified spelling for a name colliding with a skill and inserts it', async () => {
     useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-collision' })
     vi.mocked(listAgents).mockResolvedValue([])

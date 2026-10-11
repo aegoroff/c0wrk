@@ -53,6 +53,26 @@ func (b *OrchestratorBuilder) currentAgentModes() map[string]CapabilityModes {
 	return maps.Clone(b.agentModes)
 }
 
+// UpdateCapabilities republishes all three capability mode snapshots (MCP
+// servers, skills, agents) from cfg — the runtime-edit counterpart of the
+// constructor projection, mirroring the single-line mcpModes republication
+// ReconfigureMCP performs. It is a pure in-memory write under b.mu: no
+// gateway work, no readiness wait, no network — mode edits are policy, not
+// topology (ADR-084), so the gateway keeps its current dial set (a newly
+// both-disabled server stays dialed until the next full reconfigure or
+// restart, which is that ADR's declared behavior) while live orchestrators
+// pick the fresh snapshots up at the next task entry through the resolver
+// getters. The snapshots are private clones built by the projection helpers,
+// so later mutation of the caller's config maps cannot leak in. A nil skill
+// or agent section publishes nil — a cleared section gates nothing.
+func (b *OrchestratorBuilder) UpdateCapabilities(cfg *BuilderConfig) {
+	b.mu.Lock()
+	b.mcpModes = mcpServerModesFromConfig(cfg)
+	b.skillModes = capabilityModesFromConfig(cfg.Capabilities.Skills)
+	b.agentModes = capabilityModesFromConfig(cfg.Capabilities.Agents)
+	b.mu.Unlock()
+}
+
 // implicitSkillDescriptors filters the skill catalog down to the skills
 // implicit discovery (the router) may see: auto-mode entries and names
 // absent from the modes map. Manual skills stay resolvable for explicit

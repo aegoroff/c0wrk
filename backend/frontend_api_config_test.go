@@ -42,6 +42,7 @@ type mockBuilder struct {
 	rebuildProxyCalls         int
 	updateSearchToolCalls     int
 	updateSecPolicyCalls      int
+	updateCapabilitiesCalls   int
 	updateShellBlocklistCalls int
 	reconfigureMCPCalls       int
 	listProviderModelsCalls   int
@@ -81,6 +82,11 @@ type mockBuilder struct {
 	// UpdateSecurityPolicies so tests can assert the runtime push forwards the
 	// intended security state (e.g. silent mode) to the live registries.
 	updateSecPolicyLastCfg *core.BuilderConfig
+
+	// updateCapabilitiesLastCfg captures the most recent BuilderConfig passed
+	// to UpdateCapabilities so tests can assert the runtime push carries the
+	// just-saved capability modes to the live builder.
+	updateCapabilitiesLastCfg *core.BuilderConfig
 
 	// Configurable return values for methods that have them.
 	rebuildRouterErr        error
@@ -215,6 +221,12 @@ func (m *mockBuilder) UpdateSecurityPolicies(cfg *core.BuilderConfig) {
 	m.mu.Lock()
 	m.updateSecPolicyCalls++
 	m.updateSecPolicyLastCfg = cfg
+	m.mu.Unlock()
+}
+func (m *mockBuilder) UpdateCapabilities(cfg *core.BuilderConfig) {
+	m.mu.Lock()
+	m.updateCapabilitiesCalls++
+	m.updateCapabilitiesLastCfg = cfg
 	m.mu.Unlock()
 }
 func (m *mockBuilder) UpdateShellBlocklist(_ *core.BuilderConfig) error {

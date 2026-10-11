@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/v0lka/c0wrk/backend/config"
+	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/sp4rk/tools/mcp"
 )
 
@@ -75,7 +76,11 @@ func TestGetCapabilityModes_NoConfig(t *testing.T) {
 // TestUpdateCapabilityModes_PersistsAllSections covers the happy path for
 // every kind: the section is written to the live config, persisted through
 // the common pipeline (atomic YAML rewrite), and reads back normalized via
-// GetCapabilityModes. The persisted file must not contain a legacy mode key.
+// GetCapabilityModes. Every update is also pushed to the live builder
+// (UpdateCapabilities) — orchestrators read modes from the builder's
+// immutable snapshots at task entry, so a save without the push would stay
+// invisible until the next app restart. The persisted file must not contain
+// a legacy mode key.
 func TestUpdateCapabilityModes_PersistsAllSections(t *testing.T) {
 	f, mock, cfgPath := newTestAPI(t)
 	f.config.MCP = config.MCPConfig{
@@ -102,6 +107,27 @@ func TestUpdateCapabilityModes_PersistsAllSections(t *testing.T) {
 
 	if mock.reconfigureMCPCalls != 0 {
 		t.Errorf("ReconfigureMCP called %d times, want 0 (the server set is unchanged)", mock.reconfigureMCPCalls)
+	}
+
+	// The runtime-edit push: one UpdateCapabilities per RPC, and the last one
+	// carries the full saved state — the skill/agent sections verbatim and
+	// the MCP modes projected onto the server entries (the same shape the
+	// constructor and ReconfigureMCP publish from).
+	if mock.updateCapabilitiesCalls != 3 {
+		t.Errorf("UpdateCapabilities called %d times, want 3 (one per section update)", mock.updateCapabilitiesCalls)
+	}
+	last := mock.updateCapabilitiesLastCfg
+	if last == nil {
+		t.Fatal("UpdateCapabilities never captured a BuilderConfig")
+	}
+	if s, ok := last.Capabilities.Skills["my-skill"]; !ok || s != (core.CapabilityModes{ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeAuto}) {
+		t.Errorf("pushed skills[my-skill] = %+v (present %t), want chat manual / code auto", s, ok)
+	}
+	if a, ok := last.Capabilities.Agents["code-reviewer"]; !ok || a != (core.CapabilityModes{ChatMode: config.MCPServerModeDisabled, CodeMode: config.MCPServerModeDisabled}) {
+		t.Errorf("pushed agents[code-reviewer] = %+v (present %t), want disabled/disabled", a, ok)
+	}
+	if srv := last.MCP.Servers["srv"]; srv.ChatMode != config.MCPServerModeManual || srv.CodeMode != config.MCPServerModeDisabled {
+		t.Errorf("pushed mcp server modes = {chat %q, code %q}, want manual/disabled", srv.ChatMode, srv.CodeMode)
 	}
 
 	// In-memory state is normalized.
@@ -321,6 +347,33 @@ func TestUpdateCapabilityModes_NoConfig(t *testing.T) {
 	f.seedPublished.Store(true)
 	if err := f.UpdateCapabilityModes(CapabilitySectionSkills, nil); err == nil {
 		t.Fatal("expected error when config is not initialized")
+	}
+}
+
+// TestUpdateCapabilityModes_NoLiveBuilder verifies the no-op publication
+// branch: with a live config but no builder yet (fresh API before Init),
+// the update still mutates and persists — the constructor projects the same
+// section from the persisted config at build time, so there is nothing to
+// push into and nothing is lost.
+func TestUpdateCapabilityModes_NoLiveBuilder(t *testing.T) {
+	f, _, cfgPath := newTestAPI(t)
+	f.builderOverride = nil
+	f.app = nil
+
+	if err := f.UpdateCapabilityModes(CapabilitySectionSkills, map[string]CapabilityModesInfo{
+		"my-skill": {ChatMode: config.MCPServerModeManual, CodeMode: config.MCPServerModeManual},
+	}); err != nil {
+		t.Fatalf("UpdateCapabilityModes without a live builder: %v", err)
+	}
+	if s := f.GetCapabilityModes().Skills["my-skill"]; s.ChatMode != config.MCPServerModeManual {
+		t.Errorf("skills[my-skill] = %+v, want the update applied with no builder present", s)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload persisted config: %v", err)
+	}
+	if s := reloaded.Capabilities.Skills["my-skill"]; s.ChatMode != config.MCPServerModeManual {
+		t.Errorf("persisted skills[my-skill] = %+v, want chat manual", s)
 	}
 }
 

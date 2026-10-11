@@ -448,19 +448,6 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 	}
 }
 
-// parseMCPDuration resolves an MCP server duration string (timeout /
-// call_timeout) into a time.Duration for the sp4rk ServerEntry. Empty resolves
-// to 0 (the sp4rk default). An unparseable or non-positive value fails soft to
-// 0, so a bad duration can never prevent a server from starting.
-//
-// It deliberately logs nothing: config.LoadWithResult is the single surfacing
-// point for an invalid value — normalizeMCPTimeouts turns each one into a load
-// warning that config.ResolveAndLoad both logs at WARN and hands to the UI's
-// configLoadErrors channel — so logging here too would duplicate that WARN on
-// every start (and on every builder rebuild). The UI save path rejects an
-// invalid value up front (validateMCPServerConfig), so this fail-soft branch
-// only ever covers a hand-edited file (already warned about at load) or a
-// programmatic config that bypasses that validation.
 // capabilityModesToCore converts a config-layer per-capability mode map into
 // the core-layer mirror, value-for-value (core never imports backend/config,
 // so the struct types are distinct copies of the same shape).
@@ -475,6 +462,19 @@ func capabilityModesToCore(entries map[string]config.CapabilityModes) map[string
 	return out
 }
 
+// parseMCPDuration resolves an MCP server duration string (timeout /
+// call_timeout) into a time.Duration for the sp4rk ServerEntry. Empty resolves
+// to 0 (the sp4rk default). An unparseable or non-positive value fails soft to
+// 0, so a bad duration can never prevent a server from starting.
+//
+// It deliberately logs nothing: config.LoadWithResult is the single surfacing
+// point for an invalid value — normalizeMCPTimeouts turns each one into a load
+// warning that config.ResolveAndLoad both logs at WARN and hands to the UI's
+// configLoadErrors channel — so logging here too would duplicate that WARN on
+// every start (and on every builder rebuild). The UI save path rejects an
+// invalid value up front (validateMCPServerConfig), so this fail-soft branch
+// only ever covers a hand-edited file (already warned about at load) or a
+// programmatic config that bypasses that validation.
 func parseMCPDuration(raw string) time.Duration {
 	d, err := config.ParseMCPDuration(raw)
 	if err != nil {
