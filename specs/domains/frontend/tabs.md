@@ -2,7 +2,7 @@
 
 ## Role
 
-The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible and how notification clicks route (see [ADR-084](../../decisions/084-workspace-tabs-single-engine.md)).
+The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible and how notification clicks route (see [ADR-085](../../decisions/085-workspace-tabs-single-engine.md)).
 
 ## Key Files
 
@@ -81,17 +81,17 @@ Every tab creation goes through `TabEngine.createAndActivate(seed?)`: the [creat
 | `workspaceTabByProject` | `uiStore` | `'explorer'` \| `'git'` \| `'semantics'` \| `'research'` per project id |
 | `researchSegmentByProject` | `uiStore` | `'dashboard'` \| `'papers'` per project id |
 | `inputMode` | `inputModeStore` | `{mode, height, collapsedHeight, isExpanded}` — exactly the panel's persisted fields; the transient `pending*` fields are excluded |
-| `sidebar` | `uiStore` | `{collapsed, width}` — the left sidebar's geometry (v2, [ADR-084](../../decisions/084-workspace-tabs-single-engine.md)) |
+| `sidebar` | `uiStore` | `{collapsed, width}` — the left sidebar's geometry (v2, [ADR-085](../../decisions/085-workspace-tabs-single-engine.md)) |
 | `viewer` | `fileViewerStore` | `{pinned, collapsed, width}` — the right panel's geometry (v2); its OPEN FILE TABS are deliberately excluded |
 | `gitPanelTabByProject` | `gitPanelStore` | `'files'` \| `'changes'` \| `'history'` per project id (v2) |
 | `chatSessionListRatio` | `uiStore` | the CHAT session-list/workspace split ratio (v2) |
 | `showSessionStats` | `uiStore` | the session-stats row visibility toggle (v2) |
 
-Restore semantics follow the slice's shape: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), while every scalar slice — sidebar, viewer, input panel, ratio, stats — restores as an OVERWRITE through its owning store's setters (the setters' clamps stay in force); overwriting the live value is exactly what makes the scalar shell state per-tab ([ADR-084](../../decisions/084-workspace-tabs-single-engine.md)). The viewer restore additionally respects the empty-floating auto-collapse invariant: an unpinned viewer with zero open tabs recedes to the docked rail regardless of what the snapshot remembers.
+Restore semantics follow the slice's shape: the per-project maps merge entry-by-entry (this tab's remembered entries layer over the live map; other projects' entries survive), while every scalar slice — sidebar, viewer, input panel, ratio, stats — restores as an OVERWRITE through its owning store's setters (the setters' clamps stay in force); overwriting the live value is exactly what makes the scalar shell state per-tab ([ADR-085](../../decisions/085-workspace-tabs-single-engine.md)). The viewer restore additionally respects the empty-floating auto-collapse invariant: an unpinned viewer with zero open tabs recedes to the docked rail regardless of what the snapshot remembers.
 
 Every payload crosses `sanitizeTabUI` (the same fail-closed contract as `mergeUIStore`): per-project maps rebuild from valid entries only, scalar fields fall back to the caller-supplied live fallback (widths/heights/ratio must be finite numbers, modes must be known modes, booleans must be booleans), results are freshly allocated so later store mutations never leak into a stored snapshot. `captureTabUI` captures the live slices; `restoreTabUI` validates a remembered snapshot against the live fallback; `isSameTabUI` powers the content-equality no-ops.
 
-The file viewer's open tabs and active file are deliberately NOT a slice: they remain per-project state, restored by the project-switch persistence (`ProjectSwitchState`), never captured per workspace tab — two tabs on the same project intentionally share the project's viewer ([ADR-084](../../decisions/084-workspace-tabs-single-engine.md) D3).
+The file viewer's open tabs and active file are deliberately NOT a slice: they remain per-project state, restored by the project-switch persistence (`ProjectSwitchState`), never captured per workspace tab — two tabs on the same project intentionally share the project's viewer ([ADR-085](../../decisions/085-workspace-tabs-single-engine.md) D3).
 
 ### Banner-click routing (the one flag branch)
 
@@ -159,4 +159,4 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 - [stores.md](stores.md) — `tabStore` in the store catalog; `uiStore` owns the persisted flag (v7) and the per-project maps the snapshot slices capture
 - [system-notifications.md](system-notifications.md) — the flag-on banner-click branch of `useNotificationClicks`
 - [README.md](README.md) — the app shell the tab bar sits above and the project-switch flow the engine drives
-- [ADR-084](../../decisions/084-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision
+- [ADR-085](../../decisions/085-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision

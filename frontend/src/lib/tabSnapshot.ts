@@ -21,7 +21,7 @@ import {
 // slices with `captureTabUI`, stores the result on the tab's `ui` field, and
 // restores the incoming tab's slices with `restoreTabUI`.
 //
-// v2 composition (ADR-084): beside the v1 workspace-panel slices, a tab also
+// v2 composition (ADR-085): beside the v1 workspace-panel slices, a tab also
 // remembers the shell geometry (left sidebar, right viewer panel), the
 // per-project Git-panel tab, and the two chat-view toggles. Scalar slices
 // restore as an OVERWRITE — that is what makes them per-tab — while the
@@ -50,7 +50,7 @@ export interface TabSidebarSnapshot {
  * The right viewer panel's geometry slice (fileViewerStore
  * pinned/collapsed/width). The viewer's OPEN FILE TABS are deliberately NOT
  * part of a workspace tab's snapshot: they stay per-project state, restored
- * by the project-switch persistence (ProjectSwitchState) — see ADR-084 D3.
+ * by the project-switch persistence (ProjectSwitchState) — see ADR-085 D3.
  */
 export interface TabViewerSnapshot {
   pinned: boolean
@@ -67,7 +67,7 @@ export interface TabUIState {
   workspaceTabByProject: WorkspaceTabByProject
   researchSegmentByProject: ResearchSegmentByProject
   inputMode: TabInputSnapshot
-  // v2 slices (ADR-084).
+  // v2 slices (ADR-085).
   sidebar: TabSidebarSnapshot
   viewer: TabViewerSnapshot
   gitPanelTabByProject: GitPanelTabByProject

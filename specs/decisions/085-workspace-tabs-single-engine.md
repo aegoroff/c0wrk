@@ -1,4 +1,4 @@
-# ADR-084: Workspace Tabs — Single Engine, Flag-Only Visibility, Snapshot Slices
+# ADR-085: Workspace Tabs — Single Engine, Flag-Only Visibility, Snapshot Slices
 
 ## Status
 
