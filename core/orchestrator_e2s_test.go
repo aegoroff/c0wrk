@@ -915,10 +915,10 @@ func TestHandleMessage_E2S_MCPModeGating(t *testing.T) {
 				Enabled: true,
 				Tools:   BuilderE2SToolsConfig{Preset: E2SToolsPresetAll},
 			},
-			MCPServerModes: map[string]string{
-				"auto-srv":     "auto",
-				"manual-srv":   "manual",
-				"disabled-srv": "disabled",
+			MCPServerModes: map[string]CapabilityModes{
+				"auto-srv":     {ChatMode: "auto", CodeMode: "auto"},
+				"manual-srv":   {ChatMode: "manual", CodeMode: "manual"},
+				"disabled-srv": {ChatMode: "disabled", CodeMode: "disabled"},
 			},
 		}, deps)
 		return reg, o, mockLLM

@@ -211,7 +211,7 @@ func (o *Orchestrator) routeOrContinue(
 					o.emitter.Routing("conductor", restored.Domain, strconv.Itoa(restored.Complexity))
 					o.logInfo("routing_decision", "domain", restored.Domain, "complexity", restored.Complexity)
 					ctx = o.reactivateSkills(ctx, restored, opts.UserSkills)
-					activeSkills := o.collectActiveSkillDescriptors(restored, opts.UserSkills)
+					activeSkills := o.collectActiveSkillDescriptors(ctx, restored, opts.UserSkills)
 					ctx = WithDomain(ctx, restored.Domain)
 					ctx = WithComplexity(ctx, restored.Complexity)
 					if len(opts.UserSkills) > 0 {
@@ -229,14 +229,17 @@ func (o *Orchestrator) routeOrContinue(
 // /-mention subagent names, and the user's MCP-server mentions to the context
 // so the Conductor's system prompt can render the "Available Subagents",
 // "Requested Subagents", and "Requested MCP Servers" sections. The catalog is
-// the full discovery list (including hidden agents — the prompt formatter
-// filters hidden entries for the public roster but keeps them resolvable for
-// explicit mentions). All attachments are nil/empty-safe: a nil agentManager
-// or empty name lists leave the context unchanged, so a project with no
-// subagents and no MCP mentions sees no regression.
+// filtered through the task's agent capability snapshot BEFORE the hidden-agent
+// formatting: auto entries only — a manual agent is hidden from implicit
+// discovery (it still resolves for an explicit /agent: mention, which threads
+// through the separately-attached user list, itself stripped of disabled
+// agents at task entry), and a disabled agent is gone entirely. All
+// attachments are nil/empty-safe: a nil agentManager or empty name lists
+// leave the context unchanged, so a project with no subagents and no MCP
+// mentions sees no regression.
 func (o *Orchestrator) enrichAgentContext(ctx context.Context, userAgents, userMCPServers []string) context.Context {
 	if o.agentManager != nil {
-		if descriptors := o.agentManager.List(); len(descriptors) > 0 {
+		if descriptors := filterRosterAgents(ctx, o.agentManager.List()); len(descriptors) > 0 {
 			ctx = WithAvailableAgents(ctx, descriptors)
 		}
 	}
@@ -253,7 +256,13 @@ func (o *Orchestrator) enrichAgentContext(ctx context.Context, userAgents, userM
 // from a restored routing decision. Used by the continuation fast-path to
 // avoid calling the router while still wiring skills.
 func (o *Orchestrator) reactivateSkills(ctx context.Context, routing *router.RoutingDecision, userSkills []string) context.Context {
-	mergedSkillNames := mergeSkillNames(routing.MatchedSkills, userSkills)
+	// Capability gating on the restored routing decision: a skill matched
+	// before a pause but since turned manual/disabled must not silently
+	// reactivate through the fast-path — the same implicit-discovery rule the
+	// fresh path's router-catalog filter applies. User mentions were already
+	// filtered at task entry (disabled dropped, manual kept).
+	implicitMatched := implicitSkillNames(routing.MatchedSkills, SkillCapabilityModesFromContext(ctx))
+	mergedSkillNames := mergeSkillNames(implicitMatched, userSkills)
 	if len(mergedSkillNames) == 0 || o.skillManager == nil {
 		return ctx
 	}
@@ -276,9 +285,16 @@ func (o *Orchestrator) reactivateSkills(ctx context.Context, routing *router.Rou
 }
 
 // collectActiveSkillDescriptors builds the SkillDescriptor slice for a restored
-// routing decision (mirrors what routeAndActivateSkills would produce).
-func (o *Orchestrator) collectActiveSkillDescriptors(routing *router.RoutingDecision, userSkills []string) []skills.SkillDescriptor {
-	mergedSkillNames := mergeSkillNames(routing.MatchedSkills, userSkills)
+// routing decision (mirrors what routeAndActivateSkills would produce). The
+// task context carries the skill capability snapshot (attachCapabilitySnapshots),
+// which the routing-matched names are filtered through.
+func (o *Orchestrator) collectActiveSkillDescriptors(ctx context.Context, routing *router.RoutingDecision, userSkills []string) []skills.SkillDescriptor {
+	// Same rules as reactivateSkills: routing-matched names follow the
+	// implicit-discovery rule (a restored decision predating a capability
+	// change must not resurrect a manual/disabled skill); user mentions were
+	// already filtered at task entry.
+	implicitMatched := implicitSkillNames(routing.MatchedSkills, SkillCapabilityModesFromContext(ctx))
+	mergedSkillNames := mergeSkillNames(implicitMatched, userSkills)
 	if len(mergedSkillNames) == 0 || o.skillManager == nil {
 		return nil
 	}
@@ -313,7 +329,12 @@ func (o *Orchestrator) routeAndActivateSkills(
 
 	var skillDescriptors []skills.SkillDescriptor
 	if o.skillManager != nil {
-		skillDescriptors = o.skillManager.List()
+		// Capability gating (auto-only catalog): manual skills are invisible
+		// to router matching (they activate only via an explicit /skill:
+		// mention) and disabled skills are gone entirely. The snapshot rides
+		// the task context (attachCapabilitySnapshots at task entry); an
+		// absent snapshot passes the catalog through unchanged.
+		skillDescriptors = implicitSkillDescriptors(o.skillManager.List(), SkillCapabilityModesFromContext(ctx))
 	}
 
 	// When the user explicitly invoked skill(s) via /skill-name, the message
@@ -381,7 +402,12 @@ func (o *Orchestrator) routeAndActivateSkills(
 
 	// Activate matched skills (merge router-matched + user-specified, deduplicated)
 	var activeSkillDescriptors []skills.SkillDescriptor
-	mergedSkillNames := mergeSkillNames(routing.MatchedSkills, opts.UserSkills)
+	// The router only saw the auto-only catalog, so routing-matched names are
+	// already implicitly discoverable — the filter is defense-in-depth (and
+	// the exact rule collectActiveSkillDescriptors applies to a RESTORED
+	// routing decision, which may predate a capability change).
+	implicitMatched := implicitSkillNames(routing.MatchedSkills, SkillCapabilityModesFromContext(ctx))
+	mergedSkillNames := mergeSkillNames(implicitMatched, opts.UserSkills)
 	if len(mergedSkillNames) > 0 && o.skillManager != nil {
 		var activeSkills []*skills.Skill
 		var activatedNames []string

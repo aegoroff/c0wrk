@@ -10,7 +10,7 @@
 import type { AgentDescriptor, SkillDescriptor } from '@/types/models'
 import { listAgents } from '@/api/agents'
 import { listSkills } from '@/api/skills'
-import { getMCPMentionableServers, mentionableMCPNames } from '@/api/mcp'
+import { getMCPMentionableServers, isMentionableMCPServer } from '@/api/mcp'
 import { subscribe } from '@/api/runtime'
 
 export interface RefCatalogs {
@@ -47,7 +47,9 @@ export function cachedRefCatalogs(): RefCatalogs | null {
  * server-cached RPCs; getMCPMentionableServers is the secret-free
  * name+mode listing). A failing side degrades to an empty set for that kind
  * — an unknown name then renders as a neutral chip instead of blocking
- * message display.
+ * message display. The MCP set uses the DISPLAY predicate (mentionable in
+ * ≥1 context): these catalogs resolve chip kinds for PERSISTED messages the
+ * renderer cannot re-contextualize into their original session kind.
  */
 export function loadRefCatalogs(): Promise<RefCatalogs> {
   if (refCatalogsCache) return Promise.resolve(refCatalogsCache)
@@ -55,7 +57,9 @@ export function loadRefCatalogs(): Promise<RefCatalogs> {
     ensureRefCatalogsSubscription()
     const agentsP: Promise<AgentDescriptor[]> = listAgents().catch(() => [])
     const skillsP: Promise<SkillDescriptor[]> = listSkills().catch(() => [])
-    const mcpP = getMCPMentionableServers().then(mentionableMCPNames).catch(() => [])
+    const mcpP = getMCPMentionableServers()
+      .then((servers) => servers.filter(isMentionableMCPServer).map((s) => s.name))
+      .catch(() => [])
     refCatalogsInflight = Promise.all([agentsP, skillsP, mcpP]).then(([agents, skills, mcpNames]) => {
       const catalogs: RefCatalogs = {
         agentNames: new Set(agents.map((a) => a.name)),

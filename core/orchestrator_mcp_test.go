@@ -9,6 +9,14 @@ import (
 	coretools "github.com/v0lka/c0wrk/core/tools"
 )
 
+// bothCtxModes builds a CapabilityModes entry carrying the same mode in both
+// session contexts — the shape a legacy single per-server mode folds into
+// (backend/config migrateLegacyMCPServerMode). Tests that exercise the flat
+// single-mode semantics use it; context-split behavior has its own entries.
+func bothCtxModes(mode string) CapabilityModes {
+	return CapabilityModes{ChatMode: mode, CodeMode: mode}
+}
+
 func TestGatedMCPServerSet(t *testing.T) {
 	modes := map[string]string{
 		"auto-srv":   mcpModeAuto,
@@ -83,10 +91,10 @@ func TestFilterGatedMCPTools(t *testing.T) {
 }
 
 func TestApplyMCPModeGating(t *testing.T) {
-	o := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]string{
-		"auto-srv":     mcpModeAuto,
-		"manual-srv":   mcpModeManual,
-		"disabled-srv": mcpModeDisabled,
+	o := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]CapabilityModes{
+		"auto-srv":     bothCtxModes(mcpModeAuto),
+		"manual-srv":   bothCtxModes(mcpModeManual),
+		"disabled-srv": bothCtxModes(mcpModeDisabled),
 	}}}
 	ctx := context.Background()
 
@@ -113,10 +121,136 @@ func TestApplyMCPModeGating(t *testing.T) {
 	}
 
 	// Nothing gated (all auto) → list and ctx pass through unchanged.
-	oAll := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]string{"auto-srv": mcpModeAuto}}}
+	oAll := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]CapabilityModes{"auto-srv": bothCtxModes(mcpModeAuto)}}}
 	got, gatedCtx = oAll.applyMCPModeGating(ctx, mcpGateTestDescriptors(), nil)
 	if len(got) != 4 || gatedCtx != ctx {
 		t.Fatalf("auto-only config must be a no-op (got %d tools, ctx changed=%v)", len(got), gatedCtx != ctx)
+	}
+}
+
+// TestApplyMCPModeGating_SessionContextSelection pins the per-context mode
+// split: the session type selects which side of a CapabilityModes entry the
+// gating reads — CODE sessions apply code_mode, CHAT (No Project) sessions
+// apply chat_mode. A server manual only in CODE is available to a mentioned
+// CODE task and gated in CHAT tasks; the complement invariant (auto ∪
+// (manual ∩ mentioned)) holds per context, and a mention never overrides the
+// mode (a disabled context stays gated, mention or not).
+func TestApplyMCPModeGating_SessionContextSelection(t *testing.T) {
+	mcpDesc := func(name string) sdktools.ToolDescriptor {
+		return sdktools.ToolDescriptor{Name: name + "_query", Source: name, SourceCategory: sdktools.SourceCategoryMCP, Group: sdktools.GroupRemoteMCP}
+	}
+	sources := func(descs []sdktools.ToolDescriptor) map[string]bool {
+		out := make(map[string]bool, len(descs))
+		for _, d := range descs {
+			out[d.Source] = true
+		}
+		return out
+	}
+
+	modes := map[string]CapabilityModes{
+		// manual only in CODE; disabled in CHAT.
+		"code-manual": {ChatMode: mcpModeDisabled, CodeMode: mcpModeManual},
+		// manual in CHAT; auto in CODE.
+		"chat-manual": {ChatMode: mcpModeManual, CodeMode: mcpModeAuto},
+	}
+
+	tests := []struct {
+		name        string
+		isNoProject bool
+		mentioned   []string
+		wantSources []string
+	}{
+		{"CODE unmentioned: auto available, manual gated", false, nil, []string{"chat-manual"}},
+		{"CODE mentioned: manual∩mention joins the complement", false, []string{"code-manual"}, []string{"code-manual", "chat-manual"}},
+		{"CHAT unmentioned: both gated (disabled + unmentioned manual)", true, nil, nil},
+		{"CHAT mention cannot override the disabled context", true, []string{"code-manual"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &Orchestrator{config: OrchestratorConfig{MCPServerModes: modes}, isNoProject: tt.isNoProject}
+			descs := []sdktools.ToolDescriptor{mcpDesc("code-manual"), mcpDesc("chat-manual")}
+			got, ctx := o.applyMCPModeGating(context.Background(), descs, tt.mentioned)
+			gotSources := sources(got)
+			if len(gotSources) != len(tt.wantSources) {
+				t.Fatalf("available sources = %v, want %v", gotSources, tt.wantSources)
+			}
+			for _, want := range tt.wantSources {
+				if !gotSources[want] {
+					t.Errorf("server %q must be available, got %v", want, gotSources)
+				}
+			}
+			// The dispatch gate must mirror the catalog exactly: every server
+			// outside the available complement is gated, nothing else is.
+			gated := coretools.GatedMCPServersFromContext(ctx)
+			for _, server := range []string{"code-manual", "chat-manual"} {
+				if gated[server] == gotSources[server] {
+					t.Errorf("server %q: gate=%v must be the complement of availability=%v", server, gated[server], gotSources[server])
+				}
+			}
+		})
+	}
+
+	// Empty capability map: both session contexts are no-ops (zero regression).
+	for _, isNoProject := range []bool{false, true} {
+		o := &Orchestrator{config: OrchestratorConfig{}, isNoProject: isNoProject}
+		descs := []sdktools.ToolDescriptor{mcpDesc("any")}
+		got, ctx := o.applyMCPModeGating(context.Background(), descs, nil)
+		if len(got) != 1 || ctx != context.Background() {
+			t.Errorf("empty modes (isNoProject=%v) must pass through unchanged, got %v", isNoProject, got)
+		}
+	}
+}
+
+// TestMCPModesForSession pins the capability-map projection: the session
+// context selects chat_mode vs code_mode per server, empty selections are
+// omitted (missing entry = auto downstream), and a fully-empty map projects
+// to nil.
+func TestMCPModesForSession(t *testing.T) {
+	modes := map[string]CapabilityModes{
+		"chat-disabled": {ChatMode: mcpModeDisabled, CodeMode: mcpModeManual},
+		"code-disabled": {ChatMode: mcpModeManual, CodeMode: mcpModeDisabled},
+		"both-empty":    {},
+	}
+	chat := capabilityModesForSession(modes, mcpSessionChat)
+	if chat["chat-disabled"] != mcpModeDisabled || chat["code-disabled"] != mcpModeManual {
+		t.Errorf("chat projection = %v, want chat-disabled→disabled, code-disabled→manual", chat)
+	}
+	if _, ok := chat["both-empty"]; ok {
+		t.Error("both-empty entry must be omitted from the projection (absent = auto)")
+	}
+	code := capabilityModesForSession(modes, mcpSessionCode)
+	if code["chat-disabled"] != mcpModeManual || code["code-disabled"] != mcpModeDisabled {
+		t.Errorf("code projection = %v, want chat-disabled→manual, code-disabled→disabled", code)
+	}
+	if got := capabilityModesForSession(nil, mcpSessionChat); got != nil {
+		t.Errorf("nil modes must project to nil, got %v", got)
+	}
+	if got := capabilityModesForSession(map[string]CapabilityModes{"a": {}}, mcpSessionCode); got != nil {
+		t.Errorf("all-empty modes must project to nil, got %v", got)
+	}
+}
+
+// TestMCPServerModesFromConfig_CapabilitySnapshot pins the builder-side
+// snapshot: entries with both contexts empty are omitted, mixed entries carry
+// their values verbatim, and an empty/absent server map yields nil.
+func TestMCPServerModesFromConfig_CapabilitySnapshot(t *testing.T) {
+	if got := mcpServerModesFromConfig(&BuilderConfig{}); got != nil {
+		t.Errorf("no servers must snapshot nil, got %v", got)
+	}
+	cfg := &BuilderConfig{MCP: BuilderMCPConfig{Servers: map[string]BuilderMCPServer{
+		"empty": {Transport: "stdio", Command: "cmd"},
+		"both":  {ChatMode: mcpModeManual, CodeMode: mcpModeDisabled},
+		"chat":  {ChatMode: mcpModeManual},
+	}}}
+	got := mcpServerModesFromConfig(cfg)
+	if len(got) != 2 {
+		t.Fatalf("snapshot = %v, want 2 entries (the all-empty server is omitted)", got)
+	}
+	if got["both"] != (CapabilityModes{ChatMode: mcpModeManual, CodeMode: mcpModeDisabled}) {
+		t.Errorf("snapshot[both] = %v, want verbatim {manual, disabled}", got["both"])
+	}
+	if got["chat"] != (CapabilityModes{ChatMode: mcpModeManual}) {
+		t.Errorf("snapshot[chat] = %v, want {manual, \"\"}", got["chat"])
 	}
 }
 

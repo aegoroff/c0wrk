@@ -7,9 +7,12 @@ import { describe, expect, it } from 'vitest'
 import {
   isAgentDescriptor,
   isBlackboardState,
+  isCapabilityModes,
+  isCapabilitiesInfo,
   isChatMessage,
   isFileEntry,
   isGPUDevice,
+  isMCPMentionableServer,
   isMCPServerStatus,
   isProjectInfo,
   isSessionBookmark,
@@ -155,7 +158,7 @@ describe('isFileEntry (file tree string methods + render)', () => {
 })
 
 describe('isMCPServerStatus', () => {
-  const base = { name: 'srv', transport: 'stdio', connected: true, starting: false, tool_count: 0, tools: [] }
+  const base = { name: 'srv', transport: 'stdio', connected: true, starting: false, tool_count: 0, tools: [], chat_mode: 'auto', code_mode: 'auto' }
 
   it('accepts a canonical payload', () => {
     expect(isMCPServerStatus(base)).toBe(true)
@@ -168,6 +171,43 @@ describe('isMCPServerStatus', () => {
   it('rejects a non-string name and a non-boolean connected', () => {
     expect(isMCPServerStatus({ ...base, name: { x: 1 } })).toBe(false)
     expect(isMCPServerStatus({ ...base, connected: 'yes' })).toBe(false)
+  })
+
+  it('rejects missing or non-enum per-context modes (they key the neutral disabled rendering)', () => {
+    expect(isMCPServerStatus({ ...base, chat_mode: undefined })).toBe(false)
+    expect(isMCPServerStatus({ ...base, code_mode: 'bogus' })).toBe(false)
+  })
+})
+
+describe('isMCPMentionableServer', () => {
+  it('accepts a name plus canonical per-context modes', () => {
+    expect(isMCPMentionableServer({ name: 'srv', chat_mode: 'manual', code_mode: 'disabled' })).toBe(true)
+  })
+
+  it('rejects a non-enum chat or code mode', () => {
+    expect(isMCPMentionableServer({ name: 'srv', chat_mode: 'sometimes', code_mode: 'auto' })).toBe(false)
+    expect(isMCPMentionableServer({ name: 'srv', chat_mode: 'auto' })).toBe(false)
+    expect(isMCPMentionableServer({ name: 1, chat_mode: 'auto', code_mode: 'auto' })).toBe(false)
+  })
+})
+
+describe('isCapabilitiesInfo / isCapabilityModes', () => {
+  const modes = { chat_mode: 'auto', code_mode: 'manual' }
+
+  it('accepts the canonical three-section payload with empty sections', () => {
+    expect(isCapabilitiesInfo({ skills: {}, agents: {}, mcp: {} })).toBe(true)
+    expect(isCapabilitiesInfo({ skills: { s: modes }, agents: { a: modes }, mcp: { m: modes } })).toBe(true)
+  })
+
+  it('rejects a missing or null section (the caller falls back to empty maps)', () => {
+    expect(isCapabilitiesInfo({ skills: {}, agents: {} })).toBe(false)
+    expect(isCapabilitiesInfo({ skills: null, agents: {}, mcp: {} })).toBe(false)
+  })
+
+  it('rejects an entry with a non-enum mode value', () => {
+    expect(isCapabilitiesInfo({ skills: { bad: { chat_mode: 'nope', code_mode: 'auto' } }, agents: {}, mcp: {} })).toBe(false)
+    expect(isCapabilityModes({ chat_mode: 'auto' })).toBe(false)
+    expect(isCapabilityModes('auto')).toBe(false)
   })
 })
 

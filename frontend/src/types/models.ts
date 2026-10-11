@@ -972,6 +972,13 @@ export interface ToolInfo {
 
 // --- MCP types ---
 
+/** Per-context activation mode of a capability (MCP server, skill or subagent
+ *  profile): "auto" (always on in that context), "manual" (only after a
+ *  /server-name mention) or "disabled" (never advertised there). The same
+ *  enum backs config.ValidMCPServerMode on the backend — the capabilities
+ *  section deliberately has no enum of its own. */
+export type MCPServerMode = 'auto' | 'manual' | 'disabled'
+
 export interface MCPServerConfig {
   transport: string
   command: string
@@ -987,13 +994,6 @@ export interface MCPServerConfig {
    *  applied to both transports. Empty inherits `timeout`; when set it must
    *  parse and be positive. */
   call_timeout: string
-  /** Per-server activation mode: "auto" (default — connect whenever the MCP
-   *  gateway starts or reconfigures), "manual" (kept in the config and
-   *  surfaced as mentionable for the chat-input `/`-completion / send flow
-   *  instead of always-on), or "disabled" (never dialed). The backend
-   *  marshals it `omitempty`, so an absent key means "auto" — normalized at
-   *  this boundary so downstream consumers never see undefined. */
-  mode?: 'auto' | 'manual' | 'disabled'
 }
 
 export interface MCPServerStatus {
@@ -1009,22 +1009,50 @@ export interface MCPServerStatus {
   tool_count: number
   tools: string[]
   error?: string
-  /** Configured activation mode ("auto" | "manual" | "disabled"; see
-   *  MCPServerConfig.mode). Always set by GetMCPStatus except on the
-   *  synthetic `_gateway` startup placeholder, which renders by its
-   *  `starting` flag anyway. A `disabled` entry carries no error/flags — it
-   *  is intentionally not dialed, never broken. */
-  mode?: 'auto' | 'manual' | 'disabled'
+  /** Configured per-context activation modes ("auto" | "manual" | "disabled";
+   *  capabilities.mcp.<name>). Always set by GetMCPStatus, including on the
+   *  synthetic `_gateway` startup placeholder (auto/auto). A server disabled
+   *  in BOTH contexts is inert, not broken: the backend neutralizes its live
+   *  status (no error/flags) and the card renders it neutrally. A single
+   *  disabled context keeps the server live for the other one. */
+  chat_mode: MCPServerMode
+  code_mode: MCPServerMode
 }
 
 /** Secret-free identity of one configured MCP server for the chat input's
- *  `/`-completion and the send path (GetMCPMentionableServers): name plus
- *  per-server mode, nothing else — command args, env and headers can embed
- *  secrets and are excluded by construction. */
+ *  `/`-completion and the send path (GetMCPMentionableServers): name plus the
+ *  per-context activation modes, nothing else — command args, env and headers
+ *  can embed secrets and are excluded by construction. */
 export interface MCPMentionableServer {
   name: string
-  mode: 'auto' | 'manual' | 'disabled'
+  chat_mode: MCPServerMode
+  code_mode: MCPServerMode
 }
+
+// --- Capabilities types ---
+
+/** The per-context activation modes of one capability entry (skill, subagent
+ *  profile or MCP server) — the wire shape of CapabilitiesInfo entries. Both
+ *  fields are always populated with canonical enum values ("auto" resolves a
+ *  missing config entry), never undefined. */
+export interface CapabilityModes {
+  chat_mode: MCPServerMode
+  code_mode: MCPServerMode
+}
+
+/** The three capability sections GetCapabilityModes returns, keyed by
+ *  capability name (skills: Agent Skill names, agents: Subagent Profile
+ *  names, mcp: configured MCP server names). Hidden agents never appear —
+ *  the backend lists only visible profiles, mirroring ListAgents. */
+export interface CapabilitiesInfo {
+  skills: Record<string, CapabilityModes>
+  agents: Record<string, CapabilityModes>
+  mcp: Record<string, CapabilityModes>
+}
+
+/** Section identifier accepted by updateCapabilityModes — mirrors the
+ *  backend's CapabilitySection* constants. */
+export type CapabilitySection = 'skills' | 'agents' | 'mcp'
 
 // --- Blackboard Viewer types ---
 

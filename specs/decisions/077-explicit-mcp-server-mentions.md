@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [084](./084-per-capability-chat-code-activation-modes.md)
 
 ## Context
 
