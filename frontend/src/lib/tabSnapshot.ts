@@ -50,7 +50,7 @@ export interface TabSidebarSnapshot {
  * The right viewer panel's geometry slice (fileViewerStore
  * pinned/collapsed/width). The viewer's OPEN FILE TABS are deliberately NOT
  * part of a workspace tab's snapshot: they stay per-project state, restored
- * by the project-switch persistence (ProjectSwitchState) — see ADR-083 D3.
+ * by the project-switch persistence (ProjectSwitchState) — see ADR-084 D3.
  */
 export interface TabViewerSnapshot {
   pinned: boolean
