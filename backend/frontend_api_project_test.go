@@ -300,7 +300,7 @@ func TestApplySavedProjectSwitchState_UsesSavedSessionWhenValid(t *testing.T) {
 	h.seedSession(t, "latest-other", now.Add(-time.Hour).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
 	h.saveUIState(t, "saved-valid")
 
-	h.api.applySavedProjectSwitchState(h.projectID)
+	h.api.applySavedProjectSwitchState(context.Background(), h.projectID)
 
 	state := h.loadUIState(t)
 	if state.SavedSessionID != "saved-valid" {
@@ -317,7 +317,7 @@ func TestApplySavedProjectSwitchState_FallsBackToLatestWhenSavedMissing(t *testi
 	h.seedSession(t, "latest", now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339))
 	h.saveUIState(t, "missing-session")
 
-	h.api.applySavedProjectSwitchState(h.projectID)
+	h.api.applySavedProjectSwitchState(context.Background(), h.projectID)
 
 	state := h.loadUIState(t)
 	if state.SavedSessionID != "latest" {
@@ -339,7 +339,7 @@ func TestApplySavedProjectSwitchState_CreatesSessionWhenProjectHasNone(t *testin
 
 	h.saveUIState(t, "")
 
-	h.api.applySavedProjectSwitchState(h.projectID)
+	h.api.applySavedProjectSwitchState(context.Background(), h.projectID)
 
 	state := h.loadUIState(t)
 	if state.SavedSessionID == "" {
@@ -652,14 +652,14 @@ func TestResolveSavedSessionForProject_SkipsArchived(t *testing.T) {
 	h.seedArchivedSession(t, "archived-saved", now.Add(-time.Hour).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
 	h.seedSession(t, "live-session", now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-2*time.Minute).Format(time.RFC3339))
 
-	got, err := h.api.resolveSavedSessionForProject(h.projectID, "archived-saved")
+	got, err := h.api.resolveSavedSessionForProject(context.Background(), h.projectID, "archived-saved")
 	if err != nil {
 		t.Fatalf("resolveSavedSessionForProject(archived-saved): %v", err)
 	}
 	if got != "" {
 		t.Fatalf("archived session must not resolve as saved selection, got %q", got)
 	}
-	got, err = h.api.resolveSavedSessionForProject(h.projectID, "live-session")
+	got, err = h.api.resolveSavedSessionForProject(context.Background(), h.projectID, "live-session")
 	if err != nil {
 		t.Fatalf("resolveSavedSessionForProject(live-session): %v", err)
 	}
@@ -679,7 +679,7 @@ func TestResolveLatestSessionForProject_SkipsArchived(t *testing.T) {
 	h.seedArchivedSession(t, "archived-latest", now.Add(-time.Hour).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339))
 	h.seedSession(t, "live-older", now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339))
 
-	if got := h.api.resolveLatestSessionForProject(h.projectID); got != "live-older" {
+	if got := h.api.resolveLatestSessionForProject(context.Background(), h.projectID); got != "live-older" {
 		t.Fatalf("latest fallback must skip archived sessions: got %q, want %q", got, "live-older")
 	}
 }
@@ -694,7 +694,7 @@ func TestResolveLatestSessionForProject_AllArchivedReturnsEmpty(t *testing.T) {
 	h.seedArchivedSession(t, "archived-a", now, now)
 	h.seedArchivedSession(t, "archived-b", now, now)
 
-	if got := h.api.resolveLatestSessionForProject(h.projectID); got != "" {
+	if got := h.api.resolveLatestSessionForProject(context.Background(), h.projectID); got != "" {
 		t.Fatalf("all-archived project must have no latest fallback, got %q", got)
 	}
 }
@@ -711,7 +711,7 @@ func TestApplySavedProjectSwitchState_SkipsArchivedSavedSession(t *testing.T) {
 	h.seedSession(t, "live-latest", now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339))
 	h.saveUIState(t, "saved-archived")
 
-	h.api.applySavedProjectSwitchState(h.projectID)
+	h.api.applySavedProjectSwitchState(context.Background(), h.projectID)
 
 	state := h.loadUIState(t)
 	if state.SavedSessionID != "live-latest" {
@@ -1052,7 +1052,7 @@ func TestSwitchProject_VectorSetupFailureLeavesPreviousProjectActive(t *testing.
 			switched++
 		}
 	}
-	h.api.switchProjectSetupVectorFn = func(*project.ProjectInfo) error {
+	h.api.switchProjectSetupVectorFn = func(ctx context.Context, p *project.ProjectInfo) error {
 		return errors.New("vector init boom")
 	}
 
@@ -1102,7 +1102,7 @@ func TestSwitchProject_RetryAfterLateStepFailureSucceeds(t *testing.T) {
 		}
 	}
 	failing := true
-	h.api.switchProjectSetupVectorFn = func(*project.ProjectInfo) error {
+	h.api.switchProjectSetupVectorFn = func(ctx context.Context, p *project.ProjectInfo) error {
 		if failing {
 			return errors.New("vector init boom")
 		}
@@ -1143,10 +1143,32 @@ func TestSwitchProject_AcquireSwitchLockTimesOut(t *testing.T) {
 	h.api.activeProjectID = h.projectID
 	h.api.activeProjectPath = h.workspace
 	h.api.activeProjectMu.Unlock()
-	captureMiscDiagnostics(t, h.api, miscExpectedDiagnostic{
-		message: "SwitchProject: timed out waiting for an in-flight switch",
-		attrs:   map[string]string{"project": h.projectID, "error": errSwitchLockTimeout.Error()},
-	})
+	captureMiscDiagnostics(t, h.api,
+		miscExpectedDiagnostic{
+			message: "SwitchProject: timed out waiting for an in-flight switch",
+			attrs:   map[string]string{"project": h.projectID, "error": errSwitchLockTimeout.Error()},
+		},
+		// The timeout now carries an offline-diagnosis goroutine dump: the
+		// holder has outlived the whole acquisition budget, and the dump is
+		// the only artifact that names the stuck line on an unreachable
+		// machine. The stack content is inherently variable (addresses,
+		// goroutine ids), so the contract is pinned via a matcher on the
+		// invariant parts.
+		miscExpectedDiagnostic{
+			message: "SwitchProject: switchMu still held; goroutine dump for offline diagnosis",
+			match: func(got miscExpectedDiagnostic) bool {
+				if got.attrs["project"] != h.projectID {
+					return false
+				}
+				if got.attrs["dump_truncated"] != "false" {
+					return false
+				}
+				stacks := got.attrs["stacks"]
+				return strings.Contains(stacks, "goroutine ") &&
+					strings.Contains(stacks, "dumpBusySwitchHolders") &&
+					strings.Contains(stacks, "TestSwitchProject_AcquireSwitchLockTimesOut")
+			},
+		})
 
 	// The bounded-acquire failure must be user-visible: record the emitted
 	// runtime_error (the only channel that reaches the user — the toggle's own

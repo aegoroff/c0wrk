@@ -43,7 +43,7 @@ type vectorIndexTarget struct {
 // resolved root is handed to the per-root registry (ApplyFocus), which owns
 // the manager for it. It no longer re-points a shared singleton — sessions
 // route through their own task context, the user's search follows the focus.
-func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorIndexTarget {
+func (f *FrontendAPI) resolveVectorIndexTarget(switchCtx context.Context, p *project.ProjectInfo) vectorIndexTarget {
 	base := vectorIndexTarget{
 		workspacePath: p.WorkspacePath,
 		storagePath:   config.ProjectVectorIndexPath(f.agentDir, p.ID),
@@ -54,10 +54,13 @@ func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorInd
 	// Both reads below are bounded by terminalPathLookupTimeout, as this
 	// function's siblings require: Manager.WorkspacePathFor's contract makes
 	// the CALLER bound the session-row read, and the shared SQLite pool can
-	// otherwise park SwitchProject (switchMu held) indefinitely. A timeout
-	// degrades to base — the project checkout — which is already the
-	// fail-soft default of every negative branch here.
-	ctx, cancel := context.WithTimeout(f.ctx(), terminalPathLookupTimeout)
+	// otherwise park SwitchProject (switchMu held) indefinitely. The bound is
+	// derived from the switch-section deadline (switchSectionTimeout) so a
+	// saturated pool cannot stack this budget on top of every other
+	// round-trip in the critical section. A timeout degrades to base — the
+	// project checkout — which is already the fail-soft default of every
+	// negative branch here.
+	ctx, cancel := context.WithTimeout(switchCtx, terminalPathLookupTimeout)
 	defer cancel()
 	savedID := ""
 	if f.projStore != nil {

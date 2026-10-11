@@ -1223,6 +1223,18 @@ func (m *Manager) getOrRestoreSession(id string) (*Session, error) {
 // ListSessionsByProject returns sessions for a project, merging in-memory active
 // state with persistent store data. Falls back to in-memory sessions if no store.
 func (m *Manager) ListSessionsByProject(projectID string) ([]SessionInfo, error) {
+	listCtx, listCancel := context.WithTimeout(context.Background(), restoreDBReadTimeout)
+	defer listCancel()
+	return m.ListSessionsByProjectCtx(listCtx, projectID)
+}
+
+// ListSessionsByProjectCtx is the caller-deadline variant of
+// ListSessionsByProject. It exists so the project-switch critical section can
+// derive every store round-trip from ONE switch-scoped deadline: individually
+// bounded reads still sum to minutes of switchMu hold time when the shared
+// SQLite pool is saturated and every one of them burns its full budget. See
+// SwitchProject's switchSectionTimeout.
+func (m *Manager) ListSessionsByProjectCtx(ctx context.Context, projectID string) ([]SessionInfo, error) {
 	m.mu.RLock()
 	store := m.sessionStore
 	m.mu.RUnlock()
@@ -1243,10 +1255,9 @@ func (m *Manager) ListSessionsByProject(projectID string) ([]SessionInfo, error)
 	// backs the synchronous session-list / project-switch RPCs and shares the
 	// app's single SQLite pool; without a deadline a read queuing behind a
 	// write storm hangs the RPC indefinitely instead of surfacing a retryable
-	// error.
-	listCtx, listCancel := context.WithTimeout(context.Background(), restoreDBReadTimeout)
-	sessions, err := store.ListSessionsByProject(listCtx, projectID)
-	listCancel()
+	// error. When called through the switch path, ctx carries the (stricter)
+	// switch-section deadline on top of this per-op bound.
+	sessions, err := store.ListSessionsByProject(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

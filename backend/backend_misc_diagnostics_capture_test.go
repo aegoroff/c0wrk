@@ -10,9 +10,14 @@ import (
 )
 
 // miscExpectedDiagnostic describes the entire diagnostic contract, excluding time.
+// For records whose payload is inherently variable (e.g. a goroutine dump with
+// runtime addresses), set match instead of attrs: match receives the captured
+// record and must verify the invariant parts. Exactly one of the two must be
+// used; a record never matches both ways.
 type miscExpectedDiagnostic struct {
 	message string
 	attrs   map[string]string
+	match   func(got miscExpectedDiagnostic) bool
 }
 
 type miscDiagnosticSink struct {
@@ -69,8 +74,32 @@ func captureMiscDiagnostics(t *testing.T, f *FrontendAPI, want ...miscExpectedDi
 		f.logger = previous
 		sink.mu.Lock()
 		defer sink.mu.Unlock()
-		if !reflect.DeepEqual(sink.records, want) {
+		usesMatchers := false
+		for i := range want {
+			if want[i].match != nil {
+				usesMatchers = true
+				break
+			}
+		}
+		if !usesMatchers && !reflect.DeepEqual(sink.records, want) {
 			t.Errorf("backend diagnostics(%s) = %#v, want %#v", t.Name(), sink.records, want)
+		}
+		if len(sink.records) != len(want) {
+			t.Errorf("backend diagnostics(%s): %d records, want %d: %#v", t.Name(), len(sink.records), len(want), sink.records)
+		}
+		for i, rec := range sink.records {
+			if i >= len(want) {
+				break
+			}
+			if want[i].match != nil {
+				if !want[i].match(rec) {
+					t.Errorf("backend diagnostics(%s) record %d = %#v, failed its matcher", t.Name(), i, rec)
+				}
+				continue
+			}
+			if !reflect.DeepEqual(rec, want[i]) {
+				t.Errorf("backend diagnostics(%s) record %d = %#v, want %#v", t.Name(), i, rec, want[i])
+			}
 		}
 		for i, level := range sink.levels {
 			if level != slog.LevelWarn {

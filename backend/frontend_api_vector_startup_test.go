@@ -101,7 +101,7 @@ func seedDeferred(t *testing.T, f *FrontendAPI, p *project.ProjectInfo) {
 	if f.vectorRootsRegistry().FactoryReady() {
 		t.Fatal("precondition: factory must be unwired to reproduce the startup race")
 	}
-	if err := f.switchProjectSetupVector(p); err != nil {
+	if err := f.switchProjectSetupVector(context.Background(), p); err != nil {
 		t.Fatalf("switchProjectSetupVector (deferral): %v", err)
 	}
 	if f.deferredVectorProject != p {
@@ -127,7 +127,7 @@ func TestSwitchProjectSetupVector_NoProjectDropsDeferred(t *testing.T) {
 	f.deferredVectorProject = &project.ProjectInfo{ID: "proj-a"}
 
 	np := &project.ProjectInfo{ID: project.NoProjectID, IsNoProject: true}
-	if err := f.switchProjectSetupVector(np); err != nil {
+	if err := f.switchProjectSetupVector(context.Background(), np); err != nil {
 		t.Fatalf("switchProjectSetupVector(No Project): %v", err)
 	}
 	if f.deferredVectorProject != nil {
@@ -158,7 +158,7 @@ func TestSwitchProjectSetupVector_FactoryReadyClearsDeferred(t *testing.T) {
 	// Use the REGISTERED path (the project manager symlink-resolves it), not
 	// the raw temp dir: vector routing matches the root git itself reports.
 	p := &project.ProjectInfo{ID: "proj-a", WorkspacePath: created.WorkspacePath}
-	if err := f.switchProjectSetupVector(p); err != nil {
+	if err := f.switchProjectSetupVector(context.Background(), p); err != nil {
 		t.Fatalf("switchProjectSetupVector (ready factory): %v", err)
 	}
 	if f.deferredVectorProject != nil {

@@ -205,7 +205,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	p := h.proj
 
 	// No saved session: checkout defaults.
-	got := h.api.resolveVectorIndexTarget(p)
+	got := h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath || got.storagePath != config.ProjectVectorIndexPath(h.agentDir, p.ID) {
 		t.Fatalf("default target = %+v; want checkout + project storage", got)
 	}
@@ -213,7 +213,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	tree := h.addManagedWorktree(t, "s-1", "topic")
 	h.saveManagedSession(t, "sess-managed", "s-1", "topic", tree)
 
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	wantStorage, err := config.WorktreeVectorIndexPath(h.agentDir, p.ID, "s-1")
 	if err != nil {
 		t.Fatalf("worktree vector path: %v", err)
@@ -227,7 +227,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 
 	// A local saved session keeps the defaults.
 	h.saveLocalSession(t, "sess-local")
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath {
 		t.Errorf("local-session target workspace = %q, want checkout", got.workspacePath)
 	}

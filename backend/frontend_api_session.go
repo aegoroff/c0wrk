@@ -32,6 +32,17 @@ func (f *FrontendAPI) storeOpCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(f.ctx(), sessionStoreOpTimeout)
 }
 
+// switchStoreOpCtx derives one store round-trip deadline from the
+// switch-section deadline (switchSectionTimeout): the effective bound is the
+// EARLIER of the per-op budget and whatever the switch has left, so a
+// saturated store cannot stack N full budgets into one switchMu hold. Note
+// the parent is the switch ctx, not f.ctx(): the switch already implies
+// liveness, and the section deadline must hold even if f.ctx() has no
+// deadline of its own.
+func (f *FrontendAPI) switchStoreOpCtx(switchCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(switchCtx, sessionStoreOpTimeout)
+}
+
 // CreateSession creates a new agent session within the active project.
 func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 	if f.appCell() == nil || f.app.Manager() == nil {
