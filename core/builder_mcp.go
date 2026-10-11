@@ -95,7 +95,7 @@ func (b *OrchestratorBuilder) ReconfigureMCP(ctx context.Context, cfg *BuilderCo
 }
 
 // currentMCPServerModes returns an independent current policy snapshot.
-func (b *OrchestratorBuilder) currentMCPServerModes() map[string]string {
+func (b *OrchestratorBuilder) currentMCPServerModes() map[string]CapabilityModes {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return maps.Clone(b.mcpModes)
@@ -184,28 +184,29 @@ func (b *OrchestratorBuilder) SetMCPWorkDir(path string) {
 
 // mcpModeDisabled mirrors config.MCPServerModeDisabled ("disabled"). core
 // never imports backend/config, so the enum value is duplicated here; the
-// adapter carries the config value verbatim into BuilderMCPServer.Mode.
-// mcpModeAuto / mcpModeManual (the gating-relevant siblings) live in
-// orchestrator_mcp.go next to their consumer.
+// adapter carries the config values verbatim into BuilderMCPServer.ChatMode /
+// CodeMode. mcpModeAuto / mcpModeManual (the gating-relevant siblings) live
+// in orchestrator_mcp.go next to their consumer.
 const mcpModeDisabled = "disabled"
 
-// mcpServerModesFromConfig projects the per-server MCP modes into the
-// orchestrator's runtime map (name → mode). Empty/absent modes are omitted:
-// gatedMCPServerSet treats a missing entry as auto (always available), and
-// the config load path has already normalized every configured server to a
-// canonical mode value (backend/config normalizeMCPModes), so this map only
-// carries canonical values — including "disabled", whose servers the gateway
-// never dials but whose stale registrations the orchestrator-side gating
-// must still hide.
-func mcpServerModesFromConfig(cfg *BuilderConfig) map[string]string {
+// mcpServerModesFromConfig projects the per-server MCP capability modes into
+// the orchestrator's runtime map (name → CapabilityModes). Entries whose two
+// contexts are BOTH empty are omitted: capabilityModesForSession treats a missing
+// entry as auto (always available), and the config load path has already
+// normalized every configured server to canonical mode values (backend/config
+// normalizeCapabilities), so this map only carries canonical values —
+// including "disabled", whose servers the gateway never dials but whose stale
+// registrations the orchestrator-side gating must still hide.
+func mcpServerModesFromConfig(cfg *BuilderConfig) map[string]CapabilityModes {
 	if len(cfg.MCP.Servers) == 0 {
 		return nil
 	}
-	modes := make(map[string]string, len(cfg.MCP.Servers))
+	modes := make(map[string]CapabilityModes, len(cfg.MCP.Servers))
 	for name, srv := range cfg.MCP.Servers {
-		if srv.Mode != "" {
-			modes[name] = srv.Mode
+		if srv.ChatMode == "" && srv.CodeMode == "" {
+			continue // both auto — absent entry
 		}
+		modes[name] = CapabilityModes{ChatMode: srv.ChatMode, CodeMode: srv.CodeMode}
 	}
 	if len(modes) == 0 {
 		return nil
@@ -217,12 +218,14 @@ func mcpServerModesFromConfig(cfg *BuilderConfig) map[string]string {
 func configToGatewayConfig(cfg *BuilderConfig) mcp.GatewayConfig {
 	entries := make(map[string]mcp.ServerEntry, len(cfg.MCP.Servers))
 	for name, srv := range cfg.MCP.Servers {
-		// A disabled server is never dialed: it is omitted from the gateway
-		// config entirely, so no process is spawned and no connection is
-		// opened — neither at startup nor on reconfigure. auto and manual
-		// both stay; manual's on-demand behavior is layered above the
-		// gateway, not by skipping it here.
-		if srv.Mode == mcpModeDisabled {
+		// A server disabled in BOTH contexts is never dialed: it is omitted
+		// from the gateway config entirely, so no process is spawned and no
+		// connection is opened — neither at startup nor on reconfigure. Any
+		// other combination stays: the active session context resolves to a
+		// mode that is auto, manual, or disabled, and a disabled-in-one-
+		// context server remains dialable for the other context (its tools
+		// are withheld per task by the orchestrator's mode gating).
+		if srv.ChatMode == mcpModeDisabled && srv.CodeMode == mcpModeDisabled {
 			continue
 		}
 		entries[name] = mcp.ServerEntry{

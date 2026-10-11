@@ -594,6 +594,47 @@ mcp:
   #                                # unhealthy (marked, never killed).
 
 # ---------------------------------------------------------------------------
+# Capability Activation Modes (skills / subagents / MCP servers)
+# ---------------------------------------------------------------------------
+# Per-name activation modes for the three capability catalogs, split by the
+# execution context a mode applies to. Every catalog, entry, and mode key is
+# optional: an omitted name behaves as "auto" in both contexts, and an
+# omitted section — or the whole block — behaves as if every capability were
+# "auto", so a config without this section is exactly the pre-capabilities
+# behavior.
+#
+# Each entry carries two modes:
+#   chat_mode — interactive chat tasks (the main chat input)
+#   code_mode — project (CODE) tasks
+# Both share one enum:
+#   "auto"      the capability keeps its built-in posture (always-on
+#               catalogs stay always-on; mention-gated ones stay
+#               mention-gated) — also the value of an omitted or empty key
+#   "manual"    the capability is held back until you mention it in the
+#               chat input ("/name"; the collision-qualified spelling
+#               disambiguates same-named catalogs)
+#   "disabled"  the capability is never activated
+# An unrecognized value fails soft to "auto" with a load warning; a
+# capabilities.mcp name missing from mcp.servers above, and an entry with
+# both keys empty, are dropped at load as carrying nothing.
+#
+# The legacy mcp.servers.<name>.mode key is migrated at load (its value
+# fills BOTH modes of capabilities.mcp.<name> unless the entry already
+# carries an explicit value) and the legacy key is dropped at the next save.
+capabilities: {}
+  # skills:
+  #   study-paper:
+  #     chat_mode: "manual"        # "auto" | "manual" | "disabled"
+  #     code_mode: "disabled"
+  # agents:
+  #   code-reviewer:
+  #     chat_mode: "manual"
+  # mcp:
+  #   example-server:              # must name a server from mcp.servers
+  #     chat_mode: "manual"
+  #     code_mode: "auto"
+
+# ---------------------------------------------------------------------------
 # Agent Skills Discovery
 # ---------------------------------------------------------------------------
 # Directories to scan for Agent Skills (agentskills.io spec).

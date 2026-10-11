@@ -21,6 +21,7 @@ type BuilderConfig struct {
 	Skills        BuilderSkillsConfig
 	Search        BuilderSearchConfig
 	MCP           BuilderMCPConfig
+	Capabilities  BuilderCapabilitiesConfig
 	Orchestration BuilderOrchestrationConfig
 	GoalLoop      BuilderGoalLoopConfig
 	ModelProfiles BuilderModelProfilesConfig
@@ -606,6 +607,19 @@ type BuilderSkillsConfig struct {
 	Dirs []string // absolute paths to skill directories in priority order
 }
 
+// BuilderCapabilitiesConfig carries the per-capability activation modes for
+// the skill and agent catalogs (capabilities.skills / capabilities.agents in
+// config.yaml), one CapabilityModes entry per named skill/agent. MCP servers
+// carry their modes on BuilderMCPServer instead. An entry absent from a map —
+// or present with both contexts empty — is "auto" in every context: implicit
+// discovery and explicit mentions both work (the zero-regression default).
+// core never imports backend/config, so the shape and the enum values mirror
+// config.CapabilityModes by value.
+type BuilderCapabilitiesConfig struct {
+	Skills map[string]CapabilityModes
+	Agents map[string]CapabilityModes
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -626,6 +640,18 @@ type BuilderMCPConfig struct {
 	DefaultWorkDir string
 }
 
+// CapabilityModes is one capability entry's activation modes, one per
+// execution context: ChatMode applies to CHAT sessions (No Project), CodeMode
+// to CODE sessions (a real project). Both carry the MCP server mode enum —
+// "auto", "manual" or "disabled" (mcpModeAuto / mcpModeManual /
+// mcpModeDisabled) — and an empty value IS "auto" (the default). core never
+// imports backend/config, so the shape and the enum values mirror
+// config.CapabilityModes by value.
+type CapabilityModes struct {
+	ChatMode string
+	CodeMode string
+}
+
 // BuilderMCPServer defines how to connect to an MCP server.
 type BuilderMCPServer struct {
 	Transport string
@@ -636,13 +662,17 @@ type BuilderMCPServer struct {
 	Headers   map[string]string
 	WorkDir   string
 
-	// Mode is the per-server activation mode, carried verbatim from
-	// config.MCPServerConfig.Mode: "auto" | "manual" | "disabled", with empty
-	// behaving as "auto". A disabled server is skipped by
-	// configToGatewayConfig and never dialed; auto and manual both stay in
-	// the gateway config. core never imports backend/config, so the enum
-	// values mirror the config constants by string value.
-	Mode string
+	// ChatMode / CodeMode are the per-server activation modes for CHAT
+	// (No Project) and CODE (real project) sessions respectively: "auto" |
+	// "manual" | "disabled", with empty behaving as "auto". A server disabled
+	// in BOTH contexts is skipped by configToGatewayConfig and never dialed;
+	// every other combination stays in the gateway config, with manual's
+	// on-demand behavior layered above the gateway. The adapter carries the
+	// values verbatim from config.Capabilities.MCP; core never imports
+	// backend/config, so the enum values mirror the config constants by
+	// string value.
+	ChatMode string
+	CodeMode string
 
 	// Timeout bounds this server's initialization handshake (initialize +
 	// tools/list). Zero or negative selects the mcp package default (60s).

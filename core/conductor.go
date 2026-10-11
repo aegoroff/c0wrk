@@ -1843,6 +1843,16 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 		if !ok {
 			return agent.SubAgentTask{}, fmt.Errorf("delegation %q: unknown agent %q — no Subagent Profile with that name was found", t.ID, t.Agent)
 		}
+		// Capability gate (fail-closed, the delegation-side mirror of the MCP
+		// registry gate): an agent whose task snapshot reads "disabled" is
+		// refused even though the profile still resolves — the roster never
+		// advertised it and a /agent: mention of it was already dropped at
+		// task entry, so reaching this point means the model invented the
+		// name (or a mode changed mid-task; the snapshot is immutable, so it
+		// did not). Absent snapshot → nothing blocks (zero regression).
+		if agentDelegationBlocked(ctx, t.Agent) {
+			return agent.SubAgentTask{}, fmt.Errorf("delegation %q: agent %q is disabled by capabilities.agents and cannot be delegated to", t.ID, t.Agent)
+		}
 	}
 
 	maxSteps := t.MaxSteps

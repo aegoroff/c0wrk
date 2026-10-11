@@ -185,13 +185,17 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 	}
 
 	// Convert MCP servers.
-	// Mode is carried verbatim: the load pipeline (normalizeMCPModes) has
-	// already canonicalized every mode, and the frontend rebuild paths start
-	// from that validated config — so the adapter needs no normalization of
-	// its own (mirroring the timeout contract, where the adapter does not
-	// log or fix anything the load path owns).
+	// Capability modes are carried verbatim from capabilities.mcp: the load
+	// pipeline (migrateLegacyMCPServerModes + normalizeCapabilities) folds
+	// the legacy per-server mode key into the section and canonicalizes every
+	// value, and the frontend rebuild paths start from that validated config
+	// — so the adapter needs no normalization of its own (mirroring the
+	// timeout contract, where the adapter does not log or fix anything the
+	// load path owns). A name absent from the section maps to the zero
+	// CapabilityModes — auto in both contexts.
 	mcpServers := make(map[string]core.BuilderMCPServer, len(cfg.MCP.Servers))
 	for name, srv := range cfg.MCP.Servers {
+		caps := cfg.Capabilities.MCP[name]
 		mcpServers[name] = core.BuilderMCPServer{
 			Transport:   srv.Transport,
 			Command:     srv.Command,
@@ -199,7 +203,8 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 			Env:         srv.Env,
 			URL:         srv.URL,
 			Headers:     srv.Headers,
-			Mode:        srv.Mode,
+			ChatMode:    caps.ChatMode,
+			CodeMode:    caps.CodeMode,
 			Timeout:     parseMCPDuration(srv.Timeout),
 			CallTimeout: parseMCPDuration(srv.CallTimeout),
 		}
@@ -321,6 +326,16 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 		MCP: core.BuilderMCPConfig{
 			Servers: mcpServers,
 		},
+		// Capability modes for the skill/agent catalogs are carried verbatim
+		// from capabilities.skills / capabilities.agents — the same contract
+		// as the MCP section above: the load pipeline already canonicalized
+		// every value (normalizeCapabilities covers all three sections), the
+		// builder drops both-empty entries into its immutable snapshot, and a
+		// name absent from a section is auto in both contexts.
+		Capabilities: core.BuilderCapabilitiesConfig{
+			Skills: capabilityModesToCore(cfg.Capabilities.Skills),
+			Agents: capabilityModesToCore(cfg.Capabilities.Agents),
+		},
 		Orchestration: core.BuilderOrchestrationConfig{
 			MaxDependencyContextChars: cfg.Orchestration.MaxDependencyContextChars,
 			MaxJudgeCacheSize:         cfg.Orchestration.MaxJudgeCacheSize,
@@ -431,6 +446,20 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 		},
 		ExpandEnvVars: config.ExpandEnvVars,
 	}
+}
+
+// capabilityModesToCore converts a config-layer per-capability mode map into
+// the core-layer mirror, value-for-value (core never imports backend/config,
+// so the struct types are distinct copies of the same shape).
+func capabilityModesToCore(entries map[string]config.CapabilityModes) map[string]core.CapabilityModes {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]core.CapabilityModes, len(entries))
+	for name, cm := range entries {
+		out[name] = core.CapabilityModes{ChatMode: cm.ChatMode, CodeMode: cm.CodeMode}
+	}
+	return out
 }
 
 // parseMCPDuration resolves an MCP server duration string (timeout /

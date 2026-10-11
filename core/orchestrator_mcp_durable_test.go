@@ -50,7 +50,7 @@ func TestPrepareTaskMCP_DurableUnionIsolationAndRecovery(t *testing.T) {
 	store := &failingMCPStore{}
 	bb := newDelegSpecBB("actual-task", store)
 	bb.SetOriginalRequest("work")
-	o := &Orchestrator{taskStore: store, config: OrchestratorConfig{MCPServerModes: map[string]string{"a": "manual", "b": "manual"}}}
+	o := &Orchestrator{taskStore: store, config: OrchestratorConfig{MCPServerModes: map[string]CapabilityModes{"a": bothCtxModes(mcpModeManual), "b": bothCtxModes(mcpModeManual)}}}
 	stale := coretools.WithGatedMCPServers(WithUserMCPServers(context.Background(), []string{"foreign"}), map[string]bool{"foreign": true})
 	for _, extra := range [][]string{{"b", "a", "b"}, nil, {"c"}} {
 		ctx, err := o.prepareTaskMCP(stale, bb, extra)
@@ -122,7 +122,7 @@ func TestResumeMCP_WaveCatalogDispatchAndCurrentSnapshot(t *testing.T) {
 			if err := store.PersistMCPMentions(context.Background(), "task", []string{"selected", "disabled"}); err != nil {
 				t.Fatal(err)
 			}
-			modes := map[string]string{"selected": "manual", "unmentioned": "manual", "disabled": "disabled"}
+			modes := map[string]CapabilityModes{"selected": bothCtxModes(mcpModeManual), "unmentioned": bothCtxModes(mcpModeManual), "disabled": bothCtxModes(mcpModeDisabled)}
 			snapshots, calls := 0, 0
 			var o *Orchestrator
 			caller := &mockLLMCaller{callFn: func(ctx context.Context, req llm.ChatRequest) (*llm.ChatResponse, error) {
@@ -149,7 +149,7 @@ func TestResumeMCP_WaveCatalogDispatchAndCurrentSnapshot(t *testing.T) {
 					t.Errorf("Resume(%s) catalog lacks durable selected_probe", kind)
 				}
 				if calls == 1 {
-					modes = map[string]string{"selected": "disabled"}
+					modes = map[string]CapabilityModes{"selected": bothCtxModes(mcpModeDisabled)}
 					return assistantToolCall("stale1", "unmentioned_probe", `{}`), nil
 				}
 				if calls == 2 {
@@ -169,7 +169,7 @@ func TestResumeMCP_WaveCatalogDispatchAndCurrentSnapshot(t *testing.T) {
 			r.Register(coretools.NewExecutePlanTool())
 			r.Register(coretools.NewDelegateTool())
 			o.toolRegistry, o.toolExec, o.coreToolRegistry = r.ToolRegistry, r, r
-			o.config.MCPServerModesResolver = func() map[string]string { snapshots++; return modes }
+			o.config.MCPServerModesResolver = func() map[string]CapabilityModes { snapshots++; return modes }
 			logger := expectedCoreLogger(t,
 				expectedCoreDiagnostic{level: "WARN", message: "security: tool blocked by MCP server mode gating", fields: map[string]string{"tool": "unmentioned_probe", "server": "unmentioned"}},
 				expectedCoreDiagnostic{level: "WARN", message: "security: tool blocked by MCP server mode gating", fields: map[string]string{"tool": "disabled_probe", "server": "disabled"}})
@@ -251,7 +251,9 @@ func TestResumeMCP_E2SDurableDirective(t *testing.T) {
 	}}
 	o, _, _, _ := newFunnelOrchestrator(t, caller)
 	o.SetTaskStore(store)
-	o.config.MCPServerModesResolver = func() map[string]string { return map[string]string{"selected": "manual"} }
+	o.config.MCPServerModesResolver = func() map[string]CapabilityModes {
+		return map[string]CapabilityModes{"selected": bothCtxModes(mcpModeManual)}
+	}
 	es := e2s.NewE2SState("work", time.Now())
 	if err := store.PersistE2SState("task", &es); err != nil {
 		t.Fatal(err)

@@ -3,16 +3,22 @@ import { Plus, RefreshCw, Server, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { getMCPStatus, getMCPServers, getToolList, updateMCPServers } from '@/api/mcp'
+import { getCapabilityModes, updateCapabilityModes } from '@/api/capabilities'
 import { subscribe } from '@/api/runtime'
 import { logger } from '@/lib/logger'
 import { MCPServerCard } from './MCPServerCard'
 import { MCPServerForm } from './MCPServerForm'
-import type { MCPServerStatus, MCPServerConfig, ToolInfo } from '@/types/models'
+import type { CapabilityModes, MCPServerConfig, MCPServerMode, MCPServerStatus, ToolInfo } from '@/types/models'
 
 export function MCPSettings() {
   const [servers, setServers] = useState<MCPServerStatus[]>([])
   const [configs, setConfigs] = useState<Record<string, MCPServerConfig>>({})
   const [tools, setTools] = useState<ToolInfo[]>([])
+  // The MCP slice of the capabilities section. Null until the first load
+  // resolves: mode selectors stay disabled without it, because
+  // updateCapabilityModes REPLACES the whole section — writing from a
+  // half-known map would silently reset every other server's modes.
+  const [caps, setCaps] = useState<Record<string, CapabilityModes> | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   // Guard full-map writes synchronously, including callbacks from already-open menus.
@@ -29,6 +35,11 @@ export function MCPSettings() {
   const loadData = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+    // The gateway view (status/tools/configs) and the capabilities section
+    // load independently: a capabilities failure must NOT blank the server
+    // list — it only leaves the mode selectors disabled (caps stays null),
+    // because writing modes from a half-known map would reset the others.
+    let loadError: string | null = null
     try {
       const [st, tl, cf] = await Promise.all([getMCPStatus(), getToolList(), getMCPServers()])
       setServers(st || [])
@@ -36,8 +47,19 @@ export function MCPSettings() {
       setConfigs(cf || {})
     } catch (err) {
       logger.error('Failed to load MCP status:', err)
-      setError(err instanceof Error ? err.message : String(err))
-    } finally { setIsLoading(false) }
+      loadError = err instanceof Error ? err.message : String(err)
+    }
+    try {
+      setCaps((await getCapabilityModes()).mcp ?? {})
+    } catch (err) {
+      logger.error('Failed to load capability modes:', err)
+      // Drop any previously loaded map: a failed load must never leave a
+      // stale section behind for the selectors to write back.
+      setCaps(null)
+      loadError = loadError ?? (err instanceof Error ? err.message : String(err))
+    }
+    if (loadError) setError(loadError)
+    setIsLoading(false)
   }, [])
 
   useEffect(() => { loadData() }, [loadData])
@@ -57,11 +79,32 @@ export function MCPSettings() {
     finally { savingRef.current = false; setIsSaving(false) }
   }
 
-  const handleModeChange = async (name: string, mode: NonNullable<MCPServerConfig['mode']>) => {
-    const config = configs[name]
-    if (!config || savingRef.current || (config.mode ?? 'auto') === mode) return
-    const err = await handleSave({ ...configs, [name]: { ...config, mode } })
-    if (err) setError(err)
+  // Persist one context's mode for one server through the capabilities RPC.
+  // The payload must carry the FULL mcp section (the backend replaces it
+  // wholesale), so every rendered card contributes its current entry — a
+  // server never shown here cannot exist (the card list mirrors the
+  // configured set) and stale names are trimmed server-side anyway.
+  const handleModeChange = async (name: string, context: 'chat' | 'code', mode: MCPServerMode) => {
+    if (!caps || savingRef.current) return
+    const current = caps[name] ?? { chat_mode: 'auto', code_mode: 'auto' }
+    const field: keyof CapabilityModes = context === 'chat' ? 'chat_mode' : 'code_mode'
+    if (current[field] === mode) return
+    const next: Record<string, CapabilityModes> = {
+      ...caps,
+      [name]: { ...current, [field]: mode },
+    }
+    savingRef.current = true
+    setIsSaving(true)
+    setError(null)
+    try {
+      await updateCapabilityModes('mcp', next)
+      setCaps(next)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      savingRef.current = false
+      setIsSaving(false)
+    }
   }
 
   const handleDelete = async (name: string) => {
@@ -100,7 +143,22 @@ export function MCPSettings() {
 
       {servers.length === 0
         ? <div className="text-sm text-muted-foreground py-4 text-center">No MCP servers configured.</div>
-        : <div className="space-y-2">{servers.map((s) => <MCPServerCard key={s.name} server={s} tools={tools.filter((t) => t.source === s.name)} expanded={expanded.has(s.name)} onToggleExpand={() => handleToggleExpand(s.name)} onEdit={() => openEdit(s)} onDelete={() => setDeleteConfirm(s.name)} mode={configs[s.name]?.mode ?? s.mode ?? 'auto'} isSaving={isSaving || !configs[s.name]} onModeChange={(mode) => { void handleModeChange(s.name, mode) }} />)}</div>
+        : <div className="space-y-2">{servers.map((s) => (
+            <MCPServerCard
+              key={s.name}
+              server={s}
+              tools={tools.filter((t) => t.source === s.name)}
+              expanded={expanded.has(s.name)}
+              onToggleExpand={() => handleToggleExpand(s.name)}
+              onEdit={() => openEdit(s)}
+              onDelete={() => setDeleteConfirm(s.name)}
+              chatMode={caps?.[s.name]?.chat_mode ?? 'auto'}
+              codeMode={caps?.[s.name]?.code_mode ?? 'auto'}
+              isSaving={isSaving || !caps}
+              onChatModeChange={(mode) => { void handleModeChange(s.name, 'chat', mode) }}
+              onCodeModeChange={(mode) => { void handleModeChange(s.name, 'code', mode) }}
+            />
+          ))}</div>
       }
 
       {formOpen && <MCPServerForm open={formOpen} onOpenChange={setFormOpen} editingName={editingName} serverConfigs={configs} editServer={editServer} isSaving={isSaving} onSave={handleSave} />}

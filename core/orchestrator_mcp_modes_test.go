@@ -19,13 +19,13 @@ func publishMCPModesDuringStartup(t *testing.T, b *OrchestratorBuilder, mode str
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cfg := &BuilderConfig{MCP: BuilderMCPConfig{Servers: map[string]BuilderMCPServer{
-		"live-srv": {Mode: mode},
+		"live-srv": {ChatMode: mode, CodeMode: mode},
 	}}}
 	if err := b.ReconfigureMCP(ctx, cfg); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReconfigureMCP(mode=%q, canceled startup) = %v, want context.Canceled", mode, err)
 	}
 	// The accepted config must not alias the builder's published map.
-	cfg.MCP.Servers["live-srv"] = BuilderMCPServer{Mode: "disabled"}
+	cfg.MCP.Servers["live-srv"] = BuilderMCPServer{ChatMode: mcpModeDisabled, CodeMode: mcpModeDisabled}
 }
 
 func TestMCPModesLiveSnapshot_ExistingOrchestratorBoundaries(t *testing.T) {
@@ -74,8 +74,8 @@ func TestMCPModesLiveSnapshot_ExistingOrchestratorBoundaries(t *testing.T) {
 					return executorFinishResponse("done"), nil
 				}}
 				o, _, _, _ := newFunnelOrchestrator(t, caller)
-				o.config.MCPServerModes = map[string]string{"live-srv": transition.from} // Intentionally stale session snapshot.
-				o.config.MCPServerModesResolver = func() map[string]string {
+				o.config.MCPServerModes = map[string]CapabilityModes{"live-srv": bothCtxModes(transition.from)} // Intentionally stale session snapshot.
+				o.config.MCPServerModesResolver = func() map[string]CapabilityModes {
 					snapshots++
 					return b.currentMCPServerModes()
 				}
@@ -122,12 +122,12 @@ func TestMCPModesLiveSnapshot_IndependentMapsAndDirectHelper(t *testing.T) {
 	b := &OrchestratorBuilder{mcpDone: make(chan struct{})}
 	publishMCPModesDuringStartup(t, b, "manual")
 	snapshot := b.currentMCPServerModes()
-	snapshot["live-srv"] = "auto"
-	if got := b.currentMCPServerModes()["live-srv"]; got != "manual" {
-		t.Errorf("currentMCPServerModes(after snapshot mutation) = %q, want manual", got)
+	snapshot["live-srv"] = bothCtxModes(mcpModeAuto)
+	if got := b.currentMCPServerModes()["live-srv"]; got != bothCtxModes(mcpModeManual) {
+		t.Errorf("currentMCPServerModes(after snapshot mutation) = %v, want manual", got)
 	}
 	o := &Orchestrator{config: OrchestratorConfig{
-		MCPServerModes:         map[string]string{"live-srv": "auto"},
+		MCPServerModes:         map[string]CapabilityModes{"live-srv": bothCtxModes(mcpModeAuto)},
 		MCPServerModesResolver: b.currentMCPServerModes,
 	}}
 	descs := []sdktools.ToolDescriptor{{Name: "live_probe", Source: "live-srv", SourceCategory: sdktools.SourceCategoryMCP}}

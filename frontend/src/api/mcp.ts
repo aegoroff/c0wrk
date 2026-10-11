@@ -2,8 +2,10 @@
 
 import { getApp } from './runtime'
 import { logger } from '@/lib/logger'
+import { isMentionableInContext } from '@/lib/capabilityModes'
+import type { CapabilityContext } from '@/lib/capabilityModes'
 import { isMCPServerStatus, isMCPMentionableServer, isToolInfo, isArrayOf } from '@/types/guards'
-import type { MCPServerStatus, MCPServerConfig, MCPMentionableServer, ToolInfo } from '@/types/models'
+import type { MCPServerStatus, MCPServerConfig, MCPMentionableServer, MCPServerMode, ToolInfo } from '@/types/models'
 
 export async function getMCPStatus(): Promise<MCPServerStatus[]> {
   try {
@@ -41,18 +43,17 @@ export async function getMCPServers(): Promise<Record<string, MCPServerConfig>> 
         malformed.push(name)
         continue
       }
-      // The backend marshals `timeout`/`call_timeout`/`mode` with `omitempty`,
+      // The backend marshals `timeout`/`call_timeout` with `omitempty`,
       // so an unset value is absent from the payload. Normalize the missing
       // keys at this boundary so every downstream consumer sees the
       // non-optional shape the type declares: '' timeouts mean "use the
-      // default", and an absent mode means "auto" (the backend's effective
-      // default).
+      // default". (Activation modes left the MCPServerConfig wire shape —
+      // they live in the capabilities section, read via getCapabilityModes.)
       const valid = cfg as MCPServerConfig
       servers[name] = {
         ...valid,
         timeout: valid.timeout ?? '',
         call_timeout: valid.call_timeout ?? '',
-        mode: valid.mode ?? 'auto',
       }
     }
     if (malformed.length > 0) {
@@ -76,12 +77,13 @@ export async function updateMCPServers(servers: Record<string, MCPServerConfig>)
 }
 
 /**
- * Fetch the secret-free `{name, mode}` identity of every configured MCP
- * server (GetMCPMentionableServers), name-sorted by the backend. The single
- * read behind the chat input's `/`-completion and the send path's mention
- * partitioning — no transport details, no gateway state, no credentials.
- * Returns [] on an unexpected shape or failure; callers degrade to "no
- * mentionable servers" rather than blocking the input.
+ * Fetch the secret-free `{name, chat_mode, code_mode}` identity of every
+ * configured MCP server (GetMCPMentionableServers), name-sorted by the
+ * backend. The single read behind the chat input's `/`-completion and the
+ * send path's mention partitioning — no transport details, no gateway
+ * state, no credentials. Returns [] on an unexpected shape or failure;
+ * callers degrade to "no mentionable servers" rather than blocking the
+ * input.
  */
 export async function getMCPMentionableServers(): Promise<MCPMentionableServer[]> {
   try {
@@ -99,24 +101,39 @@ export async function getMCPMentionableServers(): Promise<MCPMentionableServer[]
 }
 
 /**
- * The servers eligible for `/`-mentions: `auto` (always connected, still
- * mentionable to surface the directive) and `manual` (mention-triggered by
- * design). A `disabled` server is inert — never offered in the completion
- * and never threaded as a mention — so it is filtered out of the mentionable
- * set. Shared by the autocomplete source and the send-path partitioning so
- * the two can never disagree.
+ * Per-context mentionability: `auto` (always on, still mentionable to
+ * surface the directive) and `manual` (mention-triggered by design) count;
+ * a `disabled` context is inert — the tools are never advertised there, so
+ * a mention is never threaded for it.
  */
-export function isMentionableMCPMode(mode: 'auto' | 'manual' | 'disabled'): boolean {
+export function isMentionableMCPMode(mode: MCPServerMode): boolean {
   return mode === 'auto' || mode === 'manual'
 }
 
 /**
- * Mentionable server names (auto + manual only, disabled hidden), in the
- * backend's name-sorted order — the shape the `/`-completion sections and
- * the send-path partition catalog consume.
+ * Whether a server is eligible for `/`-mentions in AT LEAST one context.
+ * DISPLAY-only semantics: the chip kind resolution for persisted messages
+ * (refCatalogs) renders against history it cannot re-contextualize, so a
+ * server mentionable anywhere still resolves to the MCP kind there. The
+ * completion and the send path use the SESSION-KIND-AWARE filter instead
+ * (isMentionableInContext / mentionableMCPNames) — never this one.
  */
-export function mentionableMCPNames(servers: MCPMentionableServer[]): string[] {
-  return servers.filter((s) => isMentionableMCPMode(s.mode)).map((s) => s.name)
+export function isMentionableMCPServer(server: MCPMentionableServer): boolean {
+  return isMentionableMCPMode(server.chat_mode) || isMentionableMCPMode(server.code_mode)
+}
+
+/**
+ * Mentionable server names for ONE session kind (the active session's kind
+ * decides the column): only servers whose mode for that context is auto or
+ * manual — a server disabled there is inert and its name is excluded, so a
+ * plain `/name` ref never partitions into an MCP mention it could not
+ * enable. Preserves the backend's name-sorted order. Shared by the send-path
+ * partition catalog so it can never disagree with the completion.
+ */
+export function mentionableMCPNames(servers: MCPMentionableServer[], context: CapabilityContext): string[] {
+  return servers
+    .filter((s) => isMentionableInContext(context, s))
+    .map((s) => s.name)
 }
 
 export async function getToolList(): Promise<ToolInfo[]> {

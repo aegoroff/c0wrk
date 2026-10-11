@@ -18,9 +18,10 @@ vi.mock('@/api/agents', () => ({ listAgents: (...args: unknown[]) => listAgentsM
 vi.mock('@/api/skills', () => ({ listSkills: (...args: unknown[]) => listSkillsMock(...args) }))
 vi.mock('@/api/mcp', () => ({
   getMCPMentionableServers: (...args: unknown[]) => getMCPMentionableServersMock(...args),
-  // Pure helper mirrored verbatim (production behavior under test).
-  mentionableMCPNames: (servers: Array<{ name: string; mode: string }>) =>
-    servers.filter((s) => s.mode === 'auto' || s.mode === 'manual').map((s) => s.name),
+  // Pure helper mirrored verbatim (production behavior under test): the
+  // display predicate refCatalogs uses — mentionable in ≥1 context.
+  isMentionableMCPServer: (s: { chat_mode: string; code_mode: string }) =>
+    s.chat_mode !== 'disabled' || s.code_mode !== 'disabled',
 }))
 vi.mock('@/api/runtime', () => ({ subscribe: vi.fn(() => () => {}) }))
 
@@ -102,7 +103,7 @@ describe('UserMessageContent /-ref chips', () => {
     // render sequence.
     listAgentsMock.mockResolvedValue([{ name: 'code-reviewer', description: '' }])
     listSkillsMock.mockResolvedValue([{ name: 'commit', description: '' }])
-    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', mode: 'auto' }])
+    getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', chat_mode: 'auto', code_mode: 'auto' }])
 
     const container = render(
       <UserMessageContent content="run /code-reviewer /commit /context7 /mystery now" />,

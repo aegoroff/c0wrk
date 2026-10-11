@@ -9,14 +9,70 @@ import (
 	"github.com/v0lka/c0wrk/core/tools"
 )
 
-// Per-server MCP mode values (config `mcp.servers.<name>.mode`), mirrored
-// from backend/config — core never imports backend/config, so the enum is
-// duplicated here. "disabled" is mirrored next to the gateway mapping in
-// builder_mcp.go (mcpModeDisabled); these two join it for the gating side.
+// Per-server MCP mode values ("auto" | "manual" | "disabled"), mirrored from
+// backend/config — core never imports backend/config, so the enum is
+// duplicated here. The values arrive per context via core.CapabilityModes
+// (capabilities.mcp.<name>.chat_mode / code_mode); "disabled" is mirrored
+// next to the gateway mapping in builder_mcp.go (mcpModeDisabled); these two
+// join it for the gating side.
 const (
 	mcpModeAuto   = "auto"
 	mcpModeManual = "manual"
 )
+
+// mcpSessionContext selects which side of a CapabilityModes entry a session
+// reads: CHAT (No Project) sessions apply chat_mode, CODE sessions apply
+// code_mode.
+type mcpSessionContext int
+
+const (
+	mcpSessionChat mcpSessionContext = iota
+	mcpSessionCode
+)
+
+// capabilityModesForSession projects a per-capability CapabilityModes map
+// through a session context into the flat name→mode map the gating consumes.
+// Shared by every capability kind (MCP servers, skills, agents). Empty
+// projections (both contexts unset, or every selected mode empty) yield nil:
+// consumers treat a missing entry as auto (always available).
+func capabilityModesForSession(modes map[string]CapabilityModes, ctx mcpSessionContext) map[string]string {
+	if len(modes) == 0 {
+		return nil
+	}
+	flat := make(map[string]string, len(modes))
+	for name, cm := range modes {
+		mode := cm.CodeMode
+		if ctx == mcpSessionChat {
+			mode = cm.ChatMode
+		}
+		if mode != "" {
+			flat[name] = mode
+		}
+	}
+	if len(flat) == 0 {
+		return nil
+	}
+	return flat
+}
+
+// currentMCPCapabilityModes returns the orchestrator's current per-server
+// capability snapshot: the resolver's live snapshot when wired, else the
+// static map the constructor was built with.
+func (o *Orchestrator) currentMCPCapabilityModes() map[string]CapabilityModes {
+	if o.config.MCPServerModesResolver != nil {
+		return o.config.MCPServerModesResolver()
+	}
+	return o.config.MCPServerModes
+}
+
+// sessionCapabilityContext reports which capability context this
+// orchestrator's session runs in: CHAT (No Project) or CODE (real project).
+func (o *Orchestrator) sessionCapabilityContext() mcpSessionContext {
+	if o.isNoProject {
+		return mcpSessionChat
+	}
+	return mcpSessionCode
+}
 
 // gatedMCPServerSet computes the set of MCP server names whose tools are
 // gated OFF for a task:
@@ -90,14 +146,12 @@ func stripGatedMCPTools(ctx context.Context, descs []sdktools.ToolDescriptor) []
 // applyMCPModeGating snapshots current modes and filters descriptors for direct
 // callers. Production task entry uses prepareTaskMCP once, then filters every
 // catalog with stripGatedMCPTools so reconfiguration cannot change a running
-// task's authorization snapshot. A nil resolver uses the constructor's static
-// MCPServerModes map. When nothing is gated, both the list and context pass
-// through unchanged.
+// task's authorization snapshot. The session context (o.isNoProject) selects
+// each server's chat_mode or code_mode before the gated-set computation. A nil
+// resolver uses the constructor's static MCPServerModes map. When nothing is
+// gated, both the list and context pass through unchanged.
 func (o *Orchestrator) applyMCPModeGating(ctx context.Context, descs []sdktools.ToolDescriptor, mentioned []string) ([]sdktools.ToolDescriptor, context.Context) {
-	modes := o.config.MCPServerModes
-	if o.config.MCPServerModesResolver != nil {
-		modes = o.config.MCPServerModesResolver()
-	}
+	modes := capabilityModesForSession(o.currentMCPCapabilityModes(), o.sessionCapabilityContext())
 	gated := gatedMCPServerSet(modes, mentioned)
 	if len(gated) == 0 {
 		return descs, ctx

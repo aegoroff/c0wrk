@@ -17,15 +17,16 @@ func TestMCPModes_PublicationBeforeFailedReconciliationAndImmutableSnapshot(t *t
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, mode := range []string{"auto", "manual", "auto", "disabled", "manual"} {
-		cfg := &BuilderConfig{MCP: BuilderMCPConfig{Servers: map[string]BuilderMCPServer{"srv": {Mode: mode}}}}
+		want := bothCtxModes(mode)
+		cfg := &BuilderConfig{MCP: BuilderMCPConfig{Servers: map[string]BuilderMCPServer{"srv": {ChatMode: mode, CodeMode: mode}}}}
 		if err := b.ReconfigureMCP(ctx, cfg); !errors.Is(err, context.Canceled) {
 			t.Fatalf("ReconfigureMCP(%s,cancelled) = %v, want cancellation", mode, err)
 		}
-		cfg.MCP.Servers["srv"] = BuilderMCPServer{Mode: "auto"}
+		cfg.MCP.Servers["srv"] = BuilderMCPServer{ChatMode: "auto", CodeMode: "auto"}
 		snapshot := b.currentMCPServerModes()
-		snapshot["srv"] = "auto"
-		if got := b.currentMCPServerModes()["srv"]; got != mode {
-			t.Errorf("currentMCPServerModes(%s) = %s, want independent %s", mode, got, mode)
+		snapshot["srv"] = bothCtxModes(mcpModeAuto)
+		if got := b.currentMCPServerModes()["srv"]; got != want {
+			t.Errorf("currentMCPServerModes(%s) = %v, want independent %v", mode, got, want)
 		}
 		prepared, err := o.prepareTaskMCP(context.Background(), bb, nil)
 		if err != nil {

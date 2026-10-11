@@ -50,10 +50,10 @@ func (o *Orchestrator) prepareTaskMCP(ctx context.Context, bb orchestration.Blac
 		}
 	}
 	names = slices.Clone(names)
-	modes := o.config.MCPServerModes
-	if o.config.MCPServerModesResolver != nil {
-		modes = o.config.MCPServerModesResolver()
-	}
+	// The session context (o.isNoProject) selects chat_mode vs code_mode per
+	// server; the snapshot is taken once here so reconfiguration cannot change
+	// a running task's authorization (in-flight contexts keep their set).
+	modes := capabilityModesForSession(o.currentMCPCapabilityModes(), o.sessionCapabilityContext())
 	ctx = WithUserMCPServers(ctx, names)
 	return tools.WithGatedMCPServers(ctx, gatedMCPServerSet(modes, names)), nil
 }

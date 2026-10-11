@@ -45,6 +45,16 @@ type Config struct {
 
 	MCP MCPConfig `yaml:"mcp"`
 
+	// Capabilities carries per-name activation modes for the three capability
+	// catalogs — skills, subagent profiles and MCP servers — split by the
+	// execution context a mode applies to (chat vs code). The section is
+	// purely operator-authored and additive: an omitted name, section, or the
+	// whole block behaves as "auto" for both contexts, so a config without it
+	// is exactly the pre-capabilities behavior. The shared enum, the fail-soft
+	// load normalization and the legacy mcp.servers.<name>.mode migration
+	// live in mcp_mode.go.
+	Capabilities CapabilitiesConfig `yaml:"capabilities,omitempty"`
+
 	Router     RouterConfig     `yaml:"router"`
 	Executor   ExecutorConfig   `yaml:"executor"`
 	Security   SecurityConfig   `yaml:"security"`
@@ -1565,15 +1575,47 @@ type MCPServerConfig struct {
 	// soft to the default on the load path.
 	CallTimeout string `yaml:"call_timeout,omitempty" json:"call_timeout,omitempty"`
 
-	// Mode is the per-server activation mode: "auto" (default — connect
-	// whenever the MCP gateway starts or reconfigures), "manual" (keep the
-	// configuration and surface the server as mentionable for the chat-input
-	// completion / send flow instead of treating it as always-on) or
-	// "disabled" (never dialed — the server is skipped when the gateway
-	// config is built). Empty selects auto. An unrecognized value is rejected
-	// on the UI save path (validateMCPServerConfig) and fails soft to auto
-	// with a load warning (normalizeMCPModes).
-	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// Mode is the LEGACY per-server activation key (mcp.servers.<name>.mode):
+	// "auto" (the historical default — connect whenever the MCP gateway
+	// starts or reconfigures), "manual" (keep the configuration and surface
+	// the server as mentionable for the chat-input completion / send flow
+	// instead of treating it as always-on) or "disabled" (never dialed — the
+	// server is skipped when the gateway config is built). The load pipeline
+	// folds a set mode into capabilities.mcp.<name> (both contexts, unless
+	// the entry already carries explicit values — migrateLegacyMCPServerModes)
+	// and ALWAYS erases the field, so the key disappears from YAML at the
+	// next save and capabilities.mcp.<name> is the only place the mode
+	// survives. An unrecognized value fails soft to "auto" with a load
+	// warning. The enum is shared with the capabilities section through
+	// ValidMCPServerMode. The JSON tag is "-": the wire format stopped
+	// carrying mode when the per-context capabilities section took over —
+	// UpdateMCPServers does not accept it and GetMCPServers / GetConfig do
+	// not emit it. The YAML tag stays so the load pipeline can still read
+	// (and migrate) legacy configs.
+	Mode string `yaml:"mode,omitempty" json:"-"`
+}
+
+// CapabilityModes is one capability entry's activation modes, one per
+// execution context: ChatMode applies to interactive chat tasks, CodeMode to
+// project (CODE) tasks. Both share the MCP server mode enum — "auto",
+// "manual" or "disabled", with ValidMCPServerMode as the single source of
+// truth — and an empty value IS "auto" (the default), which is why the YAML
+// keys are omitempty.
+type CapabilityModes struct {
+	ChatMode string `yaml:"chat_mode,omitempty" json:"chat_mode,omitempty"`
+	CodeMode string `yaml:"code_mode,omitempty" json:"code_mode,omitempty"`
+}
+
+// CapabilitiesConfig is the top-level capabilities: section (skills, agents,
+// mcp), each map keyed by the capability's name. Every map is optional; a
+// missing name resolves to "auto" in both contexts. The maps are normalized
+// at load: entries whose values are BOTH empty are dropped as meaningless,
+// and capabilities.mcp names outside mcp.servers are dropped as stale, so
+// the section never carries entries the rest of the config cannot resolve.
+type CapabilitiesConfig struct {
+	Skills map[string]CapabilityModes `yaml:"skills,omitempty" json:"skills,omitempty"`
+	Agents map[string]CapabilityModes `yaml:"agents,omitempty" json:"agents,omitempty"`
+	MCP    map[string]CapabilityModes `yaml:"mcp,omitempty" json:"mcp,omitempty"`
 }
 
 // RouterConfig holds router settings.
@@ -3030,16 +3072,27 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	// the adapter without a logger).
 	mcpWarnings := normalizeMCPTimeouts(&cfg)
 
-	// Canonicalize the MCP per-server activation modes (fail-soft: an
-	// unrecognized mode is warned about and reset to the default "auto").
-	// Same pipeline position and surfacing contract as normalizeMCPTimeouts.
-	mcpModeWarnings := normalizeMCPModes(&cfg)
+	// Fold the legacy per-server MCP activation key (mcp.servers.<name>.mode)
+	// into capabilities.mcp and erase it: after the load the legacy field is
+	// dead state, so the next save drops the key from YAML. Fail-soft: an
+	// unrecognized legacy mode is warned about and folds as the default
+	// "auto". Same pipeline position and surfacing contract as
+	// normalizeMCPTimeouts.
+	mcpModeWarnings := migrateLegacyMCPServerModes(&cfg)
+
+	// Canonicalize the capabilities sections (fail-soft: an unrecognized
+	// chat_mode / code_mode is warned about and reset to the default "auto"),
+	// dropping stale capabilities.mcp names and both-empty entries along the
+	// way. Must run after the legacy migration, whose folded values are
+	// already canonical.
+	capWarnings := normalizeCapabilities(&cfg)
 
 	// Warnings collected before validation, in a deterministic order.
 	warnings := autonomyWarnings
 	warnings = append(warnings, shellExecWarnings...)
 	warnings = append(warnings, mcpWarnings...)
 	warnings = append(warnings, mcpModeWarnings...)
+	warnings = append(warnings, capWarnings...)
 
 	// Validate configuration
 	if err := validate(&cfg); err != nil {

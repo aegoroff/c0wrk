@@ -50,7 +50,9 @@ func TestMCPModeGating_CoreServerDescriptorDispatchParity(t *testing.T) {
 			}
 			logger := expectedCoreLogger(t, diagnostics...)
 			r.SetLogger(logger)
-			o := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]string{"core": mcpModeManual}}}
+			o := &Orchestrator{config: OrchestratorConfig{MCPServerModes: map[string]CapabilityModes{
+				"core": {ChatMode: mcpModeManual, CodeMode: mcpModeManual},
+			}}}
 			var mentions []string
 			if mentioned {
 				mentions = []string{"core"}

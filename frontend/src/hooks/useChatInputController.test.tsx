@@ -33,9 +33,12 @@ const { apiMocks, sendMock } = vi.hoisted(() => ({
     skills: { listSkills: vi.fn().mockResolvedValue([]) },
     mcp: {
       getMCPMentionableServers: vi.fn().mockResolvedValue([]),
-      mentionableMCPNames: (servers: Array<{ name: string; mode: string }>) =>
-        servers.filter((s) => s.mode === 'auto' || s.mode === 'manual').map((s) => s.name),
+      // Pure helper mirrored verbatim (production behavior under test): the
+      // session-kind-aware filter — only the ACTIVE context's column decides.
+      mentionableMCPNames: (servers: Array<{ name: string; chat_mode: string; code_mode: string }>, context: 'chat' | 'code') =>
+        servers.filter((s) => (context === 'chat' ? s.chat_mode : s.code_mode) !== 'disabled').map((s) => s.name),
     },
+    capabilities: { getCapabilityModes: vi.fn().mockResolvedValue({ skills: {}, agents: {}, mcp: {} }) },
     runtime: {
       subscribe: vi.fn(() => () => {}),
       emit: vi.fn(),
@@ -55,6 +58,7 @@ vi.mock('@/api/agents', () => apiMocks.agents)
 vi.mock('@/api/workspace', () => apiMocks.workspace)
 vi.mock('@/api/skills', () => apiMocks.skills)
 vi.mock('@/api/mcp', () => apiMocks.mcp)
+vi.mock('@/api/capabilities', () => apiMocks.capabilities)
 vi.mock('@/api/runtime', () => apiMocks.runtime)
 vi.mock('@/api/attachments', () => apiMocks.attachments)
 // The send RPC flow is useMessageSender's own tested concern; here we need a
@@ -83,6 +87,7 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { NO_PROJECT_ID, type SessionInfo } from '@/types/models'
 
 /** Create a promise whose settlement is controlled by the test. */
 function deferred<T>() {
@@ -787,14 +792,15 @@ describe('handleSend MCP server mentions', () => {
     apiMocks.agents.listAgents.mockResolvedValue([])
     apiMocks.skills.listSkills.mockResolvedValue([])
     apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([])
+    apiMocks.capabilities.getCapabilityModes.mockResolvedValue({ skills: {}, agents: {}, mcp: {} })
     sendMock.mockResolvedValue(undefined)
   })
 
   it('partitions a plain /server ref into activeMCPServers (position 4 of send)', async () => {
     render()
     apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
-      { name: 'context7', mode: 'manual' },
-      { name: 'github', mode: 'auto' },
+      { name: 'context7', chat_mode: 'manual', code_mode: 'auto' },
+      { name: 'github', chat_mode: 'auto', code_mode: 'auto' },
     ])
     await type('/context7 look up /github repos')
 
@@ -815,7 +821,7 @@ describe('handleSend MCP server mentions', () => {
   it('never threads a disabled server as a mention', async () => {
     render()
     apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
-      { name: 'off-srv', mode: 'disabled' },
+      { name: 'off-srv', chat_mode: 'disabled', code_mode: 'disabled' },
     ])
     await type('use /off-srv now')
 
@@ -852,7 +858,7 @@ describe('handleSend MCP server mentions', () => {
   it('blocks the send for a plain ref colliding with the mcp catalog', async () => {
     render()
     apiMocks.skills.listSkills.mockResolvedValue([{ name: 'deploy', description: 'Deploy skill' }])
-    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([{ name: 'deploy', mode: 'manual' }])
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([{ name: 'deploy', chat_mode: 'manual', code_mode: 'auto' }])
     await type('run /deploy please')
 
     await act(async () => {
@@ -869,7 +875,7 @@ describe('handleSend MCP server mentions', () => {
   it('sends after the mcp collision is qualified', async () => {
     render()
     apiMocks.skills.listSkills.mockResolvedValue([{ name: 'deploy', description: 'Deploy skill' }])
-    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([{ name: 'deploy', mode: 'manual' }])
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([{ name: 'deploy', chat_mode: 'manual', code_mode: 'auto' }])
     await type('run /deploy please')
     await act(async () => {
       await controllerRef.current!.handleSend()
@@ -888,5 +894,144 @@ describe('handleSend MCP server mentions', () => {
       ['deploy'],
       'sess-a',
     )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session-kind-aware mention filtering on the send path: the ORIGIN session's
+// kind (SessionInfo.project_id — NO_PROJECT_ID → chat, a real project → code)
+// picks the capabilities column, so a plain ref never partitions into a
+// mention it could not enable for that session. Mirrors the completion's
+// kind-aware offers; the backend drops disabled mentions anyway.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('handleSend session-kind-aware mention filtering', () => {
+  /** Make the origin session known to the store with an explicit kind. */
+  function activateOrigin(projectId: string): void {
+    const session: SessionInfo = {
+      id: 'sess-a',
+      project_id: projectId,
+      name: 'S',
+      created_at: '2026-01-01T00:00:00Z',
+      last_active_at: '2026-01-01T00:00:00Z',
+      archived: false,
+      pinned: false,
+      active: false,
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      model: 'test-model',
+      family: 'test',
+      has_unfinished_task: false,
+    }
+    useSessionStore.setState({ sessions: [session], activeSessionId: 'sess-a' })
+  }
+
+  beforeEach(() => {
+    apiMocks.agents.listAgents.mockResolvedValue([])
+    apiMocks.skills.listSkills.mockResolvedValue([])
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([])
+    apiMocks.capabilities.getCapabilityModes.mockResolvedValue({ skills: {}, agents: {}, mcp: {} })
+    sendMock.mockResolvedValue(undefined)
+  })
+
+  it('never threads a chat-disabled server as an MCP mention from a CHAT session', async () => {
+    activateOrigin(NO_PROJECT_ID)
+    render()
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
+      { name: 'srv', chat_mode: 'disabled', code_mode: 'auto' },
+    ])
+    await type('use /srv now')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    // Filtered out of the chat-kind MCP catalog, the plain ref falls through
+    // to the permissive skill path — it can never become the mention the
+    // server's tools could not honor in this session anyway.
+    expect(sendMock).toHaveBeenCalledWith('use /srv now', ['srv'], [], [], 'sess-a')
+  })
+
+  it('threads the same server as an MCP mention from a CODE session', async () => {
+    activateOrigin('proj-1')
+    render()
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
+      { name: 'srv', chat_mode: 'disabled', code_mode: 'auto' },
+    ])
+    await type('use /srv now')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    // The code column keeps the server mentionable — the plain ref partitions
+    // into activeMCPServers (position 4 of send).
+    expect(sendMock).toHaveBeenCalledWith('use /srv now', [], [], ['srv'], 'sess-a')
+  })
+
+  it('threads a manual-in-chat server as an MCP mention from a CHAT session (manual is mentionable)', async () => {
+    activateOrigin(NO_PROJECT_ID)
+    render()
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
+      { name: 'srv', chat_mode: 'manual', code_mode: 'auto' },
+    ])
+    await type('use /srv now')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    // manual is exactly the mention-triggered mode — the mention must pass.
+    expect(sendMock).toHaveBeenCalledWith('use /srv now', [], [], ['srv'], 'sess-a')
+  })
+
+  it('partitions a plain ref away from an agent disabled for the active kind', async () => {
+    activateOrigin(NO_PROJECT_ID)
+    render()
+    apiMocks.agents.listAgents.mockResolvedValue([{ name: 'reviewer', description: 'Reviews code' }])
+    apiMocks.capabilities.getCapabilityModes.mockResolvedValue({
+      skills: {},
+      agents: { reviewer: { chat_mode: 'disabled', code_mode: 'auto' } },
+      mcp: {},
+    })
+    await type('run /reviewer please')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    // Dropped from the chat-kind agent catalog, the plain ref degrades to the
+    // permissive skill path (the backend drops the unknown/disabled skill) —
+    // never into an agent delegation this session cannot use.
+    expect(sendMock).toHaveBeenCalledWith('run /reviewer please', ['reviewer'], [], [], 'sess-a')
+  })
+
+  it('resolves a collision only against the kind-visible catalogs (no spurious ambiguity)', async () => {
+    // 'deploy' is BOTH a skill and an MCP server — but the server is disabled
+    // for CHAT. In a chat session the kind-aware catalogs leave exactly one
+    // visible home, so the plain ref resolves instead of no-oping as
+    // ambiguous (the old both-contexts catalog would have blocked it).
+    activateOrigin(NO_PROJECT_ID)
+    render()
+    apiMocks.skills.listSkills.mockResolvedValue([{ name: 'deploy', description: 'Deploy skill' }])
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([{ name: 'deploy', chat_mode: 'disabled', code_mode: 'auto' }])
+    await type('run /deploy please')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    expect(sendMock).toHaveBeenCalledWith('run /deploy please', ['deploy'], [], [], 'sess-a')
+  })
+
+  it('fails open when the capabilities fetch rejects: catalogs stay whole', async () => {
+    activateOrigin('proj-1')
+    render()
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([
+      { name: 'srv', chat_mode: 'disabled', code_mode: 'manual' },
+    ])
+    apiMocks.capabilities.getCapabilityModes.mockRejectedValue(new Error('caps down'))
+    await type('use /srv now')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+
+    // No filtering information → nothing is hidden on the client; the
+    // backend's own disabled-mention drop remains the safety net.
+    expect(sendMock).toHaveBeenCalledWith('use /srv now', [], [], ['srv'], 'sess-a')
   })
 })

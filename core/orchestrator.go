@@ -269,17 +269,41 @@ type OrchestratorConfig struct {
 	// the core/e2s defaults when zero.
 	E2S E2SSettings
 
-	// MCPServerModes carries the per-server MCP mode map ("auto" | "manual"
-	// | "disabled") from the config snapshot the orchestrator was built
-	// with. It drives task-level tool gating: a "manual" server's tools are
-	// hidden (and rejected at dispatch) unless the user mentioned the server
-	// in the task's messages, and "disabled" servers never surface at all
-	// (the builder already refuses to dial them). Empty (no modes configured)
-	// gates nothing — zero regression.
-	MCPServerModes map[string]string
+	// MCPServerModes carries the per-server MCP capability-mode map (each
+	// entry a CapabilityModes with a mode per session context: "auto" |
+	// "manual" | "disabled") from the config snapshot the orchestrator was
+	// built with. At task entry the session context (isNoProject) selects
+	// chat_mode vs code_mode, then it drives task-level tool gating: a
+	// "manual" server's tools are hidden (and rejected at dispatch) unless
+	// the user mentioned the server in the task's messages, and "disabled"
+	// servers never surface at all (the builder already refuses to dial a
+	// server disabled in both contexts). Empty (no modes configured) gates
+	// nothing — zero regression.
+	MCPServerModes map[string]CapabilityModes
 	// MCPServerModesResolver supplies the builder's current immutable policy snapshot.
 	// Direct constructors fall back to MCPServerModes when it is nil.
-	MCPServerModesResolver func() map[string]string
+	MCPServerModesResolver func() map[string]CapabilityModes
+
+	// SkillModes / AgentModes carry the per-name capability-mode maps for the
+	// skill and agent catalogs (same enum and per-context CapabilityModes
+	// shape as MCPServerModes, from capabilities.skills / capabilities.agents).
+	// At task entry attachCapabilitySnapshots resolves the session context and
+	// attaches the flat projections to the request context; the filters then
+	// apply the mirrored three-state semantics: "auto" participates in
+	// implicit discovery (router matching / the "Available Subagents" roster)
+	// and answers explicit mentions; "manual" is hidden from implicit
+	// discovery but activates via an explicit /skill: / /agent: mention;
+	// "disabled" is fully unavailable (mentions silently dropped, delegation
+	// refused fail-closed). Empty maps gate nothing — zero regression.
+	SkillModes map[string]CapabilityModes
+	// SkillModesResolver supplies the builder's current immutable policy
+	// snapshot. Direct constructors fall back to SkillModes when it is nil.
+	SkillModesResolver func() map[string]CapabilityModes
+	// AgentModes mirrors SkillModes for the subagent catalog.
+	AgentModes map[string]CapabilityModes
+	// AgentModesResolver supplies the builder's current immutable policy
+	// snapshot. Direct constructors fall back to AgentModes when it is nil.
+	AgentModesResolver func() map[string]CapabilityModes
 }
 
 // E2SSettings is the runtime mirror of BuilderE2SConfig carried on
@@ -1269,6 +1293,12 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	if err != nil {
 		return nil, err
 	}
+	// Capability snapshots for a resumed task: no fresh mentions exist on
+	// resume (the fresh path threads them through HandleOptions), but the
+	// restored routing decision can still name skills whose mode changed
+	// while the task was paused — the snapshots pin the authorization view
+	// the reactivation filters apply.
+	ctx = o.attachCapabilitySnapshots(ctx)
 
 	// One-shot resume-compaction request: when the user selected a compaction
 	// strategy for this resume (manual compaction of a paused task), the
@@ -3250,6 +3280,18 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		return nil, err
 	}
 	opts.UserMCPServers = UserMCPServersFromContext(ctx)
+
+	// Skill/agent capability snapshots: the session context (o.isNoProject,
+	// including a CHAT→CODE promotion already applied to this orchestrator)
+	// selects each entry's chat_mode/code_mode ONCE here, and the snapshots
+	// ride the context so routing, the roster, and delegation all see one
+	// immutable view for the whole task. Mentions of disabled capabilities
+	// are dropped (manual mentions pass — that is how a manual capability
+	// activates); the filtered lists replace opts for every downstream path
+	// (Conductor, E2S, goal) in one place.
+	ctx = o.attachCapabilitySnapshots(ctx)
+	opts.UserSkills = mentionedSkillsForTask(ctx, opts.UserSkills)
+	opts.UserAgents = mentionedAgentsForTask(ctx, opts.UserAgents)
 
 	// Augment the Conductor's task message with the session's attached files.
 	// The router and conversation history keep the clean `taskMessage`; only the
