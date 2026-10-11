@@ -363,5 +363,16 @@ export function Terminal({ sessionId, visible, isActive, onReady }: TerminalProp
         termRef.current?.focus()
     }
 
-    return <div ref={containerRef} className="w-full h-full cursor-pointer" onClick={handleClick} />
+    return (
+      <div
+        ref={containerRef}
+        className="w-full h-full cursor-pointer"
+        onClick={handleClick}
+        // Marks the xterm DOM subtree for focus-scoped key routing: while the
+        // terminal holds focus (its hidden helper textarea lives in here), the
+        // workspace tab-cycling shortcuts yield entirely to the terminal — a
+        // TUI can legitimately bind those combos (see useTabHotkeys).
+        data-terminal-root=""
+      />
+    )
 }

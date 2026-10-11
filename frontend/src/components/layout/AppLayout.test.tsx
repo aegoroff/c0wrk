@@ -61,7 +61,7 @@ vi.mock('./TabBar', () => ({ TabBar: () => <div data-testid="tab-bar" /> }))
 // AppLayout owns the single controller mount; the real hook drags the engine,
 // project-switch state and four store subscriptions — stubbed here.
 vi.mock('@/hooks/useTabController', () => ({
-  useTabController: () => ({ activate: async () => {}, writeBack: () => {} }),
+  useTabController: () => ({ activate: async () => {}, createAndActivate: async () => {}, writeBack: () => {} }),
 }))
 vi.mock('@/components/chat/ChatArea', () => ({ ChatArea: () => <div data-testid="chat-area" /> }))
 vi.mock('@/components/chat/BonsaiProfileBanner', () => ({ BonsaiProfileBanner: () => <div data-testid="bonsai-banner" /> }))

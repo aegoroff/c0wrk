@@ -6,7 +6,7 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import { useTabStore, type Tab } from '@/stores/tabStore'
 import { useUIStore } from '@/stores/uiStore'
-import { captureLiveUI, createTabEngine } from '@/lib/tabEngine'
+import { createTabEngine } from '@/lib/tabEngine'
 import { logger } from '@/lib/logger'
 import type { SessionInfo } from '@/types/models'
 
@@ -38,12 +38,13 @@ function findSessionTab(tabs: Tab[], projectId: string, sessionId: string): Tab 
  * With tabs enabled, this is the ONLY behavioral branch in the hook: the
  * click routes through the tab engine's single activation path instead of
  * the direct switch/select pair. A tab already showing the session is
- * activated; otherwise a fresh tab is created carrying the clicked
- * {projectId, sessionId} context plus a capture of the current live UI
- * slices — its activation then restores what the workspace already shows,
- * leaving the input panel untouched (the same contract the «+» button's
- * write-back gives a new tab) — and the engine materializes it (project
- * switch and session restore happen inside the activation). The hook owns a
+ * activated; otherwise a fresh tab is created through the engine's shared
+ * [create → activate] chain link (the same `createAndActivate` primitive the
+ * tab bar's «+» button uses) seeded with the clicked {projectId, sessionId}
+ * and a live UI capture taken when the link runs — its activation then
+ * restores what the workspace already shows, leaving the input panel
+ * untouched — and the engine materializes it (project switch and session
+ * restore happen inside the activation). The hook owns a
  * bare engine — write-back mirroring stays the tab-controller's job, so a
  * flag-off click never touches the tab store.
  *
@@ -104,25 +105,20 @@ export function useNotificationClicks(): void {
             await engine.activate(existing.id)
             return
           }
-          // No tab shows the session: create one carrying the clicked
-          // context plus a capture of the CURRENT live slices. The bare
+          // No tab shows the session: create one through the engine's shared
+          // [create → activate] chain link — the SAME primitive the tab bar's
+          // «+» button uses, so an in-flight activation can never be overtaken
+          // by a half-created tab. The clicked {projectId, sessionId} are the
+          // fixed seed; the engine captures the live UI slices when the link
+          // runs, so the activation's restore re-applies what the workspace
+          // already shows and the input panel is left untouched (the bare
           // default snapshot would not do: its input fields are all present
-          // and valid, so the activation's restore applies them as-is and
-          // resets the panel; the live capture makes the restore re-apply
-          // what the workspace already shows — the same outcome the «+»
-          // path's write-back convergence gives a fresh tab.
-          // addTab auto-activates, so step back to the previous tab and let
-          // the engine's full activation materialize the context (its
-          // already-active guard would skip the whole path otherwise).
-          // All synchronous — no intermediate state can be painted.
-          const outgoingId = tabLayer.activeTabId
-          const newTabId = tabLayer.addTab({
-            projectId,
-            sessionId: data.session_id,
-            ui: captureLiveUI(),
-          })
-          useTabStore.getState().activateTab(outgoingId)
-          await engine.activate(newTabId)
+          // and valid, so the restore would apply them as-is and reset the
+          // panel). The created tab survives a failed activation — the
+          // rollback only reverts the active pointer (see specs tabs.md,
+          // Banner-click routing), and a re-click finds it via the exact
+          // match above.
+          await engine.createAndActivate({ projectId, sessionId: data.session_id })
           return
         }
 

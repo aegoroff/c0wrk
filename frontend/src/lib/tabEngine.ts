@@ -36,6 +36,18 @@ import type { ProjectInfo } from '@/types/models'
  */
 export type ProjectSwitcher = (projectId: string) => Promise<void>
 
+/**
+ * The explicit context seed for {@link TabEngine.createAndActivate}. An
+ * `undefined` field means "the LIVE workspace value, read when the chain link
+ * runs" — the «+» semantic (a tab for what the user is looking at). The
+ * banner click passes BOTH ids explicitly (the clicked session), so its
+ * project/session are fixed while the UI capture stays live.
+ */
+export interface TabCreateSeed {
+  projectId?: string | null
+  sessionId?: string | null
+}
+
 export interface TabEngine {
   /**
    * Activate a tab. The returned promise NEVER rejects: every failure is
@@ -44,6 +56,21 @@ export interface TabEngine {
    * rejection.
    */
   activate: (tabId: string) => Promise<void>
+  /**
+   * Create a tab and materialize it through the FULL activation path as ONE
+   * chain link — the shared creation primitive behind the tab bar's «+»
+   * button and the banner-click tab. Because creation lives inside the same
+   * module-level chain as every activation, an in-flight activation always
+   * completes (its restore + write-back land on the tab that was active
+   * throughout) BEFORE the new tab exists — the fresh tab can never be
+   * grafted with a mid-switch context the way an out-of-chain addTab can.
+   * The link reads the seed and captures the live UI when it RUNS (not at
+   * call time), so the tab inherits the workspace the user sees at that
+   * moment; `captureLiveUI` as the seed keeps the restore re-applying what
+   * the workspace already shows (the input panel stays untouched). Like
+   * activate, the promise never rejects.
+   */
+  createAndActivate: (seed?: TabCreateSeed) => Promise<void>
   /**
    * Write-back: mirror the LIVE context (activeProjectId, activeSessionId,
    * the uiStore per-project maps, the input-panel slice) into the ACTIVE
@@ -280,6 +307,36 @@ async function runActivation(switchProjectWithState: ProjectSwitcher, tabId: str
   writeBack()
 }
 
+// --- Creation (the [addTab → activate] chain link) ---
+
+/**
+ * One chain link: seed a fresh tab from the LIVE stores (or the explicit
+ * seed), then run the full activation path for it. Synchronous up to the
+ * activation — addTab, the step-back and the seed capture cannot interleave
+ * with anything.
+ */
+function runCreateActivation(switchProjectWithState: ProjectSwitcher, seed: TabCreateSeed): Promise<void> {
+  // Resolve the seed NOW (link-run time, not click time): an in-flight
+  // activation may have moved the workspace between the caller's click and
+  // this link starting, and a fresh tab must inherit what the user sees the
+  // moment it materializes.
+  const projects = useProjectStore.getState()
+  const sessions = useSessionStore.getState()
+  const projectId = seed.projectId !== undefined ? seed.projectId : projects.activeProjectId
+  const sessionId = seed.sessionId !== undefined ? seed.sessionId : sessions.activeSessionId
+  const tabLayer = useTabStore.getState()
+  const outgoingId = tabLayer.activeTabId
+  // A live capture as the seed: the activation's restore re-applies what the
+  // workspace already shows (the bare default snapshot would reset the input
+  // panel), and the final write-back converges content-equal.
+  const newTabId = useTabStore.getState().addTab({ projectId, sessionId, ui: captureLiveUI() })
+  // addTab auto-activated the fresh tab; step back so the engine's FULL path
+  // (not its already-active guard) materializes the context. Synchronous —
+  // no intermediate active pointer can be painted.
+  useTabStore.getState().activateTab(outgoingId)
+  return runActivation(switchProjectWithState, newTabId)
+}
+
 // Activation chain — MODULE-level, shared by every engine instance (the
 // AppLayout controller AND the bare engine in useNotificationClicks). Each
 // activation's full body (capture → flip → switch/select → restore →
@@ -287,22 +344,27 @@ async function runActivation(switchProjectWithState: ProjectSwitcher, tabId: str
 // a banner-click activation can never interleave its store writes with an
 // in-flight tab-click activation: the shared project switcher serializes only
 // the project-switch segment, and the same-project branch has no switch (and
-// therefore no serialization) at all. runActivation never rejects (all
-// failures are caught and rolled back), but the chain link guards both
-// settlements anyway so a future edit can never poison the queue.
+// therefore no serialization) at all. Tab CREATION rides the same chain
+// (createAndActivate), so a «+» click cannot slide a fresh tab under an
+// in-flight activation either. Neither entry ever rejects (all failures are
+// caught and rolled back), but the chain link guards both settlements anyway
+// so a future edit can never poison the queue.
 let chain: Promise<void> = Promise.resolve()
 
 // --- Engine factory ---
 
 export function createTabEngine(switchProjectWithState: ProjectSwitcher): TabEngine {
-  const activate = (tabId: string): Promise<void> => {
-    const run = chain.then(
-      () => runActivation(switchProjectWithState, tabId),
-      () => runActivation(switchProjectWithState, tabId),
-    )
+  const enqueue = (link: () => Promise<void>): Promise<void> => {
+    const run = chain.then(link, link)
     chain = run
     return run
   }
+
+  const activate = (tabId: string): Promise<void> =>
+    enqueue(() => runActivation(switchProjectWithState, tabId))
+
+  const createAndActivate = (seed: TabCreateSeed = {}): Promise<void> =>
+    enqueue(() => runCreateActivation(switchProjectWithState, seed))
 
   const attachWriteBack = (): (() => void) => {
     writeBack()
@@ -352,5 +414,5 @@ export function createTabEngine(switchProjectWithState: ProjectSwitcher): TabEng
     }
   }
 
-  return { activate, writeBack, attachWriteBack }
+  return { activate, createAndActivate, writeBack, attachWriteBack }
 }

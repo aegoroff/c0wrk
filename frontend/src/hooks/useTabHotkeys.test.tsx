@@ -19,9 +19,11 @@ import type { TabController } from '@/hooks/useTabController'
 
 // --- fixtures ---
 
-function fakeController() {
+function fakeController(): TabController {
   return {
     activate: vi.fn((_tabId: string) => Promise.resolve()),
+    // The hotkeys never create tabs; the stub only satisfies the interface.
+    createAndActivate: vi.fn(() => Promise.resolve()),
     writeBack: vi.fn(),
   } satisfies TabController
 }
@@ -177,6 +179,54 @@ describe('useTabHotkeys — Windows/Linux system set', () => {
     const event = pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true })
     expect(controller.activate).not.toHaveBeenCalled()
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('yields entirely while the embedded terminal holds focus (event untouched)', () => {
+    const controller = fakeController()
+    renderHarness(controller)
+    // The xterm DOM shape: a container marked data-terminal-root holding the
+    // hidden helper textarea that carries focus while the terminal is used.
+    const term = document.createElement('div')
+    term.setAttribute('data-terminal-root', '')
+    const helper = document.createElement('textarea')
+    term.appendChild(helper)
+    document.body.appendChild(term)
+    act(() => {
+      helper.focus()
+    })
+    expect(document.activeElement).toBe(helper)
+
+    // Keydowns originate AT the focused textarea and bubble to window — the
+    // terminal wins on every cycling combo, both platform sets.
+    const combos: KeyboardEventInit[] = [
+      { key: 'Tab', code: 'Tab', ctrlKey: true },
+      { key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true },
+      { key: 'PageDown', code: 'PageDown', ctrlKey: true },
+      { key: ']', code: 'BracketRight', metaKey: true, shiftKey: true },
+    ]
+    for (const init of combos) {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+      act(() => {
+        helper.dispatchEvent(event)
+      })
+      expect(controller.activate).not.toHaveBeenCalled()
+      expect(event.defaultPrevented).toBe(false)
+    }
+  })
+
+  it('still cycles when a terminal is mounted but NOT focused', () => {
+    const controller = fakeController()
+    renderHarness(controller)
+    const term = document.createElement('div')
+    term.setAttribute('data-terminal-root', '')
+    const helper = document.createElement('textarea')
+    term.appendChild(helper)
+    document.body.appendChild(term)
+    // Focus stays outside the terminal (activeElement = body).
+
+    const event = pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true })
+    expect(controller.activate).toHaveBeenCalledTimes(1)
+    expect(event.defaultPrevented).toBe(true)
   })
 
   it('reads the tab layer at event time, not mount time', () => {

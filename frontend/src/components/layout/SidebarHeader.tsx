@@ -16,8 +16,8 @@ interface SidebarHeaderProps {
 export function SidebarHeader({ onToggleCollapse, collapsed }: SidebarHeaderProps) {
   const openSettings = useSettingsStore((s) => s.openSettings)
   // When the workspace tab bar is on, it carries the Settings affordance
-  // (aimed straight at its Appearance section) and the header drops its own
-  // gear — one settings entry point, no duplicate.
+  // (opening on the same default tab as this header's gear always did) and
+  // the header drops its own gear — one settings entry point, no duplicate.
   const tabsEnabled = useUIStore((s) => s.tabsEnabled)
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)

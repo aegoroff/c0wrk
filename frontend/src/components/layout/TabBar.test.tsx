@@ -59,9 +59,37 @@ const SESS: SessionInfo = {
   has_unfinished_task: false,
 }
 
-function fakeController() {
+function fakeController(): TabController {
+  return {
+    // Mimics the engine's optimistic flip: activate moves the active pointer
+    // BEFORE resolving (a failure would resolve WITHOUT flipping — the
+    // rollback the real engine performs).
+    activate: vi.fn((tabId: string) => {
+      useTabStore.getState().activateTab(tabId)
+      return Promise.resolve()
+    }),
+    // Mimics engine.createAndActivate's observable store effect: the fresh
+    // tab is appended and auto-activated (the full materialization is the
+    // engine suite's business).
+    createAndActivate: vi.fn((seed?: { projectId?: string | null; sessionId?: string | null }) => {
+      const projects = useProjectStore.getState()
+      const sessions = useSessionStore.getState()
+      useTabStore.getState().addTab({
+        projectId: seed?.projectId !== undefined ? seed.projectId : projects.activeProjectId,
+        sessionId: seed?.sessionId !== undefined ? seed.sessionId : sessions.activeSessionId,
+      })
+      return Promise.resolve()
+    }),
+    writeBack: vi.fn(),
+  } satisfies TabController
+}
+
+/** A controller whose activations FAIL the way the real engine's do: resolve
+ *  without flipping (the rollback left the requested tab unmaterialized). */
+function failingController(): TabController {
   return {
     activate: vi.fn((_tabId: string) => Promise.resolve()),
+    createAndActivate: vi.fn(() => Promise.resolve()),
     writeBack: vi.fn(),
   } satisfies TabController
 }
@@ -192,6 +220,27 @@ describe('TabBar', () => {
     expect(useTabStore.getState().activeTabId).toBe(t2.id)
   })
 
+  it('keeps the ACTIVE tab open when the neighbor activation fails (rollback = still active)', async () => {
+    const t1 = createTab()
+    const t2 = createTab({ projectId: PROJ.id })
+    useTabStore.setState({ tabs: [t1, t2], activeTabId: t1.id })
+    // A failed activation resolves WITHOUT flipping (the engine rolled
+    // activeTabId back onto the closed tab) — the observable post-failure
+    // state the real engine produces.
+    const controller = failingController()
+    renderBar(controller)
+
+    act(() => {
+      buttonByLabel('Close New Tab').click()
+    })
+    await flush()
+    // The failed activation left t1 active (rollback) — closing onto the
+    // unmaterialized neighbor would let the next write-back clobber its
+    // remembered context, so the tab stays open instead.
+    expect(useTabStore.getState().tabs.map((t) => t.id)).toEqual([t1.id, t2.id])
+    expect(useTabStore.getState().activeTabId).toBe(t1.id)
+  })
+
   it('closes on middle-click', () => {
     const t1 = createTab()
     const t2 = createTab({ projectId: PROJ.id })
@@ -222,7 +271,7 @@ describe('TabBar', () => {
     expect(controller.writeBack).toHaveBeenCalledTimes(1)
   })
 
-  it('«+» appends an active tab and converges it through the controller', () => {
+  it('«+» creates the tab through the engine, seeded live (no direct addTab)', () => {
     const t1 = createTab()
     useTabStore.setState({ tabs: [t1], activeTabId: t1.id })
     const controller = fakeController()
@@ -232,20 +281,28 @@ describe('TabBar', () => {
       buttonByLabel('New tab').click()
     })
     const state = useTabStore.getState()
+    // The fresh tab exists and is active (the fake mimics the engine's
+    // observable store effect).
     expect(state.tabs).toHaveLength(2)
     expect(state.activeTabId).not.toBe(t1.id)
-    expect(controller.activate).toHaveBeenCalledWith(state.activeTabId)
-    expect(controller.writeBack).toHaveBeenCalledTimes(1)
+    // Creation rode the engine's chain link — the same primitive the banner
+    // click uses — with NO explicit seed: the fresh tab inherits the live
+    // workspace read when the link runs, so an in-flight activation can
+    // never be overtaken by a half-created tab.
+    expect(controller.createAndActivate).toHaveBeenCalledTimes(1)
+    expect(controller.createAndActivate).toHaveBeenCalledWith()
+    expect(controller.activate).not.toHaveBeenCalled()
+    expect(controller.writeBack).not.toHaveBeenCalled()
   })
 
-  it('opens Settings aimed at the Appearance section', () => {
+  it('opens Settings on the default tab (same as the sidebar gear before tabs)', () => {
     renderBar()
     act(() => {
       buttonByLabel('Settings').click()
     })
     const settings = useSettingsStore.getState()
     expect(settings.open).toBe(true)
-    expect(settings.activeTab).toBe('appearance')
+    expect(settings.activeTab).toBe('general')
   })
 
   it('paints the session status dot from the single shared derivation', () => {

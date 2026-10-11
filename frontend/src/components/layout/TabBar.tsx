@@ -8,7 +8,7 @@ import { useTabStore, useTabs, useActiveTabId, type Tab } from '@/stores/tabStor
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { selectSessionNameFor, selectTitleScopeFor } from '@/hooks/useWindowTitle'
 import { useSessionStatusIndicator } from '@/hooks/useSessionStatusIndicator'
-import { sessionNameFromSnapshot, type SessionDisplayStatus } from '@/lib/activeSessions'
+import { SESSION_DOT_CLASSES, SESSION_DOT_TITLES, sessionNameFromSnapshot } from '@/lib/activeSessions'
 import { buildTabLabel } from '@/lib/tabLabel'
 import type { TabController } from '@/hooks/useTabController'
 import { cn } from '@/lib/utils'
@@ -20,25 +20,9 @@ import { cn } from '@/lib/utils'
 // every label/status is derived LIVE from the project/session/chat stores by
 // id, so renames and lifecycle events repaint without the tab holding a
 // stale copy — the same contract useWindowTitle follows. The label builder
-// itself lives in lib/tabLabel.ts (pure string algebra).
-
-/** Dot color per display status — the SAME tokens and wording the session
- *  list (SessionListItem) and the radar rows (ActiveSessionRow) use, so the
- *  three surfaces can never drift. `idle` has no dot. */
-const STATUS_DOT_CLASSES: Partial<Record<SessionDisplayStatus, string>> = {
-  pending: 'bg-warning',
-  failed: 'bg-destructive',
-  active: 'bg-success',
-  paused: 'bg-muted-foreground',
-}
-
-/** Dot hover hint — SessionListItem's wording. */
-const STATUS_DOT_TITLES: Partial<Record<SessionDisplayStatus, string>> = {
-  pending: 'Awaiting your response',
-  failed: 'Task failed — resume available',
-  active: 'Task running',
-  paused: 'Task paused',
-}
+// itself lives in lib/tabLabel.ts (pure string algebra), and the status-dot
+// maps are the shared SESSION_DOT_* from lib/activeSessions (the same tokens
+// and wording the session list and the radar rows use).
 
 export interface TabBarProps {
   /** The app-level controller (AppLayout's single useTabController mount). */
@@ -73,7 +57,14 @@ export function TabBar({ controller }: TabBarProps) {
       // own rule (right neighbor, else the last tab).
       const neighbor = state.tabs[index + 1] ?? state.tabs[index - 1]
       if (neighbor === undefined) return // unreachable: length > 1 here
+      // `activate` never rejects: a FAILED activation rolls `activeTabId`
+      // back onto `id` (this tab is still active). Closing onto a neighbor
+      // whose remembered context never got applied would then let the next
+      // write-back clobber that memory — so a failed activation leaves the
+      // tab OPEN (the engine's logger.warn is the user-visible signal), and
+      // the close only proceeds when the neighbor is genuinely live.
       void controller.activate(neighbor.id).then(() => {
+        if (useTabStore.getState().activeTabId === id) return
         useTabStore.getState().closeTab(id)
       })
     },
@@ -81,17 +72,14 @@ export function TabBar({ controller }: TabBarProps) {
   )
 
   const handleAdd = useCallback(() => {
-    const id = useTabStore.getState().addTab()
-    // addTab already flipped activeTabId, so activate() is a deliberate no-op
-    // (the engine's guard treats an already-active tab as nothing to capture
-    // or restore) — the call merely keeps creation routed through the single
-    // engine entry point.
-    void controller.activate(id)
-    // The fresh tab is active but still carries its default-empty context,
-    // and a tabStore-only change never fires the write-back subscriptions —
-    // converge it to the live workspace NOW so the title/status never lag a
-    // store event behind the flip.
-    controller.writeBack()
+    // Creation is serialized through the engine like every other activation:
+    // the [create → activate] pair is ONE chain link shared with the banner
+    // click, so an in-flight activation always finishes its restore + write-
+    // back on the tab that was active throughout BEFORE the fresh tab exists
+    // — it can never resume into a half-created tab and graft its context
+    // onto it. The link reads the live context when it runs, so the new tab
+    // inherits exactly what the user is looking at.
+    void controller.createAndActivate()
   }, [controller])
 
   // Keyboard interaction on the tab strip (WAI-ARIA APG Tabs, manual
@@ -160,7 +148,7 @@ export function TabBar({ controller }: TabBarProps) {
       <Button
         variant="ghost"
         size="icon-sm"
-        onClick={() => openSettings('appearance')}
+        onClick={() => openSettings()}
         aria-label="Settings"
         title="Settings"
       >
@@ -210,8 +198,8 @@ function TabRow({ tab, active, controller, onClose }: TabRowProps) {
   )
 
   const label = buildTabLabel(scope, sessionName)
-  const dotClass = STATUS_DOT_CLASSES[status]
-  const dotTitle = STATUS_DOT_TITLES[status]
+  const dotClass = SESSION_DOT_CLASSES[status]
+  const dotTitle = SESSION_DOT_TITLES[status]
 
   return (
     <div

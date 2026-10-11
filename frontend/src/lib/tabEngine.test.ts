@@ -765,6 +765,129 @@ describe('tabEngine.activate — rollback & serialization', () => {
   })
 })
 
+describe('tabEngine.createAndActivate', () => {
+  /** Simulate the real switch's store effect: the project (and a session) move. */
+  function switchMovesProject(): void {
+    switchMock.mockImplementation(async (id: string) => {
+      useProjectStore.getState().setActiveProjectId(id)
+      useSessionStore.getState().setActiveSessionId(id === NO_PROJECT_ID ? 'np1' : null)
+    })
+  }
+
+  it('seed-less creation inherits the LIVE context (the «+» semantic) — no switch, no select, panel untouched', async () => {
+    useSessionStore.setState({ selectSession: selectSessionMock })
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+    // A non-default live panel: the fresh tab must capture (not reset) it.
+    useInputModeStore.setState({ mode: 'terminal', height: 420, collapsedHeight: 96, isExpanded: true })
+
+    await engine.createAndActivate()
+
+    expect(switchMock).not.toHaveBeenCalled()
+    expect(selectSessionMock).not.toHaveBeenCalled()
+    const state = useTabStore.getState()
+    expect(state.tabs).toHaveLength(2)
+    const fresh = state.tabs[1]!
+    expect(state.activeTabId).toBe(fresh.id)
+    // Same project + same session: the fresh tab rides the clean
+    // capture/flip/restore path and converges with the live workspace.
+    expect(fresh.projectId).toBe('p1')
+    expect(fresh.sessionId).toBe('s1')
+    // The captured live slice is what the tab remembers — and the live panel
+    // itself survived the creation untouched.
+    expect(fresh.ui.inputMode).toEqual({ mode: 'terminal', height: 420, collapsedHeight: 96, isExpanded: true })
+    expect(useInputModeStore.getState()).toMatchObject({ mode: 'terminal', height: 420 })
+  })
+
+  it('serializes creation behind an in-flight activation: no half-created tab to graft a context onto', async () => {
+    switchMovesProject()
+    useSessionStore.setState({ selectSession: selectSessionMock })
+    const { bId } = twoTabs({ projectId: 'p2', sessionId: 's-p2' })
+
+    // The first activation stalls mid-switch (after its optimistic flip).
+    const gate = deferred()
+    switchMock.mockImplementationOnce(async (id: string) => {
+      await gate.promise
+      useProjectStore.getState().setActiveProjectId(id)
+      useSessionStore.getState().setActiveSessionId('s-p2')
+    })
+    const first = engine.activate(bId)
+    // The chain link runs on a microtask: drain to the stalled switch, THEN
+    // assert the mid-flight state (the optimistic flip has happened, the
+    // switch is awaiting the gate).
+    await flush()
+    expect(useTabStore.getState().activeTabId).toBe(bId)
+
+    // «+» clicked mid-switch: creation enqueues BEHIND the in-flight
+    // activation. NOTHING exists yet — an out-of-chain addTab would have
+    // already created the tab here, and the resuming activation would graft
+    // its restore + write-back onto it.
+    const created = engine.createAndActivate()
+    expect(useTabStore.getState().tabs).toHaveLength(2)
+
+    gate.resolve()
+    await Promise.all([first, created])
+
+    // The in-flight activation completed on ITS tab first; only then did the
+    // link create the fresh tab.
+    const state = useTabStore.getState()
+    expect(state.tabs).toHaveLength(3)
+    const fresh = state.tabs[2]!
+    expect(state.activeTabId).toBe(fresh.id)
+    // The seed was read at LINK-RUN time — the live, post-switch workspace
+    // (b's context), never a's stale click-time context.
+    expect(fresh.projectId).toBe('p2')
+    expect(fresh.sessionId).toBe('s-p2')
+  })
+
+  it('an explicit seed (the banner click) materializes the clicked context through the full path', async () => {
+    switchMovesProject()
+    spyRealSelectSession()
+    useSessionStore.setState({
+      sessions: [
+        makeSession({ id: 's1', project_id: 'p1' }),
+        makeSession({ id: 's2', project_id: 'p1' }),
+        makeSession({ id: 's-p2', project_id: 'p2' }),
+      ],
+    })
+    const aId = useTabStore.getState().tabs[0]!.id
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+
+    await engine.createAndActivate({ projectId: 'p2', sessionId: 's-p2' })
+
+    expect(switchMock).toHaveBeenCalledExactlyOnceWith('p2')
+    const state = useTabStore.getState()
+    expect(state.tabs).toHaveLength(2)
+    const fresh = state.tabs[1]!
+    expect(state.activeTabId).toBe(fresh.id)
+    expect(fresh.projectId).toBe('p2')
+    // The tab's own remembered session was selected through the switch flow
+    // and converged back into the tab.
+    expect(fresh.sessionId).toBe('s-p2')
+    expect(useSessionStore.getState().activeSessionId).toBe('s-p2')
+    expect(selectSessionMock).toHaveBeenCalledExactlyOnceWith('s-p2', 'p2')
+    // The outgoing tab kept the workspace it was showing.
+    expect(state.tabs.find((t) => t.id === aId)!.sessionId).toBe('s1')
+  })
+
+  it('a failed seeded creation keeps the created tab, rolls the active pointer back, and never rejects', async () => {
+    switchMock.mockRejectedValueOnce(new Error('switch failed'))
+    const aId = useTabStore.getState().tabs[0]!.id
+    useTabStore.getState().updateActiveContext({ projectId: 'p1', sessionId: 's1' })
+
+    await expect(engine.createAndActivate({ projectId: 'p2', sessionId: null })).resolves.toBeUndefined()
+
+    const state = useTabStore.getState()
+    // The banner-survival contract: the created tab STAYS in the strip with
+    // its clicked context (a re-click finds it via the exact-match lookup).
+    expect(state.tabs).toHaveLength(2)
+    expect(state.tabs[1]!.projectId).toBe('p2')
+    expect(state.tabs[1]!.sessionId).toBeNull()
+    // The active pointer rolled back onto the outgoing tab; the engine warned.
+    expect(state.activeTabId).toBe(aId)
+    expect(warnMock).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('tabEngine write-back', () => {
   it('adopting the live context on attach: the single tab mirrors project, session and slices (flag off)', async () => {
     useUIStore.setState({ workspaceTabByProject: { p1: 'git' } })

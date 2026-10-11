@@ -22,7 +22,11 @@ import { useUIStore } from '@/stores/uiStore'
 //
 // The listener is window-level (like useShiftHeld): cycling must work no
 // matter which panel holds focus — the tab layer is app-wide context, not a
-// focus-scoped widget. It is mounted in AppLayout right next to THE single
+// focus-scoped widget. The ONE exception is the embedded terminal: while IT
+// holds focus (xterm attaches its own handlers on its hidden helper textarea,
+// and a TUI can legitimately bind the cycling combos), the shortcuts yield
+// entirely — the keydown is left unprevented for the terminal. It is mounted
+// in AppLayout right next to THE single
 // TabController mount and routes every activation through that controller,
 // so hotkey cycling travels the exact same single-engine path — and the same
 // module-level serialization chain — as tab-bar clicks and banner-click
@@ -112,6 +116,17 @@ export function selectNeighborTabId(
 }
 
 /**
+ * True when a key event originates inside the embedded terminal — xterm's
+ * hidden helper textarea under the container marked `data-terminal-root`
+ * (Terminal.tsx). While the terminal holds focus the cycling combos belong to
+ * it first (a TUI can bind them), so the shortcuts must not steal them: the
+ * event is left untouched. Pure and exported for tests.
+ */
+export function isTerminalKeyEvent(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('[data-terminal-root]') !== null
+}
+
+/**
  * Mount the system tab-cycling shortcuts. Takes the app's single
  * TabController (AppLayout's mount) — activation failures are the engine's
  * concern (activate never rejects), so the handler stays fire-and-forget.
@@ -120,6 +135,9 @@ export function useTabHotkeys(controller: TabController): void {
   useEffect(() => {
     const macHost = isMacHost()
     const onKeyDown = (event: KeyboardEvent): void => {
+      // The embedded terminal owns its keys while focused — yield before
+      // anything else, whatever the combo is.
+      if (isTerminalKeyEvent(event.target)) return
       const delta = tabSwitchDelta(event, macHost)
       if (delta === 0) return
       // The shortcuts belong to the visible tab bar: flag off → untouched

@@ -7,14 +7,14 @@ The workspace tab layer is the outermost context layer of the app shell: each ta
 ## Key Files
 
 - `frontend/src/stores/tabStore.ts` — the tab layer state: the `Tab {id, projectId, sessionId, ui}` list plus `activeTabId`; actions `addTab` / `closeTab` / `activateTab` / `updateActiveContext`; the pure `selectActiveTab` selector. TRANSIENT — never persisted.
-- `frontend/src/lib/tabEngine.ts` — the single activation engine: `activate` (never rejects), `writeBack` (live stores → active tab), `attachWriteBack` (write-back subscriptions). A plain lib module (no React); it never reads the flag.
+- `frontend/src/lib/tabEngine.ts` — the single activation engine: `activate` (never rejects), `createAndActivate` (the shared [create → activate] chain link behind the tab bar's «+» and the banner click), `writeBack` (live stores → active tab), `attachWriteBack` (write-back subscriptions). A plain lib module (no React); it never reads the flag.
 - `frontend/src/lib/tabSnapshot.ts` — the v2 snapshot slices: `captureTabUI` / `restoreTabUI` / `sanitizeTabUI` (fail-closed validation) and `isSameTabUI` (content equality behind reference-stable no-ops). Pure functions — no store access.
 - `frontend/src/hooks/useTabController.ts` — the React seam: one engine instance per mount, `attachWriteBack` mounted in an effect, exposes `{activate, writeBack}`.
 - `frontend/src/hooks/useTabHotkeys.ts` — the system-standard tab-cycling shortcuts (host-platform pairs), routed through the app's single TabController; the pure matchers (`tabSwitchDelta`, `selectNeighborTabId`) are exported for tests.
 - `frontend/src/components/layout/AppLayout.tsx` — THE single controller mount for the app plus the `{tabsEnabled && <TabBar/>}` render gate.
 - `frontend/src/components/layout/TabBar.tsx` — the presentational tab strip; every interaction routes through the `TabController` prop; labels and task-status dots derive LIVE from the project/session/chat stores by id, so renames and lifecycle events repaint without a stale copy on the tab.
 - `frontend/src/lib/tabLabel.ts` — `buildTabLabel`, the pure label algebra behind the strip: `Project: Session`, `Project`, `CHAT: Session`, `New Tab` (absent segments are dropped, never rendered as empty text).
-- `frontend/src/components/layout/SidebarHeader.tsx` — drops its own Settings gear while the bar is on (the bar carries the one Settings affordance, aimed at its Appearance section) and regains it when the flag turns off.
+- `frontend/src/components/layout/SidebarHeader.tsx` — drops its own Settings gear while the bar is on (the bar carries the one Settings affordance, opening on the same default tab the header gear always used) and regains it when the flag turns off.
 - `frontend/src/components/settings/TabsSettings.tsx` — the Appearance-tab master switch over `uiStore.tabsEnabled`.
 - `frontend/src/hooks/useNotificationClicks.ts` — the flag-on banner-click routing branch (the only behavioral flag branch in the app, see [system-notifications.md](system-notifications.md)).
 - `frontend/src/hooks/useWindowTitle.ts` — the window title follows the ACTIVE tab's ids, resolved live against the project/session stores.
@@ -66,6 +66,10 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
 
 Activations serialize through the engine's module-level chain, shared by every engine instance: each activation's full body completes before the next one starts — including activations from a DIFFERENT engine instance (the notification hook's bare engine) — so rapid tab clicks and a banner click landing mid-switch never interleave their store writes.
 
+### Tab creation (`createAndActivate`) — creation rides the same chain
+
+Every tab creation goes through `TabEngine.createAndActivate(seed?)`: the [create → activate] pair is ONE chain link, so an in-flight activation always completes (its restore + write-back land on the tab that was active throughout) BEFORE the fresh tab exists — a half-created tab can never be overtaken by a resuming activation and silently grafted with a foreign context. The link resolves the seed and captures the live UI when it RUNS (not at call time): seed-less (the tab bar's «+» button) means the fresh tab inherits the LIVE workspace of that moment — same project, same session, the slices the user is looking at — so its activation is the clean same-project/same-session path. The banner click passes both ids explicitly (the clicked session). Internally the link is: `addTab(seed + captureLiveUI)` → synchronous step-back to the outgoing tab → the full `runActivation` for the new tab (addTab auto-activates, and the step-back keeps the engine's already-active guard from skipping the materialization). Like `activate`, `createAndActivate` never rejects.
+
 ### Write-back: the active tab is a live mirror
 
 `writeBack()` copies the live workspace context (`activeProjectId`, `activeSessionId`, and all eight snapshot slices: the uiStore per-project maps and scalar shell slices, the input-panel slice, the viewer geometry, the git-panel map) into the ACTIVE tab via `updateActiveContext`. `attachWriteBack()` adopts the context synchronously on attach, then keeps the mirror converged through subscriptions on the project, session, ui, input, file-viewer and git-panel stores. Content-equal writes keep the stored references, so unrelated store churn costs nothing.
@@ -91,7 +95,9 @@ The file viewer's open tabs and active file are deliberately NOT a slice: they r
 
 ### Banner-click routing (the one flag branch)
 
-With the flag ON, a `notification_clicked` payload routes through the tab engine: prefer the exact `{projectId, sessionId}` tab, else any tab already showing the session (session ids are globally unique), and `activate` it; no match creates a tab for the clicked context carrying a capture of the CURRENT live slices (`captureLiveUI`) — the activation's restore step then re-applies what the workspace already shows, so the input panel is left untouched exactly like a «+»-created tab (`addTab` auto-activates, the handler steps back to the previous tab, then `activate` materializes the context). With the flag OFF, the pre-tab radar pattern runs (switch-when-needed → `selectSession`) and the tab layer is never read or written. See [system-notifications.md](system-notifications.md) § Click routing.
+With the flag ON, a `notification_clicked` payload routes through the tab engine: prefer the exact `{projectId, sessionId}` tab, else any tab already showing the session (session ids are globally unique), and `activate` it; no match creates a tab through the shared `createAndActivate` primitive with the clicked ids as the fixed seed and a live UI capture — the activation's restore step then re-applies what the workspace already shows, so the input panel is left untouched exactly like a «+»-created tab. With the flag OFF, the pre-tab radar pattern runs (switch-when-needed → `selectSession`) and the tab layer is never read or written. See [system-notifications.md](system-notifications.md) § Click routing.
+
+A banner-CREATED tab survives a FAILED activation: `activate` never rejects, and a failure rolls back only the active pointer — the created tab stays in the strip with its clicked context (the seeded live capture matches what the workspace shows, so nothing stale is attributed to it). This is deliberate: the user explicitly asked for that session's tab, and a re-click finds it through the exact-match lookup above and retries the activation.
 
 ### Keyboard cycling (the host platform's tab shortcuts)
 
@@ -103,7 +109,7 @@ With the flag ON, a `notification_clicked` payload routes through the tab engine
 | macOS (alias) | `Ctrl+Tab` | `Ctrl+Shift+Tab` |
 | Windows / Linux | `Ctrl+Tab` / `Ctrl+PageDown` | `Ctrl+Shift+Tab` / `Ctrl+PageUp` |
 
-The macOS pair is matched on the physical key (`code` `BracketRight`/`BracketLeft`), so any keyboard layout works, and `Cmd+]` / `Cmd+[` stay untouched (the web-history pair). Cycling wraps around over the CURRENT tab order, read via `getState()` at event time. With the flag off, or with fewer than two tabs, the keypress is left completely untouched — no activation and no `preventDefault` — so the pre-tab shell keeps its byte-identical keyboard behavior. A held shortcut firing repeated keydowns is well-defined: each keydown enqueues one wrap-around step on the shared chain.
+The macOS pair is matched on the physical key (`code` `BracketRight`/`BracketLeft`), so any keyboard layout works, and `Cmd+]` / `Cmd+[` stay untouched (the web-history pair). Cycling wraps around over the CURRENT tab order, read via `getState()` at event time. With the flag off, or with fewer than two tabs, the keypress is left completely untouched — no activation and no `preventDefault` — so the pre-tab shell keeps its byte-identical keyboard behavior. The same full yield applies while the EMBEDDED TERMINAL holds focus: xterm attaches its own handlers (a TUI can legitimately bind the cycling combos), so a keydown originating inside the terminal's `data-terminal-root` container (xterm's hidden helper textarea) is left unprevented and unhandled — the check is on the event's own target (`isTerminalKeyEvent`), not on panel visibility, so a visible-but-unfocused terminal keeps cycling working. A held shortcut firing repeated keydowns is well-defined: each keydown enqueues one wrap-around step on the shared chain.
 
 ### Tab-strip keyboard interaction (APG tabs, manual activation)
 
@@ -118,8 +124,11 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 | Tab's session was deleted | The dead id is dropped from the tab; the live session stays put — in BOTH the same-project branch and the cross-project branch (checked against the destination list after the switch) |
 | `activate` on the already-active id | No-op (nothing captured, nothing restored) |
 | Tab closed while its activation sat in the queue | No-op |
+| Closing the ACTIVE tab when the neighbor's activation FAILS | The tab stays open: the failed activation rolled `activeTabId` back onto it, and closing onto a neighbor whose remembered context never got applied would let the next write-back clobber that memory (the engine's `logger.warn` is the signal); the close proceeds only when the neighbor is live |
 | No Project entry unavailable | The activation fails and rolls back (see Error Handling) |
 | Cycling shortcut with the flag off or a single tab | No-op; the keydown is left unprevented (the pre-tab keyboard behavior) |
+| Cycling shortcut while the embedded terminal holds focus | Full yield: the keydown is left unprevented for the terminal (a TUI can bind the combos) |
+| Banner-created tab whose activation fails | The tab STAYS in the strip with its clicked context (only the active pointer rolls back); a re-click finds it via the exact-match lookup and retries |
 
 ## Error Handling
 
@@ -133,8 +142,8 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 - The tab layer always holds at least one tab; closing the last tab replaces it with a fresh default tab.
 - `activeTabId` always references an element of `tabs`.
 - The ACTIVE tab always mirrors the live workspace context — project id, session id, and the eight snapshot slices of the v2 composition — kept converged by the write-back subscriptions under any `tabsEnabled` value.
-- Every tab activation travels the single engine path, and the engine stays flag-agnostic — it reads only the tab layer and the live stores.
-- Keyboard cycling acts only while the tab bar is enabled and at least two tabs exist, and it travels the single engine path; any gated-out or non-matching keypress stays unprevented.
+- Every tab activation travels the single engine path, every tab creation rides the same module-level chain (`createAndActivate`), and the engine stays flag-agnostic — it reads only the tab layer and the live stores.
+- Keyboard cycling acts only while the tab bar is enabled and at least two tabs exist, it travels the single engine path, and it yields entirely while the embedded terminal holds focus; any gated-out or non-matching keypress stays unprevented.
 - Tab-strip keys (`←`/`→`/`Home`/`End`/`Enter`/`Space`) work only when a tab row itself is focused; arrows move focus without switching (manual activation), and the nested close button keeps native button semantics.
 - Tab actions that change nothing return the same state object (reference-stable no-ops).
 - Tab arrangements stay app-lifetime: `tabStore` keeps its state in memory only, and a restart always starts from a single default tab.

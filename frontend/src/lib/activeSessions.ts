@@ -22,6 +22,24 @@ import { hasUnresolvedHITL } from '@/lib/hitlTypes'
  *  Exactly one color per session; see sessionDisplayStatus for priorities. */
 export type SessionDisplayStatus = 'pending' | 'failed' | 'active' | 'paused' | 'idle'
 
+/** Dot color per display status — the ONE shared map every status-dot surface
+ *  imports (the sidebar session list, the radar rows, the workspace tabs), so
+ *  the tokens can never drift. `idle` has no dot (undefined). */
+export const SESSION_DOT_CLASSES: Partial<Record<SessionDisplayStatus, string>> = {
+  pending: 'bg-warning',
+  failed: 'bg-destructive',
+  active: 'bg-success',
+  paused: 'bg-muted-foreground',
+}
+
+/** Dot hover hint — the ONE shared wording map (same surfaces as above). */
+export const SESSION_DOT_TITLES: Partial<Record<SessionDisplayStatus, string>> = {
+  pending: 'Awaiting your response',
+  failed: 'Task failed — resume available',
+  active: 'Task running',
+  paused: 'Task paused',
+}
+
 /** Live per-session execution flags derived from chatStore. */
 export interface LiveSessionFlags {
   /** A task is currently running in this session. */
