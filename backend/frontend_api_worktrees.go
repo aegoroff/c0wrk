@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/session"
 	"github.com/v0lka/c0wrk/backend/worktrees"
@@ -43,6 +44,23 @@ import (
 // add, which materializes a full checkout). Generous on purpose: the point is
 // to convert a wedged git into an explicit error, not to race a slow disk.
 const managedProvisionTimeout = 10 * time.Minute
+
+// canonicalWorktreeRoot returns the symlink-resolved form of a repository
+// root, falling back to the given form when the path cannot be resolved.
+// Every worktree seam must present the same (canonical) form to the worktree
+// primitives: git lists canonical paths, the add/recreate post-checks
+// compare derived targets against that listing, and the per-repo worktree
+// lock keys lexically — a legacy registration keeping a symlinked ancestor
+// in its stored path would otherwise fail a post-check after a successful
+// git mutation and split the lock key against already-canonicalized seams.
+// Event payloads and frontend keying stay on the stored form (see the emit
+// sites); only the git-facing root is canonicalized.
+func canonicalWorktreeRoot(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
 
 // SessionDeleteOptions carries the user's explicit decisions for deleting a
 // session that owns a managed worktree. Both flags exist because the
@@ -129,12 +147,25 @@ func (f *FrontendAPI) installWorkspaceEnsurer() {
 // data that lived only in the missing tree is unrecoverable, which the
 // manager surfaces as an explicit warning.
 func (f *FrontendAPI) ensureManagedWorkspace(ctx context.Context, repoRoot string, binding *session.WorkspaceBinding) (bool, error) {
+	// Canonicalize the root the resolver handed back (fail-soft — see
+	// canonicalWorktreeRoot): legacy rows registered before the manager
+	// canonicalized internal workspaces may keep a symlinked ancestor.
+	repoRoot = canonicalWorktreeRoot(repoRoot)
 	owner := f.worktreeOwner()
 	trees, err := owner.List(ctx, repoRoot)
 	if err != nil {
 		return false, fmt.Errorf("list worktrees of %s: %w", repoRoot, err)
 	}
-	entry := workspace.FindWorktree(trees, binding.WorkspacePath)
+	// Probe with the same derived target Recreate uses: the binding's
+	// WorkspacePath was normalized by the caller against the RAW stored
+	// root, which for legacy rows differs from the canonical form git
+	// lists — FindWorktree compares lexically, so probing with the binding
+	// path would misreport an intact legacy tree as missing.
+	probePath, perr := config.ManagedWorktreePath(repoRoot, binding.WorktreeName)
+	if perr != nil {
+		return false, fmt.Errorf("derive managed worktree path for %s: %w", binding.WorktreeName, perr)
+	}
+	entry := workspace.FindWorktree(trees, probePath)
 	missing := entry == nil || !entry.IsLinked() || entry.Prunable
 	if _, err := owner.Recreate(ctx, repoRoot, binding.WorktreeName, binding.Branch); err != nil {
 		return false, err
@@ -177,7 +208,7 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 
 	f.activeProjectMu.RLock()
 	projectID := f.activeProjectID
-	repoRoot := f.activeProjectPath
+	storedRoot := f.activeProjectPath
 	f.activeProjectMu.RUnlock()
 
 	if projectID == "" {
@@ -186,6 +217,11 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 	if projectID == project.NoProjectID {
 		return nil, errors.New("CHAT (No Project) sessions cannot own a managed worktree")
 	}
+	// Canonicalize the provisioning root for the git primitives (fail-soft
+	// to the stored form — see canonicalWorktreeRoot). The stored form stays
+	// untouched: the checkout-held fallback below binds a session's identity
+	// to it, and identity (unlike git operands) is stored-form keyed.
+	repoRoot := canonicalWorktreeRoot(storedRoot)
 
 	draft := session.NewSessionDraft(projectID, nil)
 	if createBranch && branch == "" {
@@ -220,7 +256,14 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 			case workspace.WorktreeManaged:
 				return f.adoptManagedTree(ctx, owner, repoRoot, projectID, branch, holder)
 			case workspace.WorktreeMain:
-				return f.createLocalFallbackSession(projectID, repoRoot, branch)
+				// The fallback binds the session to the checkout itself —
+				// an identity, not a git operand: the session's stored
+				// WorkspacePath must keep the registration form. The
+				// vector registry's AGENT routing matches it against the
+				// project row by plain string compare (no symlink
+				// resolution), so the canonical form would strand the
+				// session without a vector target on legacy rows.
+				return f.createLocalFallbackSession(projectID, storedRoot, branch)
 			default:
 				return nil, fmt.Errorf("%w: branch %s is checked out in external worktree %s — created outside c0wrk; use a local session or remove that tree first", workspace.ErrBranchBusy, branch, holder.Path)
 			}
@@ -483,7 +526,11 @@ func (f *FrontendAPI) resolveProjectRoot(ctx context.Context, projectID string) 
 	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return "", fmt.Errorf("project %s has no absolute registered workspace root", projectID)
 	}
-	return root, nil
+	// Canonicalize the registered root for the git primitives (fail-soft to
+	// the stored form — see canonicalWorktreeRoot): legacy rows registered
+	// before the manager canonicalized internal workspaces may carry a
+	// symlinked ancestor.
+	return canonicalWorktreeRoot(root), nil
 }
 
 // prepareManagedTreeDeletion runs the managed part of session deletion

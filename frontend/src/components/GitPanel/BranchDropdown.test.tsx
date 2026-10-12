@@ -15,6 +15,7 @@ const { gitMocks } = vi.hoisted(() => ({
     pushBranch: vi.fn(),
     checkoutRemoteBranch: vi.fn(),
     deleteRemoteBranch: vi.fn(),
+    deleteWorktree: vi.fn(),
   },
 }))
 
@@ -25,6 +26,7 @@ vi.mock('@/lib/logger', () => ({ logger: { error: vi.fn() } }))
 const { focusMocks } = vi.hoisted(() => ({
   focusMocks: {
     focusWorktree: vi.fn(),
+    refreshGitFocus: vi.fn(),
   },
 }))
 
@@ -53,6 +55,7 @@ beforeEach(() => {
   gitMocks.pushBranch.mockResolvedValue('pushed')
   gitMocks.checkoutRemoteBranch.mockResolvedValue(undefined)
   gitMocks.deleteRemoteBranch.mockResolvedValue('deleted')
+  gitMocks.deleteWorktree.mockResolvedValue(undefined)
 
   useGitPanelStore.getState().reset()
   // Branch operations record their outcome against the ACTIVE project.
@@ -383,28 +386,17 @@ describe('BranchDropdown', () => {
     expect(gitMocks.deleteRemoteBranch).toHaveBeenCalledWith('feature/x', 'origin')
   })
 
-  it('New branch... opens the branch picker', async () => {
+  it('does not render the New branch.../Manage branches... footer items', async () => {
+    // The footer entries duplicated the git panel toolbar's "Manage branches"
+    // button (the only picker opener) and were removed.
     renderDropdown()
     await openDropdown()
 
-    act(() => {
-      menuItem('New branch...').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-
-    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
-    expect(isMenuOpen()).toBe(false)
-  })
-
-  it('Manage branches... opens the branch picker', async () => {
-    renderDropdown()
-    await openDropdown()
-
-    act(() => {
-      menuItem('Manage branches...').dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-
-    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
-    expect(isMenuOpen()).toBe(false)
+    expect(menuItem('New branch...')).toBeUndefined()
+    expect(menuItem('Manage branches...')).toBeUndefined()
+    // Branch creation lives in the BranchPicker modal — the dropdown never
+    // opens it itself.
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
   })
 })
 
@@ -412,6 +404,8 @@ describe('BranchDropdown — worktree focus switcher', () => {
   beforeEach(() => {
     focusMocks.focusWorktree.mockReset()
     focusMocks.focusWorktree.mockResolvedValue(undefined)
+    focusMocks.refreshGitFocus.mockReset()
+    focusMocks.refreshGitFocus.mockResolvedValue(undefined)
   })
 
   it('hides the Worktrees section when the project has no worktrees', async () => {
@@ -453,5 +447,147 @@ describe('BranchDropdown — worktree focus switcher', () => {
     expect(focusWorktree).toHaveBeenCalledWith('/repo/.worktrees/s-abc12345')
     // Selecting a worktree closes the dropdown.
     expect(isMenuOpen()).toBe(false)
+  })
+
+  it('exposes the delete action on the linked tree but never on the checkout', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: false,
+        is_focus: false,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]'))
+    expect(rows).toHaveLength(2)
+    // The checkout row has no hover actions; the linked tree has one.
+    expect(rowButtons(rows[0] as HTMLElement)).toHaveLength(0)
+    expect(rowButtons(rows[1] as HTMLElement)).toHaveLength(1)
+  })
+
+  it('opens the delete confirm dialog on the row action without switching the focus', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: false,
+        is_focus: false,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const row = body().querySelector('[data-testid="worktree-row"]') as HTMLElement
+    act(() => {
+      rowButtons(row)[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    // The delete click must never double as a focus switch.
+    expect(focusWorktree).not.toHaveBeenCalled()
+    expect(body().textContent).toContain('Delete worktree?')
+
+    act(() => {
+      dialogButton('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.deleteWorktree).toHaveBeenCalledWith('/repo/.worktrees/s-abc12345', {
+      force: false,
+      unlock: false,
+    })
+    // Success refreshes the worktree list + focus mirror.
+    expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the unlock consent in the dialog for a locked tree', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: false,
+        is_focus: false, locked: true,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const row = body().querySelector('[data-testid="worktree-row"]') as HTMLElement
+    act(() => {
+      rowButtons(row)[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    const box = body().querySelector('[data-testid="worktree-unlock-checkbox"]') as HTMLInputElement
+    expect(box).toBeTruthy()
+    expect(box.checked).toBe(false)
+
+    act(() => {
+      box.click()
+    })
+    act(() => {
+      dialogButton('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.deleteWorktree).toHaveBeenCalledWith('/repo/.worktrees/s-abc12345', {
+      force: false,
+      unlock: true,
+    })
+  })
+
+  it('shows the backend refusal in the dialog for a failed deletion', async () => {
+    gitMocks.deleteWorktree.mockRejectedValue(
+      new Error('worktree has uncommitted changes: M frontend/src/api/git.ts'),
+    )
+    // The failure is recorded against the ACTIVE project's console.
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: false,
+        is_focus: false,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const row = body().querySelector('[data-testid="worktree-row"]') as HTMLElement
+    act(() => {
+      rowButtons(row)[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    act(() => {
+      dialogButton('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    // The refusal re-opens the dialog with the verbatim reason + force hint;
+    // the outcome is recorded in the operation console.
+    expect(body().textContent).toContain('worktree has uncommitted changes')
+    expect(body().textContent).toContain('Force delete discards the uncommitted changes.')
+    expect(focusMocks.refreshGitFocus).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().operationByProject['p1']).toMatchObject({
+      kind: 'worktree-delete',
+      ok: false,
+    })
+
+    // Retrying with Force discards the dirty tree.
+    gitMocks.deleteWorktree.mockResolvedValue(undefined)
+    act(() => {
+      dialogButton('Force delete').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.deleteWorktree).toHaveBeenLastCalledWith('/repo/.worktrees/s-abc12345', {
+      force: true,
+      unlock: false,
+    })
+    expect(body().textContent).not.toContain('Delete worktree?')
+    expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
   })
 })

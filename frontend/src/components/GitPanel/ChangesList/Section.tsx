@@ -16,7 +16,8 @@ interface SectionProps {
   sortBy: SortBy
   /** Sub-grouping criterion forwarded to the flat renderer (D8). */
   groupBy: GroupBy
-  workspaceRoot: string
+  /** Root the display paths are relative to (focus root, else workspace). */
+  displayRoot: string
   expandedDirs: Set<string>
   onToggleExpandedDir: (dir: string) => void
   onToggleFile: StageToggleHandler
@@ -29,7 +30,7 @@ export function Section({
   viewMode,
   sortBy,
   groupBy,
-  workspaceRoot,
+  displayRoot,
   expandedDirs,
   onToggleExpandedDir,
   onToggleFile,
@@ -54,7 +55,7 @@ export function Section({
               entries={section.entries}
               side={section.side}
               groupBy={groupBy}
-              workspaceRoot={workspaceRoot}
+              displayRoot={displayRoot}
               onToggleFile={onToggleFile}
               onOpenDiff={onOpenDiff}
             />
@@ -63,7 +64,7 @@ export function Section({
               entries={section.entries}
               side={section.side}
               sortBy={sortBy}
-              workspaceRoot={workspaceRoot}
+              displayRoot={displayRoot}
               expandedDirs={expandedDirs}
               onToggleExpandedDir={onToggleExpandedDir}
               onToggleFile={onToggleFile}

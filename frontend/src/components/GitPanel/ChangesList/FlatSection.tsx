@@ -1,6 +1,7 @@
 import { Fragment, useMemo } from 'react'
 import { GitFileEntry } from '../GitFileEntry'
 import { groupEntries } from '@/lib/gitSortGroup'
+import { stripRootPrefix } from '@/lib/gitStatus'
 import type { StageSide, StageToggleHandler } from '@/lib/gitStatus'
 import type { GitPanelEntry, GroupBy } from '@/stores/gitPanelStore'
 
@@ -13,26 +14,23 @@ interface FlatSectionProps {
   side: StageSide
   /** Sub-grouping criterion applied within the section (D8). */
   groupBy: GroupBy
-  workspaceRoot: string
+  /** Root the display strings are relative to (focus root, else workspace). */
+  displayRoot: string
   onToggleFile: StageToggleHandler
   onOpenDiff: (path: string) => void
 }
 
 /**
- * Render a directory group label relative to the workspace root. Absolute
+ * Render a directory group label relative to the display root. Absolute
  * parent-directory keys (produced by `groupEntries`) are stripped of the
- * workspace prefix for display; the `(root)` sentinel is shown as-is.
+ * display root for display (via the shared `stripRootPrefix` segment-boundary
+ * semantics); the `(root)` sentinel is shown as-is, and a label that IS the
+ * root itself collapses back to the sentinel.
  */
-function displayDirLabel(label: string, workspaceRoot: string): string {
+function displayDirLabel(label: string, displayRoot: string): string {
   if (label === '(root)') return '(root)'
-  if (
-    workspaceRoot !== '' &&
-    (label === workspaceRoot || label.startsWith(workspaceRoot + '/'))
-  ) {
-    const rel = label.slice(workspaceRoot.length).replace(/^\//, '')
-    return rel || '(root)'
-  }
-  return label
+  const rel = stripRootPrefix(label, displayRoot)
+  return rel === '' ? '(root)' : rel
 }
 
 /** Compact sub-group header rendered above each group of files. */
@@ -48,7 +46,7 @@ export function FlatSection({
   entries,
   side,
   groupBy,
-  workspaceRoot,
+  displayRoot,
   onToggleFile,
   onOpenDiff,
 }: FlatSectionProps) {
@@ -66,7 +64,7 @@ export function FlatSection({
             key={entry.path}
             entry={entry}
             side={side}
-            workspaceRoot={workspaceRoot}
+            displayRoot={displayRoot}
             onToggle={onToggleFile}
             onOpenDiff={onOpenDiff}
           />
@@ -81,14 +79,14 @@ export function FlatSection({
       {Array.from(groups, ([label, items]) => (
         <Fragment key={label}>
           <SubGroupHeader
-            label={groupBy === 'directory' ? displayDirLabel(label, workspaceRoot) : label}
+            label={groupBy === 'directory' ? displayDirLabel(label, displayRoot) : label}
           />
           {items.map((entry) => (
             <GitFileEntry
               key={entry.path}
               entry={entry}
               side={side}
-              workspaceRoot={workspaceRoot}
+              displayRoot={displayRoot}
               onToggle={onToggleFile}
               onOpenDiff={onOpenDiff}
             />

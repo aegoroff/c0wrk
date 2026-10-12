@@ -12,7 +12,8 @@ interface TreeSectionProps {
   side: StageSide
   /** Sort criterion applied to leaf (file) nodes within the tree (D8). */
   sortBy: SortBy
-  workspaceRoot: string
+  /** Root the display paths are relative to (focus root, else workspace). */
+  displayRoot: string
   expandedDirs: Set<string>
   onToggleExpandedDir: (dir: string) => void
   onToggleFile: StageToggleHandler
@@ -23,15 +24,15 @@ export function TreeSection({
   entries,
   side,
   sortBy,
-  workspaceRoot,
+  displayRoot,
   expandedDirs,
   onToggleExpandedDir,
   onToggleFile,
   onOpenDiff,
 }: TreeSectionProps) {
   const tree = useMemo(
-    () => buildTree(entries, workspaceRoot, sortBy),
-    [entries, workspaceRoot, sortBy],
+    () => buildTree(entries, displayRoot, sortBy),
+    [entries, displayRoot, sortBy],
   )
 
   return (
@@ -42,7 +43,7 @@ export function TreeSection({
           node={node}
           depth={0}
           side={side}
-          workspaceRoot={workspaceRoot}
+          displayRoot={displayRoot}
           expandedDirs={expandedDirs}
           onToggleExpandedDir={onToggleExpandedDir}
           onToggleFile={onToggleFile}

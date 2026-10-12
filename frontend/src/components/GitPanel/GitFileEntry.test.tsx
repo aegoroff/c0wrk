@@ -67,7 +67,7 @@ describe('GitFileEntry', () => {
       <GitFileEntry
         entry={makeEntry()}
         side="worktree"
-        workspaceRoot="/repo"
+        displayRoot="/repo"
         onToggle={noop}
         onOpenDiff={noop}
       />,
@@ -89,12 +89,67 @@ describe('GitFileEntry', () => {
       <GitFileEntry
         entry={makeEntry()}
         side="worktree"
-        workspaceRoot="/other-repo"
+        displayRoot="/other-repo"
         onToggle={noop}
         onOpenDiff={noop}
       />,
     )
     expect(nameSpan(container).getAttribute('title')).toBe(LONG_PATH)
+  })
+})
+
+// ───────────────────── Worktree focus display root ───────────────────────────
+
+describe('GitFileEntry — worktree focus display root', () => {
+  const WORKTREE = '/repo/.worktrees/s-abc12345'
+  const WORKTREE_FILE = `${WORKTREE}/src/deeply/nested/directory/structure/with-a-very-long-file-name.ts`
+
+  it('displays the path relative to the focus worktree, not the project checkout', () => {
+    // With the focus on a managed worktree the backend keys entries onto the
+    // WORKTREE root; stripping by the project checkout would leave a
+    // `.worktrees/s-abc12345/…` prefix. The display root is the focus root.
+    const container = render(
+      <GitFileEntry
+        entry={makeEntry({ path: WORKTREE_FILE })}
+        side="worktree"
+        displayRoot={WORKTREE}
+        onToggle={noop}
+        onOpenDiff={noop}
+      />,
+    )
+    expect(nameSpan(container).getAttribute('title')).toBe(
+      'src/deeply/nested/directory/structure/with-a-very-long-file-name.ts',
+    )
+  })
+
+  it('keeps the absolute entry path in callbacks while displaying the relative path', async () => {
+    const onToggle = vi.fn(() => Promise.resolve(true))
+    const onOpenDiff = vi.fn()
+    const container = render(
+      <GitFileEntry
+        entry={makeEntry({ path: WORKTREE_FILE })}
+        side="worktree"
+        displayRoot={WORKTREE}
+        onToggle={onToggle}
+        onOpenDiff={onOpenDiff}
+      />,
+    )
+
+    // The visible tooltip is display-relative…
+    expect(nameSpan(container).getAttribute('title')).toBe(
+      'src/deeply/nested/directory/structure/with-a-very-long-file-name.ts',
+    )
+
+    // …but every callback receives the ABSOLUTE entry path.
+    await act(async () => {
+      checkbox(container).click()
+    })
+    expect(onToggle).toHaveBeenCalledWith(WORKTREE_FILE, 'stage')
+
+    act(() => {
+      nameSpan(container).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    })
+    expect(onOpenDiff).toHaveBeenCalledWith(WORKTREE_FILE)
   })
 })
 
@@ -106,7 +161,7 @@ describe('GitFileEntry — path display', () => {
       <GitFileEntry
         entry={makeEntry()}
         side="worktree"
-        workspaceRoot="/repo"
+        displayRoot="/repo"
         onToggle={noop}
         onOpenDiff={noop}
       />,
@@ -127,7 +182,7 @@ describe('GitFileEntry — path display', () => {
       <GitFileEntry
         entry={makeEntry({ path: '/repo/README.md' })}
         side="worktree"
-        workspaceRoot="/repo"
+        displayRoot="/repo"
         onToggle={noop}
         onOpenDiff={noop}
       />,
@@ -141,7 +196,7 @@ describe('GitFileEntry — path display', () => {
       <GitFileEntry
         entry={makeEntry()}
         side="worktree"
-        workspaceRoot="/repo"
+        displayRoot="/repo"
         pathDisplay="name-only"
         onToggle={noop}
         onOpenDiff={noop}

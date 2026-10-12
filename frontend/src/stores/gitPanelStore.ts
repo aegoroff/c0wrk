@@ -131,6 +131,7 @@ export type GitOperationKind =
   | 'tag-delete'
   | 'tag-push'
   | 'tag-delete-remote'
+  | 'worktree-delete'
   | 'reset'
 
 /**

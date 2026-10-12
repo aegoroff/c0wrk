@@ -369,6 +369,21 @@ export async function createBranch(name: string, base: string): Promise<void> {
   await app.CreateBranch(name, base)
 }
 
+/**
+ * Create a new branch at `base` (empty = the checkout's HEAD) inside a fresh
+ * managed worktree: the branch is born atomically with `git worktree add -b`
+ * and the current checkout is untouched. The Git panel's focus deliberately
+ * does NOT switch — the caller refreshes the worktree list via
+ * `refreshGitFocus()` so the new tree appears in the focus switcher.
+ */
+export async function createBranchInWorktree(name: string, base: string): Promise<void> {
+  if (typeof name !== 'string' || name.trim() === '') {
+    throw new Error('createBranchInWorktree: branch name is required')
+  }
+  const app = getApp()
+  await app.CreateBranchInWorktree(name.trim(), base)
+}
+
 export async function getBranchBases(): Promise<BranchBase[]> {
   try {
     const app = getApp()
@@ -729,4 +744,23 @@ export async function getGitPanelFocus(): Promise<GitPanelFocus> {
 export async function setGitPanelFocus(worktreePath: string): Promise<void> {
   const app = getApp()
   await app.SetGitPanelFocus(worktreePath)
+}
+
+/**
+ * Delete a linked worktree of the active project — an app-managed session
+ * tree or an external linked tree. The local checkout is refused by the
+ * backend (`ErrWorktreeMain`); a foreign path fails with a not-linked error.
+ * `force` confirms discarding the tree's uncommitted changes, `unlock`
+ * authorizes removing a locked tree — neither is ever taken implicitly.
+ * The branch the tree was on is never deleted.
+ */
+export async function deleteWorktree(
+  worktreePath: string,
+  options: { force?: boolean; unlock?: boolean } = {},
+): Promise<void> {
+  if (typeof worktreePath !== 'string' || worktreePath.trim() === '') {
+    throw new Error('deleteWorktree: worktree path is required')
+  }
+  const app = getApp()
+  await app.DeleteWorktree(worktreePath.trim(), options.force === true, options.unlock === true)
 }

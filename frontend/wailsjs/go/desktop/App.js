@@ -106,6 +106,10 @@ export function CreateBranch(arg1, arg2) {
   return window['go']['desktop']['App']['CreateBranch'](arg1, arg2);
 }
 
+export function CreateBranchInWorktree(arg1, arg2) {
+  return window['go']['desktop']['App']['CreateBranchInWorktree'](arg1, arg2);
+}
+
 export function CreateHypothesis(arg1, arg2) {
   return window['go']['desktop']['App']['CreateHypothesis'](arg1, arg2);
 }
@@ -180,6 +184,10 @@ export function DeleteTheme(arg1) {
 
 export function DeleteWorkDirectory(arg1, arg2, arg3) {
   return window['go']['desktop']['App']['DeleteWorkDirectory'](arg1, arg2, arg3);
+}
+
+export function DeleteWorktree(arg1, arg2, arg3) {
+  return window['go']['desktop']['App']['DeleteWorktree'](arg1, arg2, arg3);
 }
 
 export function DiscardChanges(arg1) {

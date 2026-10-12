@@ -1,24 +1,9 @@
 import type { GitPanelEntry, SortBy } from '@/stores/gitPanelStore'
 import { compareEntries } from '@/lib/gitSortGroup'
+import { stripRootPrefix } from '@/lib/gitStatus'
 import type { TreeDirNode, TreeFileNode, TreeNode } from './types'
 
 // ──────────────────────────────── Helpers ────────────────────────────────────
-
-/**
- * Compute the display-relative path for an entry (stripped of the workspace
- * root prefix). Shared by `buildTree` and `collectAllDirPaths` so both use
- * identical path semantics for the `expandedDirs` set.
- */
-function displayPath(entry: GitPanelEntry, workspaceRoot: string): string {
-  // Match workspaceRoot only at a path-separator boundary to avoid a
-  // sibling directory sharing the same prefix (e.g. "/repo" vs "/repo-extra").
-  const isUnderRoot =
-    workspaceRoot !== '' &&
-    (entry.path === workspaceRoot || entry.path.startsWith(workspaceRoot + '/'))
-  return isUnderRoot
-    ? entry.path.slice(workspaceRoot.length).replace(/^\//, '')
-    : entry.path
-}
 
 // ──────────────────────────────── Tree Builder ───────────────────────────────
 
@@ -28,27 +13,29 @@ function displayPath(entry: GitPanelEntry, workspaceRoot: string): string {
  * Nodes are sorted: directories first, then files — alphabetically within each group.
  *
  * @param entries  Flat list of git file entries (absolute paths preserved for callbacks).
- * @param workspaceRoot  Workspace root path (to compute display-relative paths for tree structure).
+ * @param displayRoot  Root the display paths are relative to (the Git-panel focus
+ *                     root, else the project workspace root) — tree keys are
+ *                     entry paths stripped of this prefix at a segment boundary.
  * @param sortBy  Sort criterion applied to leaf (file) nodes within each directory.
  *                Defaults to `'path'` (alphabetical). Directories always sort
  *                alphabetically and precede files. (D8)
  */
 export function buildTree(
   entries: GitPanelEntry[],
-  workspaceRoot: string,
+  displayRoot: string,
   sortBy: SortBy = 'path',
 ): TreeNode[] {
   const root: TreeNode[] = []
   const dirMap = new Map<string, TreeDirNode>()
 
-  // Preprocess: compute display path relative to workspace root
+  // Preprocess: compute display path relative to the display root
   interface IndexedEntry {
     entry: GitPanelEntry
     displayPath: string
   }
   const indexed: IndexedEntry[] = entries.map((entry) => ({
     entry,
-    displayPath: displayPath(entry, workspaceRoot),
+    displayPath: stripRootPrefix(entry.path, displayRoot),
   }))
 
   // Sort entries by display path for deterministic ordering
@@ -136,11 +123,11 @@ export function buildTree(
  */
 export function collectAllDirPaths(
   entries: GitPanelEntry[],
-  workspaceRoot: string,
+  displayRoot: string,
 ): string[] {
   const dirs = new Set<string>()
   for (const entry of entries) {
-    const parts = displayPath(entry, workspaceRoot).split('/')
+    const parts = stripRootPrefix(entry.path, displayRoot).split('/')
     // Root-level files (single segment) contribute no directory paths.
     let currentPath = ''
     for (let i = 0; i < parts.length - 1; i++) {

@@ -3,14 +3,18 @@ package backend
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/core/workspace"
+	"github.com/v0lka/c0wrk/internal/gittest"
 )
 
 // --- helpers for git tests ---
@@ -28,17 +32,50 @@ func commitFile(t *testing.T, dir, name, content string) {
 
 // withGitRepo creates a temporary directory with an initialised git
 // repository and a committed file (committed.txt), then runs fn with a
-// FrontendAPI pointing at that directory.
+// FrontendAPI pointing at that directory. The directory is the
+// symlink-resolved form (gittest.TempDir): git reports canonical paths, so
+// a fixture root fed to the worktree primitives — which compare derived
+// targets against `git worktree list` output — must be canonical too
+// (macOS resolves /var -> /private/var; Windows resolves 8.3 short names).
 func withGitRepo(t *testing.T, fn func(*FrontendAPI, string)) {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir := gittest.TempDir(t)
 	gitInit(t, tmpDir)
 	commitFile(t, tmpDir, "committed.txt", "v1\n")
 
 	f := &FrontendAPI{activeProjectPath: tmpDir}
 	f.seedPublished.Store(true)
-	f.seedPublished.Store(true)
 	fn(f, tmpDir)
+}
+
+// TestCreateBranchInWorktree_SymlinkedProjectPath pins the RPC-side path
+// canonicalization: a project path reached through a symlink (a legacy
+// internal registration; on macOS /var is a symlink to /private/var) must
+// still provision. The derived tree target is compared against git's
+// canonical `git worktree list` output, so an unresolved registered path
+// used to fail the add post-check AFTER a successful `git worktree add`,
+// leaving the created branch and tree behind.
+func TestCreateBranchInWorktree_SymlinkedProjectPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks on Windows require elevated privileges; the scenario cannot be modeled here")
+	}
+	repoDir := gittest.TempDir(t)
+	gitInit(t, repoDir)
+	commitFile(t, repoDir, "committed.txt", "v1\n")
+
+	alias := filepath.Join(gittest.TempDir(t), "repo-alias")
+	if err := os.Symlink(repoDir, alias); err != nil {
+		t.Fatalf("create repo symlink alias: %v", err)
+	}
+
+	f := &FrontendAPI{activeProjectPath: alias}
+	f.seedPublished.Store(true)
+	if err := f.CreateBranchInWorktree("feature-one", ""); err != nil {
+		t.Fatalf("CreateBranchInWorktree through a symlinked project path: %v", err)
+	}
+	// The branch really exists in the repository (runGit fails the test on
+	// error).
+	runGit(t, repoDir, "rev-parse", "--verify", "refs/heads/feature-one")
 }
 
 // --- StageFile tests ---
@@ -1478,6 +1515,250 @@ func TestCreateBranch_InvalidBase(t *testing.T) {
 		}
 		if !errors.Is(err, ErrInvalidBaseRef) {
 			t.Errorf("expected error to wrap ErrInvalidBaseRef, got: %v", err)
+		}
+	})
+}
+
+// --- CreateBranchInWorktree tests ---
+
+func TestWorktreeSlug(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"feature-x", "feature-x"},
+		{"feature/one", "feature-one"},
+		{"Feature.X_1-y", "Feature.X_1-y"}, // alphabet, digits, dash, underscore, dot survive
+		{"feature+one", "feature-one"},     // unmappable runes collapse to '-'
+		{"..hidden", "hidden"},
+		{"--dash", "dash"}, // no leading '-'
+		{"dot.", "dot"},    // no trailing '.'
+		{"", "branch"},     // empty fallback
+		{"---", "branch"},  // sanitized to empty fallback
+		{"фича", "branch"}, // non-ASCII collapses away
+	}
+	for _, tc := range cases {
+		if got := worktreeSlug(tc.in); got != tc.want {
+			t.Errorf("worktreeSlug(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	long := worktreeSlug(strings.Repeat("a", 300))
+	if len(long) != managedTreeSlugCap {
+		t.Errorf("worktreeSlug(long) length = %d, want %d", len(long), managedTreeSlugCap)
+	}
+}
+
+func TestCreateBranchInWorktree_NoProject(t *testing.T) {
+	f := &FrontendAPI{}
+	f.seedPublished.Store(true)
+	if err := f.CreateBranchInWorktree("main", ""); err == nil {
+		t.Fatal("expected error when no active project")
+	}
+}
+
+func TestCreateBranchInWorktree_NoProjectMode(t *testing.T) {
+	f := &FrontendAPI{activeProjectID: project.NoProjectID, activeProjectPath: t.TempDir()}
+	f.seedPublished.Store(true)
+	if err := f.CreateBranchInWorktree("main", ""); err == nil {
+		t.Fatal("expected error in No Project mode")
+	}
+}
+
+func TestCreateBranchInWorktree_EmptyName(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		if err := f.CreateBranchInWorktree("   ", ""); err == nil {
+			t.Fatal("expected error for empty branch name")
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_InvalidBase(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		err := f.CreateBranchInWorktree("feature", "nonexistent-ref")
+		if err == nil {
+			t.Fatal("expected error for invalid base ref")
+		}
+		if !errors.Is(err, ErrInvalidBaseRef) {
+			t.Errorf("expected error to wrap ErrInvalidBaseRef, got: %v", err)
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_FromHead(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		f.logger = slog.New(slog.DiscardHandler)
+		var emitted string
+		f.emitEvent = func(name string, args ...any) {
+			if name == EventGitStatusChanged && len(args) >= 1 {
+				if p, ok := args[0].(string); ok {
+					emitted = p
+				}
+			}
+		}
+
+		if err := f.CreateBranchInWorktree("feature-x", ""); err != nil {
+			t.Fatalf("CreateBranchInWorktree: %v", err)
+		}
+
+		trees, err := f.worktreeOwner().List(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		entry := branchHolder(trees, "feature-x")
+		if entry == nil {
+			t.Fatalf("branch feature-x is not checked out in any worktree; trees: %+v", trees)
+		}
+		if entry.Kind != workspace.WorktreeManaged {
+			t.Errorf("tree kind: got %q, want %q", entry.Kind, workspace.WorktreeManaged)
+		}
+		wantPath, err := config.ManagedWorktreePath(dir, "feature-x")
+		if err != nil {
+			t.Fatalf("ManagedWorktreePath: %v", err)
+		}
+		if entry.Path != wantPath {
+			t.Errorf("tree path: got %q, want %q", entry.Path, wantPath)
+		}
+
+		// The branch exists and the tree sits at the checkout's HEAD
+		// (empty base = HEAD).
+		gitOut(t, dir, "rev-parse", "--verify", "--quiet", "refs/heads/feature-x")
+		head := gitOut(t, dir, "rev-parse", "HEAD")
+		if treeHead := gitOut(t, entry.Path, "rev-parse", "HEAD"); treeHead != head {
+			t.Errorf("tree HEAD: got %q, want checkout HEAD %q", treeHead, head)
+		}
+
+		// The focus is NOT switched: the checkout stays on its branch.
+		defaultBranch := gitDefaultBranch(t, dir)
+		if current := gitOut(t, dir, "symbolic-ref", "--short", "HEAD"); current != defaultBranch {
+			t.Errorf("checkout moved off %q to %q — focus must not switch", defaultBranch, current)
+		}
+
+		if emitted != dir {
+			t.Errorf("event payload: got %q, want %q", emitted, dir)
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_FromBase(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		f.logger = slog.New(slog.DiscardHandler)
+		// Advance develop by one commit so the base is distinguishable
+		// from the checkout's HEAD.
+		gitOut(t, dir, "branch", "develop")
+		defaultBranch := gitDefaultBranch(t, dir)
+		runGit(t, dir, "checkout", "develop")
+		commitFile(t, dir, "develop.txt", "develop\n")
+		runGit(t, dir, "checkout", defaultBranch)
+
+		if err := f.CreateBranchInWorktree("feature", "develop"); err != nil {
+			t.Fatalf("CreateBranchInWorktree: %v", err)
+		}
+
+		trees, err := f.worktreeOwner().List(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		entry := branchHolder(trees, "feature")
+		if entry == nil {
+			t.Fatalf("branch feature is not checked out in any worktree; trees: %+v", trees)
+		}
+		baseSha := gitOut(t, dir, "rev-parse", "refs/heads/develop")
+		headSha := gitOut(t, dir, "rev-parse", "HEAD")
+		if headSha == baseSha {
+			t.Fatal("test setup: develop must differ from the checkout HEAD")
+		}
+		if treeHead := gitOut(t, entry.Path, "rev-parse", "HEAD"); treeHead != baseSha {
+			t.Errorf("tree HEAD: got %q, want base develop %q", treeHead, baseSha)
+		}
+
+		// The checkout keeps its branch and its HEAD.
+		if current := gitOut(t, dir, "symbolic-ref", "--short", "HEAD"); current != defaultBranch {
+			t.Errorf("checkout moved off %q to %q — focus must not switch", defaultBranch, current)
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_TreeNameSlugAndSuffix(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		f.logger = slog.New(slog.DiscardHandler)
+		// "feature/one" slugs to "feature-one" — the tree takes that name.
+		if err := f.CreateBranchInWorktree("feature/one", ""); err != nil {
+			t.Fatalf("CreateBranchInWorktree(feature/one): %v", err)
+		}
+		// "feature+one" slugs to the same "feature-one": the name is busy,
+		// so the tree falls back to the numeric suffix "feature-one-2".
+		if err := f.CreateBranchInWorktree("feature+one", ""); err != nil {
+			t.Fatalf("CreateBranchInWorktree(feature+one): %v", err)
+		}
+
+		trees, err := f.worktreeOwner().List(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		entry := branchHolder(trees, "feature+one")
+		if entry == nil {
+			t.Fatalf("branch feature+one is not checked out in any worktree; trees: %+v", trees)
+		}
+		wantPath, err := config.ManagedWorktreePath(dir, "feature-one-2")
+		if err != nil {
+			t.Fatalf("ManagedWorktreePath: %v", err)
+		}
+		if entry.Path != wantPath {
+			t.Errorf("tree path: got %q, want suffixed %q", entry.Path, wantPath)
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_BranchExists(t *testing.T) {
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		// An existing branch that is not checked out anywhere: the atomic
+		// worktree-add creation refuses it with ErrBranchExists (a branch
+		// currently checked out in a tree fails earlier, with
+		// ErrBranchBusy — core's occupancy taxonomy).
+		gitOut(t, dir, "branch", "side-branch")
+		err := f.CreateBranchInWorktree("side-branch", "")
+		if err == nil {
+			t.Fatal("expected error for existing branch")
+		}
+		if !errors.Is(err, workspace.ErrBranchExists) {
+			t.Errorf("expected error to wrap workspace.ErrBranchExists, got: %v", err)
+		}
+		// The failed creation left no tree behind (the branch check fires
+		// before git worktree add runs).
+		if _, err := os.ReadDir(config.ManagedWorktreesDir(dir)); err == nil {
+			t.Fatal("expected no managed worktree container after a failed creation")
+		}
+	})
+}
+
+func TestCreateBranchInWorktree_ReservedTreeName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The scenario needs a branch literally named "con". On Windows the
+		// Win32 reserved-name check strips extensions, so git cannot create
+		// refs/heads/con.lock ("Invalid argument") and such a branch cannot
+		// exist in the repository at all — the managed-tree slug side-step
+		// onto "con-2" is only observable on POSIX.
+		t.Skip("a branch named con cannot exist in a git repo on Windows")
+	}
+	withGitRepo(t, func(f *FrontendAPI, dir string) {
+		f.logger = slog.New(slog.DiscardHandler)
+		// "con" is a valid branch name but a reserved managed-tree
+		// identity (Windows device name): the slug moves off the reserved
+		// stem with a numeric suffix.
+		if err := f.CreateBranchInWorktree("con", ""); err != nil {
+			t.Fatalf("CreateBranchInWorktree(con): %v", err)
+		}
+
+		trees, err := f.worktreeOwner().List(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		entry := branchHolder(trees, "con")
+		if entry == nil {
+			t.Fatalf("branch con is not checked out in any worktree; trees: %+v", trees)
+		}
+		if filepath.Base(entry.Path) != "con-2" {
+			t.Errorf("tree name: got %q, want %q", filepath.Base(entry.Path), "con-2")
 		}
 	})
 }

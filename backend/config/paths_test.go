@@ -99,6 +99,89 @@ func TestProjectEmbeddingCachePath(t *testing.T) {
 	}
 }
 
+func TestWorktreeEmbeddingCachePath(t *testing.T) {
+	got, err := WorktreeEmbeddingCachePath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("WorktreeEmbeddingCachePath: %v", err)
+	}
+	want := filepath.Join(testAgentDir, "projects", "proj-123", "vector_index", "worktrees", "s-abc123", "embedding_cache")
+	if got != want {
+		t.Errorf("WorktreeEmbeddingCachePath: got %q, want %q", got, want)
+	}
+}
+
+// TestWorktreeEmbeddingCachePath_InsideWorktreeVectorStorage pins the
+// containment contract with core/vectorindex: Service.SetProject enables a
+// persistent embedding cache only when its root sits inside the storage root
+// the service was opened for (it fails closed to a disabled cache otherwise),
+// so a per-tree cache outside WorktreeVectorIndexPath silently turns every
+// worktree's first index pass into a full cold ONNX re-run — the issue #137
+// step 1 bug. The sibling location used before the fix
+// (embedding_cache-worktrees/<name>) must never come back.
+func TestWorktreeEmbeddingCachePath_InsideWorktreeVectorStorage(t *testing.T) {
+	storage, err := WorktreeVectorIndexPath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("WorktreeVectorIndexPath: %v", err)
+	}
+	cache, err := WorktreeEmbeddingCachePath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("WorktreeEmbeddingCachePath: %v", err)
+	}
+	within, err := IsWithinPath(storage, cache)
+	if err != nil {
+		t.Fatalf("IsWithinPath: %v", err)
+	}
+	if !within {
+		t.Fatalf("worktree embedding cache %q must live inside its storage root %q", cache, storage)
+	}
+}
+
+// TestWorktreeEmbeddingCachePath_NoNestedCacheRoots pins the accounting
+// invariant: one live cache root must never contain another (scanCacheTree
+// walks its own root recursively and would corrupt a nested root's size
+// accounting), so the checkout's cache and every tree's cache must stay
+// disjoint subtrees.
+func TestWorktreeEmbeddingCachePath_NoNestedCacheRoots(t *testing.T) {
+	checkout := ProjectEmbeddingCachePath(testAgentDir, "proj-123")
+	cache, err := WorktreeEmbeddingCachePath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("WorktreeEmbeddingCachePath: %v", err)
+	}
+	for _, pair := range [][2]string{{checkout, cache}, {cache, checkout}} {
+		within, err := IsWithinPath(pair[0], pair[1])
+		if err != nil {
+			t.Fatalf("IsWithinPath(%q, %q): %v", pair[0], pair[1], err)
+		}
+		if within {
+			t.Fatalf("cache roots must be disjoint: %q contains %q", pair[0], pair[1])
+		}
+	}
+}
+
+func TestLegacyWorktreeEmbeddingCachePath(t *testing.T) {
+	got, err := LegacyWorktreeEmbeddingCachePath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("LegacyWorktreeEmbeddingCachePath: %v", err)
+	}
+	want := filepath.Join(testAgentDir, "projects", "proj-123", "vector_index", "embedding_cache-worktrees", "s-abc123")
+	if got != want {
+		t.Errorf("LegacyWorktreeEmbeddingCachePath: got %q, want %q", got, want)
+	}
+	// The legacy location must stay OUTSIDE the tree's storage root: that is
+	// exactly why core/vectorindex refused it and the layout moved inside.
+	storage, err := WorktreeVectorIndexPath(testAgentDir, "proj-123", "s-abc123")
+	if err != nil {
+		t.Fatalf("WorktreeVectorIndexPath: %v", err)
+	}
+	within, err := IsWithinPath(storage, got)
+	if err != nil {
+		t.Fatalf("IsWithinPath: %v", err)
+	}
+	if within {
+		t.Fatalf("legacy cache path %q must stay outside the tree storage %q", got, storage)
+	}
+}
+
 func TestSessionDir(t *testing.T) {
 	got := SessionDir(testAgentDir, "proj-123", "sess-456")
 	want := filepath.Join(testAgentDir, "projects", "proj-123", "sess-456")

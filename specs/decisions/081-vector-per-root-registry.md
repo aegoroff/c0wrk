@@ -52,10 +52,18 @@ owned by a backend registry (`backend/vector_roots.go`, `VectorRoots`):
    its own tree while the user looks elsewhere). `vector_index:status`
    events stream only from the focused manager's callbacks, and a focus
    change emits the new manager's status snapshot once.
-6. **Cache roots never nest.** Each root's embedding cache is a SIBLING of
-   the project cache (`config.WorktreeEmbeddingCachePath`) because the cache
-   accounting walk is recursive — one cache root containing another's would
-   let eviction delete a sibling's entries.
+6. **Cache roots never nest.** Each root's embedding cache lives INSIDE its
+   own storage root — the checkout's at `<projectVI>/embedding_cache`, a
+   managed tree's at `<projectVI>/worktrees/<name>/embedding_cache`
+   (`config.WorktreeEmbeddingCachePath`) — because the cache accounting walk
+   is recursive (one cache root containing another's would let eviction
+   delete a sibling's entries), and because `Service.SetProject` enables a
+   persistent cache only when its root sits inside the storage root the
+   service was opened for: the earlier sibling location
+   (`embedding_cache-worktrees/<name>`) failed that containment check and was
+   silently disabled, turning every tree's first index pass into a full cold
+   ONNX re-run (the issue #137 step 1 bug). The checkout cache and each tree
+   cache stay disjoint subtrees, so the no-nesting rule still holds.
 7. **Bounded shutdown.** `ShutdownAll` (from `FrontendAPILifecycle.Cleanup`)
    closes every live manager, then the process-global embedder exactly once.
    A factory wired after shutdown closes the embedder itself, so quitting

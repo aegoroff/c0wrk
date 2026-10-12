@@ -88,6 +88,16 @@ func (m *Manager) EnsureNoProject() (created bool, err error) {
 	if absPath, err := filepath.Abs(wsPath); err == nil {
 		wsPath = absPath
 	}
+	// Canonicalize the deepest existing ancestor (the projects dir —
+	// created by NewManager) so the stored path matches the same invariant
+	// CreateProject's internal branch establishes: stored roots are
+	// compared against resolved forms. The workspace directory itself is
+	// deliberately not created here (lazy per-session creation below), so
+	// only the existing prefix is resolved; the fail-soft fallback keeps
+	// the lexical form.
+	if resolvedParent, perr := filepath.EvalSymlinks(filepath.Dir(wsPath)); perr == nil {
+		wsPath = filepath.Join(resolvedParent, filepath.Base(wsPath))
+	}
 	info := ProjectInfo{
 		ID:            NoProjectID,
 		Name:          "No Project",
@@ -167,6 +177,17 @@ func (m *Manager) CreateProject(name, externalPath string) (*ProjectInfo, error)
 		if err := safeio.MkdirAllReal(info.WorkspacePath, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create internal workspace directory: %w", err)
 		}
+		// Canonicalize before persisting, mirroring the external branch:
+		// the stored path is compared against symlink-resolved forms by
+		// security containment (resolved tool inputs) and the git worktree
+		// primitives (git's canonical `git worktree list` output), so a
+		// constructed path through a symlinked ancestor (e.g. a symlinked
+		// agent dir) would silently diverge from every one of them.
+		resolved, err := filepath.EvalSymlinks(info.WorkspacePath)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve internal workspace symlinks: %w", err)
+		}
+		info.WorkspacePath = resolved
 	} else {
 		// External project: canonicalize the path (absolute, cleaned,
 		// symlink-resolved) before persisting. Stored paths participate in
@@ -262,24 +283,41 @@ func (m *Manager) RenameProject(id, name string) error {
 
 // ListProjects returns all projects ordered by last activity.
 func (m *Manager) ListProjects() ([]ProjectInfo, error) {
+	ctx, cancel := m.opCtx()
+	defer cancel()
+	return m.ListProjectsCtx(ctx)
+}
+
+// ListProjectsCtx is the caller-deadline variant of ListProjects. It exists so
+// the project-switch critical section can derive every store round-trip —
+// its own, and the vector leg's root resolution (resolveRootPlan) — from
+// ONE switch-scoped deadline: individually bounded operations (each with its
+// own opCtx) still sum to minutes of switchMu hold time when the shared
+// SQLite pool is saturated and every one of them burns its full budget. See
+// SwitchProject's switchSectionTimeout.
+func (m *Manager) ListProjectsCtx(ctx context.Context) ([]ProjectInfo, error) {
 	if err := m.checkReady(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ctx, cancel := m.opCtx()
-	defer cancel()
 	return m.store.ListProjects(ctx)
 }
 
 // GetProject returns a project by ID, or nil if not found.
 func (m *Manager) GetProject(id string) (*ProjectInfo, error) {
+	ctx, cancel := m.opCtx()
+	defer cancel()
+	return m.GetProjectCtx(ctx, id)
+}
+
+// GetProjectCtx is the caller-deadline variant of GetProject (see
+// ListProjectsCtx for why it exists).
+func (m *Manager) GetProjectCtx(ctx context.Context, id string) (*ProjectInfo, error) {
 	if err := m.checkReady(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ctx, cancel := m.opCtx()
-	defer cancel()
 	return m.store.LoadProject(ctx, id)
 }

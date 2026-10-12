@@ -43,7 +43,7 @@ type vectorIndexTarget struct {
 // resolved root is handed to the per-root registry (ApplyFocus), which owns
 // the manager for it. It no longer re-points a shared singleton — sessions
 // route through their own task context, the user's search follows the focus.
-func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorIndexTarget {
+func (f *FrontendAPI) resolveVectorIndexTarget(switchCtx context.Context, p *project.ProjectInfo) vectorIndexTarget {
 	base := vectorIndexTarget{
 		workspacePath: p.WorkspacePath,
 		storagePath:   config.ProjectVectorIndexPath(f.agentDir, p.ID),
@@ -54,10 +54,13 @@ func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorInd
 	// Both reads below are bounded by terminalPathLookupTimeout, as this
 	// function's siblings require: Manager.WorkspacePathFor's contract makes
 	// the CALLER bound the session-row read, and the shared SQLite pool can
-	// otherwise park SwitchProject (switchMu held) indefinitely. A timeout
-	// degrades to base — the project checkout — which is already the
-	// fail-soft default of every negative branch here.
-	ctx, cancel := context.WithTimeout(f.ctx(), terminalPathLookupTimeout)
+	// otherwise park SwitchProject (switchMu held) indefinitely. The bound is
+	// derived from the switch-section deadline (switchSectionTimeout) so a
+	// saturated pool cannot stack this budget on top of every other
+	// round-trip in the critical section. A timeout degrades to base — the
+	// project checkout — which is already the fail-soft default of every
+	// negative branch here.
+	ctx, cancel := context.WithTimeout(switchCtx, terminalPathLookupTimeout)
 	defer cancel()
 	savedID := ""
 	if f.projStore != nil {
@@ -102,6 +105,22 @@ func (f *FrontendAPI) managedWorktreeVectorTarget(p *project.ProjectInfo, ws str
 	return vectorIndexTarget{workspacePath: ws, storagePath: storage}, true
 }
 
+// storedProjectRoot returns the project row's stored (unresolved) workspace
+// path — the registration form — for legacy-form comparisons. Fail-soft:
+// ok=false when the manager is unwired or the row is unreadable.
+func (f *FrontendAPI) storedProjectRoot(projectID string) (string, bool) {
+	if f.projectManager == nil {
+		return "", false
+	}
+	p, err := f.projectManager.GetProject(projectID)
+	if err != nil || p == nil {
+		f.log().Debug("vector index: cannot read the project row for the stored root",
+			"project", projectID, "error", err)
+		return "", false
+	}
+	return p.WorkspacePath, true
+}
+
 // deleteWorktreeVectorIndex releases a managed tree's per-root manager and
 // removes the tree's persisted vector-index state — its whole worktree-scoped
 // storage root plus its per-tree embedding cache. Best-effort by design: the
@@ -119,6 +138,25 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		root = filepath.Join(config.ManagedWorktreesDir(repoRoot), name)
 	}
 	mgr := vr.Release(root)
+	// Legacy rows keep a symlinked (or otherwise unresolved) ancestor in
+	// their stored root: AGENT routing keys a tree's live manager under the
+	// raw stored spelling (the session's WorkspacePath re-derives from the
+	// stored row and canonicalRoot does not resolve symlinks), while the
+	// repo root here is the canonical form the deletion flows present.
+	// Release the stored spelling too, so the delete shuts the
+	// legacy-keyed manager down as well — a miss returns nil. Fail-soft:
+	// an unreadable project row only skips the second key.
+	if stored, ok := f.storedProjectRoot(projectID); ok && stored != repoRoot {
+		alt, altErr := config.ManagedWorktreePath(stored, name)
+		if altErr != nil {
+			alt = filepath.Join(config.ManagedWorktreesDir(stored), name)
+		}
+		if alt != root {
+			if m := vr.Release(alt); m != nil && mgr == nil {
+				mgr = m
+			}
+		}
+	}
 
 	storage, err := config.WorktreeVectorIndexPath(f.agentDir, projectID, name)
 	if err != nil {
@@ -143,11 +181,23 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		}
 	}
 
-	// The per-tree embedding cache is a sibling of the tree's storage (its
-	// content-addressed entries are meaningless without the tree) — drop it.
+	// The per-tree embedding cache lives INSIDE the tree's storage root
+	// (WorktreeEmbeddingCachePath → <storage>/embedding_cache), so the
+	// DeleteProjectData removal above already dropped it. The explicit
+	// removal stays as belt-and-braces, and the LEGACY sibling location used
+	// by builds before the containment fix (issue #137 step 1) is removed
+	// too: trees provisioned by those builds carry seed copies there that
+	// nothing ever read — drop them so the stale directories do not outlive
+	// the tree.
 	if cache, cerr := config.WorktreeEmbeddingCachePath(f.agentDir, projectID, name); cerr == nil {
 		if err := os.RemoveAll(cache); err != nil {
 			f.log().Warn("vector index: failed to remove released worktree embedding cache",
+				"project", projectID, "worktree", name, "error", err)
+		}
+	}
+	if legacy, lerr := config.LegacyWorktreeEmbeddingCachePath(f.agentDir, projectID, name); lerr == nil {
+		if err := os.RemoveAll(legacy); err != nil {
+			f.log().Warn("vector index: failed to remove legacy worktree embedding cache",
 				"project", projectID, "worktree", name, "error", err)
 		}
 	}
@@ -313,8 +363,7 @@ func (f *FrontendAPI) SearchVectorStore(req SearchRequest) ([]VectorStoreEntry, 
 		return []VectorStoreEntry{}, nil
 	}
 
-	vr := f.vectorRootsRegistry()
-	vm, err := vr.FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return nil, errVectorNoTarget
 	}
@@ -414,7 +463,7 @@ func (f *FrontendAPI) GetVectorIndexStatus() VectorIndexStatus {
 		return st
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		result := VectorIndexStatus{State: "unavailable", Indices: []string{}}
 		f.applyEmbedderInfo(&result)
@@ -476,7 +525,7 @@ func (f *FrontendAPI) ReindexVectorIndex() error {
 		return errors.New("vector index is unavailable in No Project mode")
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return errors.New("vector index not available")
 	}

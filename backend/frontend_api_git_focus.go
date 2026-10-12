@@ -189,7 +189,12 @@ func (f *FrontendAPI) SetGitPanelFocus(worktreePath string) error {
 	if err != nil {
 		return fmt.Errorf("invalid focus path: %w", err)
 	}
-	trees, err := f.listWorktreesBounded(projectPath)
+	// Canonicalize the repo root for the listing (fail-soft to the stored
+	// form — see canonicalWorktreeRoot): every listing seam must present
+	// one form to the listing primitive, whose Kind classification and
+	// canonical entries the focus handling below keys on. The reset branch
+	// keeps the vector focus and the emitted event on the stored form.
+	trees, err := f.listWorktreesBounded(canonicalWorktreeRoot(projectPath))
 	if err != nil {
 		return fmt.Errorf("listing worktrees of the active project: %w", err)
 	}
@@ -212,7 +217,9 @@ func (f *FrontendAPI) SetGitPanelFocus(worktreePath string) error {
 // unresolvable root) is logged at Warn and never fails the git RPC — the
 // vector_index:status stream carries the actionable state instead.
 func (f *FrontendAPI) focusVectorRoots(root string) {
-	if err := f.vectorRootsRegistry().ApplyFocus(canonicalRoot(root)); err != nil {
+	// f.ctx() + resolveRootPlan's per-op cap reproduce the bounded projects
+	// listing the plain ListProjects() applied before the ctx threading.
+	if err := f.vectorRootsRegistry().ApplyFocus(f.ctx(), canonicalRoot(root)); err != nil {
 		f.log().Warn("vector focus unavailable for git panel target", "root", root, "error", err)
 	}
 }
@@ -226,8 +233,16 @@ func (f *FrontendAPI) GetGitPanelFocus() (GitPanelFocusInfo, error) {
 	if err != nil {
 		return GitPanelFocusInfo{}, err
 	}
-	focus := f.resolveGitFocusRoot(projectPath)
-	trees, err := f.listWorktreesBounded(projectPath)
+	// Canonicalize the repo root for the listing and the focus resolution
+	// (fail-soft to the stored form — see canonicalWorktreeRoot): the
+	// listing's entries are canonical (git lists canonical paths) and the
+	// stored focus is matched against them by string equality, so a legacy
+	// registration keeping a symlinked ancestor — whose default focus falls
+	// back to the stored form — would miss the match and lose the managed
+	// classification and focus flags of the reported payload.
+	repoRoot := canonicalWorktreeRoot(projectPath)
+	focus := f.resolveGitFocusRoot(repoRoot)
+	trees, err := f.listWorktreesBounded(repoRoot)
 	if err != nil {
 		return GitPanelFocusInfo{}, fmt.Errorf("listing worktrees of the active project: %w", err)
 	}
@@ -271,11 +286,19 @@ func (f *FrontendAPI) ListProjectWorktrees() ([]GitWorktree, error) {
 	if err != nil {
 		return nil, err
 	}
-	trees, err := f.listWorktreesBounded(projectPath)
+	// Canonicalize the repo root for the listing and the focus resolution
+	// (fail-soft to the stored form — see canonicalWorktreeRoot): the
+	// listing's entries are canonical (git lists canonical paths) and the
+	// IsFocus flag below compares the resolved focus against them by
+	// string equality, so a legacy registration keeping a symlinked
+	// ancestor — whose default focus falls back to the stored form — would
+	// flag no row at all.
+	repoRoot := canonicalWorktreeRoot(projectPath)
+	trees, err := f.listWorktreesBounded(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("listing worktrees of the active project: %w", err)
 	}
-	focus := f.resolveGitFocusRoot(projectPath)
+	focus := f.resolveGitFocusRoot(repoRoot)
 	out := make([]GitWorktree, 0, len(trees))
 	for i := range trees {
 		t := trees[i]
@@ -302,6 +325,83 @@ func (f *FrontendAPI) ListProjectWorktrees() ([]GitWorktree, error) {
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// DeleteWorktree removes a linked worktree of the active project's
+// repository — an app-managed session tree or an external linked tree.
+// The path must be a worktree of the active project (validated against the
+// live `git worktree list`; a foreign path fails with ErrWorktreeNotLinked)
+// and the local checkout is refused by the removal primitive itself: the
+// main worktree is the project's registration root and is never removed.
+// force confirms the loss of uncommitted changes in the tree, unlock
+// authorizes removing a locked tree — neither is ever taken implicitly
+// (ErrWorktreeDirty / ErrWorktreeLocked name the missing confirmation).
+// The branch the tree was on is never deleted. Managed trees are removed
+// regardless of bound sessions (an explicit user decision): the session
+// rows stay, the tree under them is gone.
+//
+// Cleanup mirrors the session-release flow: the tree's vector-registry
+// root is released first (shutting its live per-root manager so no open
+// handle keeps the removed directory alive on Windows), and a managed
+// tree's derived index storage + embedding cache are dropped as well
+// (deleteWorktreeVectorIndex). git:status_changed is emitted for the
+// project checkout — the refresh re-resolves the focus server-side, so a
+// focus pointing at the deleted tree rolls back to the checkout through
+// resolveGitFocusRoot's stale-focus fallback.
+func (f *FrontendAPI) DeleteWorktree(worktreePath string, force, unlock bool) error {
+	projectPath, projectID, err := f.activeGitProjectRoot()
+	if err != nil {
+		return err
+	}
+	target := strings.TrimSpace(worktreePath)
+	if target == "" {
+		return fmt.Errorf("%w: empty worktree path", workspace.ErrWorktreePathInvalid)
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("invalid worktree path: %w", err)
+	}
+	// Canonicalize the repo root for the removal and the vector cleanup
+	// (fail-soft to the stored form — see canonicalWorktreeRoot): the
+	// per-repo worktree lock keys lexically and the per-tree vector
+	// storage/registry keys derive from this root, so a legacy registration
+	// keeping a symlinked ancestor must not split the lock against the
+	// canonicalized seams or miss the live vector manager's Release. The
+	// success event below stays on the stored form.
+	repoRoot := canonicalWorktreeRoot(projectPath)
+	trees, err := f.listWorktreesBounded(repoRoot)
+	if err != nil {
+		return fmt.Errorf("listing worktrees of the active project: %w", err)
+	}
+	entry := workspace.FindWorktree(trees, abs)
+	if entry == nil {
+		return fmt.Errorf("%w: %s is not a worktree of the active project", workspace.ErrWorktreeNotLinked, abs)
+	}
+	// The removal — a full directory deletion plus an optional unlock and
+	// dirty probe — gets the same generous budget provisioning and the
+	// mirrored session-release flow get (managedProvisionTimeout): the point
+	// is to convert a wedged git into an explicit error, not to race a slow
+	// disk through a large tree (node_modules, build artifacts). The
+	// read-only pre-check listing above stays on gitCmdTimeout.
+	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
+	defer cancel()
+	if err := workspace.RemoveWorktree(ctx, repoRoot, entry.Path, workspace.RemoveWorktreeOptions{
+		Force:  force,
+		Unlock: unlock,
+	}); err != nil {
+		return err
+	}
+	switch entry.Kind {
+	case workspace.WorktreeManaged:
+		f.deleteWorktreeVectorIndex(repoRoot, projectID, entry.Name)
+	case workspace.WorktreeExternal:
+		// An external tree may have been the panel's focus and picked up a
+		// live manager; release it. c0wrk never provisioned one, so no
+		// worktree-scoped storage exists to clean.
+		f.vectorRootsRegistry().Release(canonicalRoot(entry.Path))
+	}
+	f.emitGitStatusChanged(projectPath)
+	return nil
 }
 
 // managedTreeOwner resolves the session bound to the managed worktree name,
@@ -359,12 +459,22 @@ func isManagedTreePath(checkout, target string) bool {
 // gitFocusRoots returns the active project's checkout path together with the
 // resolved Git-panel focus root — the pair the pinned-branch guard and the
 // checkout-family RPCs need (they operate on the focus but classify against
-// the checkout).
+// the checkout). The checkout is returned in the canonical form (fail-soft
+// to the stored form — see canonicalWorktreeRoot): the guard classifies the
+// focus root — a canonical listing path — against <checkout>/.worktrees and
+// first compares the two for same-tree, so a legacy registration keeping a
+// symlinked ancestor must not feed the operands in different forms. The git
+// operations run on the focus root and the emitted git:status_changed
+// payload follows it; the payload keys no frontend consumer (the handler
+// refetches the status with its own stored workspace path), and the
+// backend's cache-invalidation funnel normalizes its key (gitCacheKey), so
+// the form stays consistent on both layers.
 func (f *FrontendAPI) gitFocusRoots() (checkout, focus string, err error) {
 	checkout, _, err = f.activeGitProjectRoot()
 	if err != nil {
 		return "", "", err
 	}
+	checkout = canonicalWorktreeRoot(checkout)
 	return checkout, f.resolveGitFocusRoot(checkout), nil
 }
 

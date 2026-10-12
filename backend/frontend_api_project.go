@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -51,10 +52,10 @@ func (f *FrontendAPI) DeleteProject(id string) error {
 	// Per-root vector managers (ADR-080) are released FIRST — shutdown drops
 	// their open chromem handles so the directory removal below works on
 	// Windows too. Managed-session worktree indexes live under
-	// <projectVI>/worktrees/<name> with per-tree embedding caches under
-	// <projectVI>/embedding_cache-worktrees/<name>: drop each worktree
-	// storage explicitly, then the project root removes everything left
-	// (caches included). Any live manager can run the deletion (it is a
+	// <projectVI>/worktrees/<name> with the per-tree embedding cache inside
+	// that storage (<projectVI>/worktrees/<name>/embedding_cache): drop each
+	// worktree storage explicitly, then the project root removes everything
+	// left. Any live manager can run the deletion (it is a
 	// plain fs + park-slot operation); without one there is nothing this app
 	// run can be holding open, so the best-effort pass is skipped exactly
 	// like the nil-manager case before it. Releasing before removal is the
@@ -177,7 +178,7 @@ func (f *FrontendAPI) SaveProjectUIState(req ProjectUIStateRequest) error {
 	})
 	// A resolution failure must not clobber the pointer: keep the original
 	// value instead of normalizing to empty on a transient store error.
-	resolved, err := f.resolveSavedSessionForProject(state.ProjectID, state.SavedSessionID)
+	resolved, err := f.resolveSavedSessionForProject(context.Background(), state.ProjectID, state.SavedSessionID)
 	if err != nil {
 		f.log().Warn("failed to resolve saved session for project UI state; keeping original value", "project", state.ProjectID, "error", err)
 	} else {
@@ -226,7 +227,7 @@ func (f *FrontendAPI) SaveProjectActiveSession(projectID, sessionID string) erro
 		// falls back to the latest live session. A resolution ERROR is
 		// propagated instead of writing anything: persisting "" after a
 		// transient store failure would clobber a valid saved pointer.
-		resolved, err := f.resolveSavedSessionForProject(projectID, sessionID)
+		resolved, err := f.resolveSavedSessionForProject(context.Background(), projectID, sessionID)
 		if err != nil {
 			return fmt.Errorf("failed to resolve session selection: %w", err)
 		}
@@ -262,7 +263,7 @@ func (f *FrontendAPI) GetProjectUIState(projectID string) (*ProjectUIStateRespon
 	}
 
 	normalized := normalizeProjectUIState(*state)
-	resolved, err := f.resolveSavedSessionForProject(projectID, normalized.SavedSessionID)
+	resolved, err := f.resolveSavedSessionForProject(context.Background(), projectID, normalized.SavedSessionID)
 	if err != nil {
 		// Read path: a transient resolution failure must not blank the saved
 		// pointer in the response (nor trigger the normalization write-back).
@@ -340,9 +341,27 @@ func (f *FrontendAPI) SwitchProject(id string) error {
 		}
 		f.log().Warn("SwitchProject: timed out waiting for an in-flight switch",
 			"project", id, "error", err)
+		// The holder has already outlived the whole acquisition budget —
+		// exactly the wedged-switch state this error exists to surface, and
+		// one that has been reported in the wild without any way to name the
+		// stuck step (the reporting machine is a user box, unreachable for
+		// live debugging). Dump the goroutines while the holder is still
+		// parked: the holder's own stack names the exact line. Best-effort
+		// diagnostics; never alters the switch outcome.
+		f.dumpBusySwitchHolders(id)
 		return err
 	}
-	defer f.switchMu.Unlock()
+	switchCtx, cancelSwitchSection := context.WithTimeout(context.Background(), switchSectionTimeout)
+	defer cancelSwitchSection()
+	acquiredAt := time.Now()
+	defer func() {
+		f.switchMu.Unlock()
+		if held := time.Since(acquiredAt); held >= switchHeldWarnThreshold {
+			f.log().Warn("SwitchProject: held switchMu past the acquisition budget",
+				"project", id, "held", held.String(),
+				"budget", switchSectionTimeout.String())
+		}
+	}()
 	if f.switchInProgressHook != nil {
 		f.switchInProgressHook(id)
 	}
@@ -366,7 +385,11 @@ func (f *FrontendAPI) SwitchProject(id string) error {
 		// A lookup failure here is rare (e.g. a race with project deletion),
 		// but without a log it is undiagnosable why the frontend never
 		// repaired itself — so warn instead of failing silently.
-		p, err := f.projectManager.GetProject(id)
+		p, err := func() (*project.ProjectInfo, error) {
+			opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+			defer cancel()
+			return f.projectManager.GetProjectCtx(opCtx, id)
+		}()
 		switch {
 		case err != nil:
 			f.log().Warn("SwitchProject: failed to re-emit project:switched on already-active path", "project", id, "error", err)
@@ -384,7 +407,11 @@ func (f *FrontendAPI) SwitchProject(id string) error {
 		return nil
 	}
 
-	p, err := f.projectManager.GetProject(id)
+	p, err := func() (*project.ProjectInfo, error) {
+		opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+		defer cancel()
+		return f.projectManager.GetProjectCtx(opCtx, id)
+	}()
 	if err != nil {
 		return err
 	}
@@ -418,21 +445,21 @@ func (f *FrontendAPI) SwitchProject(id string) error {
 	// the previous project — the backend never half-switches, and the frontend
 	// (which treats a non-nil RPC error as "switch did not happen") cannot
 	// diverge from the backend.
-	f.switchProjectTeardown(id)
+	f.switchProjectTeardown(switchCtx, id)
 	// The fallible vector setup runs before the watcher swap on purpose: the
 	// two steps are independent, and a vector failure here leaves the previous
 	// watcher untouched (still scoped to the still-active project) instead of
 	// closing it and starting one scoped to a project that never activated.
-	if err := f.switchSetupVector(p); err != nil {
+	if err := f.switchSetupVector(switchCtx, p); err != nil {
 		return err
 	}
-	f.switchProjectSetupWatcher(p)
+	f.switchProjectSetupWatcher(switchCtx, p)
 
 	// All fallible steps succeeded: commit the activation. From here on the
 	// switch cannot fail, so the active marker and the project:switched event
 	// stay consistent with what the frontend is told.
-	f.switchProjectActivate(p)
-	f.applySavedProjectSwitchState(p.ID)
+	f.switchProjectActivate(switchCtx, p)
+	f.applySavedProjectSwitchState(switchCtx, p.ID)
 
 	// c0wrk-owned packs (research-*/study-paper skills, research agent
 	// profile) are seeded into the GLOBAL agent directories once per launch
@@ -499,24 +526,46 @@ func (f *FrontendAPI) acquireSwitchLock() error {
 	}
 }
 
+// dumpBusySwitchHolders writes a bounded all-goroutine stack dump to the log
+// after a switch failed to acquire switchMu. Every step inside the switch's
+// critical section is individually bounded, so a hold that outlives the whole
+// acquisition budget means either deadline stacking under a saturated store
+// (several soft-failing ops each burning their budget) or a blocking call the
+// deadlines do not reach — and only the holder's stack distinguishes them.
+// The dump is capped (maxBusySwitchDumpBytes), emitted at WARN next to the
+// timeout line the user already sees, and never changes the switch outcome.
+func (f *FrontendAPI) dumpBusySwitchHolders(projectID string) {
+	buf := make([]byte, maxBusySwitchDumpBytes)
+	n := runtime.Stack(buf, true)
+	f.log().Warn("SwitchProject: switchMu still held; goroutine dump for offline diagnosis",
+		"project", projectID,
+		"dump_truncated", n == len(buf),
+		"stacks", string(buf[:n]))
+}
+
+// maxBusySwitchDumpBytes caps the diagnostic goroutine dump. A desktop
+// process rarely exceeds a few hundred goroutines; the cap keeps the pathological
+// case (thousands of parked goroutines) from flooding the log.
+const maxBusySwitchDumpBytes = 512 * 1024
+
 // switchSetupVector runs the vector-index setup for a project switch, honoring
 // the test-only switchProjectSetupVectorFn seam (nil in production). It lets a
 // test drive the fallible pre-watcher step to verify the switch stays atomic
-// on failure.
-func (f *FrontendAPI) switchSetupVector(p *project.ProjectInfo) error {
+// on failure. ctx is the switch-section deadline (see switchSectionTimeout).
+func (f *FrontendAPI) switchSetupVector(ctx context.Context, p *project.ProjectInfo) error {
 	if f.switchProjectSetupVectorFn != nil {
-		return f.switchProjectSetupVectorFn(p)
+		return f.switchProjectSetupVectorFn(ctx, p)
 	}
-	return f.switchProjectSetupVector(p)
+	return f.switchProjectSetupVector(ctx, p)
 }
 
 // switchProjectTeardown persists the previous project state and cancels in-flight work.
-func (f *FrontendAPI) switchProjectTeardown(newID string) {
+func (f *FrontendAPI) switchProjectTeardown(ctx context.Context, newID string) {
 	f.activeProjectMu.RLock()
 	previousProjectID := f.activeProjectID
 	f.activeProjectMu.RUnlock()
 	if previousProjectID != "" && previousProjectID != newID {
-		f.persistCurrentProjectSwitchState(previousProjectID)
+		f.persistCurrentProjectSwitchState(ctx, previousProjectID)
 	}
 
 	// Per-root managers (ADR-080): no indexing is cancelled here. Every live
@@ -529,7 +578,7 @@ func (f *FrontendAPI) switchProjectTeardown(newID string) {
 }
 
 // switchProjectActivate sets the new project as active and updates related state.
-func (f *FrontendAPI) switchProjectActivate(p *project.ProjectInfo) {
+func (f *FrontendAPI) switchProjectActivate(switchCtx context.Context, p *project.ProjectInfo) {
 	f.seedAcquire()
 	f.activeProjectMu.Lock()
 	f.activeProjectID = p.ID
@@ -570,7 +619,7 @@ func (f *FrontendAPI) switchProjectActivate(p *project.ProjectInfo) {
 
 	// Update project activity timestamp.
 	if f.projStore != nil {
-		ctx, cancel := f.storeOpCtx()
+		ctx, cancel := f.switchStoreOpCtx(switchCtx)
 		_ = f.projStore.UpdateProjectActivity(ctx, p.ID) // Best-effort; error is non-critical.
 		// Persist the destination project (including the No Project
 		// pseudo-project) so the last active project survives an app restart.
@@ -597,12 +646,12 @@ func (f *FrontendAPI) switchProjectActivate(p *project.ProjectInfo) {
 // via WatchDirectory. When no session exists yet (fresh start), creation is
 // deferred until the first session is activated — WatchDirectory creates the
 // watcher lazily.
-func (f *FrontendAPI) switchProjectSetupWatcher(p *project.ProjectInfo) {
+func (f *FrontendAPI) switchProjectSetupWatcher(switchCtx context.Context, p *project.ProjectInfo) {
 	f.seedAcquire()
 	// For No Project, resolve the session workspace before acquiring the lock
 	// to avoid holding watcherMu during session-manager queries.
 	if p.IsNoProject {
-		sessionWS := f.resolveNoProjectSessionWorkspace()
+		sessionWS := f.resolveNoProjectSessionWorkspace(switchCtx)
 		f.watcherMu.Lock()
 		defer f.watcherMu.Unlock()
 		if sessionWS == "" {
@@ -837,7 +886,7 @@ func (f *FrontendAPI) reScopeNoProjectWatcherLocked(root string) error {
 // their own trees regardless of the focus. For No Project (CHAT mode) vector
 // indexing is fully disabled: the focus is cleared and an unavailable status
 // is emitted; no index is built.
-func (f *FrontendAPI) switchProjectSetupVector(p *project.ProjectInfo) error {
+func (f *FrontendAPI) switchProjectSetupVector(switchCtx context.Context, p *project.ProjectInfo) error {
 	f.seedAcquire()
 	// Handshake with the background ONNX init: the manager factory is built
 	// asynchronously (its own goroutine, after EventBackendReady) and is
@@ -877,8 +926,14 @@ func (f *FrontendAPI) switchProjectSetupVector(p *project.ProjectInfo) error {
 	// Fail-soft: a focus that cannot be indexed (unresolvable root, factory
 	// failure) must not fail the project switch — the vector_index:status
 	// stream carries the actionable state instead.
-	target := f.resolveVectorIndexTarget(p)
-	if err := vr.ApplyFocus(canonicalRoot(target.workspacePath)); err != nil {
+	//
+	// switchCtx flows into ApplyFocus so the vector leg's one store
+	// round-trip (root resolution → ListProjectsCtx) is derived from the
+	// section deadline like every other store op in the switch; the manager
+	// build and the eviction-drain wait stay time-bounded, not ctx-bounded
+	// (see switchSectionTimeout for the honest exception list).
+	target := f.resolveVectorIndexTarget(switchCtx, p)
+	if err := vr.ApplyFocus(switchCtx, canonicalRoot(target.workspacePath)); err != nil {
 		f.log().Warn("vector focus unavailable for project target",
 			"project", p.ID, "root", target.workspacePath, "error", err)
 	}
@@ -961,7 +1016,9 @@ func projectUIStateEqual(a, b project.ProjectUIState) bool {
 // persistCurrentProjectSwitchState stores switch state for the current project.
 // Backend is not authoritative for open tabs/selected session, so this method
 // only validates and normalizes already persisted state (non-destructive).
-func (f *FrontendAPI) persistCurrentProjectSwitchState(projectID string) {
+// switchCtx is the switch-section deadline; every store round-trip derives
+// from it so a saturated pool burns the section budget once, not once per op.
+func (f *FrontendAPI) persistCurrentProjectSwitchState(switchCtx context.Context, projectID string) {
 	f.seedAcquire()
 	if strings.TrimSpace(projectID) == "" {
 		return
@@ -970,7 +1027,7 @@ func (f *FrontendAPI) persistCurrentProjectSwitchState(projectID string) {
 		return
 	}
 
-	ctx, cancel := f.storeOpCtx()
+	ctx, cancel := f.switchStoreOpCtx(switchCtx)
 	defer cancel()
 	state, err := f.projStore.LoadUIState(ctx, projectID)
 	if err != nil {
@@ -982,7 +1039,7 @@ func (f *FrontendAPI) persistCurrentProjectSwitchState(projectID string) {
 	}
 
 	normalized := normalizeProjectUIState(*state)
-	resolved, err := f.resolveSavedSessionForProject(projectID, normalized.SavedSessionID)
+	resolved, err := f.resolveSavedSessionForProject(switchCtx, projectID, normalized.SavedSessionID)
 	if err != nil {
 		// Keep the original pointer: normalizing to empty after a transient
 		// store failure would clobber a valid saved selection.
@@ -1002,7 +1059,8 @@ func (f *FrontendAPI) persistCurrentProjectSwitchState(projectID string) {
 // 1) use restored saved session when valid
 // 2) otherwise select latest session for project
 // 3) otherwise create a new project-scoped session
-func (f *FrontendAPI) applySavedProjectSwitchState(projectID string) {
+// switchCtx is the switch-section deadline (see switchSectionTimeout).
+func (f *FrontendAPI) applySavedProjectSwitchState(switchCtx context.Context, projectID string) {
 	f.seedAcquire()
 	if strings.TrimSpace(projectID) == "" {
 		return
@@ -1011,7 +1069,7 @@ func (f *FrontendAPI) applySavedProjectSwitchState(projectID string) {
 		return
 	}
 
-	ctx, cancel := f.storeOpCtx()
+	ctx, cancel := f.switchStoreOpCtx(switchCtx)
 	defer cancel()
 	state, err := f.projStore.LoadUIState(ctx, projectID)
 	if err != nil {
@@ -1026,7 +1084,7 @@ func (f *FrontendAPI) applySavedProjectSwitchState(projectID string) {
 		normalized = project.ProjectUIState{ProjectID: strings.TrimSpace(projectID)}
 	}
 
-	resolvedSessionID, changed, err := f.resolveSessionFallback(projectID, normalized.SavedSessionID)
+	resolvedSessionID, changed, err := f.resolveSessionFallback(switchCtx, projectID, normalized.SavedSessionID)
 	if err != nil {
 		// Persist nothing on a resolution error: falling back to the latest
 		// session after a transient store failure would overwrite a valid
@@ -1045,8 +1103,8 @@ func (f *FrontendAPI) applySavedProjectSwitchState(projectID string) {
 	}
 }
 
-func (f *FrontendAPI) resolveSessionFallback(projectID, savedSessionID string) (resolvedID string, changed bool, err error) {
-	resolvedSaved, err := f.resolveSavedSessionForProject(projectID, savedSessionID)
+func (f *FrontendAPI) resolveSessionFallback(switchCtx context.Context, projectID, savedSessionID string) (resolvedID string, changed bool, err error) {
+	resolvedSaved, err := f.resolveSavedSessionForProject(switchCtx, projectID, savedSessionID)
 	if err != nil {
 		return "", false, err
 	}
@@ -1054,12 +1112,12 @@ func (f *FrontendAPI) resolveSessionFallback(projectID, savedSessionID string) (
 		return resolvedSaved, strings.TrimSpace(savedSessionID) != resolvedSaved, nil
 	}
 
-	latest := f.resolveLatestSessionForProject(projectID)
+	latest := f.resolveLatestSessionForProject(switchCtx, projectID)
 	if latest != "" {
 		return latest, strings.TrimSpace(savedSessionID) != latest, nil
 	}
 
-	created := f.createSessionForProject(projectID)
+	created := f.createSessionForProject(switchCtx, projectID)
 	if created != "" {
 		return created, strings.TrimSpace(savedSessionID) != created, nil
 	}
@@ -1072,7 +1130,7 @@ func (f *FrontendAPI) resolveSessionFallback(projectID, savedSessionID string) (
 // SessionInfo.LastActiveAt: the newest persisted session event (chat message
 // or terminal command), falling back to the stored last_active_at, then to
 // created_at.
-func (f *FrontendAPI) resolveLatestSessionForProject(projectID string) string {
+func (f *FrontendAPI) resolveLatestSessionForProject(switchCtx context.Context, projectID string) string {
 	if strings.TrimSpace(projectID) == "" {
 		return ""
 	}
@@ -1080,7 +1138,11 @@ func (f *FrontendAPI) resolveLatestSessionForProject(projectID string) string {
 		return ""
 	}
 
-	sessions, err := f.app.Manager().ListSessionsByProject(projectID)
+	sessions, err := func() ([]session.SessionInfo, error) {
+		opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+		defer cancel()
+		return f.app.Manager().ListSessionsByProjectCtx(opCtx, projectID)
+	}()
 	if err != nil {
 		f.log().Warn("failed to list sessions for latest fallback resolution", "project", projectID, "error", err)
 		return ""
@@ -1119,15 +1181,29 @@ func parseSessionActivityTimestamp(info session.SessionInfo) time.Time {
 	return time.Time{}
 }
 
-func (f *FrontendAPI) createSessionForProject(projectID string) string {
+func (f *FrontendAPI) createSessionForProject(switchCtx context.Context, projectID string) string {
 	if strings.TrimSpace(projectID) == "" {
 		return ""
 	}
 	if f.projectManager == nil || f.appCell() == nil || f.app.Manager() == nil {
 		return ""
 	}
+	if err := switchCtx.Err(); err != nil {
+		// The switch-section deadline is spent; skip the fallback creation —
+		// CreateSession builds a full orchestrator (MCP gateway, skill scans)
+		// with no internal deadline, so starting it here could hold switchMu
+		// far past switchSectionTimeout. The frontend falls back to its own
+		// default session selection instead.
+		f.log().Warn("switch section deadline spent; skipping fallback session creation",
+			"project", projectID, "error", err)
+		return ""
+	}
 
-	proj, err := f.projectManager.GetProject(projectID)
+	proj, err := func() (*project.ProjectInfo, error) {
+		opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+		defer cancel()
+		return f.projectManager.GetProjectCtx(opCtx, projectID)
+	}()
 	if err != nil {
 		f.log().Warn("failed to load project for session creation fallback", "project", projectID, "error", err)
 		return ""
@@ -1146,7 +1222,7 @@ func (f *FrontendAPI) createSessionForProject(projectID string) string {
 	}
 
 	if f.store != nil {
-		ctx, cancel := f.storeOpCtx()
+		ctx, cancel := f.switchStoreOpCtx(switchCtx)
 		if err := f.store.SaveSession(ctx, *created); err != nil {
 			f.log().Warn("failed to persist fallback session", "project", projectID, "session_id", created.ID, "error", err)
 		}
@@ -1160,11 +1236,15 @@ func (f *FrontendAPI) createSessionForProject(projectID string) string {
 // recently active session for the No Project, or an empty string if no
 // session exists yet. Used to scope the file watcher to the session-specific
 // directory instead of the shared __no_project__/ base.
-func (f *FrontendAPI) resolveNoProjectSessionWorkspace() string {
+func (f *FrontendAPI) resolveNoProjectSessionWorkspace(switchCtx context.Context) string {
 	if f.appCell() == nil || f.app.Manager() == nil {
 		return ""
 	}
-	sessions, err := f.app.Manager().ListSessionsByProject(project.NoProjectID)
+	sessions, err := func() ([]session.SessionInfo, error) {
+		opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+		defer cancel()
+		return f.app.Manager().ListSessionsByProjectCtx(opCtx, project.NoProjectID)
+	}()
 	if err != nil || len(sessions) == 0 {
 		return ""
 	}
@@ -1174,7 +1254,7 @@ func (f *FrontendAPI) resolveNoProjectSessionWorkspace() string {
 	// latter lazily restores the session (full orchestrator build + unbounded
 	// store reads) inside SwitchProject while switchMu is held, which is the
 	// hang WorkspacePathFor was introduced to avoid.
-	ctx, cancel := context.WithTimeout(context.Background(), terminalPathLookupTimeout)
+	ctx, cancel := context.WithTimeout(switchCtx, terminalPathLookupTimeout)
 	defer cancel()
 	ws, ok := f.app.Manager().WorkspacePathFor(ctx, sessions[0].ID)
 	if !ok || ws == "" {
@@ -1188,8 +1268,10 @@ func (f *FrontendAPI) resolveNoProjectSessionWorkspace() string {
 // to the project, and is not archived. A resolution ERROR is distinct from a
 // negative answer: callers must not treat a transient store failure as
 // "pointer is stale", because normalizing to empty in that case would clobber
-// a perfectly valid saved selection.
-func (f *FrontendAPI) resolveSavedSessionForProject(projectID, savedSessionID string) (string, error) {
+// a perfectly valid saved selection. switchCtx bounds the store round-trip —
+// the switch path passes the switch-section deadline, non-switch callers pass
+// context.Background() (the session manager applies its own per-op bound).
+func (f *FrontendAPI) resolveSavedSessionForProject(switchCtx context.Context, projectID, savedSessionID string) (string, error) {
 	savedSessionID = strings.TrimSpace(savedSessionID)
 	if savedSessionID == "" {
 		return "", nil
@@ -1198,7 +1280,11 @@ func (f *FrontendAPI) resolveSavedSessionForProject(projectID, savedSessionID st
 		return "", nil
 	}
 
-	sessions, err := f.app.Manager().ListSessionsByProject(projectID)
+	sessions, err := func() ([]session.SessionInfo, error) {
+		opCtx, cancel := f.switchStoreOpCtx(switchCtx)
+		defer cancel()
+		return f.app.Manager().ListSessionsByProjectCtx(opCtx, projectID)
+	}()
 	if err != nil {
 		return "", fmt.Errorf("failed to list sessions for saved session resolution: %w", err)
 	}

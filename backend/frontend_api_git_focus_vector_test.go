@@ -9,6 +9,7 @@ package backend
 // init is awaited with bounded watchdogs and channel receives, never sleeps.
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -29,7 +30,7 @@ func TestSetGitPanelFocus_VectorStatusFollowsFocus(t *testing.T) {
 	if err := h.api.SetGitPanelFocus(treeB); err != nil {
 		t.Fatalf("SetGitPanelFocus(treeB): %v", err)
 	}
-	mgrB, err := h.roots.FocusManager()
+	mgrB, err := h.roots.FocusManager(context.Background())
 	if err != nil {
 		t.Fatalf("focus manager after focusing tree B: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestSetGitPanelFocus_VectorStatusFollowsFocus(t *testing.T) {
 	if err := h.api.SetGitPanelFocus(""); err != nil {
 		t.Fatalf("SetGitPanelFocus reset: %v", err)
 	}
-	mgrCheckout, err := h.roots.FocusManager()
+	mgrCheckout, err := h.roots.FocusManager(context.Background())
 	if err != nil {
 		t.Fatalf("focus manager after reset: %v", err)
 	}

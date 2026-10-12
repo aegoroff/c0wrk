@@ -18,9 +18,11 @@ import { getBranches } from '@/api/git'
 import { useBranchActions } from '@/hooks/useBranchActions'
 import type { BranchActionKind } from '@/hooks/useBranchActions'
 import { focusWorktree } from '@/lib/gitFocus'
+import { useWorktreeActions } from '@/hooks/useWorktreeActions'
 import { LocalBranchRow } from './LocalBranchRow'
 import { RemoteBranchRow } from './RemoteBranchRow'
 import { BranchDeleteConfirmDialog } from './BranchDeleteConfirmDialog'
+import { WorktreeDeleteConfirmDialog } from './WorktreeDeleteConfirmDialog'
 import { NewBranchSection } from './NewBranchSection'
 import { WorktreesSection } from './WorktreesSection'
 
@@ -43,7 +45,12 @@ import { WorktreesSection } from './WorktreesSection'
  * - A "Worktrees" section switches the Git panel's FOCUS between every
  *   worktree of the project (local checkout, managed session trees with their
  *   owning session, external trees) — a focus switch via SetGitPanelFocus,
- *   never a checkout, so it never touches the operation console.
+ *   never a checkout, so it never touches the operation console. The linked
+ *   trees (managed + external) also expose a hover delete that runs through
+ *   the mandatory {@link WorktreeDeleteConfirmDialog}; the section is shown
+ *   in draft mode too, so an existing worktree can be deleted without
+ *   leaving the chat-side draft picker (the deletion never touches the
+ *   draft).
  */
 export function BranchPicker() {
   const isOpen = useGitPanelStore((s) => s.isBranchPickerOpen)
@@ -57,6 +64,7 @@ export function BranchPicker() {
   const worktrees = useGitPanelStore((s) => s.worktrees)
 
   const actions = useBranchActions()
+  const worktreeActions = useWorktreeActions()
   // Destructure the stable operation callbacks so the checkout handlers below
   // can list them (rather than the recreated `actions` object) as useCallback
   // dependencies, keeping `react-hooks/exhaustive-deps` satisfied.
@@ -305,11 +313,13 @@ export function BranchPicker() {
 
         {/* Worktrees — switch the Git panel's FOCUS between every worktree of
             the project (local checkout, managed session trees, external
-            trees). Selecting one closes the picker: the focus switch is not
-            a checkout, so there is no operation console outcome to read.
-            Hidden in draft mode: the draft picks a BRANCH for a new
-            session's worktree; focus switching is a different intent. */}
-        {!isDraftMode && worktrees.length > 0 && (
+            trees) and expose deletion of the linked trees. Selecting one
+            closes the picker: the focus switch is not a checkout, so there
+            is no operation console outcome to read. Shown in draft mode too:
+            the draft picks a BRANCH, but the user must still be able to
+            delete an existing worktree (e.g. a stale managed tree) from the
+            same dialog — the deletion never touches the draft. */}
+        {worktrees.length > 0 && (
           <div className="shrink-0 border-t border-border px-2 pb-2 pt-1">
             <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               Worktrees
@@ -320,6 +330,8 @@ export function BranchPicker() {
                 void focusWorktree(w.path)
                 closeBranchPicker()
               }}
+              onDelete={worktreeActions.requestDelete}
+              deleteBusyPath={worktreeActions.busyPath}
             />
           </div>
         )}
@@ -352,6 +364,13 @@ export function BranchPicker() {
         pending={actions.pendingDelete}
         onConfirm={actions.confirmDelete}
         onCancel={actions.cancelDelete}
+      />
+
+      <WorktreeDeleteConfirmDialog
+        pending={worktreeActions.pendingDelete}
+        error={worktreeActions.deleteError}
+        onConfirm={worktreeActions.confirmDelete}
+        onCancel={worktreeActions.cancelDelete}
       />
     </Dialog>
   )

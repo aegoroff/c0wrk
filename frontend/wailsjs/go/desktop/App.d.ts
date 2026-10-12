@@ -60,6 +60,8 @@ export function ConfirmGoal(arg1:string,arg2:string,arg3:string,arg4:string,arg5
 
 export function CreateBranch(arg1:string,arg2:string):Promise<void>;
 
+export function CreateBranchInWorktree(arg1:string,arg2:string):Promise<void>;
+
 export function CreateHypothesis(arg1:string,arg2:backend.NewHypothesisCard):Promise<backend.ResearchGraphDTO>;
 
 export function CreateManagedSession(arg1:string,arg2:boolean,arg3:string):Promise<session.SessionInfo>;
@@ -97,6 +99,8 @@ export function DeleteTag(arg1:string):Promise<void>;
 export function DeleteTheme(arg1:string):Promise<void>;
 
 export function DeleteWorkDirectory(arg1:string,arg2:string,arg3:string):Promise<void>;
+
+export function DeleteWorktree(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
 
 export function DiscardChanges(arg1:string):Promise<void>;
 

@@ -114,6 +114,18 @@ func (f *FrontendAPI) runGitIgnoredPaths(repoRoot string) (map[string]bool, erro
 	return workspace.GitIgnoredPaths(ctx, repoRoot)
 }
 
+// gitCacheKey normalizes a repo-root cache key to the canonical (symlink-
+// resolved) form, failing soft to the cleaned input (see
+// canonicalWorktreeRoot): the population and invalidation sites hand in
+// different forms on a legacy registration row — GetGitStatus keys off the
+// raw stored project path its caller passed, while the mutating git RPCs
+// emit the focus root gitFocusRoots resolved — and a plain string key would
+// strand an entry the invalidation can never reach (a stale snapshot until
+// the TTL lapses).
+func gitCacheKey(repoRoot string) string {
+	return canonicalWorktreeRoot(filepath.Clean(repoRoot))
+}
+
 // cachedGitStatus returns the git status for repoRoot, reusing a snapshot
 // computed within gitStatusCacheTTL. Errors are not cached so a transient git
 // failure is retried on the next call. The returned map is always a shallow
@@ -125,9 +137,10 @@ func (f *FrontendAPI) cachedGitStatus(repoRoot string) (map[string]GitStatusEntr
 		return nil, errors.New("empty repo root")
 	}
 	now := time.Now()
+	key := gitCacheKey(repoRoot)
 
 	f.gitStatusCacheMu.Lock()
-	if e, ok := f.gitStatusCache[repoRoot]; ok && now.Before(e.expiry) {
+	if e, ok := f.gitStatusCache[key]; ok && now.Before(e.expiry) {
 		status := e.status
 		f.gitStatusCacheMu.Unlock()
 		return maps.Clone(status), nil
@@ -146,7 +159,7 @@ func (f *FrontendAPI) cachedGitStatus(repoRoot string) (map[string]GitStatusEntr
 	if f.gitStatusCache == nil {
 		f.gitStatusCache = make(map[string]gitStatusCacheEntry)
 	}
-	f.gitStatusCache[repoRoot] = gitStatusCacheEntry{status: status, expiry: now.Add(gitStatusCacheTTL)}
+	f.gitStatusCache[key] = gitStatusCacheEntry{status: status, expiry: now.Add(gitStatusCacheTTL)}
 	f.gitStatusCacheMu.Unlock()
 
 	return maps.Clone(status), nil
@@ -162,9 +175,10 @@ func (f *FrontendAPI) cachedGitIgnoredPaths(repoRoot string) (map[string]bool, e
 		return nil, errors.New("empty repo root")
 	}
 	now := time.Now()
+	key := gitCacheKey(repoRoot)
 
 	f.gitIgnoredCacheMu.Lock()
-	if e, ok := f.gitIgnoredCache[repoRoot]; ok && now.Before(e.expiry) {
+	if e, ok := f.gitIgnoredCache[key]; ok && now.Before(e.expiry) {
 		ignored := e.ignored
 		f.gitIgnoredCacheMu.Unlock()
 		return maps.Clone(ignored), nil
@@ -183,7 +197,7 @@ func (f *FrontendAPI) cachedGitIgnoredPaths(repoRoot string) (map[string]bool, e
 	if f.gitIgnoredCache == nil {
 		f.gitIgnoredCache = make(map[string]gitIgnoredCacheEntry)
 	}
-	f.gitIgnoredCache[repoRoot] = gitIgnoredCacheEntry{ignored: ignored, expiry: now.Add(gitIgnoredCacheTTL)}
+	f.gitIgnoredCache[key] = gitIgnoredCacheEntry{ignored: ignored, expiry: now.Add(gitIgnoredCacheTTL)}
 	f.gitIgnoredCacheMu.Unlock()
 
 	return maps.Clone(ignored), nil
@@ -204,7 +218,7 @@ func (f *FrontendAPI) invalidateGitStatusCache(repoRoot string) {
 		return
 	}
 	f.gitStatusCacheMu.Lock()
-	delete(f.gitStatusCache, repoRoot)
+	delete(f.gitStatusCache, gitCacheKey(repoRoot))
 	f.gitStatusCacheMu.Unlock()
 }
 
@@ -215,7 +229,7 @@ func (f *FrontendAPI) invalidateGitIgnoredCache(repoRoot string) {
 		return
 	}
 	f.gitIgnoredCacheMu.Lock()
-	delete(f.gitIgnoredCache, repoRoot)
+	delete(f.gitIgnoredCache, gitCacheKey(repoRoot))
 	f.gitIgnoredCacheMu.Unlock()
 }
 

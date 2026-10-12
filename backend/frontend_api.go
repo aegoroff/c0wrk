@@ -218,7 +218,7 @@ type FrontendAPI struct {
 	// switchProjectSetupVector from SwitchProject. Test-only seam (nil in
 	// production) letting a test drive the fallible pre-watcher step to
 	// verify the switch stays atomic when it fails.
-	switchProjectSetupVectorFn func(*project.ProjectInfo) error
+	switchProjectSetupVectorFn func(ctx context.Context, p *project.ProjectInfo) error
 
 	// Active research root path (empty for the No Project pseudo-project).
 	// Guarded by activeProjectMu so it stays in sync with project switches.
@@ -742,6 +742,42 @@ func (f *FrontendAPI) EmitSessionEvent(evt session.Event) {
 // FrontendAPI.switchLockTimeoutOverride.
 const switchLockTimeout = 5 * time.Second
 
+// switchSectionTimeout bounds how long a switch may HOLD switchMu once
+// acquired. Per-operation store deadlines (storeOpTimeout,
+// sessionStoreOpTimeout, restoreDBReadTimeout, terminalPathLookupTimeout) cap
+// each round-trip separately, but the switch's critical section performs a
+// SEQUENCE of them whose failures are deliberately soft (best-effort
+// persistence warns and continues), so on a saturated machine — a worktree
+// full reindex saturating disk I/O while every store op queues behind the
+// shared SQLite pool — the holds stack up to minutes even though no single
+// step is unbounded. Every store round-trip in the critical section is
+// derived from one ctx carrying this deadline (see SwitchProject and
+// switchStoreOpCtx; the vector leg's root-resolution listing rides the same
+// ctx via switchProjectSetupVector → ApplyFocus → resolveRootPlan →
+// ListProjectsCtx), so no store read can outlive the section. Two known
+// waits inside the section are deliberately NOT derived from it:
+//   - createSessionForProject pre-checks the deadline (switchCtx.Err) and
+//     then runs the deadline-less full orchestrator build — a build that
+//     started with budget left still runs to completion and can hold
+//     switchMu past this timeout;
+//   - the vector leg's ManagerForRoot can wait out an in-flight eviction
+//     drain for up to vectorRootsEvictWait (25s, time-bounded).
+//
+// Overruns still surface: a hold at or above switchHeldWarnThreshold logs a
+// WARN with the total, which keeps the section observable exactly where the
+// deadline does not reach. This is what lets a wedged switch fail fast
+// enough for the NEXT switch's 5s acquireSwitchLock to recover the UI
+// instead of compounding into "Another project switch is still finishing"
+// loops.
+const switchSectionTimeout = 30 * time.Second
+
+// switchHeldWarnThreshold is the hold duration at or above which SwitchProject
+// logs a WARN after releasing switchMu. It names switches that ate a
+// significant slice of the acquisition budget while staying under
+// switchSectionTimeout — the observable precursor of the busy-loop failure
+// mode above.
+const switchHeldWarnThreshold = 3 * time.Second
+
 const gitRepoCacheTTL = 30 * time.Second
 
 const gitRepoCacheMaxSize = 100
@@ -1017,7 +1053,7 @@ func (l *FrontendAPILifecycle) InitVectorIndexForActiveProject() {
 		return
 	}
 
-	if err := f.switchProjectSetupVector(p); err != nil {
+	if err := f.switchProjectSetupVector(context.Background(), p); err != nil {
 		f.log().Warn("deferred vector index setup failed", "project", p.ID, "error", err)
 	}
 }

@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -255,7 +256,7 @@ func TestSwitchProjectSetupWatcher_NoProject_NoSession_DeferCreation(t *testing.
 		WorkspacePath: filepath.Join(t.TempDir(), "does-not-exist"),
 	}
 
-	f.switchProjectSetupWatcher(p)
+	f.switchProjectSetupWatcher(context.Background(), p)
 	if f.watcher != nil {
 		t.Fatal("expected watcher to be nil when no session workspace can be determined")
 	}

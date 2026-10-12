@@ -68,6 +68,14 @@ export function ChangesList({ onToggleFile, onOpenDiff }: ChangesListProps) {
     return s.projects.find((p) => p.id === activeProjectId)?.workspace_path ?? ''
   })
 
+  // The display root mirrors the backend's status keying: every entry path is
+  // absolute under the resolved focus worktree root (`resolveGitRepoRoot`), so
+  // display paths are stripped against THAT root. Only when no focus has been
+  // resolved yet does the project workspace path stand in (the backend's
+  // default focus for a local session IS the checkout).
+  const focusPath = useGitPanelStore((s) => (s.focus ? s.focus.path : null))
+  const displayRoot = focusPath || workspaceRoot
+
   // Split entries into the 3 structural sections along their porcelain axis
   // (see `classifyEntries`) and sort each section by the selected criterion.
   // The split is by-axis, not exclusive: a path modified on both axes (`MM`)
@@ -116,7 +124,7 @@ export function ChangesList({ onToggleFile, onOpenDiff }: ChangesListProps) {
       {viewMode === 'flat' ? (
         <SortGroupControls />
       ) : (
-        <TreeExpandControls workspaceRoot={workspaceRoot} />
+        <TreeExpandControls displayRoot={displayRoot} />
       )}
 
       {isLoading && entries.length === 0 ? (
@@ -146,7 +154,7 @@ export function ChangesList({ onToggleFile, onOpenDiff }: ChangesListProps) {
               viewMode={viewMode}
               sortBy={sortBy}
               groupBy={groupBy}
-              workspaceRoot={workspaceRoot}
+              displayRoot={displayRoot}
               expandedDirs={expandedDirs}
               onToggleExpandedDir={toggleExpandedDir}
               onToggleFile={onToggleFile}

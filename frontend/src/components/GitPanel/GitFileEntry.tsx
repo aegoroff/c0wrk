@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { File, Check, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { GitFileContextMenu } from './GitFileContextMenu'
-import { isMergeConflict, isUntracked, rowStatusChar } from '@/lib/gitStatus'
+import { isMergeConflict, isUntracked, rowStatusChar, stripRootPrefix } from '@/lib/gitStatus'
 import type { StageSide, StageToggleHandler } from '@/lib/gitStatus'
 import type { GitPanelEntry } from '@/stores/gitPanelStore'
 
@@ -19,8 +19,13 @@ interface GitFileEntryProps {
    * state, the toggle action, and the status badge character.
    */
   side: StageSide
-  /** Optional workspace root path — when provided, strips it for display rendering */
-  workspaceRoot?: string
+  /**
+   * Root the row's display path is relative to — the resolved Git-panel focus
+   * root, else the project workspace root. Paths under it are stripped at a
+   * segment boundary for DISPLAY only; every callback still receives the
+   * absolute `entry.path`.
+   */
+  displayRoot?: string
   /**
    * Display order inside the truncating span. 'name-first' (default — flat
    * mode) renders the basename, then the muted directory: the ellipsis
@@ -74,7 +79,7 @@ function splitPathParts(filePath: string): { dir: string; name: string } {
 
 // --- Component ---
 
-export function GitFileEntry({ entry, side, workspaceRoot, pathDisplay = 'name-first', onToggle, onOpenDiff }: GitFileEntryProps) {
+export function GitFileEntry({ entry, side, displayRoot, pathDisplay = 'name-first', onToggle, onOpenDiff }: GitFileEntryProps) {
   const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null)
 
   // The checkbox is server-derived (an index row is staged, a worktree row is
@@ -176,13 +181,12 @@ export function GitFileEntry({ entry, side, workspaceRoot, pathDisplay = 'name-f
 
   const closeContextMenu = useCallback(() => setContextMenuPos(null), [])
 
-  // Strip workspace root prefix from the absolute path for display.
-  // Match only at a path-separator boundary to avoid a sibling directory
-  // sharing the same prefix (e.g. "/repo" vs "/repo-extra").
-  const displayPath =
-    workspaceRoot && (entry.path === workspaceRoot || entry.path.startsWith(workspaceRoot + '/'))
-      ? entry.path.slice(workspaceRoot.length).replace(/^\//, '')
-      : entry.path
+  // Strip the display root (focus worktree, else the project workspace) from
+  // the absolute path for display. The strip matches only at a path-segment
+  // boundary (see `stripRootPrefix`) so a sibling directory sharing the same
+  // prefix (e.g. "/repo" vs "/repo-extra") is never stripped. Callbacks keep
+  // the absolute path.
+  const displayPath = stripRootPrefix(entry.path, displayRoot ?? '')
 
   const { dir, name } = splitPathParts(displayPath)
   // Untracked paths carry no per-axis change code (worktreeStatus '?'); git
@@ -265,7 +269,7 @@ export function GitFileEntry({ entry, side, workspaceRoot, pathDisplay = 'name-f
     <GitFileContextMenu
       entry={entry}
       side={side}
-      workspaceRoot={workspaceRoot}
+      displayRoot={displayRoot}
       position={contextMenuPos}
       onClose={closeContextMenu}
     />

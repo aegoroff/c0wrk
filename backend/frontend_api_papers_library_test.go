@@ -723,7 +723,7 @@ func TestSwitchProjectSetupWatcher_WatchesHybridLibrary(t *testing.T) {
 		f.watcherMu.Unlock()
 	})
 
-	f.switchProjectSetupWatcher(p)
+	f.switchProjectSetupWatcher(context.Background(), p)
 	f.watcherMu.Lock()
 	created := f.watcher != nil
 	f.watcherMu.Unlock()

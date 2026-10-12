@@ -28,6 +28,35 @@ export function toEntries(
   }))
 }
 
+// --- Display-path stripping ---
+//
+// The backend keys every git status entry onto the resolved focus worktree
+// root (`resolveGitRepoRoot` → `resolveGitFocusRoot`), so an entry path is
+// absolute under the FOCUS root — which for a managed session tree is a
+// `.worktrees/<name>` directory nested inside the project checkout. Display
+// paths must therefore be stripped against the focus root (falling back to
+// the project workspace root only when no focus is resolved) — stripping by
+// the workspace path would leave a `.worktrees/<name>/` prefix on every row.
+
+/**
+ * Strip the `root` prefix from `path` for display purposes, matching only at
+ * a path-segment boundary so a sibling directory sharing the same prefix
+ * (e.g. "/repo" vs "/repo-extra") is never stripped. An empty or non-matching
+ * root returns `path` unchanged; a match returns the remainder without the
+ * leading separator (possibly the empty string when `path === root`).
+ *
+ * Single source of truth for the segment-boundary strip: GitFileEntry's
+ * display path, buildTree/collectAllDirPaths's tree keys, FlatSection's
+ * directory-group labels, and GitFileContextMenu's .gitignore patterns and
+ * operation labels all share this semantics.
+ */
+export function stripRootPrefix(path: string, root: string): string {
+  if (root !== '' && (path === root || path.startsWith(root + '/'))) {
+    return path.slice(root.length).replace(/^\//, '')
+  }
+  return path
+}
+
 // --- Two-axis porcelain classification ---
 //
 // `git status --porcelain` v1 reports every tracked path as a two-character

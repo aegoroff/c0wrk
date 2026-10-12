@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -205,7 +206,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	p := h.proj
 
 	// No saved session: checkout defaults.
-	got := h.api.resolveVectorIndexTarget(p)
+	got := h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath || got.storagePath != config.ProjectVectorIndexPath(h.agentDir, p.ID) {
 		t.Fatalf("default target = %+v; want checkout + project storage", got)
 	}
@@ -213,7 +214,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	tree := h.addManagedWorktree(t, "s-1", "topic")
 	h.saveManagedSession(t, "sess-managed", "s-1", "topic", tree)
 
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	wantStorage, err := config.WorktreeVectorIndexPath(h.agentDir, p.ID, "s-1")
 	if err != nil {
 		t.Fatalf("worktree vector path: %v", err)
@@ -227,7 +228,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 
 	// A local saved session keeps the defaults.
 	h.saveLocalSession(t, "sess-local")
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath {
 		t.Errorf("local-session target workspace = %q, want checkout", got.workspacePath)
 	}
@@ -373,7 +374,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrB, "focus-beta")
 
 	// Focus B: the status RPC reports B's branch...
-	if err := h.roots.ApplyFocus(canonicalRoot(treeB)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeB)); err != nil {
 		t.Fatalf("focus tree B: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-beta" {
@@ -383,7 +384,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrA, "focus-alpha")
 
 	// Focus back to A: the visible identity flips, B's manager survives.
-	if err := h.roots.ApplyFocus(canonicalRoot(treeA)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeA)); err != nil {
 		t.Fatalf("focus tree A: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-alpha" {
@@ -511,6 +512,61 @@ func TestDeleteProject_RemovesWorktreeVectorIndexes(t *testing.T) {
 		if _, statErr := os.Stat(storage); !os.IsNotExist(statErr) {
 			t.Errorf("worktree %s vector storage still present after project delete (err=%v)", name, statErr)
 		}
+	}
+}
+
+// TestDeleteWorktreeVectorIndex_ReleasesLegacyRawKeyedManager pins the
+// dual-form release: on a legacy registration row (the stored root keeps a
+// symlinked ancestor), AGENT routing keys the tree's live manager under the
+// raw stored spelling of the tree path (the session's WorkspacePath
+// re-derives from the stored row; canonicalRoot does not resolve symlinks),
+// while the deletion flows derive the release key from the canonical root —
+// the delete must shut down both keys.
+func TestDeleteWorktreeVectorIndex_ReleasesLegacyRawKeyedManager(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks on Windows require elevated privileges; the scenario cannot be modeled here")
+	}
+	h := newVectorWorktreeHarness(t)
+
+	alias := filepath.Join(gittest.TempDir(t), "repo-alias")
+	if err := os.Symlink(h.proj.WorkspacePath, alias); err != nil {
+		t.Fatalf("create repo symlink alias: %v", err)
+	}
+	// Model the legacy registration: the project row (and with it the
+	// cached active project path) keeps the raw alias form.
+	legacy := *h.proj
+	legacy.WorkspacePath = alias
+	if err := h.api.projStore.SaveProject(context.Background(), legacy); err != nil {
+		t.Fatalf("rewrite the project row to the legacy raw form: %v", err)
+	}
+	h.api.activeProjectMu.Lock()
+	h.api.activeProjectPath = alias
+	h.api.activeProjectMu.Unlock()
+
+	// A managed tree (provisioned through the canonical root, as the
+	// provisioning seams do) plus a session whose binding spells the tree
+	// through the raw row — the legacy load path re-derives bindings from
+	// the stored root.
+	const treeName, branch = "s-legacy", "feature-legacy"
+	h.addManagedWorktree(t, treeName, branch)
+	rawTree := filepath.Join(config.ManagedWorktreesDir(alias), treeName)
+	h.saveManagedSession(t, "sess-legacy", treeName, branch, rawTree)
+
+	// AGENT routing keys a live manager under the raw spelling.
+	ctx := sdktools.WithWorkspacePathNoProbe(context.Background(), rawTree)
+	if _, err := h.roots.ManagerForContext(ctx); err != nil {
+		t.Fatalf("manager for the raw tree path: %v", err)
+	}
+	if h.roots.LiveManager(rawTree) == nil {
+		t.Fatal("manager not live under the raw key before the delete")
+	}
+
+	// The deletion flow derives the release key from the canonical root
+	// (what DeleteWorktree and the session-release flow pass): the
+	// legacy-keyed manager must be released too.
+	h.api.deleteWorktreeVectorIndex(h.proj.WorkspacePath, h.proj.ID, treeName)
+	if h.roots.LiveManager(rawTree) != nil {
+		t.Fatal("legacy raw-keyed manager still live after the delete")
 	}
 }
 
