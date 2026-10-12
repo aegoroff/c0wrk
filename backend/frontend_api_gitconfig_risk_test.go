@@ -9,6 +9,7 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/core/gittrust"
+	"github.com/v0lka/c0wrk/internal/gittest"
 )
 
 // writeGitConfig creates dir/.git/config with the given content. The scan is
@@ -795,6 +796,42 @@ func TestSwitchProject_AlreadyActiveStillScansGitConfigRisk(t *testing.T) {
 }
 
 // --- Trust snapshot + fingerprint recheck (step_3 RPC) ---
+
+// TestTrustGitRepo_WorktreePathStoresRepositoryRoot pins the trust-key
+// normalization for linked worktrees: trusting from a worktree path — the
+// form the Commit-withheld dialog's Trust action passes (the project
+// workspace) — records the repository's MAIN work-tree root, not the
+// worktree, so a decision made from any path inside the repository covers
+// the whole repository and the commit gate (which keys a worktree commit on
+// the same root) agrees with what was stored. Before the unification this
+// was the reported no-op Trust loop: the root was already trusted, the
+// worktree commit keyed on the worktree path, and the trust RPC re-trusted
+// the already-covered root without effect.
+func TestTrustGitRepo_WorktreePathStoresRepositoryRoot(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root := filepath.Join(t.TempDir(), "repo")
+	repo := gittest.InitRepo(t, root, "hello\n")
+	wt := filepath.Join(t.TempDir(), "wt")
+	repo.Git(t, "worktree", "add", wt, "-b", "wtbranch")
+
+	f, _, _ := newTestAPI(t)
+	if err := f.TrustGitRepo(wt); err != nil {
+		t.Fatalf("TrustGitRepo(worktree): %v", err)
+	}
+	got := f.GetTrustedGitRepos()
+	if len(got) != 1 || got[0] != repo.Root {
+		t.Fatalf("GetTrustedGitRepos = %v, want exactly [%s] (the main work-tree root)", got, repo.Root)
+	}
+	// The gate must agree for a commit in the worktree.
+	if !f.gitRepoTrusted(wt) {
+		t.Fatal("gitRepoTrusted(worktree) = false — the gate must honor repository-root trust from the worktree")
+	}
+	if !f.gitRepoTrusted(repo.Root) {
+		t.Fatal("gitRepoTrusted(main root) = false — the entry IS the main root")
+	}
+}
 
 // TestTrustGitRepo_StoresFingerprintAndSnapshot pins acceptance (1): trusting
 // a repo records the work-tree root plus a non-empty fingerprint of the

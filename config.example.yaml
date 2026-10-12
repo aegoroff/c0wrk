@@ -938,8 +938,11 @@ security:
   # Repositories whose "untrusted git configuration" intake warning has been
   # dismissed via the toast's "Trust this repo" action (also manageable from
   # Settings → Security → Trusted repos). Each entry is a mapping with an
-  # absolute repository-root `path` (matching is exact, after cleaning) and
-  # the fingerprints of the git-config snapshot captured when the repository
+  # absolute repository-root `path` (matching is exact, after cleaning — the
+  # repository's main work-tree root: trusting any path inside a repository,
+  # a subdirectory or a linked worktree included, covers the whole
+  # repository) and the fingerprints of the git-config snapshot captured when
+  # the repository
   # was trusted (snapshots live under ~/.c0wrk/git-config-snapshots/):
   # `fingerprint` hashes the snapshot bytes, `semantic_fingerprint` hashes
   # their dangerous semantic content — what the trust lifecycle keys on. On a

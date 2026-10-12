@@ -2052,6 +2052,113 @@ func ResolveWorkTreeRoot(path string) string {
 	}
 }
 
+// ResolveGitTrustRoot returns the path form the git TRUST decision keys on
+// for path: the repository's MAIN work-tree root. For a plain repository
+// (or a workspace at a subdirectory of one) it is identical to
+// ResolveWorkTreeRoot. For a LINKED worktree — where .git is a "gitdir:"
+// pointer file — it resolves the shared git directory through the pointer
+// chain (.git file → worktree gitdir → commondir file) and returns the main
+// work-tree root the common dir lives under: the commit surface a trust
+// decision covers (the commit-family hooks in <commonDir>/hooks, the common
+// config, the signing keys) is shared by every worktree of the repository,
+// so the decision must key on the root those programs come from, not on the
+// worktree the commit happened to run in. Without this unification a
+// trusted repository's worktree stays untrusted: the commit gate detects
+// the shared hook, the dialog offers trust for the repository root, and
+// trusting it is an idempotent no-op — the "Trust this repo & commit"
+// button loops forever (the subdirectory twin of this bug is why
+// ResolveWorkTreeRoot exists, review [52]).
+//
+// The resolution stays LEXICAL like ResolveWorkTreeRoot — the stored and
+// displayed root remains in the path form the user knows — and every hop
+// DEGRADES to the ResolveWorkTreeRoot form (the original keying) when the
+// pointer chain cannot be resolved: a malformed .git pointer, a missing or
+// unreadable commondir, or a common dir not laid out as <mainRoot>/.git
+// (e.g. worktrees of a bare repository) keep keying trust on the worktree
+// root exactly as before. Nothing widens trust on an unresolvable chain;
+// it only stops being attributed to a path the commit surface does not
+// come from. Returns "" when no .git exists anywhere on the chain.
+func ResolveGitTrustRoot(path string) string {
+	root := ResolveWorkTreeRoot(path)
+	if root == "" {
+		return ""
+	}
+	gitDir, err := resolveGitDirAt(root)
+	if err != nil || gitDir == "" {
+		return root
+	}
+	commonDir, isWorktree, err := resolveCommonGitDir(gitDir)
+	if err != nil || !isWorktree {
+		return root
+	}
+	// Only the standard (non-bare) layout maps back to a work-tree root
+	// lexically: the common dir lives at <mainRoot>/.git. Verify the main
+	// root really carries the .git entry before returning it, so a hostile
+	// or exotic commondir can never redirect the trust key outside a
+	// repository root.
+	if filepath.Base(commonDir) != ".git" {
+		return root
+	}
+	mainRoot := filepath.Dir(commonDir)
+	if _, err := os.Lstat(filepath.Join(mainRoot, ".git")); err != nil {
+		return root
+	}
+	return mainRoot
+}
+
+// canonicalizePathBestEffort returns the symlink-resolved spelling of path,
+// or path itself when it cannot be resolved (missing, loop, unreadable
+// ancestor). Trust comparisons probe both spellings because the two sides of
+// a trust decision often derive the same repository root through different
+// routes: user-facing paths stay in their lexical (user-known) form, while a
+// linked worktree's pointer chain carries the canonical paths git wrote into
+// it (macOS resolves /var → /private/var the same way).
+func canonicalizePathBestEffort(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// TrustProbePaths returns every path form a trust decision for path may be
+// stored or checked under: the exact cleaned path, its canonical spelling,
+// the repository trust root (ResolveGitTrustRoot), the legacy work-tree root
+// (ResolveWorkTreeRoot), and the canonical spelling of both roots — deduped,
+// first occurrence first. The trust list (backend's trustedGitRepoEntryFor)
+// and the process-wide spawn registry (core/gittrust via GitCmdInRepo) probe
+// ALL of them, so a trust recorded from any path form inside the repository
+// — the project checkout, a subdirectory workspace, a linked worktree, a
+// symlinked mount — honors every other form, without prefix/subtree
+// semantics ever crossing a repository boundary (every candidate is the same
+// repository's root or the probed path itself).
+func TrustProbePaths(path string) []string {
+	cleaned := filepath.Clean(path)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 6)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	add(cleaned)
+	add(canonicalizePathBestEffort(cleaned))
+	for _, resolve := range []func(string) string{ResolveGitTrustRoot, ResolveWorkTreeRoot} {
+		if root := resolve(cleaned); root != "" {
+			add(root)
+			add(canonicalizePathBestEffort(root))
+		}
+	}
+	return out
+}
+
 // readCapped reads a regular file, refusing input beyond limit bytes.
 // Regularity is enforced by safeio.Open with NO Stat→Open window (review
 // [14]): a FIFO swapped in between a stat and an open by a racing local

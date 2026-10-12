@@ -151,12 +151,23 @@ func gitCmdInRepoScanned(ctx context.Context, scan *gitScanMemo, args ...string)
 	// core/gittrust). Spawn raw git — no sysproc baseline, no per-repo
 	// NeutralizingArgv, no GIT_EDITOR pin — so the repository behaves exactly
 	// as it would outside c0wrk, hooks/filters/signing included. HideConsole
-	// is still applied by sysproc.GitCmdRaw. The comparison keys on the
-	// work-tree root git would discover from scan.path (ResolveWorkTreeRoot),
-	// the same form backend stores in the trust list, so a workspace opened at
-	// a subdirectory of a trusted repository (or reopened at its root) agrees
-	// with the stored entry.
-	if root := ResolveWorkTreeRoot(scan.path); root != "" && gittrust.IsTrusted(root) {
+	// is still applied by sysproc.GitCmdRaw. The comparison probes every
+	// trust-key form of scan.path (workspace.TrustProbePaths): the
+	// repository trust root (ResolveGitTrustRoot — the main work-tree root a
+	// linked worktree's commits share their hooks and common config with —
+	// the form backend stores), the work-tree root (the legacy
+	// pre-worktree-unification store form), the raw path itself, and the
+	// canonical spelling of each — so a workspace opened at a subdirectory
+	// of a trusted repository, at its root, or in one of its linked
+	// worktrees (symlinked mounts included) all agree with the stored entry.
+	trustedRoot := false
+	for _, root := range TrustProbePaths(scan.path) {
+		if gittrust.IsTrusted(root) {
+			trustedRoot = true
+			break
+		}
+	}
+	if trustedRoot {
 		cmd := sysproc.GitCmdRaw(ctx, args...)
 		cmd.Dir = scan.path
 		// GIT_OPTIONAL_LOCKS=0 is c0wrk's own watcher-loop prevention, not

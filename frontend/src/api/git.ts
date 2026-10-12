@@ -135,6 +135,14 @@ export interface CommitSuppression {
   hooks?: string[]
   signing_repo?: boolean
   signing_global?: boolean
+  /**
+   * The repository root the trust decision records and the commit gate
+   * checks — the main work-tree root (for a commit in a linked worktree
+   * that is the main checkout the shared hooks live in). The dialog names
+   * exactly what trusting records; falls back to the project workspace path
+   * when absent (older backends).
+   */
+  repo_root?: string
 }
 
 /** Commit RPC payload: SHA + bounded commit output, or a Suppressed description when withheld. */
@@ -151,6 +159,7 @@ function isCommitSuppression(v: unknown): v is CommitSuppression {
   if (Array.isArray(s.hooks) && !s.hooks.every((h) => typeof h === 'string')) return false
   if ('signing_repo' in s && s.signing_repo !== undefined && typeof s.signing_repo !== 'boolean') return false
   if ('signing_global' in s && s.signing_global !== undefined && typeof s.signing_global !== 'boolean') return false
+  if ('repo_root' in s && s.repo_root !== undefined && typeof s.repo_root !== 'string') return false
   return true
 }
 

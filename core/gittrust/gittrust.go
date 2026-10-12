@@ -23,49 +23,78 @@ var (
 	roots = make(map[string]struct{})
 )
 
+// spellings returns the cleaned path plus its symlink-resolved spelling
+// (when different): the two forms a trust decision may be written or probed
+// under. User-facing storage keeps the lexical form the user knows, while
+// git's own worktree pointers carry canonical paths (macOS resolves
+// /var → /private/var) — the registry treats the two as the same root so
+// both sides of the spawn-layer decision agree regardless of which form the
+// backend mirrored or the caller probes.
+func spellings(root string) []string {
+	cleaned := filepath.Clean(root)
+	out := []string{cleaned}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && resolved != cleaned {
+		out = append(out, resolved)
+	}
+	return out
+}
+
 // Trust adds root to the trusted set. Idempotent: trusting an already-trusted
-// root is a no-op. The root is canonicalized with filepath.Clean before
-// storage; callers are responsible for resolving the path to the repository's
-// work-tree root (the same normalization the trust list applies, see
-// workspace.ResolveWorkTreeRoot) so both sides of the comparison agree.
+// root is a no-op. Both spellings of root (lexical and symlink-resolved) are
+// stored so either form of a later probe matches. The root is canonicalized
+// with filepath.Clean before storage; callers are responsible for resolving
+// the path to the repository trust root (the same normalization the trust
+// list applies, see workspace.ResolveGitTrustRoot) so both sides of the
+// comparison agree.
 func Trust(root string) {
 	root = filepath.Clean(root)
 	if root == "" || root == "." || root == string(filepath.Separator) {
 		return
 	}
 	mu.Lock()
-	roots[root] = struct{}{}
+	for _, spelling := range spellings(root) {
+		roots[spelling] = struct{}{}
+	}
 	mu.Unlock()
 }
 
-// Untrust removes root from the trusted set. Idempotent: removing an absent
-// root is a no-op.
+// Untrust removes root from the trusted set (both spellings). Idempotent:
+// removing an absent root is a no-op.
 func Untrust(root string) {
-	root = filepath.Clean(root)
 	mu.Lock()
-	delete(roots, root)
+	for _, spelling := range spellings(root) {
+		delete(roots, spelling)
+	}
 	mu.Unlock()
 }
 
-// IsTrusted reports whether root is present in the trusted set.
+// IsTrusted reports whether root is present in the trusted set, matching
+// either spelling (lexical or symlink-resolved).
 func IsTrusted(root string) bool {
-	root = filepath.Clean(root)
 	mu.RLock()
-	_, ok := roots[root]
-	mu.RUnlock()
-	return ok
+	defer mu.RUnlock()
+	for _, spelling := range spellings(root) {
+		if _, ok := roots[spelling]; ok {
+			return true
+		}
+	}
+	return false
 }
 
-// Replace swaps the entire trusted set for the given roots (each
-// canonicalized with filepath.Clean). It is the backend's mirror point: after
-// loading or mutating security.trusted_git_repos, backend calls Replace with
-// the full list so the registry never drifts from config. An empty or nil
-// slice clears the set (fail-closed).
+// Replace swaps the entire trusted set for the given roots (each stored
+// under both spellings). It is the backend's mirror point: after loading or
+// mutating security.trusted_git_repos, backend calls Replace with the full
+// list so the registry never drifts from config. An empty or nil slice
+// clears the set (fail-closed).
 func Replace(trusted []string) {
-	set := make(map[string]struct{}, len(trusted))
+	set := make(map[string]struct{}, 2*len(trusted))
 	for _, r := range trusted {
-		if c := filepath.Clean(r); c != "" && c != "." && c != string(filepath.Separator) {
-			set[c] = struct{}{}
+		c := filepath.Clean(r)
+		if c == "" || c == "." || c == string(filepath.Separator) {
+			continue
+		}
+		for _, spelling := range spellings(c) {
+			set[spelling] = struct{}{}
 		}
 	}
 	mu.Lock()

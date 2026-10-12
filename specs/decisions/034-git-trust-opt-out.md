@@ -76,9 +76,12 @@ config is byte-for-byte what the user trusted.
 
 `TrustGitRepo` (`backend/frontend_api_gitconfig_risk.go`) now does two things:
 
-- **Suppresses the intake warning** for the repository's work-tree root (the
-  same `workspace.ResolveWorkTreeRoot`-normalized form the warning is
-  attributed to, so trust and attribution always agree — review [52]).
+- **Suppresses the intake warning** for the repository's trust root (the
+  `workspace.ResolveGitTrustRoot`-normalized form — the main work-tree root,
+  which a linked worktree's commits share their hooks and common config
+  with — the same form the warning is attributed to, so trust and attribution
+  always agree; review [52], extended by the worktree unification that fixed
+  the "Trust & commit" no-op loop for worktree commits).
 - **Opts the root out of spawn-layer hardening.** The root is mirrored into
   the process-wide `core/gittrust` registry (`syncGitTrustRegistry`), which
   `core/workspace` consults to decide whether a repository may spawn raw git

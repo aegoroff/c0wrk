@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -100,6 +101,61 @@ func TestGitCmdInRepoTrustedBySubdirectory(t *testing.T) {
 	}
 	if !slices.Contains(cmd.Env, "GIT_OPTIONAL_LOCKS=0") {
 		t.Errorf("trusted-subdir cmd.Env missing the GIT_OPTIONAL_LOCKS=0 pin: %q", cmd.Env)
+	}
+}
+
+// TestGitCmdInRepoTrustedByLinkedWorktree pins the worktree unification: the
+// trust decision keys on the repository trust root (ResolveGitTrustRoot —
+// the MAIN work-tree root), so a repository trusted through its main
+// checkout runs raw git from a linked worktree too. The hooks and common
+// config a worktree commit executes are shared with the main checkout;
+// keying on the worktree path instead would leave commits in a "trusted
+// repository's" worktrees hardened, with the Commit-withheld dialog's Trust
+// action looping on the already-stored root (the bug this fixes).
+func TestGitCmdInRepoTrustedByLinkedWorktree(t *testing.T) {
+	gittest.RequirePOSIXShell(t)
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	repo, wt := worktreeFixture(t)
+	// Trust recorded for the MAIN root — the form backend's TrustGitRepo
+	// stores once normalized through ResolveGitTrustRoot.
+	gittrust.Trust(repo.Root)
+
+	cmd, err := GitCmdInRepo(context.Background(), wt, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		t.Fatalf("GitCmdInRepo (trusted worktree): %v", err)
+	}
+	want := []string{"git", "rev-parse", "--is-inside-work-tree"}
+	if !slices.Equal(cmd.Args, want) {
+		t.Errorf("trusted-worktree argv = %q, want raw %q (no -c overrides)", cmd.Args, want)
+	}
+	if !slices.Contains(cmd.Env, "GIT_OPTIONAL_LOCKS=0") {
+		t.Errorf("trusted-worktree cmd.Env missing the GIT_OPTIONAL_LOCKS=0 pin: %q", cmd.Env)
+	}
+	if slices.Contains(cmd.Env, "GIT_EDITOR=true") {
+		t.Error("trusted-worktree cmd.Env must not carry the hardened GIT_EDITOR pin")
+	}
+}
+
+// TestGitCmdInRepoTrustedWorktreeLegacyEntry pins backward compatibility: an
+// entry stored under the WORKTREE root itself (the pre-unification keying,
+// written by older builds or by hand) still opts the worktree into raw git.
+func TestGitCmdInRepoTrustedWorktreeLegacyEntry(t *testing.T) {
+	gittest.RequirePOSIXShell(t)
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	_, wt := worktreeFixture(t)
+	gittrust.Trust(wt)
+
+	cmd, err := GitCmdInRepo(context.Background(), wt, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		t.Fatalf("GitCmdInRepo (legacy worktree trust): %v", err)
+	}
+	want := []string{"git", "rev-parse", "--is-inside-work-tree"}
+	if !slices.Equal(cmd.Args, want) {
+		t.Errorf("legacy-trusted-worktree argv = %q, want raw %q", cmd.Args, want)
 	}
 }
 
