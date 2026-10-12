@@ -1732,6 +1732,14 @@ func TestCreateBranchInWorktree_BranchExists(t *testing.T) {
 }
 
 func TestCreateBranchInWorktree_ReservedTreeName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The scenario needs a branch literally named "con". On Windows the
+		// Win32 reserved-name check strips extensions, so git cannot create
+		// refs/heads/con.lock ("Invalid argument") and such a branch cannot
+		// exist in the repository at all — the managed-tree slug side-step
+		// onto "con-2" is only observable on POSIX.
+		t.Skip("a branch named con cannot exist in a git repo on Windows")
+	}
 	withGitRepo(t, func(f *FrontendAPI, dir string) {
 		f.logger = slog.New(slog.DiscardHandler)
 		// "con" is a valid branch name but a reserved managed-tree
