@@ -65,13 +65,24 @@ and checks trust:
   resolves trust itself (raw git for a trusted root), so the repository's own
   hooks and signing **execute** — that is what trust means (ADR-034) — proven
   by the canary suite in `core/workspace`. The gate's own trust check keys on
-  the same form the trust store does: the WORK-TREE ROOT
-  (`workspace.ResolveWorkTreeRoot`), not the raw workspace path — a workspace
-  opened at a subdirectory of a trusted repository commits as trusted instead
-  of re-triggering the gate (where "Trust & commit" would loop forever, and
-  force would run raw git through the gate's blind side). The suppression
+  the same form the trust store does: the REPOSITORY TRUST ROOT
+  (`workspace.ResolveGitTrustRoot` — the main work-tree root; for a linked
+  worktree that is the main checkout the shared hooks live in), not the raw
+  workspace path — a workspace opened at a subdirectory of a trusted
+  repository, or a Git-panel focus on one of its linked worktrees, commits as
+  trusted instead of re-triggering the gate (where "Trust & commit" would
+  loop forever — the worktree loop was real: the dialog trusted the
+  already-stored root while the worktree commit keyed on the worktree path —
+  and force would run raw git through the gate's blind side). The one
+  exception the spawn layer keeps for itself: a worktree whose own
+  `config.worktree` overlay arms anything dangerous (a source the trust
+  snapshot never bound — see ADR-034) commits through the hardened baseline,
+  dialog-free, because a spawn-layer refusal cannot re-key the trust entry
+  and a prompt would recreate the loop; fails safe, never silent-raw. The suppression
   detection needs no resolution: it walks up to the discovered repository's
-  hooks/config itself, so its result is independent of the workspace path.
+  common-dir hooks/config itself, so its result is independent of the
+  workspace path; the Suppressed payload carries the resolved root
+  (`repo_root`) so the dialog names exactly what trusting records.
 - **Untrusted + clean (nothing armed)** → the plain hardened commit, exactly
   as before; clean repositories see no new friction.
 

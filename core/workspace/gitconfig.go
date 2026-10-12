@@ -294,6 +294,14 @@ type GitConfigInfo struct {
 	// a canonical diff-able identity for trust-time snapshots.
 	rawSources []gitConfigSource
 
+	// worktreeOverlay retains the standalone parse of the config.worktree
+	// overlay ScanGitConfig performed before merging it into this info (nil
+	// when no overlay is in play). WorktreeOverlayClean judges the overlay's
+	// own keys, includes and errors from it — the same read the merged model
+	// was built from, so the gate never re-reads the file (and the
+	// include-directive warning fires exactly once per scan).
+	worktreeOverlay *GitConfigInfo
+
 	// includeSources captures the raw bytes of every include/includeIf
 	// target resolved by ResolveIncludes, in a stable, deterministic order
 	// (directive order, depth-first). It is populated lazily — only the
@@ -435,6 +443,56 @@ func (info *GitConfigInfo) Clean() bool {
 		}
 	}
 	return len(info.Includes) == 0 && len(info.Errors) == 0
+}
+
+// WorktreeOverlayClean reports whether the per-worktree config.worktree
+// overlay — which git reads live for this worktree whenever
+// extensions.worktreeConfig is enabled in the common config — contributes
+// nothing dangerous beyond the common configuration: no include directive
+// (an unreviewed source the scanner deliberately does not follow), no parse
+// error, and no key that is a live (non-inert) finding in the merged model
+// this info carries. It is the spawn layer's per-invocation check for
+// trusted repositories' linked worktrees, whose overlay a repository-level
+// trust decision can never bind: the trust snapshot scans the trust root
+// (common config, main checkout, attribute routing), and the overlay lives
+// in the worktree's own git dir, readable and plantable at any time —
+// including after the trust decision. Raw git may run from the worktree
+// only while its overlay stays as inert as the configuration the user
+// reviewed.
+//
+// The overlay is judged from the standalone parse ScanGitConfig retained
+// before merging it (same read the merged model was built from — no second
+// read of the file, and the include-directive warning fires exactly once).
+// Inert findings are compared through the merged model's classification: a
+// key the overlay merely shares with dead configuration (signing siblings
+// without an armed commit.gpgsign anywhere) stays clean, while any key that
+// is live in any layer — including a trusted common-config key the overlay
+// re-arms with a new value — is not. An info without an overlay in play is
+// trivially clean; an info that names an overlay its scan did not retain is
+// not clean (fail closed — the overlay's content cannot be proven safe).
+func (info *GitConfigInfo) WorktreeOverlayClean() bool {
+	if info == nil || info.WorktreeConfigPath == "" {
+		return true
+	}
+	wt := info.worktreeOverlay
+	if wt == nil {
+		return false
+	}
+	if len(wt.Includes) > 0 || len(wt.Errors) > 0 {
+		return false
+	}
+	live := make(map[string]bool, len(info.Findings))
+	for i := range info.Findings {
+		if !info.Findings[i].Inert {
+			live[info.Findings[i].FullKey] = true
+		}
+	}
+	for i := range wt.Findings {
+		if live[wt.Findings[i].FullKey] {
+			return false
+		}
+	}
+	return true
 }
 
 // Snapshot returns a canonical, diff-able byte representation of every source
@@ -1590,6 +1648,12 @@ func ScanGitConfig(repoRoot string, loggers ...*slog.Logger) (*GitConfigInfo, er
 			}
 			mergeGitConfigInfo(info, wt)
 			info.WorktreeConfigPath = wtPath
+			// Retain the standalone overlay parse for WorktreeOverlayClean:
+			// the spawn layer's trusted-worktree gate must judge the
+			// overlay's own keys/includes/errors, and only this parse
+			// attributes them to the overlay alone (the merged model folds
+			// them together).
+			info.worktreeOverlay = wt
 		}
 	}
 
@@ -2050,6 +2114,113 @@ func ResolveWorkTreeRoot(path string) string {
 		}
 		dir = parent
 	}
+}
+
+// ResolveGitTrustRoot returns the path form the git TRUST decision keys on
+// for path: the repository's MAIN work-tree root. For a plain repository
+// (or a workspace at a subdirectory of one) it is identical to
+// ResolveWorkTreeRoot. For a LINKED worktree — where .git is a "gitdir:"
+// pointer file — it resolves the shared git directory through the pointer
+// chain (.git file → worktree gitdir → commondir file) and returns the main
+// work-tree root the common dir lives under: the commit surface a trust
+// decision covers (the commit-family hooks in <commonDir>/hooks, the common
+// config, the signing keys) is shared by every worktree of the repository,
+// so the decision must key on the root those programs come from, not on the
+// worktree the commit happened to run in. Without this unification a
+// trusted repository's worktree stays untrusted: the commit gate detects
+// the shared hook, the dialog offers trust for the repository root, and
+// trusting it is an idempotent no-op — the "Trust this repo & commit"
+// button loops forever (the subdirectory twin of this bug is why
+// ResolveWorkTreeRoot exists, review [52]).
+//
+// The resolution stays LEXICAL like ResolveWorkTreeRoot — the stored and
+// displayed root remains in the path form the user knows — and every hop
+// DEGRADES to the ResolveWorkTreeRoot form (the original keying) when the
+// pointer chain cannot be resolved: a malformed .git pointer, a missing or
+// unreadable commondir, or a common dir not laid out as <mainRoot>/.git
+// (e.g. worktrees of a bare repository) keep keying trust on the worktree
+// root exactly as before. Nothing widens trust on an unresolvable chain;
+// it only stops being attributed to a path the commit surface does not
+// come from. Returns "" when no .git exists anywhere on the chain.
+func ResolveGitTrustRoot(path string) string {
+	root := ResolveWorkTreeRoot(path)
+	if root == "" {
+		return ""
+	}
+	gitDir, err := resolveGitDirAt(root)
+	if err != nil || gitDir == "" {
+		return root
+	}
+	commonDir, isWorktree, err := resolveCommonGitDir(gitDir)
+	if err != nil || !isWorktree {
+		return root
+	}
+	// Only the standard (non-bare) layout maps back to a work-tree root
+	// lexically: the common dir lives at <mainRoot>/.git. Verify the main
+	// root really carries the .git entry before returning it, so a hostile
+	// or exotic commondir can never redirect the trust key outside a
+	// repository root.
+	if filepath.Base(commonDir) != ".git" {
+		return root
+	}
+	mainRoot := filepath.Dir(commonDir)
+	if _, err := os.Lstat(filepath.Join(mainRoot, ".git")); err != nil {
+		return root
+	}
+	return mainRoot
+}
+
+// canonicalizePathBestEffort returns the symlink-resolved spelling of path,
+// or path itself when it cannot be resolved (missing, loop, unreadable
+// ancestor). Trust comparisons probe both spellings because the two sides of
+// a trust decision often derive the same repository root through different
+// routes: user-facing paths stay in their lexical (user-known) form, while a
+// linked worktree's pointer chain carries the canonical paths git wrote into
+// it (macOS resolves /var → /private/var the same way).
+func canonicalizePathBestEffort(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// TrustProbePaths returns every path form a trust decision for path may be
+// stored or checked under: the exact cleaned path, its canonical spelling,
+// the repository trust root (ResolveGitTrustRoot), the legacy work-tree root
+// (ResolveWorkTreeRoot), and the canonical spelling of both roots — deduped,
+// first occurrence first. The trust list (backend's trustedGitRepoEntryFor)
+// and the process-wide spawn registry (core/gittrust via GitCmdInRepo) probe
+// ALL of them, so a trust recorded from any path form inside the repository
+// — the project checkout, a subdirectory workspace, a linked worktree, a
+// symlinked mount — honors every other form, without prefix/subtree
+// semantics ever crossing a repository boundary (every candidate is the same
+// repository's root or the probed path itself).
+func TrustProbePaths(path string) []string {
+	cleaned := filepath.Clean(path)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 6)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	add(cleaned)
+	add(canonicalizePathBestEffort(cleaned))
+	for _, resolve := range []func(string) string{ResolveGitTrustRoot, ResolveWorkTreeRoot} {
+		if root := resolve(cleaned); root != "" {
+			add(root)
+			add(canonicalizePathBestEffort(root))
+		}
+	}
+	return out
 }
 
 // readCapped reads a regular file, refusing input beyond limit bytes.

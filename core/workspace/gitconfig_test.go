@@ -1135,6 +1135,82 @@ func TestResolveWorkTreeRoot(t *testing.T) {
 	}
 }
 
+// TestResolveGitTrustRoot pins the trust keying: a plain repository (root or
+// subdirectory query) keys on its work-tree root exactly like
+// ResolveWorkTreeRoot; a LINKED worktree keys on the MAIN work-tree root the
+// shared commit surface (hooks, common config) comes from; and every
+// unresolvable pointer chain degrades back to the worktree-root form.
+func TestResolveGitTrustRoot(t *testing.T) {
+	// Plain repository: identical to ResolveWorkTreeRoot.
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	deep := filepath.Join(repo, "a", "b", "c")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{repo, deep} {
+		if got := ResolveGitTrustRoot(p); got != repo {
+			t.Errorf("ResolveGitTrustRoot(%s) = %q, want %q", p, got, repo)
+		}
+	}
+
+	// A linked worktree keys trust on the MAIN work-tree root: the hooks and
+	// common config its commits execute are shared with the main checkout.
+	// repo.Root is canonical (gittest resolves symlinks), and so are the
+	// absolute pointer paths git writes into the worktree's .git file.
+	main, wt := worktreeFixture(t)
+	if got := ResolveGitTrustRoot(wt); got != main.Root {
+		t.Errorf("ResolveGitTrustRoot(worktree) = %q, want main root %q", got, main.Root)
+	}
+	wtSub := filepath.Join(wt, "sub")
+	if err := os.MkdirAll(wtSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveGitTrustRoot(wtSub); got != main.Root {
+		t.Errorf("ResolveGitTrustRoot(worktree subdirectory) = %q, want main root %q", got, main.Root)
+	}
+
+	// An unresolvable .git pointer degrades to the worktree-root keying.
+	_, corruptWt := worktreeFixture(t)
+	if err := os.WriteFile(filepath.Join(corruptWt, ".git"), []byte("gitdir:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveGitTrustRoot(corruptWt); got != corruptWt {
+		t.Errorf("ResolveGitTrustRoot(corrupt pointer) = %q, want the worktree root %q", got, corruptWt)
+	}
+
+	// A common dir that does not live at <root>/.git (the bare-repository
+	// worktree layout) cannot map back to a work-tree root: keep the
+	// worktree-root keying.
+	fakeCommon := filepath.Join(t.TempDir(), "repo.git")
+	fakeGitDir := filepath.Join(fakeCommon, "worktrees", "w1")
+	if err := os.MkdirAll(fakeGitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeWt := filepath.Join(t.TempDir(), "fwt")
+	if err := os.MkdirAll(fakeWt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeWt, ".git"), []byte("gitdir: "+fakeGitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeGitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveGitTrustRoot(fakeWt); got != fakeWt {
+		t.Errorf("ResolveGitTrustRoot(bare-layout worktree) = %q, want the worktree root %q", got, fakeWt)
+	}
+
+	// No .git anywhere on the chain: "" (callers fall back to the path).
+	bare := t.TempDir()
+	if got := ResolveGitTrustRoot(bare); got != "" {
+		t.Errorf("ResolveGitTrustRoot(non-repo) = %q, want \"\"", got)
+	}
+	if got := ResolveGitTrustRoot(""); got != "" {
+		t.Errorf("ResolveGitTrustRoot(\"\") = %q, want \"\"", got)
+	}
+}
+
 // TestDiffGitConfigSnapshots pins the line-level diff used for trust drift:
 // identical snapshots yield "", and a change is rendered as a unified diff
 // that attributes removed and added lines.

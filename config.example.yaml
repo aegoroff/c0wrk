@@ -938,8 +938,10 @@ security:
   # Repositories whose "untrusted git configuration" intake warning has been
   # dismissed via the toast's "Trust this repo" action (also manageable from
   # Settings → Security → Trusted repos). Each entry is a mapping with an
-  # absolute repository-root `path` (matching is exact, after cleaning) and
-  # the fingerprints of the git-config snapshot captured when the repository
+  # absolute repository-root `path` (the repository's main work-tree root:
+  # trusting any path inside a repository, a subdirectory or a linked
+  # worktree included, covers the whole repository) and the fingerprints of
+  # the git-config snapshot captured when the repository
   # was trusted (snapshots live under ~/.c0wrk/git-config-snapshots/):
   # `fingerprint` hashes the snapshot bytes, `semantic_fingerprint` hashes
   # their dangerous semantic content — what the trust lifecycle keys on. On a
@@ -953,15 +955,26 @@ security:
   # (the legacy pre-fingerprint format) is also accepted and loads as a path
   # with no fingerprints. Both fingerprint keys are written by the app;
   # default: empty (every suspicious .git/config warns once per open).
+  # Entries match across every trust-key form of both sides (the main
+  # work-tree root, its canonical spelling, and any legacy work-tree or
+  # subdirectory spelling an older build stored), so trust/harden transitions
+  # and removals always cover the whole repository; the trust⊥harden mutual
+  # exclusion is enforced and compared across the same trust-key forms at
+  # load time too (best effort — only the forms that resolve where the
+  # config is loaded), so a legacy work-tree-keyed trust entry cannot load
+  # against a main-root hardening.
   # trusted_git_repos:
   #   - path: /Users/you/work/my-legit-lfs-repo
   #     fingerprint: a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8
   #     semantic_fingerprint: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
 
   # Repositories that are ALWAYS treated as hardened: their intake warning is
-  # never suppressed and they are excluded from the trusted list (a root cannot
-  # appear in both lists). Each entry is an absolute repository-root path;
-  # matching is exact (after cleaning). Default: empty.
+  # never suppressed and they are excluded from the trusted list (a root
+  # cannot appear in both lists — enforced across every trust-key form of
+  # both sides at runtime, and compared across the same forms at load time
+  # too). Each entry is an absolute repository-root path; entries match
+  # across every trust-key form of both sides, like the trusted list.
+  # Default: empty.
   # harden_git_repos:
   #   - /Users/you/work/untrusted-download
 

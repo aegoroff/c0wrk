@@ -47,6 +47,14 @@ type CommitSuppression struct {
 	// with $XDG_CONFIG_HOME honored, and $GIT_CONFIG_GLOBAL /
 	// $GIT_CONFIG_SYSTEM when set).
 	SigningGlobal bool `json:"signing_global,omitempty"`
+	// RepoRoot is the repository root the trust decision records and the
+	// commit gate checks — the main work-tree root resolved by
+	// workspace.ResolveGitTrustRoot (for a commit in a linked worktree that
+	// is the main checkout the shared hooks live in; for a subdirectory
+	// workspace the repository root). The UI names exactly what trusting
+	// records instead of echoing the project workspace path. Empty only in
+	// the degenerate no-repository fallback.
+	RepoRoot string `json:"repo_root,omitempty"`
 }
 
 // CommitResult is the payload of the Commit RPC. A normal (or forced)
@@ -106,13 +114,17 @@ func (f *FrontendAPI) gitCommitTimeout() time.Duration {
 // 300s; quick git probes keep the 30s budget) plus a combined stdout+stderr
 // capture so hook/signing output reaches the UI.
 //
-// The trust decision keys on the repository's WORK-TREE ROOT (the form
-// TrustGitRepo stores and GitCmdInRepo compares), resolved from the active
-// workspace path: a workspace opened at a subdirectory of a trusted
-// repository must commit as trusted, not re-trigger the gate. The
-// suppression detection itself is walked up to the same root by the
-// scanner (hooks/signing come from the discovered repository), so its
-// result is independent of the workspace path.
+// The trust decision keys on the repository's TRUST ROOT (the main work-tree
+// root — the form TrustGitRepo stores and GitCmdInRepo compares, via
+// workspace.ResolveGitTrustRoot), resolved from the active workspace path: a
+// workspace opened at a subdirectory of a trusted repository, or a Git-panel
+// focus on one of its linked worktrees (whose commits execute the shared
+// hooks), must commit as trusted, not re-trigger the gate — keying the
+// worktree commit on the worktree path instead left the "Trust this repo &
+// commit" action a no-op loop against the already-stored root. The
+// suppression detection itself is walked up to the same repository by the
+// scanner (hooks/signing come from the discovered repository's common dir),
+// so its result is independent of the workspace path.
 //
 // On success the new commit's SHA is resolved (git rev-parse HEAD, 30s
 // probe budget) and git:status_changed is emitted. Errors are as before:
@@ -128,21 +140,24 @@ func (f *FrontendAPI) Commit(message string, force bool) (CommitResult, error) {
 		return CommitResult{}, err
 	}
 
-	// Resolve the work-tree root the trust store keys on (see the doc
-	// comment above). No root discovered means no repository: keep the raw
-	// path so the trust check and the detection below fail closed the same
-	// way they always have.
-	trustPath := workspace.ResolveWorkTreeRoot(repoPath)
+	// Resolve the trust root the trust store keys on (see the doc comment
+	// above) — the MAIN work-tree root, which a linked worktree's commits
+	// share their hooks and common config with. No root discovered means no
+	// repository: keep the raw path so the trust check and the detection
+	// below fail closed the same way they always have.
+	trustPath := workspace.ResolveGitTrustRoot(repoPath)
 	if trustPath == "" {
 		trustPath = repoPath
 	}
 
 	// Trusted repositories commit directly: the spawn layer runs raw git
 	// for them (hooks/signing execute — the canary suite in core/workspace
-	// proves it), and they get the long commit budget. The spawn layer
-	// resolves the same root (GitCmdInRepo), so both sides of this decision
-	// agree even for a workspace opened at a subdirectory.
-	if f.gitRepoTrusted(trustPath) {
+	// proves it), and they get the long commit budget. The check probes
+	// every trust-key form of repoPath — the trust root, the work-tree root
+	// (the legacy pre-worktree-unification store form), and the raw path —
+	// so both sides of this decision agree even for a workspace opened at a
+	// subdirectory or in a linked worktree.
+	if f.gitRepoTrusted(repoPath) {
 		return f.runCommitSpawn(repoPath, message)
 	}
 
@@ -160,6 +175,7 @@ func (f *FrontendAPI) Commit(message string, force bool) (CommitResult, error) {
 					Hooks:         hooks,
 					SigningRepo:   signingRepo,
 					SigningGlobal: signingGlobal,
+					RepoRoot:      trustPath,
 				},
 			}, nil
 		}

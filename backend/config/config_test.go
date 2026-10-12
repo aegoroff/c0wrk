@@ -2548,6 +2548,151 @@ security:
 	}
 }
 
+// TestConfigValidation_TrustedHardenMutualExclusionCrossSpelling pins the
+// canonical-form half of the mutual exclusion: the same directory listed as
+// trusted under one spelling and hardened under a symlinked spelling of the
+// same path is rejected exactly like the literal collision. The load-time
+// check can only compare forms that both resolve where the config is loaded;
+// the runtime trust/harden transitions enforce the same exclusion across
+// every trust-key form (legacy work-tree roots included) once the
+// repositories actually exist.
+func TestConfigValidation_TrustedHardenMutualExclusionCrossSpelling(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(base, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	content := securityGroupsTestBase + fmt.Sprintf(`
+security:
+  trusted_git_repos:
+    - path: %s
+  harden_git_repos:
+    - %s
+`, base, link)
+
+	_, err := Load(writeTestConfig(t, content))
+	if err == nil {
+		t.Fatal("expected validation error for symlinked spellings of one root in both lists")
+	}
+	if !contains(err.Error(), "cannot be both trusted and hardened") {
+		t.Errorf("expected error to mention mutual exclusion, got: %v", err)
+	}
+}
+
+// TestConfigValidation_TrustedHardenMutualExclusionTrustRootForms pins the
+// trust-key-form half of the mutual exclusion: a legacy entry keyed on a
+// LINKED WORKTREE path and an entry keyed on the repository's MAIN root are
+// the same repository to the runtime matcher (workspace.TrustProbePaths
+// resolves the worktree to its trust root), so the combination must be
+// rejected exactly like the literal collision — otherwise the config loads
+// cleanly and the runtime trust matching plus registry trust-root mirroring
+// make trust win repo-wide, voiding the explicit hardening decision. The
+// layout is handcrafted the way git lays it out (worktree .git pointer file
+// → worktree gitdir → commondir → <main>/.git); resolution is lexical, so
+// no git binary is needed. Entries whose paths do not resolve where the
+// config is loaded still only conflict through the forms that do resolve
+// (best effort) — the same contract the doc comment on the validation
+// states.
+func TestConfigValidation_TrustedHardenMutualExclusionTrustRootForms(t *testing.T) {
+	// buildRepoWithLinkedWorktree handcrafts a main repository plus one
+	// linked worktree of it and returns both roots.
+	buildRepoWithLinkedWorktree := func(t *testing.T) (mainRoot, worktree string) {
+		t.Helper()
+		base := t.TempDir()
+		mainRoot = filepath.Join(base, "repo")
+		wtGitDir := filepath.Join(mainRoot, ".git", "worktrees", "wt")
+		if err := os.MkdirAll(wtGitDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		worktree = filepath.Join(base, "wt-checkout")
+		if err := os.MkdirAll(worktree, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The worktree's .git pointer file → the worktree gitdir inside the
+		// main .git (absolute, as git writes it when the pointer target it
+		// recorded is absolute).
+		if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+wtGitDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// The commondir file inside the worktree gitdir → the main .git,
+		// relative to the worktree gitdir, exactly as git writes it.
+		if err := os.WriteFile(filepath.Join(wtGitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return mainRoot, worktree
+	}
+
+	t.Run("legacy worktree-keyed trust vs main-root hardening", func(t *testing.T) {
+		mainRoot, worktree := buildRepoWithLinkedWorktree(t)
+		content := securityGroupsTestBase + fmt.Sprintf(`
+security:
+  trusted_git_repos:
+    - path: %s
+  harden_git_repos:
+    - %s
+`, worktree, mainRoot)
+
+		_, err := Load(writeTestConfig(t, content))
+		if err == nil {
+			t.Fatal("expected validation error for a worktree-keyed trusted entry against a main-root hardened entry")
+		}
+		if !contains(err.Error(), "cannot be both trusted and hardened") {
+			t.Errorf("expected error to mention mutual exclusion, got: %v", err)
+		}
+	})
+
+	t.Run("main-root trust vs worktree-keyed hardening", func(t *testing.T) {
+		mainRoot, worktree := buildRepoWithLinkedWorktree(t)
+		content := securityGroupsTestBase + fmt.Sprintf(`
+security:
+  trusted_git_repos:
+    - path: %s
+  harden_git_repos:
+    - %s
+`, mainRoot, worktree)
+
+		_, err := Load(writeTestConfig(t, content))
+		if err == nil {
+			t.Fatal("expected validation error for a main-root trusted entry against a worktree-keyed hardened entry")
+		}
+		if !contains(err.Error(), "cannot be both trusted and hardened") {
+			t.Errorf("expected error to mention mutual exclusion, got: %v", err)
+		}
+	})
+
+	t.Run("unrelated repositories still load", func(t *testing.T) {
+		base := t.TempDir()
+		repoOne := filepath.Join(base, "repo-one")
+		repoTwo := filepath.Join(base, "repo-two")
+		for _, dir := range []string{filepath.Join(repoOne, ".git"), filepath.Join(repoTwo, ".git")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		content := securityGroupsTestBase + fmt.Sprintf(`
+security:
+  trusted_git_repos:
+    - path: %s
+  harden_git_repos:
+    - %s
+`, repoOne, repoTwo)
+
+		cfg, err := Load(writeTestConfig(t, content))
+		if err != nil {
+			t.Fatalf("Load() failed for unrelated repositories: %v", err)
+		}
+		if len(cfg.Security.TrustedGitRepos) != 1 || cfg.Security.TrustedGitRepos[0].Path != repoOne {
+			t.Errorf("unexpected TrustedGitRepos: %+v", cfg.Security.TrustedGitRepos)
+		}
+		if !reflect.DeepEqual(cfg.Security.HardenGitRepos, []string{repoTwo}) {
+			t.Errorf("unexpected HardenGitRepos: %v", cfg.Security.HardenGitRepos)
+		}
+	})
+}
+
 // TestConfigValidation_RejectsSystemSecurityGroup verifies that the reserved
 // system group cannot be configured.
 func TestConfigValidation_RejectsSystemSecurityGroup(t *testing.T) {
