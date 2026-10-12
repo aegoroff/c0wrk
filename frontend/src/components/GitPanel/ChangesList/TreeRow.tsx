@@ -10,7 +10,8 @@ interface TreeRowProps {
   depth: number
   /** Porcelain axis this tree's rows act on (index | worktree). */
   side: StageSide
-  workspaceRoot: string
+  /** Root the display paths are relative to (focus root, else workspace). */
+  displayRoot: string
   expandedDirs: Set<string>
   onToggleExpandedDir: (dir: string) => void
   onToggleFile: StageToggleHandler
@@ -21,7 +22,7 @@ export function TreeRow({
   node,
   depth,
   side,
-  workspaceRoot,
+  displayRoot,
   expandedDirs,
   onToggleExpandedDir,
   onToggleFile,
@@ -58,7 +59,7 @@ export function TreeRow({
               node={child}
               depth={depth + 1}
               side={side}
-              workspaceRoot={workspaceRoot}
+              displayRoot={displayRoot}
               expandedDirs={expandedDirs}
               onToggleExpandedDir={onToggleExpandedDir}
               onToggleFile={onToggleFile}
@@ -76,7 +77,7 @@ export function TreeRow({
       <GitFileEntry
         entry={node.entry}
         side={side}
-        workspaceRoot={workspaceRoot}
+        displayRoot={displayRoot}
         pathDisplay="name-only"
         onToggle={onToggleFile}
         onOpenDiff={onOpenDiff}

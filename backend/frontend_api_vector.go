@@ -105,6 +105,22 @@ func (f *FrontendAPI) managedWorktreeVectorTarget(p *project.ProjectInfo, ws str
 	return vectorIndexTarget{workspacePath: ws, storagePath: storage}, true
 }
 
+// storedProjectRoot returns the project row's stored (unresolved) workspace
+// path — the registration form — for legacy-form comparisons. Fail-soft:
+// ok=false when the manager is unwired or the row is unreadable.
+func (f *FrontendAPI) storedProjectRoot(projectID string) (string, bool) {
+	if f.projectManager == nil {
+		return "", false
+	}
+	p, err := f.projectManager.GetProject(projectID)
+	if err != nil || p == nil {
+		f.log().Debug("vector index: cannot read the project row for the stored root",
+			"project", projectID, "error", err)
+		return "", false
+	}
+	return p.WorkspacePath, true
+}
+
 // deleteWorktreeVectorIndex releases a managed tree's per-root manager and
 // removes the tree's persisted vector-index state — its whole worktree-scoped
 // storage root plus its per-tree embedding cache. Best-effort by design: the
@@ -122,6 +138,25 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		root = filepath.Join(config.ManagedWorktreesDir(repoRoot), name)
 	}
 	mgr := vr.Release(root)
+	// Legacy rows keep a symlinked (or otherwise unresolved) ancestor in
+	// their stored root: AGENT routing keys a tree's live manager under the
+	// raw stored spelling (the session's WorkspacePath re-derives from the
+	// stored row and canonicalRoot does not resolve symlinks), while the
+	// repo root here is the canonical form the deletion flows present.
+	// Release the stored spelling too, so the delete shuts the
+	// legacy-keyed manager down as well — a miss returns nil. Fail-soft:
+	// an unreadable project row only skips the second key.
+	if stored, ok := f.storedProjectRoot(projectID); ok && stored != repoRoot {
+		alt, altErr := config.ManagedWorktreePath(stored, name)
+		if altErr != nil {
+			alt = filepath.Join(config.ManagedWorktreesDir(stored), name)
+		}
+		if alt != root {
+			if m := vr.Release(alt); m != nil && mgr == nil {
+				mgr = m
+			}
+		}
+	}
 
 	storage, err := config.WorktreeVectorIndexPath(f.agentDir, projectID, name)
 	if err != nil {

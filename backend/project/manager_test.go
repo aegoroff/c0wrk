@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,14 @@ import (
 
 // setupTestManager creates a Manager backed by an in-memory SQLite store and a temp agent dir.
 func setupTestManager(t *testing.T) (mgr *Manager, agentDir string) {
+	t.Helper()
+	return setupTestManagerAt(t, t.TempDir())
+}
+
+// setupTestManagerAt is setupTestManager over a caller-chosen agent dir
+// (e.g. a path reached through a symlink, to pin registration
+// canonicalization).
+func setupTestManagerAt(t *testing.T, agentDir string) (mgr *Manager, dir string) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", ":memory:")
@@ -35,9 +44,48 @@ func setupTestManager(t *testing.T) (mgr *Manager, agentDir string) {
 		t.Fatalf("failed to create project store: %v", err)
 	}
 
-	agentDir = t.TempDir()
-	mgr = NewManager(store, agentDir, nil)
-	return mgr, agentDir
+	return NewManager(store, agentDir, nil), agentDir
+}
+
+// TestManager_CreateProject_InternalCanonicalizesSymlinkedAgentDir pins the
+// internal registration invariant: the stored workspace path is the
+// symlink-resolved form even when the agent dir is reached through a
+// symlink (a symlinked ~/.c0wrk is a supported operator layout). The stored
+// root is compared against resolved forms by security containment, the
+// vector registry identity, and the git worktree primitives — a
+// non-canonical stored path would silently fail every one of those
+// comparisons, mirroring the rationale documented on the external branch.
+func TestManager_CreateProject_InternalCanonicalizesSymlinkedAgentDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks on Windows require elevated privileges; the canonicalization invariant itself is covered by TestManager_CreateProject_Internal on every platform")
+	}
+	realAgentDir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "agent")
+	if err := os.Symlink(realAgentDir, alias); err != nil {
+		t.Fatalf("create agent dir symlink alias: %v", err)
+	}
+
+	mgr, _ := setupTestManagerAt(t, alias)
+	proj, err := mgr.CreateProject("Symlinked", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	resolvedAlias, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatalf("resolve agent dir alias: %v", err)
+	}
+	want := config.ProjectWorkspacePath(resolvedAlias, proj.ID)
+	if proj.WorkspacePath != want {
+		t.Errorf("WorkspacePath = %q, want canonical %q", proj.WorkspacePath, want)
+	}
+	info, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("workspace directory does not exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("workspace path should be a directory")
+	}
 }
 
 func TestManager_CreateProject_Internal(t *testing.T) {
@@ -65,7 +113,14 @@ func TestManager_CreateProject_Internal(t *testing.T) {
 	}
 
 	// Verify workspace directory was created (under projects/<id>/Workspace)
-	expectedWorkspace := config.ProjectWorkspacePath(agentDir, proj.ID)
+	// and is stored in its canonical (symlink-resolved) form — the stored
+	// workspace path participates in containment, vector identity, and git
+	// worktree comparisons against resolved forms, mirroring external
+	// registration.
+	expectedWorkspace, err := filepath.EvalSymlinks(config.ProjectWorkspacePath(agentDir, proj.ID))
+	if err != nil {
+		t.Fatalf("resolve expected workspace: %v", err)
+	}
 	if proj.WorkspacePath != expectedWorkspace {
 		t.Errorf("WorkspacePath = %q, want %q", proj.WorkspacePath, expectedWorkspace)
 	}

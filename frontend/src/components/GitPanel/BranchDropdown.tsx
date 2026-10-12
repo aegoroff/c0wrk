@@ -1,21 +1,22 @@
 import { useState, useMemo, useCallback } from "react";
-import { GitBranch, ChevronDown, Plus, GitGraph } from "lucide-react";
+import { GitBranch, ChevronDown } from "lucide-react";
 import { useGitPanelStore } from "@/stores/gitPanelStore";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useBranchActions } from "@/hooks/useBranchActions";
 import type { BranchActionKind } from "@/hooks/useBranchActions";
+import { useWorktreeActions } from "@/hooks/useWorktreeActions";
 import { focusWorktree } from "@/lib/gitFocus";
 import { LocalBranchRow } from "./LocalBranchRow";
 import { RemoteBranchRow } from "./RemoteBranchRow";
 import { BranchDeleteConfirmDialog } from "./BranchDeleteConfirmDialog";
+import { WorktreeDeleteConfirmDialog } from "./WorktreeDeleteConfirmDialog";
 import { WorktreesSection } from "./WorktreesSection";
 
 /**
@@ -28,18 +29,20 @@ import { WorktreesSection } from "./WorktreesSection";
  * (click checks the branch out as a new local tracking branch; hover exposes
  * delete-remote). A **Worktrees** section switches the panel's FOCUS between
  * every worktree of the project (local checkout, managed session trees,
- * external trees) — a focus switch, never a checkout. The footer offers
- * **New branch…** and **Manage branches…**,
- * both of which open the existing `BranchPicker` modal (the full switch/create
- * surface). Branch data comes from `gitPanelStore.branches`.
+ * external trees) — a focus switch, never a checkout — and exposes a hover
+ * delete on the linked trees (managed + external; never the checkout) that
+ * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. Branch
+ * creation/management lives in the `BranchPicker` modal, opened from the git
+ * panel's toolbar button — the dropdown does not duplicate those entries.
+ * Branch data comes from `gitPanelStore.branches`.
  */
 export function BranchDropdown() {
   const branches = useGitPanelStore((s) => s.branches);
   const branch = useGitPanelStore((s) => s.branch);
-  const openBranchPicker = useGitPanelStore((s) => s.openBranchPicker);
   const worktrees = useGitPanelStore((s) => s.worktrees);
 
   const actions = useBranchActions();
+  const worktreeActions = useWorktreeActions();
 
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -210,19 +213,11 @@ export function BranchDropdown() {
                   void focusWorktree(w.path);
                   close();
                 }}
+                onDelete={worktreeActions.requestDelete}
+                deleteBusyPath={worktreeActions.busyPath}
               />
             </>
           )}
-
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openBranchPicker()}>
-            <Plus className="size-4" />
-            New branch...
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openBranchPicker()}>
-            <GitGraph className="size-4" />
-            Manage branches...
-          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -230,6 +225,13 @@ export function BranchDropdown() {
         pending={actions.pendingDelete}
         onConfirm={actions.confirmDelete}
         onCancel={actions.cancelDelete}
+      />
+
+      <WorktreeDeleteConfirmDialog
+        pending={worktreeActions.pendingDelete}
+        error={worktreeActions.deleteError}
+        onConfirm={worktreeActions.confirmDelete}
+        onCancel={worktreeActions.cancelDelete}
       />
     </div>
   );

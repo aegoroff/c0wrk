@@ -9,6 +9,7 @@ import {
   isUntracked,
   classifyEntries,
   rowStatusChar,
+  stripRootPrefix,
 } from '@/lib/gitStatus'
 import type { StageSide } from '@/lib/gitStatus'
 import type { GitPanelEntry } from '@/stores/gitPanelStore'
@@ -183,6 +184,47 @@ describe('classifyEntries', () => {
 
   it('handles an empty input', () => {
     expect(classifyEntries([])).toEqual({ staged: [], unstaged: [], untracked: [] })
+  })
+})
+
+// --- stripRootPrefix ---
+
+describe('stripRootPrefix', () => {
+  const root = '/repo'
+
+  it('strips the root at a segment boundary', () => {
+    expect(stripRootPrefix('/repo/src/main.ts', root)).toBe('src/main.ts')
+    expect(stripRootPrefix('/repo/file.txt', root)).toBe('file.txt')
+  })
+
+  it('strips a worktree root nested inside the project checkout', () => {
+    // The backend keys status onto the focus worktree root; stripping against
+    // that root yields the repo-relative display path.
+    expect(stripRootPrefix('/repo/.worktrees/s-abc/src/main.ts', '/repo/.worktrees/s-abc')).toBe(
+      'src/main.ts',
+    )
+  })
+
+  it('does not strip a sibling directory sharing the same prefix', () => {
+    expect(stripRootPrefix('/repo-extra/src/main.ts', root)).toBe('/repo-extra/src/main.ts')
+  })
+
+  it('returns the path unchanged when it lies outside the root', () => {
+    expect(stripRootPrefix('/other/pkg/file.ts', root)).toBe('/other/pkg/file.ts')
+  })
+
+  it('returns the empty string when the path equals the root', () => {
+    expect(stripRootPrefix(root, root)).toBe('')
+  })
+
+  it('returns the path unchanged for an empty root', () => {
+    expect(stripRootPrefix('/repo/src/main.ts', '')).toBe('/repo/src/main.ts')
+    expect(stripRootPrefix('relative/file.ts', '')).toBe('relative/file.ts')
+  })
+
+  it('treats only a full-segment match, never a partial segment', () => {
+    // "/rep" shares a character prefix with "/repo" but is not a segment match.
+    expect(stripRootPrefix('/rep/file.ts', root)).toBe('/rep/file.ts')
   })
 })
 

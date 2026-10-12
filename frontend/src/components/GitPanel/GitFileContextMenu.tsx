@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { stripRootPrefix } from '@/lib/gitStatus'
 import type { StageSide } from '@/lib/gitStatus'
 import type { GitPanelEntry } from '@/stores/gitPanelStore'
 
@@ -26,8 +27,10 @@ interface GitFileContextMenuProps {
    * coarse `staged` flag, so an `MM` file's two rows offer opposite actions.
    */
   side: StageSide
-  /** Workspace root — when provided, stripped to form the .gitignore pattern. */
-  workspaceRoot?: string
+  /** Root the display strings are relative to — the resolved Git-panel focus
+   *  root, else the project workspace root. Stripped at a segment boundary to
+   *  form display labels and .gitignore patterns; never the callback paths. */
+  displayRoot?: string
   /**
    * Viewport coordinates where the menu appears (VISUAL px, as reported by
    * `MouseEvent.clientX/clientY`); null renders nothing. Unit conversion and
@@ -36,16 +39,6 @@ interface GitFileContextMenuProps {
   position: { x: number; y: number } | null
   /** Called when the menu (and any spawned dialog) should close. */
   onClose: () => void
-}
-
-/** Repo-relative path suitable as a .gitignore pattern / display string.
- *  Matches workspaceRoot only at a path-separator boundary to avoid a sibling
- *  directory sharing the same prefix (e.g. "/repo" vs "/repo-extra"). */
-function toRelativePath(path: string, workspaceRoot?: string): string {
-  if (workspaceRoot && (path === workspaceRoot || path.startsWith(workspaceRoot + '/'))) {
-    return path.slice(workspaceRoot.length).replace(/^\//, '')
-  }
-  return path
 }
 
 /**
@@ -57,7 +50,7 @@ function toRelativePath(path: string, workspaceRoot?: string): string {
 export function GitFileContextMenu({
   entry,
   side,
-  workspaceRoot,
+  displayRoot,
   position,
   onClose,
 }: GitFileContextMenuProps) {
@@ -66,7 +59,11 @@ export function GitFileContextMenu({
   const [isDiscarding, setIsDiscarding] = useState(false)
   const [isIgnoring, setIsIgnoring] = useState(false)
   const [isStaging, setIsStaging] = useState(false)
-  const relativePath = toRelativePath(entry.path, workspaceRoot)
+  // Display string (and .gitignore pattern): entry.path stripped of the
+  // display root at a segment boundary (see `stripRootPrefix`). Every API
+  // callback below keeps the ABSOLUTE entry.path — only labels/patterns
+  // are relative.
+  const relativePath = stripRootPrefix(entry.path, displayRoot ?? '')
   // Zoom-corrected, viewport-clamped placement (left/top in layout px).
   const menuPosition = useCursorMenuPosition(position, menuRef)
 
@@ -81,7 +78,9 @@ export function GitFileContextMenu({
         await runGitOperation({
           projectId,
           kind: side === 'index' ? 'unstage' : 'stage',
-          label: `${side === 'index' ? 'Unstaged' : 'Staged'} ${entry.path}`,
+          // Operation-console label carries the DISPLAY path; the RPC below
+          // keeps the absolute path.
+          label: `${side === 'index' ? 'Unstaged' : 'Staged'} ${relativePath}`,
           fn: () =>
             side === 'index' ? unstageFile(entry.path) : stageFile(entry.path),
           recordSuccess: false,
@@ -93,7 +92,7 @@ export function GitFileContextMenu({
       // Close the menu regardless of outcome; failures surface in the console.
       onClose()
     }
-  }, [entry.path, side, onClose])
+  }, [entry.path, side, relativePath, onClose])
 
   // --- Discard (with confirmation) ---
   const handleConfirmDiscard = useCallback(async () => {
@@ -104,7 +103,9 @@ export function GitFileContextMenu({
         await runGitOperation({
           projectId,
           kind: 'discard',
-          label: `Discarded changes in ${entry.path}`,
+          // Operation-console label carries the DISPLAY path; the RPC below
+          // keeps the absolute path.
+          label: `Discarded changes in ${relativePath}`,
           fn: () => discardChanges(entry.path),
           recordSuccess: false,
           logLevel: 'warn',
@@ -116,7 +117,7 @@ export function GitFileContextMenu({
     } finally {
       setIsDiscarding(false)
     }
-  }, [entry.path, onClose])
+  }, [entry.path, relativePath, onClose])
 
   // --- Add to .gitignore ---
   const handleAddToGitignore = useCallback(async () => {

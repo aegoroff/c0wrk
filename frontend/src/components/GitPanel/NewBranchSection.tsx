@@ -8,8 +8,9 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
-import { createBranch, getBranchBases } from '@/api/git'
+import { createBranch, createBranchInWorktree, getBranchBases } from '@/api/git'
 import { logger } from '@/lib/logger'
+import { refreshGitFocus } from '@/lib/gitFocus'
 import { BaseSelector } from './BaseSelector'
 import type { BranchBase } from '@/types/models'
 
@@ -44,6 +45,12 @@ interface NewBranchSectionProps {
  * "Create new branch" footer of BranchPicker. Calls CreateBranch (which
  * checks out the new branch immediately) and closes the picker on success.
  *
+ * A "Worktree" checkbox routes the creation through CreateBranchInWorktree
+ * instead: the branch is born inside a fresh managed worktree, the current
+ * checkout is untouched and the panel's focus deliberately stays where it is
+ * (refreshGitFocus pulls the new tree into the worktree list). In draft mode
+ * the checkbox is disabled — the session always gets its own worktree.
+ *
  * An optional Collapsible section lets the user pick a base ref (local
  * branch, remote-tracking branch, tag, or recent commit) instead of the
  * default HEAD. Bases are loaded lazily on first expansion.
@@ -59,6 +66,10 @@ export function NewBranchSection({
 }: NewBranchSectionProps) {
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
+  // "Worktree" — create the branch inside a fresh managed worktree instead of
+  // checking it out in the current tree. Unchecked by default; in draft mode
+  // it is disabled (the session always gets its own worktree anyway).
+  const [inWorktree, setInWorktree] = useState(false)
   // When a pending base is supplied (e.g. from the history context menu's
   // "Create › Branch"), open the base selector automatically so the user
   // sees the preselected start-point.
@@ -107,7 +118,17 @@ export function NewBranchSection({
     }
     setCreating(true)
     try {
-      await createBranch(trimmed, chooseBase ? selectedBase : '')
+      if (inWorktree) {
+        await createBranchInWorktree(trimmed, chooseBase ? selectedBase : '')
+        // The Git panel's focus deliberately stays where it is — the fresh
+        // worktree is NOT focused (unlike CreateBranch, which checks the new
+        // branch out in place). git:status_changed refreshes branches/status,
+        // but the worktree list is only re-read by refreshGitFocus, so the
+        // new tree shows up in the focus switcher right away.
+        await refreshGitFocus()
+      } else {
+        await createBranch(trimmed, chooseBase ? selectedBase : '')
+      }
       // Backend emits git:status_changed → store updates automatically.
       setName('')
       onCreated()
@@ -119,7 +140,7 @@ export function NewBranchSection({
     } finally {
       setCreating(false)
     }
-  }, [name, creating, disabled, chooseBase, selectedBase, onCreated, onError, onDraftCreate])
+  }, [name, creating, disabled, inWorktree, chooseBase, selectedBase, onCreated, onError, onDraftCreate])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && name.trim()) {
@@ -149,7 +170,13 @@ export function NewBranchSection({
           size="sm"
           onClick={handleCreate}
           disabled={!name.trim() || creating || disabled}
-          title={onDraftCreate ? 'Create the branch in the new session\'s worktree on first send' : 'Create and switch to new branch'}
+          title={
+            onDraftCreate
+              ? 'Create the branch in the new session\'s worktree on first send'
+              : inWorktree
+                ? 'Create the branch in a new worktree (the current checkout stays untouched)'
+                : 'Create and switch to new branch'
+          }
         >
           {creating ? (
             <Loader2 className="size-3.5 animate-spin" />
@@ -159,6 +186,30 @@ export function NewBranchSection({
           New
         </Button>
       </div>
+
+      <label
+        className={cn(
+          'mt-2 flex w-fit cursor-pointer items-center gap-1.5 text-xs text-muted-foreground',
+          onDraftCreate !== undefined && 'opacity-60',
+        )}
+        title={
+          onDraftCreate !== undefined
+            ? 'The session always gets its own worktree'
+            : 'Create the branch in its own managed worktree — the current checkout stays untouched'
+        }
+      >
+        <input
+          type="checkbox"
+          checked={inWorktree}
+          disabled={onDraftCreate !== undefined}
+          onChange={(e) => {
+            setInWorktree(e.target.checked)
+            onClearError()
+          }}
+          className="size-3 accent-primary"
+        />
+        Worktree
+      </label>
 
       <Collapsible open={chooseBase} onOpenChange={setChooseBase}>
         <CollapsibleTrigger

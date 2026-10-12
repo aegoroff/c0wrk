@@ -6,8 +6,8 @@ import { collectAllDirPaths } from './buildTree'
 // ──────────────────────── Tree Expand / Collapse All ─────────────────────────
 
 interface TreeExpandControlsProps {
-  /** Workspace root — needed to compute display-relative directory paths. */
-  workspaceRoot: string
+  /** Root the display-relative directory paths are computed against. */
+  displayRoot: string
 }
 
 const triggerClass =
@@ -24,13 +24,13 @@ const triggerClass =
  * the same display-relative path semantics as `buildTree`) and replaces the
  * `expandedDirs` set in one atomic update. "Collapse All" clears the set.
  */
-export function TreeExpandControls({ workspaceRoot }: TreeExpandControlsProps) {
+export function TreeExpandControls({ displayRoot }: TreeExpandControlsProps) {
   const entries = useGitPanelStore((s) => s.entries)
   const setExpandedDirs = useGitPanelStore((s) => s.setExpandedDirs)
 
   const allDirPaths = useMemo(
-    () => collectAllDirPaths(entries, workspaceRoot),
-    [entries, workspaceRoot],
+    () => collectAllDirPaths(entries, displayRoot),
+    [entries, displayRoot],
   )
 
   const hasDirs = allDirPaths.length > 0

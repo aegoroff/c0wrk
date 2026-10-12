@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/sp4rk/pathutil"
 	"github.com/v0lka/sp4rk/safeio"
@@ -777,6 +778,161 @@ func (f *FrontendAPI) CreateBranch(name, base string) error {
 		return err
 	}
 	f.emitGitStatusChanged(repoPath)
+	return nil
+}
+
+// managedTreeSlugCap caps the slug part of a branch-derived managed tree
+// name so a "-NN" disambiguation suffix still fits inside the 120-byte
+// portable-identity limit enforced by config.ManagedWorktreePath.
+const managedTreeSlugCap = 116
+
+// worktreeSlug derives a portable managed-tree name candidate from a branch
+// name. Only [A-Za-z0-9._-] survive (config.ManagedWorktreePath's identity
+// alphabet); every other rune collapses to '-' — branch names commonly
+// carry '/'. Leading '-'/'.', a trailing '.' and an empty result (a branch
+// made entirely of unmappable characters) are sanitized to satisfy the
+// portable-identity rules, and the result is capped so a numeric suffix
+// still fits. The identity is validated again (fail-closed) inside every
+// owner operation.
+func worktreeSlug(branch string) string {
+	var b strings.Builder
+	b.Grow(len(branch))
+	for _, r := range branch {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	slug := strings.TrimLeft(b.String(), "-.")
+	slug = strings.TrimRight(slug, ".")
+	if slug == "" {
+		slug = "branch"
+	}
+	if len(slug) > managedTreeSlugCap {
+		slug = slug[:managedTreeSlugCap]
+		// A cut can expose a trailing dot — re-sanitize.
+		slug = strings.TrimRight(slug, ".")
+	}
+	return slug
+}
+
+// freeManagedTreeName derives a free managed-tree name for branch: the
+// worktreeSlug of the branch name, disambiguated with -2, -3, ... when the
+// identity is already taken on disk (an existing managed tree, or any other
+// occupant of the candidate path that would make git worktree add refuse)
+// or when the candidate fails the portable-identity validation (e.g. a
+// branch whose slug is a reserved Windows device name — the suffix moves it
+// off the reserved stem). Bounded: 100 candidates.
+func freeManagedTreeName(repoRoot, branch string) (string, error) {
+	base := worktreeSlug(branch)
+	var lastErr error
+	for n := 0; n < 100; n++ {
+		candidate := base
+		if n > 0 {
+			candidate = base + "-" + strconv.Itoa(n+1)
+		}
+		path, err := config.ManagedWorktreePath(repoRoot, candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("managed worktree name %q: %w", candidate, err)
+			continue
+		}
+		switch _, statErr := os.Lstat(path); {
+		case statErr == nil:
+			continue // name busy — next numeric suffix
+		case !errors.Is(statErr, os.ErrNotExist):
+			return "", fmt.Errorf("inspecting managed worktree name %q: %w", candidate, statErr)
+		}
+		return candidate, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("no free managed worktree name derived from branch %q", branch)
+}
+
+// CreateBranchInWorktree creates a new branch in a freshly provisioned
+// managed worktree: git worktree add -b <branch> <tree> [<base>] — the
+// branch and its tree are born atomically (empty base = the checkout's
+// HEAD). The tree hangs off the active project's managed container under a
+// name derived from the branch (a portable slug, disambiguated with a
+// numeric suffix when taken). The branch pre-exists case fails explicitly
+// with an error matching workspace.ErrBranchExists before git runs.
+//
+// Unlike CreateBranch, the Git-panel focus is NEITHER switched NOR
+// consulted: the focused tree is never touched (no checkout runs in it), so
+// a managed-tree focus does not block this operation — entering the new
+// tree stays the user's decision. The active project's checkout is still
+// required (no No Project). The tree's embedding cache is seeded
+// best-effort from the checkout, same contract as the session provisioning
+// flow. Emits git:status_changed on success — that event refreshes the
+// status, the current branch and the branch list only; it does NOT refresh
+// the worktree list. The worktree list is refreshed by the frontend's
+// explicit refreshGitFocus() call after this RPC returns (see
+// specs/domains/session-worktrees.md) — a caller that skips it leaves the
+// new tree absent from the worktree switcher.
+//
+// Returns an error when no project is active, the project is No Project,
+// the branch name is empty, the base ref is invalid (ErrInvalidBaseRef),
+// the branch already exists (workspace.ErrBranchExists), no free tree name
+// can be derived, or the git command fails.
+func (f *FrontendAPI) CreateBranchInWorktree(name, base string) error {
+	branchName := strings.TrimSpace(name)
+	if branchName == "" {
+		return errors.New("branch name must not be empty")
+	}
+	if err := validateGitOperand("branch name", branchName); err != nil {
+		return err
+	}
+
+	// The checkout — not the Git-panel focus — is the operation target:
+	// the new tree hangs off the repository's managed container and the
+	// focused tree is never touched.
+	checkout, projectID, err := f.activeGitProjectRoot()
+	if err != nil {
+		return err
+	}
+	// Canonicalize the checkout before deriving managed paths (fail-soft
+	// filepath.EvalSymlinks — see canonicalWorktreeRoot): legacy rows
+	// registered before the manager canonicalized internal registrations
+	// may keep a symlinked ancestor, which would diverge from git's
+	// canonical listings and fail the add post-check AFTER a successful
+	// `git worktree add`, leaving the created branch and tree behind. The
+	// success event below stays on the stored form — the frontend keys git
+	// events by the registered project path.
+	repoRoot := canonicalWorktreeRoot(checkout)
+
+	baseRef := strings.TrimSpace(base)
+	if baseRef != "" {
+		// Same pre-validation as CreateBranch: rev-parse yields a clear,
+		// version-independent error instead of git worktree add's wording.
+		// ^{commit} peels annotated tags and rejects refs that do not
+		// resolve to a commit object.
+		if _, err := f.runGitCmd(repoRoot, "rev-parse", "--verify", "--quiet", baseRef+"^{commit}"); err != nil {
+			return fmt.Errorf("base %q is not a valid ref: %w", baseRef, ErrInvalidBaseRef)
+		}
+	}
+
+	treeName, err := freeManagedTreeName(repoRoot, branchName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
+	defer cancel()
+	if _, err := f.worktreeOwner().ProvisionNewBranch(ctx, repoRoot, treeName, branchName, baseRef); err != nil {
+		return err
+	}
+
+	// Best-effort, after the success point — same contract as the session
+	// provisioning flow. The focus does not move (the user decides when to
+	// enter the tree), but the tree's first index pass still reuses the
+	// checkout's computed embeddings.
+	f.seedWorktreeEmbeddingCache(projectID, treeName)
+
+	f.emitGitStatusChanged(checkout)
 	return nil
 }
 

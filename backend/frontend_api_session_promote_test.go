@@ -162,7 +162,14 @@ func TestPromoteSessionToProject_HappyPath(t *testing.T) {
 	if proj.IsExternal || proj.IsNoProject {
 		t.Fatalf("promoted project must be internal, got external=%v nopProject=%v", proj.IsExternal, proj.IsNoProject)
 	}
-	wantWorkspace := filepath.Join(agentDir, "projects", proj.ID, "Workspace")
+	// The registered internal workspace path is the canonical
+	// (symlink-resolved) form — see Manager.CreateProject's internal branch;
+	// on macOS t.TempDir() sits under /var -> /private/var, so the
+	// constructed and registered forms differ by that resolution.
+	wantWorkspace, err := filepath.EvalSymlinks(filepath.Join(agentDir, "projects", proj.ID, "Workspace"))
+	if err != nil {
+		t.Fatalf("resolve expected workspace: %v", err)
+	}
 	if proj.WorkspacePath != wantWorkspace {
 		t.Fatalf("workspace path = %q, want %q", proj.WorkspacePath, wantWorkspace)
 	}

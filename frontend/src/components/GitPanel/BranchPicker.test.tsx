@@ -12,7 +12,9 @@ const { gitMocks } = vi.hoisted(() => ({
     checkoutBranch: vi.fn(),
     checkoutRemoteBranch: vi.fn(),
     createBranch: vi.fn(),
+    createBranchInWorktree: vi.fn(),
     getBranchBases: vi.fn(),
+    deleteWorktree: vi.fn(),
   },
 }))
 
@@ -26,6 +28,7 @@ vi.mock('@/lib/logger', () => ({
 const { focusMocks } = vi.hoisted(() => ({
   focusMocks: {
     focusWorktree: vi.fn(),
+    refreshGitFocus: vi.fn(),
   },
 }))
 
@@ -47,10 +50,17 @@ beforeEach(() => {
   gitMocks.checkoutBranch.mockReset()
   gitMocks.checkoutRemoteBranch.mockReset()
   gitMocks.createBranch.mockReset()
+  gitMocks.createBranchInWorktree.mockReset()
   gitMocks.getBranchBases.mockReset()
+  gitMocks.deleteWorktree.mockReset()
   // Default: resolve to an empty branch list so the effect always has a
   // thenable. Individual tests override this as needed.
   gitMocks.getBranches.mockResolvedValue([])
+  gitMocks.deleteWorktree.mockResolvedValue(undefined)
+  focusMocks.focusWorktree.mockReset()
+  focusMocks.focusWorktree.mockResolvedValue(undefined)
+  focusMocks.refreshGitFocus.mockReset()
+  focusMocks.refreshGitFocus.mockResolvedValue(undefined)
 
   useGitPanelStore.getState().reset()
   // Branch operations record their outcome against the ACTIVE project.
@@ -479,6 +489,43 @@ describe('BranchPicker — worktree focus switcher', () => {
     // Selecting a worktree closes the switch-branch dialog.
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
   })
+
+  it('deletes a linked tree through the confirm dialog in switch mode', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 'sess-1', session_name: 'Refactor loop',
+      },
+    ])
+    renderPicker()
+    await flush()
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]'))
+    // The checkout has no delete action; the linked tree does.
+    expect(rows[0]!.querySelectorAll('button')).toHaveLength(0)
+    act(() => {
+      rows[1]!.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(body().textContent).toContain('Delete worktree?')
+    act(() => {
+      const del = allButtons().find((b) => b.textContent?.trim() === 'Delete')!
+      del.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.deleteWorktree).toHaveBeenCalledWith('/repo/.worktrees/s-abc12345', {
+      force: false,
+      unlock: false,
+    })
+    expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('BranchPicker — session-draft mode (select/create for a managed worktree)', () => {
@@ -613,18 +660,69 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
   })
 
-  it('hides remote branches and the worktrees section in draft mode', async () => {
+  it('hides remote branches but shows the worktrees section in draft mode', async () => {
     useGitPanelStore.getState().setWorktrees([
       {
         path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
         managed: false, pinned: false, is_focus: false,
       },
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: true,
+        is_focus: false, session_id: 'sess-1', session_name: 'Refactor loop',
+      },
     ])
     await openDraftPicker()
 
+    // Remote branches stay hidden — the draft never checks anything out.
     expect(branchRow('origin/feat/remote')).toBeUndefined()
     expect(body().textContent).not.toContain('Remote')
-    expect(body().textContent).not.toContain('Worktrees')
+
+    // The worktrees section is shown so an existing tree can be deleted
+    // from the same dialog (the deletion never touches the draft).
+    const rows = Array.from(body().querySelectorAll<HTMLButtonElement>('[data-testid="worktree-row"]'))
+    expect(rows).toHaveLength(2)
+    expect(body().textContent).toContain('Worktrees')
+    expect(body().textContent).toContain('Refactor loop')
+  })
+
+  it('deleting a worktree from the draft picker runs the confirmed removal without touching the draft', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-stale000', name: 's-stale000', kind: 'managed',
+        branch: 'sess/s-stale000', head: 'b', managed: true, pinned: true,
+        is_focus: false, session_id: 'sess-1', session_name: 'Stale loop',
+      },
+    ])
+    await openDraftPicker()
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]'))
+    // The checkout has no delete action; the linked tree does.
+    expect(rows[0]!.querySelectorAll('button')).toHaveLength(0)
+    act(() => {
+      rows[1]!.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(body().textContent).toContain('Delete worktree?')
+    act(() => {
+      const del = allButtons().find((b) => b.textContent?.trim() === 'Delete')!
+      del.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.deleteWorktree).toHaveBeenCalledWith('/repo/.worktrees/s-stale000', {
+      force: false,
+      unlock: false,
+    })
+    expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
+    // The draft is untouched by the deletion.
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
   })
 
   it('closing the picker resets the mode — the next Git-panel open is a switch intent', async () => {
