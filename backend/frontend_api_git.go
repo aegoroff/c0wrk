@@ -867,8 +867,12 @@ func freeManagedTreeName(repoRoot, branch string) (string, error) {
 // tree stays the user's decision. The active project's checkout is still
 // required (no No Project). The tree's embedding cache is seeded
 // best-effort from the checkout, same contract as the session provisioning
-// flow. Emits git:status_changed on success — one event that refreshes both
-// the branch list and the worktree list.
+// flow. Emits git:status_changed on success — that event refreshes the
+// status, the current branch and the branch list only; it does NOT refresh
+// the worktree list. The worktree list is refreshed by the frontend's
+// explicit refreshGitFocus() call after this RPC returns (see
+// specs/domains/session-worktrees.md) — a caller that skips it leaves the
+// new tree absent from the worktree switcher.
 //
 // Returns an error when no project is active, the project is No Project,
 // the branch name is empty, the base ref is invalid (ErrInvalidBaseRef),
@@ -890,6 +894,15 @@ func (f *FrontendAPI) CreateBranchInWorktree(name, base string) error {
 	if err != nil {
 		return err
 	}
+	// Canonicalize the checkout before deriving managed paths (fail-soft
+	// filepath.EvalSymlinks — see canonicalWorktreeRoot): legacy rows
+	// registered before the manager canonicalized internal registrations
+	// may keep a symlinked ancestor, which would diverge from git's
+	// canonical listings and fail the add post-check AFTER a successful
+	// `git worktree add`, leaving the created branch and tree behind. The
+	// success event below stays on the stored form — the frontend keys git
+	// events by the registered project path.
+	repoRoot := canonicalWorktreeRoot(checkout)
 
 	baseRef := strings.TrimSpace(base)
 	if baseRef != "" {
@@ -897,19 +910,19 @@ func (f *FrontendAPI) CreateBranchInWorktree(name, base string) error {
 		// version-independent error instead of git worktree add's wording.
 		// ^{commit} peels annotated tags and rejects refs that do not
 		// resolve to a commit object.
-		if _, err := f.runGitCmd(checkout, "rev-parse", "--verify", "--quiet", baseRef+"^{commit}"); err != nil {
+		if _, err := f.runGitCmd(repoRoot, "rev-parse", "--verify", "--quiet", baseRef+"^{commit}"); err != nil {
 			return fmt.Errorf("base %q is not a valid ref: %w", baseRef, ErrInvalidBaseRef)
 		}
 	}
 
-	treeName, err := freeManagedTreeName(checkout, branchName)
+	treeName, err := freeManagedTreeName(repoRoot, branchName)
 	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
 	defer cancel()
-	if _, err := f.worktreeOwner().ProvisionNewBranch(ctx, checkout, treeName, branchName, baseRef); err != nil {
+	if _, err := f.worktreeOwner().ProvisionNewBranch(ctx, repoRoot, treeName, branchName, baseRef); err != nil {
 		return err
 	}
 

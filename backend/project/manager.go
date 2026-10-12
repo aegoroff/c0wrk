@@ -88,6 +88,16 @@ func (m *Manager) EnsureNoProject() (created bool, err error) {
 	if absPath, err := filepath.Abs(wsPath); err == nil {
 		wsPath = absPath
 	}
+	// Canonicalize the deepest existing ancestor (the projects dir —
+	// created by NewManager) so the stored path matches the same invariant
+	// CreateProject's internal branch establishes: stored roots are
+	// compared against resolved forms. The workspace directory itself is
+	// deliberately not created here (lazy per-session creation below), so
+	// only the existing prefix is resolved; the fail-soft fallback keeps
+	// the lexical form.
+	if resolvedParent, perr := filepath.EvalSymlinks(filepath.Dir(wsPath)); perr == nil {
+		wsPath = filepath.Join(resolvedParent, filepath.Base(wsPath))
+	}
 	info := ProjectInfo{
 		ID:            NoProjectID,
 		Name:          "No Project",
@@ -167,6 +177,17 @@ func (m *Manager) CreateProject(name, externalPath string) (*ProjectInfo, error)
 		if err := safeio.MkdirAllReal(info.WorkspacePath, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create internal workspace directory: %w", err)
 		}
+		// Canonicalize before persisting, mirroring the external branch:
+		// the stored path is compared against symlink-resolved forms by
+		// security containment (resolved tool inputs) and the git worktree
+		// primitives (git's canonical `git worktree list` output), so a
+		// constructed path through a symlinked ancestor (e.g. a symlinked
+		// agent dir) would silently diverge from every one of them.
+		resolved, err := filepath.EvalSymlinks(info.WorkspacePath)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve internal workspace symlinks: %w", err)
+		}
+		info.WorkspacePath = resolved
 	} else {
 		// External project: canonicalize the path (absolute, cleaned,
 		// symlink-resolved) before persisting. Stored paths participate in

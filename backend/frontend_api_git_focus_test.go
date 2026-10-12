@@ -11,9 +11,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"testing"
 
+	"github.com/v0lka/c0wrk/backend/session"
 	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/c0wrk/internal/gittest"
 )
@@ -340,5 +342,211 @@ func TestInvalidateAllGitCaches_ClearsGitPanelFocus(t *testing.T) {
 	}
 	if got != h.project.WorkspacePath {
 		t.Fatalf("focus after project-switch invalidation = %q, want the (new) project checkout %q", got, h.project.WorkspacePath)
+	}
+}
+
+// legacyAliasHarness builds the standard worktree harness and then points
+// the FrontendAPI's cached active project path at a symlink alias of the
+// repository root, modeling a legacy registration row that stored the
+// unresolved form (registered before project registration resolved
+// symlinks; on macOS /var is a symlink to /private/var). The listing and
+// classification seams read this cache, so the mismatched forms are the
+// scenario the canonicalization must survive.
+func legacyAliasHarness(t *testing.T) (h *wtHarness, alias string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks on Windows require elevated privileges; the scenario cannot be modeled here")
+	}
+	h = newWTHarness(t, wtFactory())
+	alias = filepath.Join(gittest.TempDir(t), "repo-alias")
+	if err := os.Symlink(h.repoRoot, alias); err != nil {
+		t.Fatalf("create repo symlink alias: %v", err)
+	}
+	h.api.activeProjectMu.Lock()
+	h.api.activeProjectPath = alias
+	h.api.activeProjectMu.Unlock()
+	return h, alias
+}
+
+// TestListProjectWorktrees_LegacySymlinkedRootClassifiesManaged pins the
+// listing-side canonicalization: through a legacy registration row (cached
+// project path = symlink alias) the managed session tree must still report
+// as managed with its owning session, the default-focus flag must survive
+// the raw stored form (the resolved focus is matched against the listing's
+// canonical paths by string equality), and a focused managed tree must keep
+// its managed classification in the focus payload.
+func TestListProjectWorktrees_LegacySymlinkedRootClassifiesManaged(t *testing.T) {
+	h, alias := legacyAliasHarness(t)
+	tree, pinned := focusTestTree(t, h)
+
+	// An external linked tree outside the managed container.
+	ext := filepath.Join(gittest.TempDir(t), "ext-tree")
+	wtGit(t, h.repoRoot, "worktree", "add", "-b", "ext-branch", ext)
+
+	trees, err := h.api.ListProjectWorktrees()
+	if err != nil {
+		t.Fatalf("ListProjectWorktrees through the legacy alias %q: %v", alias, err)
+	}
+	if len(trees) != 3 {
+		t.Fatalf("worktree count = %d, want 3 (main + managed + external): %+v", len(trees), trees)
+	}
+	byKind := map[string]GitWorktree{}
+	for _, w := range trees {
+		byKind[w.Kind] = w
+	}
+	managed, hasManaged := byKind[string(workspace.WorktreeManaged)]
+	if !hasManaged {
+		t.Fatalf("managed tree %q classified as non-managed through the legacy alias: %+v", tree, trees)
+	}
+	if managed.Path != tree || !managed.Managed || !managed.Pinned || managed.Branch != pinned || managed.SessionID == "" {
+		t.Fatalf("managed entry = %+v (pinned branch %q)", managed, pinned)
+	}
+	external, hasExternal := byKind[string(workspace.WorktreeExternal)]
+	if !hasExternal || external.Path != ext || external.Managed || external.Pinned {
+		t.Fatalf("external entry = %+v", external)
+	}
+	main, hasMain := byKind[string(workspace.WorktreeMain)]
+	if !hasMain || main.Path != h.project.WorkspacePath || main.Managed || main.Pinned {
+		t.Fatalf("main entry = %+v", main)
+	}
+	if !main.IsFocus {
+		t.Fatalf("default focus (the checkout) not flagged through the legacy alias: %+v", main)
+	}
+
+	// Focusing the managed tree flags it and keeps its classification in
+	// the focus payload.
+	if err := h.api.SetGitPanelFocus(tree); err != nil {
+		t.Fatalf("SetGitPanelFocus(tree): %v", err)
+	}
+	trees, err = h.api.ListProjectWorktrees()
+	if err != nil {
+		t.Fatalf("ListProjectWorktrees after focus: %v", err)
+	}
+	for _, w := range trees {
+		if w.Path == tree && !w.IsFocus {
+			t.Fatalf("focused managed tree not flagged: %+v", trees)
+		}
+		if w.Path == h.project.WorkspacePath && w.IsFocus {
+			t.Fatalf("checkout still flagged after the focus moved: %+v", trees)
+		}
+	}
+	focus, err := h.api.GetGitPanelFocus()
+	if err != nil {
+		t.Fatalf("GetGitPanelFocus through the legacy alias: %v", err)
+	}
+	if focus.Path != tree || focus.Kind != string(workspace.WorktreeManaged) || !focus.Managed || !focus.Pinned {
+		t.Fatalf("focus info = %+v, want the managed tree %q", focus, tree)
+	}
+	if focus.SessionID != managed.SessionID || focus.Branch != pinned {
+		t.Fatalf("focus ownership = %+v, want session %q on %q", focus, managed.SessionID, pinned)
+	}
+}
+
+// TestPinnedBranchGuard_LegacySymlinkedRoot pins the guard's behavior on a
+// legacy registration row whose cached checkout path disagrees with the
+// tree's canonical path (raw stored form vs canonical listing path): the
+// pinned-branch protection must hold through the raw form, and the checkout
+// itself — focused explicitly through its canonical listing path — must
+// keep normal checkout (the container check must not capture the checkout
+// root once gitFocusRoots resolves it).
+func TestPinnedBranchGuard_LegacySymlinkedRoot(t *testing.T) {
+	h, _ := legacyAliasHarness(t)
+	tree, pinned := focusTestTree(t, h)
+
+	wtGit(t, h.repoRoot, "branch", "other-branch")
+
+	if err := h.api.SetGitPanelFocus(tree); err != nil {
+		t.Fatalf("SetGitPanelFocus(tree): %v", err)
+	}
+
+	if err := h.api.CheckoutBranch("other-branch"); !errors.Is(err, ErrPinnedWorktreeBranch) {
+		t.Fatalf("CheckoutBranch(other) error = %v, want ErrPinnedWorktreeBranch", err)
+	}
+	if got := wtGit(t, tree, "rev-parse", "--abbrev-ref", "HEAD"); got != pinned {
+		t.Fatalf("tree moved off its pin to %q", got)
+	}
+	// Checking out the pinned branch itself stays allowed.
+	if err := h.api.CheckoutBranch(pinned); err != nil {
+		t.Fatalf("CheckoutBranch(pinned) = %v, want allowed", err)
+	}
+	// Creating a branch always moves off the pin: refused.
+	if err := h.api.CreateBranch("brand-new", ""); !errors.Is(err, ErrPinnedWorktreeBranch) {
+		t.Fatalf("CreateBranch error = %v, want ErrPinnedWorktreeBranch", err)
+	}
+	// Renaming the pinned branch is refused (the binding records it).
+	if err := h.api.RenameBranch(pinned, "renamed"); !errors.Is(err, ErrPinnedWorktreeBranch) {
+		t.Fatalf("RenameBranch(pinned) error = %v, want ErrPinnedWorktreeBranch", err)
+	}
+
+	// The checkout, focused explicitly through its canonical listing path,
+	// keeps normal checkout.
+	if err := h.api.SetGitPanelFocus(h.project.WorkspacePath); err != nil {
+		t.Fatalf("SetGitPanelFocus(checkout): %v", err)
+	}
+	if err := h.api.CheckoutBranch("other-branch"); err != nil {
+		t.Fatalf("CheckoutBranch on the checkout = %v, want allowed", err)
+	}
+}
+
+// TestCreateManagedSession_LocalFallbackKeepsStoredRootOnLegacyRow pins the
+// fallback identity: when the requested branch is held by the project
+// checkout, the local fallback session's stored WorkspacePath must keep the
+// registration form (the symlink alias on a legacy row) — the vector
+// registry's AGENT routing matches it against the project row by plain
+// string compare, so the canonicalized form would strand the session
+// without a vector target.
+func TestCreateManagedSession_LocalFallbackKeepsStoredRootOnLegacyRow(t *testing.T) {
+	h, alias := legacyAliasHarness(t)
+
+	// The branch the checkout holds right now.
+	branch := wtGit(t, h.repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+
+	info, err := h.api.CreateManagedSession(branch, false, "")
+	if err != nil {
+		t.Fatalf("CreateManagedSession(%q) on the checkout-held branch: %v", branch, err)
+	}
+	if info.WorkspaceBinding == nil || info.WorkspaceBinding.Kind != session.WorkspaceLocal {
+		t.Fatalf("fallback session binding = %+v, want a local binding", info.WorkspaceBinding)
+	}
+	if got := info.WorkspaceBinding.WorkspacePath; got != alias {
+		t.Fatalf("fallback session WorkspacePath = %q, want the stored (alias) form %q", got, alias)
+	}
+}
+
+// TestCreateBranch_InvalidatesStatusCacheOnLegacyRow pins the cache-key
+// normalization: on a legacy registration row the status snapshot is
+// populated under the raw stored project path while the mutating git RPCs
+// (CreateBranch among them) invalidate through the canonical focus root —
+// the plain string key would strand the entry and serve a stale snapshot
+// until the TTL lapses. gitCacheKey must collapse both forms to one.
+func TestCreateBranch_InvalidatesStatusCacheOnLegacyRow(t *testing.T) {
+	h, alias := legacyAliasHarness(t)
+
+	// Populate the status cache through the raw stored form — the form the
+	// frontend passes on a legacy row.
+	if _, err := h.api.GetGitStatus(alias); err != nil {
+		t.Fatalf("initial GetGitStatus: %v", err)
+	}
+
+	// A dirty file the cached snapshot does not know about (no watcher in
+	// the harness, so nothing else invalidates the cache).
+	if err := os.WriteFile(filepath.Join(h.repoRoot, "dirty-after-branch.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// CreateBranch changes no working-tree files: only its emit-driven
+	// invalidation can refresh the next status read.
+	if err := h.api.CreateBranch("cache-check-branch", ""); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+
+	status, err := h.api.GetGitStatus(alias)
+	if err != nil {
+		t.Fatalf("GetGitStatus after CreateBranch: %v", err)
+	}
+	// The fresh snapshot is computed for the root the RPC was called with,
+	// so its keys carry that (raw) spelling.
+	if _, ok := status[filepath.Join(alias, "dirty-after-branch.txt")]; !ok {
+		t.Fatalf("stale status snapshot survived the CreateBranch invalidation (keys: %v)", statusKeys(status))
 	}
 }

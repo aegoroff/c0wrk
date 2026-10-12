@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/core/workspace"
+	"github.com/v0lka/c0wrk/internal/gittest"
 )
 
 // --- helpers for git tests ---
@@ -30,17 +32,50 @@ func commitFile(t *testing.T, dir, name, content string) {
 
 // withGitRepo creates a temporary directory with an initialised git
 // repository and a committed file (committed.txt), then runs fn with a
-// FrontendAPI pointing at that directory.
+// FrontendAPI pointing at that directory. The directory is the
+// symlink-resolved form (gittest.TempDir): git reports canonical paths, so
+// a fixture root fed to the worktree primitives — which compare derived
+// targets against `git worktree list` output — must be canonical too
+// (macOS resolves /var -> /private/var; Windows resolves 8.3 short names).
 func withGitRepo(t *testing.T, fn func(*FrontendAPI, string)) {
 	t.Helper()
-	tmpDir := t.TempDir()
+	tmpDir := gittest.TempDir(t)
 	gitInit(t, tmpDir)
 	commitFile(t, tmpDir, "committed.txt", "v1\n")
 
 	f := &FrontendAPI{activeProjectPath: tmpDir}
 	f.seedPublished.Store(true)
-	f.seedPublished.Store(true)
 	fn(f, tmpDir)
+}
+
+// TestCreateBranchInWorktree_SymlinkedProjectPath pins the RPC-side path
+// canonicalization: a project path reached through a symlink (a legacy
+// internal registration; on macOS /var is a symlink to /private/var) must
+// still provision. The derived tree target is compared against git's
+// canonical `git worktree list` output, so an unresolved registered path
+// used to fail the add post-check AFTER a successful `git worktree add`,
+// leaving the created branch and tree behind.
+func TestCreateBranchInWorktree_SymlinkedProjectPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlinks on Windows require elevated privileges; the scenario cannot be modeled here")
+	}
+	repoDir := gittest.TempDir(t)
+	gitInit(t, repoDir)
+	commitFile(t, repoDir, "committed.txt", "v1\n")
+
+	alias := filepath.Join(gittest.TempDir(t), "repo-alias")
+	if err := os.Symlink(repoDir, alias); err != nil {
+		t.Fatalf("create repo symlink alias: %v", err)
+	}
+
+	f := &FrontendAPI{activeProjectPath: alias}
+	f.seedPublished.Store(true)
+	if err := f.CreateBranchInWorktree("feature-one", ""); err != nil {
+		t.Fatalf("CreateBranchInWorktree through a symlinked project path: %v", err)
+	}
+	// The branch really exists in the repository (runGit fails the test on
+	// error).
+	runGit(t, repoDir, "rev-parse", "--verify", "refs/heads/feature-one")
 }
 
 // --- StageFile tests ---
