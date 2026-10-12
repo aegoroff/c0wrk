@@ -43,7 +43,7 @@ type vectorIndexTarget struct {
 // resolved root is handed to the per-root registry (ApplyFocus), which owns
 // the manager for it. It no longer re-points a shared singleton — sessions
 // route through their own task context, the user's search follows the focus.
-func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorIndexTarget {
+func (f *FrontendAPI) resolveVectorIndexTarget(switchCtx context.Context, p *project.ProjectInfo) vectorIndexTarget {
 	base := vectorIndexTarget{
 		workspacePath: p.WorkspacePath,
 		storagePath:   config.ProjectVectorIndexPath(f.agentDir, p.ID),
@@ -54,10 +54,13 @@ func (f *FrontendAPI) resolveVectorIndexTarget(p *project.ProjectInfo) vectorInd
 	// Both reads below are bounded by terminalPathLookupTimeout, as this
 	// function's siblings require: Manager.WorkspacePathFor's contract makes
 	// the CALLER bound the session-row read, and the shared SQLite pool can
-	// otherwise park SwitchProject (switchMu held) indefinitely. A timeout
-	// degrades to base — the project checkout — which is already the
-	// fail-soft default of every negative branch here.
-	ctx, cancel := context.WithTimeout(f.ctx(), terminalPathLookupTimeout)
+	// otherwise park SwitchProject (switchMu held) indefinitely. The bound is
+	// derived from the switch-section deadline (switchSectionTimeout) so a
+	// saturated pool cannot stack this budget on top of every other
+	// round-trip in the critical section. A timeout degrades to base — the
+	// project checkout — which is already the fail-soft default of every
+	// negative branch here.
+	ctx, cancel := context.WithTimeout(switchCtx, terminalPathLookupTimeout)
 	defer cancel()
 	savedID := ""
 	if f.projStore != nil {
@@ -143,11 +146,23 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		}
 	}
 
-	// The per-tree embedding cache is a sibling of the tree's storage (its
-	// content-addressed entries are meaningless without the tree) — drop it.
+	// The per-tree embedding cache lives INSIDE the tree's storage root
+	// (WorktreeEmbeddingCachePath → <storage>/embedding_cache), so the
+	// DeleteProjectData removal above already dropped it. The explicit
+	// removal stays as belt-and-braces, and the LEGACY sibling location used
+	// by builds before the containment fix (issue #137 step 1) is removed
+	// too: trees provisioned by those builds carry seed copies there that
+	// nothing ever read — drop them so the stale directories do not outlive
+	// the tree.
 	if cache, cerr := config.WorktreeEmbeddingCachePath(f.agentDir, projectID, name); cerr == nil {
 		if err := os.RemoveAll(cache); err != nil {
 			f.log().Warn("vector index: failed to remove released worktree embedding cache",
+				"project", projectID, "worktree", name, "error", err)
+		}
+	}
+	if legacy, lerr := config.LegacyWorktreeEmbeddingCachePath(f.agentDir, projectID, name); lerr == nil {
+		if err := os.RemoveAll(legacy); err != nil {
+			f.log().Warn("vector index: failed to remove legacy worktree embedding cache",
 				"project", projectID, "worktree", name, "error", err)
 		}
 	}
@@ -313,8 +328,7 @@ func (f *FrontendAPI) SearchVectorStore(req SearchRequest) ([]VectorStoreEntry, 
 		return []VectorStoreEntry{}, nil
 	}
 
-	vr := f.vectorRootsRegistry()
-	vm, err := vr.FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return nil, errVectorNoTarget
 	}
@@ -414,7 +428,7 @@ func (f *FrontendAPI) GetVectorIndexStatus() VectorIndexStatus {
 		return st
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		result := VectorIndexStatus{State: "unavailable", Indices: []string{}}
 		f.applyEmbedderInfo(&result)
@@ -476,7 +490,7 @@ func (f *FrontendAPI) ReindexVectorIndex() error {
 		return errors.New("vector index is unavailable in No Project mode")
 	}
 
-	vm, err := f.vectorRootsRegistry().FocusManager()
+	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
 		return errors.New("vector index not available")
 	}

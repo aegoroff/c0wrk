@@ -205,7 +205,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	p := h.proj
 
 	// No saved session: checkout defaults.
-	got := h.api.resolveVectorIndexTarget(p)
+	got := h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath || got.storagePath != config.ProjectVectorIndexPath(h.agentDir, p.ID) {
 		t.Fatalf("default target = %+v; want checkout + project storage", got)
 	}
@@ -213,7 +213,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 	tree := h.addManagedWorktree(t, "s-1", "topic")
 	h.saveManagedSession(t, "sess-managed", "s-1", "topic", tree)
 
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	wantStorage, err := config.WorktreeVectorIndexPath(h.agentDir, p.ID, "s-1")
 	if err != nil {
 		t.Fatalf("worktree vector path: %v", err)
@@ -227,7 +227,7 @@ func TestResolveVectorIndexTarget_ManagedSessionTargetsOwnTree(t *testing.T) {
 
 	// A local saved session keeps the defaults.
 	h.saveLocalSession(t, "sess-local")
-	got = h.api.resolveVectorIndexTarget(p)
+	got = h.api.resolveVectorIndexTarget(context.Background(), p)
 	if got.workspacePath != p.WorkspacePath {
 		t.Errorf("local-session target workspace = %q, want checkout", got.workspacePath)
 	}
@@ -373,7 +373,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrB, "focus-beta")
 
 	// Focus B: the status RPC reports B's branch...
-	if err := h.roots.ApplyFocus(canonicalRoot(treeB)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeB)); err != nil {
 		t.Fatalf("focus tree B: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-beta" {
@@ -383,7 +383,7 @@ func TestApplyFocus_StatusFollowsGitPanelFocus(t *testing.T) {
 	waitForVectorBranch(t, mgrA, "focus-alpha")
 
 	// Focus back to A: the visible identity flips, B's manager survives.
-	if err := h.roots.ApplyFocus(canonicalRoot(treeA)); err != nil {
+	if err := h.roots.ApplyFocus(context.Background(), canonicalRoot(treeA)); err != nil {
 		t.Fatalf("focus tree A: %v", err)
 	}
 	if got := h.api.GetVectorIndexStatus().Branch; got != "focus-alpha" {

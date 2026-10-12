@@ -212,7 +212,9 @@ func (f *FrontendAPI) SetGitPanelFocus(worktreePath string) error {
 // unresolvable root) is logged at Warn and never fails the git RPC — the
 // vector_index:status stream carries the actionable state instead.
 func (f *FrontendAPI) focusVectorRoots(root string) {
-	if err := f.vectorRootsRegistry().ApplyFocus(canonicalRoot(root)); err != nil {
+	// f.ctx() + resolveRootPlan's per-op cap reproduce the bounded projects
+	// listing the plain ListProjects() applied before the ctx threading.
+	if err := f.vectorRootsRegistry().ApplyFocus(f.ctx(), canonicalRoot(root)); err != nil {
 		f.log().Warn("vector focus unavailable for git panel target", "root", root, "error", err)
 	}
 }

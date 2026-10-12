@@ -146,20 +146,58 @@ func WorktreeVectorIndexPath(agentDir, projectID, name string) (string, error) {
 }
 
 // WorktreeEmbeddingCachePath returns the content-addressed embedding cache
-// directory for a managed worktree of a project: a SIBLING of the project's
-// own cache dir — <project vector index>/embedding_cache-worktrees/<name> —
-// never a subtree of it. The cache accounting (scanCacheTree) walks its root
-// recursively, so one live cache root must never contain another: with
-// per-root vector managers (ADR-080) a checkout manager and a managed-tree
-// manager of the same project run concurrently, and a shared or nested cache
-// root would corrupt both managers' size accounting. Per-tree caches keep
-// the trees isolated at the cost of cross-tree dedup, which a shared root
-// could no longer guarantee safely anyway. The dir still lives under the
-// project's vector index (outside its branches/ layout, which the legacy
-// migration never scans), so project deletion removes it together with the
-// rest of the project's index data. Checkout keeps ProjectEmbeddingCachePath
-// unchanged — no migration.
+// directory for a managed worktree of a project:
+// <project vector index>/worktrees/<name>/embedding_cache — INSIDE the tree's
+// own storage root. core/vectorindex enables a persistent cache only when its
+// root sits inside the storage the service was opened for (Service.SetProject
+// fails closed to a disabled cache with "path is outside vector-index
+// storage" otherwise), so the cache must live under WorktreeVectorIndexPath:
+// any location outside the tree storage silently turns the tree's first index
+// pass into a full cold ONNX re-run (issue #137 step 1 was dead on arrival
+// because of exactly that containment rule).
+//
+// The one-cache-root-per-subtree invariant still holds: the cache accounting
+// (scanCacheTree) walks its own root recursively, so one live cache root must
+// never contain another. The checkout's cache root (<project vector
+// index>/embedding_cache) and every tree's (<...>/worktrees/<name>/
+// embedding_cache) are disjoint subtrees — neither contains the other — and
+// two trees never nest either. Per-tree roots keep the trees isolated at the
+// cost of cross-tree dedup; the checkout's cache is copied into a fresh
+// tree's root by seedWorktreeEmbeddingCache instead (issue #137 step 1).
+//
+// The dir still lives under the project's vector index (outside its branches/
+// layout, which the legacy migration never scans — isLegacyCollectionDirName
+// matches only 8-hex directory names), so project deletion removes it
+// together with the rest of the project's index data. Checkout keeps
+// ProjectEmbeddingCachePath unchanged — no migration. Builds before the
+// containment fix stored tree caches in a sibling
+// embedding_cache-worktrees/<name> directory; that location is never read or
+// written anymore and is cleaned up on tree release
+// (LegacyWorktreeEmbeddingCachePath).
 func WorktreeEmbeddingCachePath(agentDir, projectID, name string) (string, error) {
+	if projectID == "" {
+		return "", errors.New("project id is required for a worktree embedding cache path")
+	}
+	if err := validateManagedWorktreeName(name); err != nil {
+		return "", err
+	}
+	storage, err := WorktreeVectorIndexPath(agentDir, projectID, name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(storage, "embedding_cache"), nil
+}
+
+// LegacyWorktreeEmbeddingCachePath returns the per-tree cache location used
+// by builds before the containment fix: a SIBLING of the checkout's cache
+// dir — <project vector index>/embedding_cache-worktrees/<name>. core/
+// vectorindex always refused that location (outside the tree's storage root),
+// so entries there were seed copies that were never read and never written.
+// Cleanup-only: deleteWorktreeVectorIndex removes it so trees provisioned by
+// older builds do not leak their seed copies after the tree is released.
+// Never derive a live cache root from this — new code must use
+// WorktreeEmbeddingCachePath.
+func LegacyWorktreeEmbeddingCachePath(agentDir, projectID, name string) (string, error) {
 	if projectID == "" {
 		return "", errors.New("project id is required for a worktree embedding cache path")
 	}

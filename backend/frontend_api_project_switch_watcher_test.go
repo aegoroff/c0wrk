@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func TestSwitchProject_VectorFailureKeepsPreviousWatcher(t *testing.T) {
 		t.Fatal("initial switch left no workspace watcher")
 	}
 
-	h.api.switchProjectSetupVectorFn = func(*project.ProjectInfo) error {
+	h.api.switchProjectSetupVectorFn = func(ctx context.Context, p *project.ProjectInfo) error {
 		return errors.New("vector init boom")
 	}
 

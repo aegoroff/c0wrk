@@ -211,12 +211,23 @@ func (vr *VectorRoots) awaitReady(ctx context.Context, block bool) error {
 // The root must be either a registered project's checkout or a managed
 // worktree of one — vector indexing is a CODE-project feature; CHAT session
 // workspaces and auxiliary work dirs have no index.
-func (f *FrontendAPI) resolveRootPlan(root string) (projectID, storagePath, cachePath string, err error) {
+//
+// ctx bounds the one store round-trip here: the projects listing runs on
+// ListProjectsCtx derived from the CALLER's ctx, capped per op at
+// sessionStoreOpTimeout (the same budget the plain ListProjects() applied
+// via Manager.opCtx). The project-switch critical section passes switchCtx,
+// so its vector-leg listing cannot outlive switchSectionTimeout (see
+// switchSectionTimeout for the waits that deliberately stay outside that
+// funnel). Everything after the listing — the manager build, SwitchProject's
+// async init, the eviction-drain wait — stays time-bounded, not ctx-bounded.
+func (f *FrontendAPI) resolveRootPlan(ctx context.Context, root string) (projectID, storagePath, cachePath string, err error) {
 	f.seedAcquire()
 	if f.projectManager == nil {
 		return "", "", "", errors.New("no project manager wired")
 	}
-	projects, err := f.projectManager.ListProjects()
+	readCtx, cancel := context.WithTimeout(ctx, sessionStoreOpTimeout)
+	defer cancel()
+	projects, err := f.projectManager.ListProjectsCtx(readCtx)
 	if err != nil {
 		return "", "", "", fmt.Errorf("listing projects for vector routing: %w", err)
 	}
@@ -256,8 +267,11 @@ func (f *FrontendAPI) resolveRootPlan(root string) (projectID, storagePath, cach
 // concurrent cold searches on one root must never build two managers over the
 // same chromem persistent storage. The heavy init (branch detect, collection
 // open, background indexing) runs asynchronously inside the manager exactly
-// as it did for the singleton; callers gate on Service.WaitReady.
-func (vr *VectorRoots) ManagerForRoot(root string) (*vectorindex.Manager, error) {
+// as it did for the singleton; callers gate on Service.WaitReady. ctx bounds
+// only the projects-listing store read during root resolution (see
+// resolveRootPlan); the manager build below and the bounded eviction-drain
+// wait are time-bounded, not ctx-bounded.
+func (vr *VectorRoots) ManagerForRoot(ctx context.Context, root string) (*vectorindex.Manager, error) {
 	root = canonicalRoot(root)
 	if root == "" {
 		return nil, errVectorNoTarget
@@ -305,7 +319,7 @@ func (vr *VectorRoots) ManagerForRoot(root string) (*vectorindex.Manager, error)
 		return nil, errVectorStillLoading
 	}
 
-	projectID, storagePath, cachePath, err := vr.f.resolveRootPlan(root)
+	projectID, storagePath, cachePath, err := vr.f.resolveRootPlan(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +437,9 @@ func (vr *VectorRoots) rootCallbacks(root string) vectorindex.ProjectCallbacks {
 // left running: a background session on that tree keeps searching its own
 // manager, and killing its in-flight index build because the user looked
 // away would degrade exactly the routing this registry exists to provide.
-func (vr *VectorRoots) ApplyFocus(root string) error {
+// ctx bounds the root-resolution store read (see resolveRootPlan); the
+// project-switch critical section passes its switchCtx here.
+func (vr *VectorRoots) ApplyFocus(ctx context.Context, root string) error {
 	root = canonicalRoot(root)
 	if root == "" {
 		return errVectorNoTarget
@@ -432,7 +448,7 @@ func (vr *VectorRoots) ApplyFocus(root string) error {
 	vr.focus = root
 	vr.mu.Unlock()
 
-	mgr, err := vr.ManagerForRoot(root)
+	mgr, err := vr.ManagerForRoot(ctx, root)
 	if err != nil {
 		vr.f.log().Warn("vector roots: focus manager unavailable", "root", root, "error", err)
 		return err
@@ -460,13 +476,14 @@ func (vr *VectorRoots) FocusRoot() string {
 }
 
 // FocusManager returns (creating if needed) the manager for the current
-// focus root — the manager the user-facing RPCs operate on.
-func (vr *VectorRoots) FocusManager() (*vectorindex.Manager, error) {
+// focus root — the manager the user-facing RPCs operate on. ctx bounds the
+// root-resolution store read (see resolveRootPlan).
+func (vr *VectorRoots) FocusManager(ctx context.Context) (*vectorindex.Manager, error) {
 	root := vr.FocusRoot()
 	if root == "" {
 		return nil, errVectorNoTarget
 	}
-	return vr.ManagerForRoot(root)
+	return vr.ManagerForRoot(ctx, root)
 }
 
 // LiveManager returns the already-live manager for root WITHOUT creating
@@ -540,7 +557,7 @@ func (vr *VectorRoots) ManagerForContext(ctx context.Context) (*vectorindex.Mana
 	if root == "" {
 		return nil, errVectorNoTarget
 	}
-	return vr.ManagerForRoot(root)
+	return vr.ManagerForRoot(ctx, root)
 }
 
 // NotifyFileChangeForRoot triggers debounced incremental re-indexing on the

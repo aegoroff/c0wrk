@@ -262,24 +262,41 @@ func (m *Manager) RenameProject(id, name string) error {
 
 // ListProjects returns all projects ordered by last activity.
 func (m *Manager) ListProjects() ([]ProjectInfo, error) {
+	ctx, cancel := m.opCtx()
+	defer cancel()
+	return m.ListProjectsCtx(ctx)
+}
+
+// ListProjectsCtx is the caller-deadline variant of ListProjects. It exists so
+// the project-switch critical section can derive every store round-trip —
+// its own, and the vector leg's root resolution (resolveRootPlan) — from
+// ONE switch-scoped deadline: individually bounded operations (each with its
+// own opCtx) still sum to minutes of switchMu hold time when the shared
+// SQLite pool is saturated and every one of them burns its full budget. See
+// SwitchProject's switchSectionTimeout.
+func (m *Manager) ListProjectsCtx(ctx context.Context) ([]ProjectInfo, error) {
 	if err := m.checkReady(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ctx, cancel := m.opCtx()
-	defer cancel()
 	return m.store.ListProjects(ctx)
 }
 
 // GetProject returns a project by ID, or nil if not found.
 func (m *Manager) GetProject(id string) (*ProjectInfo, error) {
+	ctx, cancel := m.opCtx()
+	defer cancel()
+	return m.GetProjectCtx(ctx, id)
+}
+
+// GetProjectCtx is the caller-deadline variant of GetProject (see
+// ListProjectsCtx for why it exists).
+func (m *Manager) GetProjectCtx(ctx context.Context, id string) (*ProjectInfo, error) {
 	if err := m.checkReady(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ctx, cancel := m.opCtx()
-	defer cancel()
 	return m.store.LoadProject(ctx, id)
 }
