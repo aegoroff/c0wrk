@@ -156,19 +156,25 @@ func (f *FrontendAPI) trustedGitRepoEntryFor(path string) (config.TrustedGitRepo
 }
 
 // trustEntryMatchesPath reports whether a stored entry's path denotes the
-// same repository as one of the probe candidates: an exact filepath.Clean-ed
-// match, or a canonical-spelling match (workspace-canonicalize the entry
-// path once — EvalSymlinks is a filesystem walk, so this stays out of hot
-// loops' inner iterations).
+// same repository as one of the probe candidates: the match is SYMMETRIC
+// across every trust-key form of BOTH sides — the entry path is expanded
+// through workspace.TrustProbePaths (its exact cleaned path, canonical
+// spelling, repository trust root, legacy work-tree root, and the canonical
+// spelling of each) and intersected with the caller's candidates (the same
+// expansion of the queried path). An entry stored under any legacy or
+// alternate spelling — a pre-unification linked-worktree key, a
+// subdirectory path, a symlinked mount — therefore matches a query for the
+// repository root and vice versa, which is what keeps the trust⊥harden
+// mutual exclusion, the idempotency loops, and the removals as sound as
+// the multi-form checks. EvalSymlinks is a filesystem walk, so this stays
+// out of hot loops' inner iterations: callers probe a handful of entries on
+// cold trust-lifecycle and intake paths.
 func trustEntryMatchesPath(entryPath string, candidates []string) bool {
-	cleaned := filepath.Clean(entryPath)
-	canonical := ""
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		canonical = resolved
-	}
-	for _, c := range candidates {
-		if c == cleaned || (canonical != "" && c == canonical) {
-			return true
+	for _, form := range workspace.TrustProbePaths(entryPath) {
+		for _, c := range candidates {
+			if form == c {
+				return true
+			}
 		}
 	}
 	return false
@@ -226,6 +232,19 @@ func (f *FrontendAPI) readGitConfigSnapshot(fingerprint string) ([]byte, error) 
 // the registry and stay hardened. The caller must hold configMu when calling
 // from a concurrent context (TrustGitRepo / RemoveTrustedGitRepo hold it;
 // NewFrontendAPI calls at construction time, before the API is published).
+//
+// Each entry is mirrored under its REPOSITORY TRUST ROOT
+// (workspace.ResolveGitTrustRoot), the same normalization TrustGitRepo
+// applies when writing new entries — the registry matches stored strings
+// exactly against the spawn layer's probed forms, so a legacy entry a
+// pre-unification build keyed on a linked-worktree path must register the
+// main root or the spawn layer would keep hardening the rest of the
+// repository (main-root commits included) while the config-side trust check
+// — which matches every key form of both sides — reads it as trusted. An
+// entry whose pointer chain cannot be resolved (repository moved or deleted)
+// mirrors verbatim, exactly the form the spawn layer's own degraded probes
+// still reach; agreement holds there too, because both sides degrade the
+// same way.
 func (f *FrontendAPI) syncGitTrustRegistry() {
 	if f.config == nil {
 		gittrust.Replace(nil)
@@ -233,7 +252,11 @@ func (f *FrontendAPI) syncGitTrustRegistry() {
 	}
 	paths := make([]string, 0, len(f.config.Security.TrustedGitRepos))
 	for _, r := range f.config.Security.TrustedGitRepos {
-		paths = append(paths, r.Path)
+		registered := r.Path
+		if root := workspace.ResolveGitTrustRoot(r.Path); root != "" {
+			registered = root
+		}
+		paths = append(paths, registered)
 	}
 	gittrust.Replace(paths)
 }
@@ -283,7 +306,10 @@ func (f *FrontendAPI) GetTrustedGitRepos() []string {
 // bytes, any semantic change evicts the trust and re-warns with a semantic
 // diff. A config that cannot be scanned is refused fail-closed (a trust
 // decision cannot be bound to bytes that cannot be read).
-// Idempotent: trusting an already-trusted root is a no-op.
+// Idempotent: trusting a repository that already has a trusted entry — under
+// this spelling, the repository trust root, the legacy work-tree root, a
+// subdirectory path, or any canonical variant (trustEntryMatchesPath) — is a
+// no-op; no duplicate record is appended.
 func (f *FrontendAPI) TrustGitRepo(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -346,8 +372,15 @@ func (f *FrontendAPI) TrustGitRepo(path string) error {
 	if f.config == nil {
 		return errors.New("config not initialized")
 	}
+	// Idempotent across every trust-key form of both sides: trusting a root
+	// that already has an entry — stored under this spelling, the legacy
+	// work-tree root, a subdirectory path, or a canonical variant — is a
+	// no-op instead of appending a duplicate record for the same repository
+	// (a duplicate would leave commits keyed on the old form suppressed and
+	// re-fire the intake warning until a second Trust click).
+	candidates := workspace.TrustProbePaths(cleaned)
 	for _, trusted := range f.config.Security.TrustedGitRepos {
-		if filepath.Clean(trusted.Path) == cleaned {
+		if trustEntryMatchesPath(trusted.Path, candidates) {
 			return nil
 		}
 	}
@@ -402,16 +435,20 @@ func (f *FrontendAPI) RemoveTrustedGitRepo(path string) error {
 	return nil
 }
 
-// removeTrustedPathLocked removes the trusted entry whose path equals cleaned
-// (exact Clean match). Reports whether an entry was removed. The caller must
-// hold configMu.Lock. It does NOT sync the registry or persist — callers do
-// that once, after all mutations, so a combined trust/harden transition syncs
-// exactly once.
+// removeTrustedPathLocked removes every trusted entry denoting the same
+// repository as cleaned — matched across all trust-key forms of both sides
+// (trustEntryMatchesPath over TrustProbePaths(cleaned)), so a legacy
+// worktree-keyed or subdirectory-spelled entry cannot survive a hardening
+// of the repository root as a raw-git-eligible zombie. Reports whether any
+// entry was removed. The caller must hold configMu.Lock. It does NOT sync
+// the registry or persist — callers do that once, after all mutations, so a
+// combined trust/harden transition syncs exactly once.
 func (f *FrontendAPI) removeTrustedPathLocked(cleaned string) bool {
+	candidates := workspace.TrustProbePaths(cleaned)
 	kept := make([]config.TrustedGitRepo, 0, len(f.config.Security.TrustedGitRepos))
 	removed := false
 	for _, t := range f.config.Security.TrustedGitRepos {
-		if filepath.Clean(t.Path) == cleaned {
+		if trustEntryMatchesPath(t.Path, candidates) {
 			removed = true
 			continue
 		}
@@ -421,13 +458,19 @@ func (f *FrontendAPI) removeTrustedPathLocked(cleaned string) bool {
 	return removed
 }
 
-// removeHardenPathLocked removes cleaned from HardenGitRepos (exact Clean
-// match). Reports whether an entry was removed. The caller holds configMu.Lock.
+// removeHardenPathLocked removes every hardened entry denoting the same
+// repository as cleaned, matched across all trust-key forms of both sides —
+// the mirror of removeTrustedPathLocked, so a legacy worktree-keyed
+// hardening cannot survive a trust decision for the repository root (where
+// the spawn layer's multi-form probes would otherwise read the repository
+// as trusted). Reports whether an entry was removed. The caller holds
+// configMu.Lock.
 func (f *FrontendAPI) removeHardenPathLocked(cleaned string) bool {
+	candidates := workspace.TrustProbePaths(cleaned)
 	kept := make([]string, 0, len(f.config.Security.HardenGitRepos))
 	removed := false
 	for _, h := range f.config.Security.HardenGitRepos {
-		if filepath.Clean(h) == cleaned {
+		if trustEntryMatchesPath(h, candidates) {
 			removed = true
 			continue
 		}
@@ -458,7 +501,10 @@ func (f *FrontendAPI) GetHardenGitRepos() []string {
 // untrusted (and unregistered from the spawn-layer trust registry) as part of
 // the call — a root cannot be both trusted and hardened (validation enforces
 // the exclusion). The path must be an existing absolute directory, normalized
-// to its repository trust root exactly like TrustGitRepo. Idempotent.
+// to its repository trust root exactly like TrustGitRepo. Idempotent: a
+// repository that already has a hardened entry — under any trust-key form of
+// either side — is a no-op, and hardening drops every trusted entry denoting
+// the same repository (removeTrustedPathLocked), not just exact spellings.
 func (f *FrontendAPI) HardenGitRepo(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -485,8 +531,12 @@ func (f *FrontendAPI) HardenGitRepo(path string) error {
 	if f.config == nil {
 		return errors.New("config not initialized")
 	}
+	// Idempotent across every trust-key form of both sides (same matching as
+	// TrustGitRepo): hardening a root that already has an entry — under any
+	// spelling — is a no-op.
+	candidates := workspace.TrustProbePaths(cleaned)
 	for _, h := range f.config.Security.HardenGitRepos {
-		if filepath.Clean(h) == cleaned {
+		if trustEntryMatchesPath(h, candidates) {
 			return nil
 		}
 	}

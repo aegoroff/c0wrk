@@ -87,7 +87,13 @@ config is byte-for-byte what the user trusted.
   `core/workspace` consults to decide whether a repository may spawn raw git
   (`sysproc.GitCmdRaw`) — its own hooks, filters, merge drivers, textconv, and
   signing apply as they would outside c0wrk. Untrusted and hardened roots keep
-  the full neutralization.
+  the full neutralization. One per-worktree source stays outside any
+  repository-level decision: a linked worktree's own `config.worktree`
+  overlay was never part of the snapshot this decision bound (the snapshot
+  scans the trust root), so a trusted spawn rooted inside a linked worktree
+  runs raw only while a fresh scan shows the overlay contributing nothing
+  dangerous; otherwise — a failing scan included — that operation runs the
+  hardened baseline from the worktree, fail-closed and dialog-free.
 
 This reverses ADR-033's "trust is warning-suppression only" rule: the user's
 explicit trust is now the control that lifts hardening, so a deliberate

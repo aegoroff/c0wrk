@@ -73,7 +73,12 @@ and checks trust:
   trusted instead of re-triggering the gate (where "Trust & commit" would
   loop forever — the worktree loop was real: the dialog trusted the
   already-stored root while the worktree commit keyed on the worktree path —
-  and force would run raw git through the gate's blind side). The suppression
+  and force would run raw git through the gate's blind side). The one
+  exception the spawn layer keeps for itself: a worktree whose own
+  `config.worktree` overlay arms anything dangerous (a source the trust
+  snapshot never bound — see ADR-034) commits through the hardened baseline,
+  dialog-free, because a spawn-layer refusal cannot re-key the trust entry
+  and a prompt would recreate the loop; fails safe, never silent-raw. The suppression
   detection needs no resolution: it walks up to the discovered repository's
   common-dir hooks/config itself, so its result is independent of the
   workspace path; the Suppressed payload carries the resolved root

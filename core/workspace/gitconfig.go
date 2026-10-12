@@ -294,6 +294,14 @@ type GitConfigInfo struct {
 	// a canonical diff-able identity for trust-time snapshots.
 	rawSources []gitConfigSource
 
+	// worktreeOverlay retains the standalone parse of the config.worktree
+	// overlay ScanGitConfig performed before merging it into this info (nil
+	// when no overlay is in play). WorktreeOverlayClean judges the overlay's
+	// own keys, includes and errors from it — the same read the merged model
+	// was built from, so the gate never re-reads the file (and the
+	// include-directive warning fires exactly once per scan).
+	worktreeOverlay *GitConfigInfo
+
 	// includeSources captures the raw bytes of every include/includeIf
 	// target resolved by ResolveIncludes, in a stable, deterministic order
 	// (directive order, depth-first). It is populated lazily — only the
@@ -435,6 +443,56 @@ func (info *GitConfigInfo) Clean() bool {
 		}
 	}
 	return len(info.Includes) == 0 && len(info.Errors) == 0
+}
+
+// WorktreeOverlayClean reports whether the per-worktree config.worktree
+// overlay — which git reads live for this worktree whenever
+// extensions.worktreeConfig is enabled in the common config — contributes
+// nothing dangerous beyond the common configuration: no include directive
+// (an unreviewed source the scanner deliberately does not follow), no parse
+// error, and no key that is a live (non-inert) finding in the merged model
+// this info carries. It is the spawn layer's per-invocation check for
+// trusted repositories' linked worktrees, whose overlay a repository-level
+// trust decision can never bind: the trust snapshot scans the trust root
+// (common config, main checkout, attribute routing), and the overlay lives
+// in the worktree's own git dir, readable and plantable at any time —
+// including after the trust decision. Raw git may run from the worktree
+// only while its overlay stays as inert as the configuration the user
+// reviewed.
+//
+// The overlay is judged from the standalone parse ScanGitConfig retained
+// before merging it (same read the merged model was built from — no second
+// read of the file, and the include-directive warning fires exactly once).
+// Inert findings are compared through the merged model's classification: a
+// key the overlay merely shares with dead configuration (signing siblings
+// without an armed commit.gpgsign anywhere) stays clean, while any key that
+// is live in any layer — including a trusted common-config key the overlay
+// re-arms with a new value — is not. An info without an overlay in play is
+// trivially clean; an info that names an overlay its scan did not retain is
+// not clean (fail closed — the overlay's content cannot be proven safe).
+func (info *GitConfigInfo) WorktreeOverlayClean() bool {
+	if info == nil || info.WorktreeConfigPath == "" {
+		return true
+	}
+	wt := info.worktreeOverlay
+	if wt == nil {
+		return false
+	}
+	if len(wt.Includes) > 0 || len(wt.Errors) > 0 {
+		return false
+	}
+	live := make(map[string]bool, len(info.Findings))
+	for i := range info.Findings {
+		if !info.Findings[i].Inert {
+			live[info.Findings[i].FullKey] = true
+		}
+	}
+	for i := range wt.Findings {
+		if live[wt.Findings[i].FullKey] {
+			return false
+		}
+	}
+	return true
 }
 
 // Snapshot returns a canonical, diff-able byte representation of every source
@@ -1590,6 +1648,12 @@ func ScanGitConfig(repoRoot string, loggers ...*slog.Logger) (*GitConfigInfo, er
 			}
 			mergeGitConfigInfo(info, wt)
 			info.WorktreeConfigPath = wtPath
+			// Retain the standalone overlay parse for WorktreeOverlayClean:
+			// the spawn layer's trusted-worktree gate must judge the
+			// overlay's own keys/includes/errors, and only this parse
+			// attributes them to the overlay alone (the merged model folds
+			// them together).
+			info.worktreeOverlay = wt
 		}
 	}
 
