@@ -348,3 +348,64 @@ describe('useTabHotkeys — macOS system pair', () => {
     expect(event.defaultPrevented).toBe(false)
   })
 })
+
+// --- held-key auto-repeat (the unbounded-backlog guard) ---
+
+describe('useTabHotkeys — held-key auto-repeat', () => {
+  beforeEach(() => {
+    pinNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15')
+  })
+
+  it('a burst of auto-repeat keydowns while a switch is in flight enqueues exactly one activation', async () => {
+    const [t1, t2, t3] = seedTabs()
+    useTabStore.setState({ tabs: [t1, t2, t3], activeTabId: t2.id })
+    // The first activation stays in flight until the test releases it — the
+    // exact window where a held key used to pile an unbounded backlog onto
+    // the serialized chain.
+    let release!: () => void
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const controller = fakeController()
+    vi.mocked(controller.activate).mockReturnValue(inFlight)
+    renderHarness(controller)
+
+    const first = pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true })
+    expect(controller.activate).toHaveBeenCalledTimes(1)
+    expect(first.defaultPrevented).toBe(true)
+
+    // OS key repeat fires keydowns at ~15–30 Hz while the key is held: a
+    // burst of repeats must be dropped (one press = one step), leaving each
+    // event untouched.
+    const repeats: KeyboardEvent[] = []
+    for (let i = 0; i < 30; i++) {
+      repeats.push(pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true, repeat: true }))
+    }
+    expect(controller.activate).toHaveBeenCalledTimes(1)
+    for (const event of repeats) {
+      expect(event.defaultPrevented).toBe(false)
+    }
+
+    release()
+    await act(async () => {
+      await inFlight
+    })
+    // Even after the blocked switch resolves, no queued links wake up.
+    expect(controller.activate).toHaveBeenCalledTimes(1)
+  })
+
+  it('a real press after the held key still cycles', () => {
+    const [t1, t2, t3] = seedTabs()
+    useTabStore.setState({ tabs: [t1, t2, t3], activeTabId: t2.id })
+    const controller = fakeController()
+    renderHarness(controller)
+
+    pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true, repeat: true })
+    pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true, repeat: true })
+    expect(controller.activate).not.toHaveBeenCalled()
+
+    pressKey({ key: 'Tab', code: 'Tab', ctrlKey: true })
+    expect(controller.activate).toHaveBeenCalledTimes(1)
+    expect(controller.activate).toHaveBeenLastCalledWith(t3.id)
+  })
+})

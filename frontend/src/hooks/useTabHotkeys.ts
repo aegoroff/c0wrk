@@ -30,9 +30,11 @@ import { useUIStore } from '@/stores/uiStore'
 // TabController mount and routes every activation through that controller,
 // so hotkey cycling travels the exact same single-engine path — and the same
 // module-level serialization chain — as tab-bar clicks and banner-click
-// activations. A held shortcut firing repeated keydowns is therefore
-// well-defined: each keydown enqueues one wrap-around step and the chain
-// runs them in order.
+// activations. OS auto-repeat (the key held down) is deliberately ignored —
+// one press = one wrap-around step: a held cross-project cycle would
+// otherwise enqueue an unbounded activation backlog on the serialized chain
+// (each project switch costs several backend RPCs plus a persisted
+// switch-state write) that keeps flipping the workspace long after release.
 //
 // The hook is flag-aware but flag-agnostic in behavior: with
 // `uiStore.tabsEnabled` off, or with fewer than two tabs, the keypress is
@@ -140,6 +142,12 @@ export function useTabHotkeys(controller: TabController): void {
       if (isTerminalKeyEvent(event.target)) return
       const delta = tabSwitchDelta(event, macHost)
       if (delta === 0) return
+      // Auto-repeat (key held down) is ignored — one press is one
+      // wrap-around step, so a held key cannot enqueue an unbounded
+      // activation backlog on the serialized chain. These combos carry no
+      // webview default, so returning before preventDefault keeps the
+      // repeat keydown untouched.
+      if (event.repeat) return
       // The shortcuts belong to the visible tab bar: flag off → untouched
       // passthrough, exactly the pre-tab keyboard behavior.
       if (!useUIStore.getState().tabsEnabled) return
