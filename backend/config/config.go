@@ -17,6 +17,7 @@ import (
 	"github.com/v0lka/c0wrk/core/embeddedllm"
 	"github.com/v0lka/c0wrk/core/llmbudget"
 	"github.com/v0lka/c0wrk/core/vectorindex"
+	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/sp4rk/llm"
 
 	"gopkg.in/yaml.v3"
@@ -2036,7 +2037,10 @@ type SecurityConfig struct {
 	// hardened: their untrusted-git-config intake warning is never suppressed
 	// and they are excluded from the trust list — a root cannot be both
 	// trusted and hardened (validation enforces the mutual exclusion). Entries
-	// are absolute, filepath.Clean-ed paths, matching is exact. Hardening is
+	// are absolute, filepath.Clean-ed paths; matching probes the same
+	// trust-key forms the trust list matches on (workspace.TrustProbePaths),
+	// so a legacy entry keyed on a linked worktree still covers — and
+	// conflicts with — its repository's main root. Hardening is
 	// the inverse of trust at the spawn layer: a hardened root never becomes
 	// raw-git eligible, so the spawn-layer neutralization stays in force for
 	// it regardless of anything else.
@@ -3320,8 +3324,22 @@ func validate(cfg *Config) error {
 	// entry could never match and is rejected at load time rather than leaving
 	// dead config. Entries are cleaned in place, duplicate roots are rejected,
 	// and the two lists are mutually exclusive: a root cannot be both trusted
-	// (warning suppressed) and hardened (warning forced).
+	// (warning suppressed) and hardened (warning forced). The mutual exclusion
+	// compares the SAME trust-key forms the runtime matcher probes
+	// (workspace.TrustProbePaths: the literal cleaned spelling, its
+	// symlink-resolved spelling, the repository trust root, the legacy
+	// work-tree root, and the canonical spelling of both roots) — best effort:
+	// an entry whose path does not resolve where this config is loaded only
+	// conflicts through the forms that do resolve. So the same repository
+	// listed as trusted under one key form and hardened under another — e.g. a
+	// legacy entry keyed on a linked worktree against a main-root hardening,
+	// a state pre-unification builds could persist — is rejected exactly like
+	// the literal collision instead of loading cleanly and letting trust win
+	// repo-wide at runtime; the runtime trust/harden transitions enforce the
+	// same exclusion across every key form once the repositories actually
+	// exist.
 	seenTrusted := make(map[string]struct{}, len(cfg.Security.TrustedGitRepos))
+	trustedForms := make(map[string]struct{}, 2*len(cfg.Security.TrustedGitRepos))
 	cleanTrusted := make([]TrustedGitRepo, 0, len(cfg.Security.TrustedGitRepos))
 	for _, repo := range cfg.Security.TrustedGitRepos {
 		if repo.Path == "" {
@@ -3341,6 +3359,9 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("security.trusted_git_repos contains duplicate path %q", cleaned)
 		}
 		seenTrusted[cleaned] = struct{}{}
+		for _, form := range workspace.TrustProbePaths(cleaned) {
+			trustedForms[form] = struct{}{}
+		}
 		cleanTrusted = append(cleanTrusted, TrustedGitRepo{Path: cleaned, Fingerprint: repo.Fingerprint, SemanticFingerprint: repo.SemanticFingerprint})
 	}
 	cfg.Security.TrustedGitRepos = cleanTrusted
@@ -3361,8 +3382,10 @@ func validate(cfg *Config) error {
 		if _, dup := seenHarden[cleaned]; dup {
 			return fmt.Errorf("security.harden_git_repos contains duplicate path %q", cleaned)
 		}
-		if _, conflict := seenTrusted[cleaned]; conflict {
-			return fmt.Errorf("repository %q cannot be both trusted and hardened", cleaned)
+		for _, form := range workspace.TrustProbePaths(cleaned) {
+			if _, conflict := trustedForms[form]; conflict {
+				return fmt.Errorf("repository %q cannot be both trusted and hardened", cleaned)
+			}
 		}
 		seenHarden[cleaned] = struct{}{}
 		cleanHarden = append(cleanHarden, cleaned)

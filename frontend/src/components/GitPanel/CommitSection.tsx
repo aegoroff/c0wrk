@@ -243,7 +243,7 @@ export function CommitSection() {
       {/* The Trust/continue decision for a withheld commit. */}
       <CommitSuppressedDialog
         suppressed={suppressedFlow.pendingSuppressed?.suppression ?? null}
-        repoPath={suppressedFlow.pendingWorkspacePath}
+        repoPath={suppressedFlow.pendingSuppressed?.suppression.repo_root || suppressedFlow.pendingWorkspacePath}
         isSubmitting={suppressedFlow.isDialogSubmitting}
         onTrust={() => void suppressedFlow.handleTrustAndCommit()}
         onForceCommit={(skip) => void suppressedFlow.handleForceCommit(skip)}

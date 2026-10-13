@@ -420,6 +420,105 @@ func TestCommit_UntrustedSubdirectorySuppresses(t *testing.T) {
 	}
 }
 
+// TestCommit_TrustedRepoWorktreeCommit pins the worktree trust unification
+// end to end: a repository trusted through its MAIN root — the exact state
+// the reported bug shipped with, the root already sitting in
+// security.trusted_git_repos — must commit as trusted from a LINKED worktree
+// too. Before the fix the gate keyed the worktree commit on the worktree
+// path, withheld it (the shared hook lives in the common dir the gate did
+// not consult for trust), and the dialog's Trust action re-trusted the
+// already-trusted root: an infinite no-op loop with the dialog staying open.
+func TestCommit_TrustedRepoWorktreeCommit(t *testing.T) {
+	gittest.RequirePOSIXShell(t)
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+	isolateHomeForCommit(t)
+
+	root := filepath.Join(t.TempDir(), "repo")
+	repo := gittest.InitRepo(t, root, "hello\n")
+	wt := filepath.Join(t.TempDir(), "wt")
+	repo.Git(t, "worktree", "add", wt, "-b", "wtbranch")
+	marker := filepath.Join(t.TempDir(), "hook-fired")
+	plantCommitHook(t, root, "HOOK-STDOUT-LINE", marker)
+
+	f, _, _ := newTestAPI(t)
+	f.activeProjectPath = wt // Git-panel focus on the linked worktree
+	if err := f.TrustGitRepo(root); err != nil {
+		t.Fatalf("TrustGitRepo(main root): %v", err)
+	}
+
+	// Dirty the WORKTREE's checkout (its own working tree, distinct from the
+	// main checkout's) so the commit has something to commit.
+	if err := os.WriteFile(filepath.Join(wt, "file.txt"), []byte("hello\nworktree change\n"), 0o644); err != nil {
+		t.Fatalf("write worktree file: %v", err)
+	}
+	repo.Git(t, "-C", wt, "add", ".")
+
+	res, err := f.Commit("trusted worktree commit", false)
+	if err != nil {
+		t.Fatalf("Commit (trusted worktree): %v", err)
+	}
+	if res.Suppressed != nil {
+		t.Fatalf("Commit (trusted worktree): Suppressed = %+v, want nil — root-keyed trust must cover linked worktrees", res.Suppressed)
+	}
+	if res.Sha == "" {
+		t.Fatal("Commit (trusted worktree): expected a commit SHA")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("trusted worktree commit must run the repository's shared hook (raw git)")
+	}
+	if got := repo.Git(t, "-C", wt, "rev-list", "--count", "HEAD"); got != "2" {
+		t.Errorf("worktree rev-list count = %s, want 2 (the commit must land on the worktree branch)", got)
+	}
+}
+
+// TestCommit_UntrustedRepoWorktreeSuppresses is the worktree twin of the
+// untrusted-subdirectory case: WITHOUT trust, a commit in a linked worktree
+// still hits the gate (detection reads the common dir's hooks) and withholds
+// — and the suppression payload names the MAIN work-tree root as RepoRoot,
+// so the dialog's Trust action records (and the gate then honors) the root
+// the shared commit surface actually belongs to.
+func TestCommit_UntrustedRepoWorktreeSuppresses(t *testing.T) {
+	gittest.RequirePOSIXShell(t)
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+	isolateHomeForCommit(t)
+
+	root := filepath.Join(t.TempDir(), "repo")
+	repo := gittest.InitRepo(t, root, "hello\n")
+	wt := filepath.Join(t.TempDir(), "wt")
+	repo.Git(t, "worktree", "add", wt, "-b", "wtbranch")
+	marker := filepath.Join(t.TempDir(), "hook-fired")
+	plantCommitHook(t, root, "hook-line", marker)
+
+	f := &FrontendAPI{activeProjectPath: wt} // untrusted worktree focus
+	f.seedPublished.Store(true)
+	if err := os.WriteFile(filepath.Join(wt, "file.txt"), []byte("hello\nworktree change\n"), 0o644); err != nil {
+		t.Fatalf("write worktree file: %v", err)
+	}
+	repo.Git(t, "-C", wt, "add", ".")
+
+	res, err := f.Commit("untrusted worktree commit", false)
+	if err != nil {
+		t.Fatalf("Commit (untrusted worktree): %v", err)
+	}
+	if res.Suppressed == nil {
+		t.Fatal("Commit (untrusted worktree): expected Suppressed — detection must see the shared hook")
+	}
+	if len(res.Suppressed.Hooks) != 1 || res.Suppressed.Hooks[0] != "pre-commit" {
+		t.Errorf("Suppressed.Hooks = %v, want [pre-commit]", res.Suppressed.Hooks)
+	}
+	if res.Suppressed.RepoRoot != repo.Root {
+		t.Errorf("Suppressed.RepoRoot = %q, want the main work-tree root %q — the dialog must name what trusting records", res.Suppressed.RepoRoot, repo.Root)
+	}
+	if got := repo.Git(t, "-C", wt, "rev-list", "--count", "HEAD"); got != "1" {
+		t.Errorf("worktree rev-list count = %s, want 1 (withheld commit must not land)", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("withheld commit must not run the hook")
+	}
+}
+
 // TestCommit_WaitDelayOrphanStillSucceeds pins the ErrWaitDelay tolerance
 // (review finding 6): a trusted repository whose pre-commit hook launches a
 // background process holding the pipes must still REPORT success — the

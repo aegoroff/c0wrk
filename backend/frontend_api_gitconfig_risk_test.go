@@ -9,6 +9,8 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/core/gittrust"
+	"github.com/v0lka/c0wrk/core/workspace"
+	"github.com/v0lka/c0wrk/internal/gittest"
 )
 
 // writeGitConfig creates dir/.git/config with the given content. The scan is
@@ -796,6 +798,42 @@ func TestSwitchProject_AlreadyActiveStillScansGitConfigRisk(t *testing.T) {
 
 // --- Trust snapshot + fingerprint recheck (step_3 RPC) ---
 
+// TestTrustGitRepo_WorktreePathStoresRepositoryRoot pins the trust-key
+// normalization for linked worktrees: trusting from a worktree path — the
+// form the Commit-withheld dialog's Trust action passes (the project
+// workspace) — records the repository's MAIN work-tree root, not the
+// worktree, so a decision made from any path inside the repository covers
+// the whole repository and the commit gate (which keys a worktree commit on
+// the same root) agrees with what was stored. Before the unification this
+// was the reported no-op Trust loop: the root was already trusted, the
+// worktree commit keyed on the worktree path, and the trust RPC re-trusted
+// the already-covered root without effect.
+func TestTrustGitRepo_WorktreePathStoresRepositoryRoot(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root := filepath.Join(t.TempDir(), "repo")
+	repo := gittest.InitRepo(t, root, "hello\n")
+	wt := filepath.Join(t.TempDir(), "wt")
+	repo.Git(t, "worktree", "add", wt, "-b", "wtbranch")
+
+	f, _, _ := newTestAPI(t)
+	if err := f.TrustGitRepo(wt); err != nil {
+		t.Fatalf("TrustGitRepo(worktree): %v", err)
+	}
+	got := f.GetTrustedGitRepos()
+	if len(got) != 1 || got[0] != repo.Root {
+		t.Fatalf("GetTrustedGitRepos = %v, want exactly [%s] (the main work-tree root)", got, repo.Root)
+	}
+	// The gate must agree for a commit in the worktree.
+	if !f.gitRepoTrusted(wt) {
+		t.Fatal("gitRepoTrusted(worktree) = false — the gate must honor repository-root trust from the worktree")
+	}
+	if !f.gitRepoTrusted(repo.Root) {
+		t.Fatal("gitRepoTrusted(main root) = false — the entry IS the main root")
+	}
+}
+
 // TestTrustGitRepo_StoresFingerprintAndSnapshot pins acceptance (1): trusting
 // a repo records the work-tree root plus a non-empty fingerprint of the
 // scanned configuration, stores the snapshot bytes under the snapshots dir,
@@ -895,6 +933,206 @@ func TestHardenGitRepo_RoundTripAndMutualExclusion(t *testing.T) {
 	}
 	if got := f.GetHardenGitRepos(); len(got) != 0 {
 		t.Errorf("GetHardenGitRepos = %v, want empty after removal", got)
+	}
+}
+
+// injectLegacyGitSecurityEntry writes the pre-unification form of a trust or
+// harden record directly into the live config — keyed on an arbitrary path
+// inside the repository (a linked worktree), the spelling older builds
+// stored before trust normalized to the repository trust root — and mirrors
+// the trust form into the spawn registry the way syncGitTrustRegistry does.
+func injectLegacyGitSecurityEntry(t *testing.T, f *FrontendAPI, trusted, hardened *string) {
+	t.Helper()
+	f.configMu.Lock()
+	defer f.configMu.Unlock()
+	if trusted != nil {
+		f.config.Security.TrustedGitRepos = append(f.config.Security.TrustedGitRepos, config.TrustedGitRepo{Path: *trusted})
+	}
+	if hardened != nil {
+		f.config.Security.HardenGitRepos = append(f.config.Security.HardenGitRepos, *hardened)
+	}
+	f.syncGitTrustRegistry()
+}
+
+// worktreeTrustFixture builds a main repository plus a linked worktree — the
+// shape every legacy worktree-keyed entry in the wild points at.
+func worktreeTrustFixture(t *testing.T) (root, wt string) {
+	t.Helper()
+	root = filepath.Join(t.TempDir(), "repo")
+	repo := gittest.InitRepo(t, root, "hello\n")
+	wt = filepath.Join(t.TempDir(), "wt")
+	repo.Git(t, "worktree", "add", wt, "-b", "wtbranch")
+	return root, wt
+}
+
+// TestHardenGitRepo_RemovesLegacyWorktreeKeyedTrust pins the security-
+// relevant direction of the trust⊥harden mutual exclusion: hardening the
+// repository through its MAIN root must remove a trusted entry that a
+// pre-unification build keyed on the WORKTREE path. The spawn layer probes
+// every trust-key form, so a surviving legacy entry would keep that
+// worktree spawning raw git after the user's explicit hardening — the
+// hardening silently losing for part of the repository, with Settings
+// listing the same repository as both hardened and trusted.
+func TestHardenGitRepo_RemovesLegacyWorktreeKeyedTrust(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root, wt := worktreeTrustFixture(t)
+	f, _, _ := newTestAPI(t)
+	wtPath := wt
+	injectLegacyGitSecurityEntry(t, f, &wtPath, nil)
+	if !f.gitRepoTrusted(root) {
+		t.Fatal("precondition: the legacy worktree-keyed entry must cover the main root through the probe forms")
+	}
+
+	if err := f.HardenGitRepo(root); err != nil {
+		t.Fatalf("HardenGitRepo: %v", err)
+	}
+	if got := f.GetTrustedGitRepos(); len(got) != 0 {
+		t.Errorf("trusted repos after hardening = %v, want empty — the legacy entry must not survive as a raw-git zombie", got)
+	}
+	if got := f.GetHardenGitRepos(); len(got) != 1 || got[0] != root {
+		t.Errorf("harden repos = %v, want exactly [%s]", got, root)
+	}
+	if gittrust.IsTrusted(wt) || gittrust.IsTrusted(root) {
+		t.Error("expected the spawn registry to drop every form of the repository after hardening")
+	}
+}
+
+// TestTrustGitRepo_RemovesLegacyWorktreeKeyedHardening pins the mirror
+// direction: trusting the repository through its MAIN root must remove a
+// hardened entry keyed on the legacy worktree form — the spawn layer's
+// multi-form probes would otherwise read the worktrees as trusted while the
+// user's explicit hardening decision silently survived.
+func TestTrustGitRepo_RemovesLegacyWorktreeKeyedHardening(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root, wt := worktreeTrustFixture(t)
+	f, _, _ := newTestAPI(t)
+	wtPath := wt
+	injectLegacyGitSecurityEntry(t, f, nil, &wtPath)
+
+	if err := f.TrustGitRepo(root); err != nil {
+		t.Fatalf("TrustGitRepo: %v", err)
+	}
+	if got := f.GetHardenGitRepos(); len(got) != 0 {
+		t.Errorf("harden repos after trusting = %v, want empty — the legacy hardening must not survive", got)
+	}
+	if got := f.GetTrustedGitRepos(); len(got) != 1 || got[0] != root {
+		t.Errorf("trusted repos = %v, want exactly [%s]", got, root)
+	}
+	if !gittrust.IsTrusted(root) {
+		t.Error("expected the spawn registry to carry the new trust")
+	}
+}
+
+// TestSyncGitTrustRegistry_NormalizesLegacyWorktreeEntry pins the registry
+// half of the legacy-entry story: a trusted entry a pre-unification build
+// keyed on a linked-worktree path must register the repository's MAIN root —
+// the form the spawn layer's probes of any path inside the repository reach.
+// The config-side trust check matches every key form of both sides, so an
+// un-normalized registry would leave a main-root commit reading as trusted
+// at the gate while the spawn layer keeps hardening it — silently skipping
+// the hooks trust promised. A path with no discoverable repository degrades
+// to the verbatim form, which the spawn layer's own degraded probes still
+// reach.
+func TestSyncGitTrustRegistry_NormalizesLegacyWorktreeEntry(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root, wt := worktreeTrustFixture(t)
+	f, _, _ := newTestAPI(t)
+	wtPath := wt
+	injectLegacyGitSecurityEntry(t, f, &wtPath, nil)
+
+	if !gittrust.IsTrusted(root) {
+		t.Fatal("expected the registry to carry the main root for a legacy worktree-keyed entry")
+	}
+	// The spawn layer probes every trust-key form of the operating path and
+	// trusts on the FIRST match — the registered root must be reachable from
+	// the worktree's probe set (mirroring the trustedRoot loop in
+	// gitCmdInRepoScanned), not every individual form.
+	trusted := false
+	for _, form := range workspace.TrustProbePaths(wt) {
+		if gittrust.IsTrusted(form) {
+			trusted = true
+			break
+		}
+	}
+	if !trusted {
+		t.Error("no spawn probe form of the legacy worktree matches the registry")
+	}
+
+	// No repository discoverable: the entry mirrors verbatim (fail-closed
+	// pairing with the trust check's own degraded forms).
+	plain := filepath.Join(t.TempDir(), "no-repo")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gittrust.Clear()
+	plainPath := plain
+	injectLegacyGitSecurityEntry(t, f, &plainPath, nil)
+	if !gittrust.IsTrusted(plain) {
+		t.Error("expected an unresolvable entry to mirror verbatim")
+	}
+	if len(gittrust.Snapshot()) == 0 {
+		t.Error("expected the verbatim entry in the registry")
+	}
+}
+
+// TestTrustGitRepo_IdempotentAcrossLegacyWorktreeEntry pins idempotency:
+// trusting a repository whose trust entry a pre-unification build keyed on
+// the worktree path is a no-op — no duplicate record for the same
+// repository. A duplicate would leave commits keyed on the new form
+// suppressed and re-fire the intake warning until a second Trust click,
+// contradicting "trusting any path inside a repository trusts that whole
+// repository".
+func TestTrustGitRepo_IdempotentAcrossLegacyWorktreeEntry(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root, wt := worktreeTrustFixture(t)
+	f, _, _ := newTestAPI(t)
+	wtPath := wt
+	injectLegacyGitSecurityEntry(t, f, &wtPath, nil)
+
+	if err := f.TrustGitRepo(root); err != nil {
+		t.Fatalf("TrustGitRepo: %v", err)
+	}
+	got := f.GetTrustedGitRepos()
+	if len(got) != 1 {
+		t.Fatalf("trusted repos after re-trust = %v, want exactly the one legacy entry (no duplicate)", got)
+	}
+	if got[0] != wt {
+		t.Errorf("trusted entry = %q, want the untouched legacy worktree key %q", got[0], wt)
+	}
+	if !f.gitRepoTrusted(root) || !f.gitRepoTrusted(wt) {
+		t.Error("the legacy entry must cover the whole repository through the probe forms")
+	}
+}
+
+// TestHardenGitRepo_IdempotentAcrossLegacyWorktreeEntry pins the hardening
+// side of the same idempotency: hardening a repository whose hardened entry
+// is keyed on the legacy worktree form appends no duplicate.
+func TestHardenGitRepo_IdempotentAcrossLegacyWorktreeEntry(t *testing.T) {
+	gittrust.Clear()
+	t.Cleanup(gittrust.Clear)
+
+	root, wt := worktreeTrustFixture(t)
+	f, _, _ := newTestAPI(t)
+	wtPath := wt
+	injectLegacyGitSecurityEntry(t, f, nil, &wtPath)
+
+	if err := f.HardenGitRepo(root); err != nil {
+		t.Fatalf("HardenGitRepo: %v", err)
+	}
+	got := f.GetHardenGitRepos()
+	if len(got) != 1 {
+		t.Fatalf("harden repos after re-harden = %v, want exactly the one legacy entry (no duplicate)", got)
+	}
+	if got[0] != wt {
+		t.Errorf("hardened entry = %q, want the untouched legacy worktree key %q", got[0], wt)
 	}
 }
 

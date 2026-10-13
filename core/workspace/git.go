@@ -109,9 +109,10 @@ func newGitScanMemo(repoPath string) *gitScanMemo {
 	return &gitScanMemo{path: repoPath}
 }
 
-// argv returns the flat "-c key=value" override pairs for every dangerous
-// key found, scanning the repository config at most once.
-func (m *gitScanMemo) argv() ([]string, error) {
+// scanInfo returns the memoized scan result, scanning the repository config
+// at most once per memo — the trusted-branch overlay gate and the hardened
+// path's argv derivation share one scan of the same operation.
+func (m *gitScanMemo) scanInfo() (*GitConfigInfo, error) {
 	if !m.done {
 		if m.logger != nil {
 			m.info, m.err = ScanGitConfig(m.path, m.logger)
@@ -123,23 +124,51 @@ func (m *gitScanMemo) argv() ([]string, error) {
 		}
 		m.done = true
 	}
-	if m.err != nil {
-		return nil, m.err
-	}
-	argv, err := m.info.NeutralizingArgvErr()
-	if err != nil {
-		// A neutralizing key that cannot be rendered as -c key=value
-		// (a subsection containing '=') would leave the repository's
-		// command armed while git runs — refuse the spawn (review [21]).
-		return nil, fmt.Errorf("rendering neutralizing overrides for repo %s (fail closed): %w", m.path, err)
-	}
-	return argv, nil
+	return m.info, m.err
 }
 
 // scanGitConfigFn is the scan seam gitScanMemo goes through; in-package
 // tests swap it to observe scan counts. Production always uses ScanGitConfig.
 var scanGitConfigFn = func(repoRoot string) (*GitConfigInfo, error) {
 	return ScanGitConfig(repoRoot)
+}
+
+// trustedRootRawEligible gates a trusted spawn on the one per-worktree
+// config source a repository-level trust decision can never cover: a linked
+// worktree's own config.worktree overlay, which git reads live whenever
+// extensions.worktreeConfig is enabled. The trust snapshot scans the
+// repository trust root (common config, main checkout, attribute routing),
+// so the overlay — living in the worktree's own git dir, readable and
+// plantable at any time, including after the trust decision — is not part
+// of what the user reviewed, and raw git may run from the worktree only
+// while a fresh scan shows it contributing nothing dangerous
+// (GitConfigInfo.WorktreeOverlayClean over this operation's memoized scan).
+// Plain checkouts and subdirectory workspaces (trust root == work-tree
+// root) read no overlay on git's side, so they stay unconditionally raw —
+// exactly the decision the snapshot bound.
+//
+// Everything else — a dangerous, malformed, unreadable, or include-bearing
+// overlay — falls through to the hardened baseline below, which
+// neutralizes the overlay's keys from the same memoized scan and fails the
+// operation closed when the scan itself failed, exactly like an untrusted
+// repository.
+//
+// The gate deliberately lives BELOW the commit gate (backend Commit keys on
+// the stored trust entry alone): a spawn-layer refusal cannot re-key the
+// trust entry, so prompting from here would recreate the "Trust this repo &
+// commit" loop this trust model exists to close. The trade is honest and
+// fails safe: a trusted repository whose worktree carries a dangerous
+// overlay commits hardened from that worktree (its shared, trusted hooks
+// included) instead of executing configuration the user never reviewed.
+func trustedRootRawEligible(scan *gitScanMemo) bool {
+	if ResolveGitTrustRoot(scan.path) == ResolveWorkTreeRoot(scan.path) {
+		return true
+	}
+	info, err := scan.scanInfo()
+	if err != nil {
+		return false
+	}
+	return info.WorktreeOverlayClean()
 }
 
 // gitCmdInRepoScanned is GitCmdInRepo over an operation-scoped scan memo:
@@ -151,12 +180,23 @@ func gitCmdInRepoScanned(ctx context.Context, scan *gitScanMemo, args ...string)
 	// core/gittrust). Spawn raw git — no sysproc baseline, no per-repo
 	// NeutralizingArgv, no GIT_EDITOR pin — so the repository behaves exactly
 	// as it would outside c0wrk, hooks/filters/signing included. HideConsole
-	// is still applied by sysproc.GitCmdRaw. The comparison keys on the
-	// work-tree root git would discover from scan.path (ResolveWorkTreeRoot),
-	// the same form backend stores in the trust list, so a workspace opened at
-	// a subdirectory of a trusted repository (or reopened at its root) agrees
-	// with the stored entry.
-	if root := ResolveWorkTreeRoot(scan.path); root != "" && gittrust.IsTrusted(root) {
+	// is still applied by sysproc.GitCmdRaw. The comparison probes every
+	// trust-key form of scan.path (workspace.TrustProbePaths): the
+	// repository trust root (ResolveGitTrustRoot — the main work-tree root a
+	// linked worktree's commits share their hooks and common config with —
+	// the form backend stores), the work-tree root (the legacy
+	// pre-worktree-unification store form), the raw path itself, and the
+	// canonical spelling of each — so a workspace opened at a subdirectory
+	// of a trusted repository, at its root, or in one of its linked
+	// worktrees (symlinked mounts included) all agree with the stored entry.
+	trustedRoot := false
+	for _, root := range TrustProbePaths(scan.path) {
+		if gittrust.IsTrusted(root) {
+			trustedRoot = true
+			break
+		}
+	}
+	if trustedRoot && trustedRootRawEligible(scan) {
 		cmd := sysproc.GitCmdRaw(ctx, args...)
 		cmd.Dir = scan.path
 		// GIT_OPTIONAL_LOCKS=0 is c0wrk's own watcher-loop prevention, not
@@ -176,11 +216,18 @@ func gitCmdInRepoScanned(ctx context.Context, scan *gitScanMemo, args ...string)
 		return cmd, nil
 	}
 
-	argv, err := scan.argv()
+	info, err := scan.scanInfo()
 	if err != nil {
 		return nil, err
 	}
-	if scan.info != nil && len(scan.info.Includes) > 0 {
+	argv, err := info.NeutralizingArgvErr()
+	if err != nil {
+		// A neutralizing key that cannot be rendered as -c key=value
+		// (a subsection containing '=') would leave the repository's
+		// command armed while git runs — refuse the spawn (review [21]).
+		return nil, fmt.Errorf("rendering neutralizing overrides for repo %s (fail closed): %w", scan.path, err)
+	}
+	if info != nil && len(info.Includes) > 0 {
 		// Include-bearing configs lean on the attr.tree kill for driver
 		// names hidden in included files, and attr.tree exists only since
 		// git 2.45 — older git silently ignores the key, which would leave
@@ -198,7 +245,7 @@ func gitCmdInRepoScanned(ctx context.Context, scan *gitScanMemo, args ...string)
 	if err != nil {
 		return nil, err
 	}
-	if scan.info.NeedsWorkTreeEnvPin() {
+	if info.NeedsWorkTreeEnvPin() {
 		// core.worktree redirects where checkout/reset write tracked
 		// files, and no -c form beats it (verified on git 2.50.1) — the
 		// one channel that outranks the key is the GIT_WORK_TREE
@@ -216,13 +263,13 @@ func gitCmdInRepoScanned(ctx context.Context, scan *gitScanMemo, args ...string)
 			// core.worktree key with no discoverable root stays fail-closed:
 			// the hostile key must never reach git unpinned.
 			hasWorkTreeFinding := false
-			for i := range scan.info.Findings {
-				if scan.info.Findings[i].Kind == GitConfigFindingWorkTree {
+			for i := range info.Findings {
+				if info.Findings[i].Kind == GitConfigFindingWorkTree {
 					hasWorkTreeFinding = true
 					break
 				}
 			}
-			if hasWorkTreeFinding || len(scan.info.Includes) == 0 {
+			if hasWorkTreeFinding || len(info.Includes) == 0 {
 				return nil, fmt.Errorf(
 					"pinning GIT_WORK_TREE for repo %s (fail closed): core.worktree is set but no work-tree root can be discovered",
 					scan.path)
