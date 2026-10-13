@@ -190,6 +190,55 @@ export namespace backend {
 		}
 	}
 	
+	export class CapabilityModesInfo {
+	    chat_mode: string;
+	    code_mode: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CapabilityModesInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chat_mode = source["chat_mode"];
+	        this.code_mode = source["code_mode"];
+	    }
+	}
+	export class CapabilitiesInfo {
+	    skills: Record<string, CapabilityModesInfo>;
+	    agents: Record<string, CapabilityModesInfo>;
+	    mcp: Record<string, CapabilityModesInfo>;
+	
+	    static createFrom(source: any = {}) {
+	        return new CapabilitiesInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.skills = this.convertValues(source["skills"], CapabilityModesInfo, true);
+	        this.agents = this.convertValues(source["agents"], CapabilityModesInfo, true);
+	        this.mcp = this.convertValues(source["mcp"], CapabilityModesInfo, true);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ChatGPTAuthStatusResponse {
 	    signed_in: boolean;
 	    email?: string;
@@ -278,6 +327,7 @@ export namespace backend {
 	    hooks?: string[];
 	    signing_repo?: boolean;
 	    signing_global?: boolean;
+	    repo_root?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new CommitSuppression(source);
@@ -288,6 +338,7 @@ export namespace backend {
 	        this.hooks = source["hooks"];
 	        this.signing_repo = source["signing_repo"];
 	        this.signing_global = source["signing_global"];
+	        this.repo_root = source["repo_root"];
 	    }
 	}
 	export class CommitResult {
@@ -1228,7 +1279,8 @@ export namespace backend {
 	}
 	export class MCPMentionableServer {
 	    name: string;
-	    mode: string;
+	    chat_mode: string;
+	    code_mode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new MCPMentionableServer(source);
@@ -1237,7 +1289,8 @@ export namespace backend {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.mode = source["mode"];
+	        this.chat_mode = source["chat_mode"];
+	        this.code_mode = source["code_mode"];
 	    }
 	}
 	export class MCPServerStatusInfo {
@@ -1249,7 +1302,8 @@ export namespace backend {
 	    tool_count: number;
 	    tools: string[];
 	    error?: string;
-	    mode: string;
+	    chat_mode: string;
+	    code_mode: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new MCPServerStatusInfo(source);
@@ -1265,7 +1319,8 @@ export namespace backend {
 	        this.tool_count = source["tool_count"];
 	        this.tools = source["tools"];
 	        this.error = source["error"];
-	        this.mode = source["mode"];
+	        this.chat_mode = source["chat_mode"];
+	        this.code_mode = source["code_mode"];
 	    }
 	}
 	export class ModelConfigRequest {
