@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
@@ -194,10 +193,10 @@ func TestPurgeBranchIndexData_CollisionKeepsSharedArtifacts(t *testing.T) {
 }
 
 // TestDeleteBranch_PurgesDeletedBranchIndexData pins the RPC hook end to end:
-// DeleteBranch deletes the git branch and the detached purge erases the
-// branch's stored artifacts from both storage roots. The hook is async by
-// contract, so completion is awaited with a bounded poll watchdog — never a
-// sleep.
+// DeleteBranch deletes the git branch and the purge erases the branch's
+// stored artifacts from both storage roots. The hook is async by contract;
+// the purgeBranchLaunchFn seam runs it synchronously here, so the outcome is
+// observable deterministically — no timing-based waiting.
 func TestDeleteBranch_PurgesDeletedBranchIndexData(t *testing.T) {
 	h := newVectorWorktreeHarness(t)
 	h.addManagedWorktree(t, "tree-b", "feature/topic")
@@ -210,32 +209,21 @@ func TestDeleteBranch_PurgesDeletedBranchIndexData(t *testing.T) {
 	pruneFixtureBranch(t, wtRoot, "branch_feature_gone", "feature_gone")
 	pruneFixtureBranch(t, wtRoot, "branch_main", "main")
 
+	// Deterministic seam: production launches the purge detached (`go`);
+	// the test runs it inline so it has landed by the time DeleteBranch
+	// returns.
+	h.api.purgeBranchLaunchFn = func(fn func()) { fn() }
+
 	if err := h.api.DeleteBranch("feature/gone", false); err != nil {
 		t.Fatalf("DeleteBranch: %v", err)
 	}
 
-	// Bounded watchdog: the detached purge must land; the test detects a
-	// hang, never asserts elapsed time.
 	gone := []string{
 		filepath.Join(viRoot, "branches", "branch_feature_gone"),
 		filepath.Join(wtRoot, "branches", "branch_feature_gone"),
 	}
-	deadline := time.After(20 * time.Second)
-	for {
-		pending := false
-		for _, path := range gone {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				pending = true
-			}
-		}
-		if !pending {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("DeleteBranch's background purge never removed the branch's index data")
-		case <-time.After(20 * time.Millisecond):
-		}
+	for _, path := range gone {
+		pruneAssertGone(t, path)
 	}
 
 	for _, root := range []string{viRoot, wtRoot} {

@@ -100,12 +100,20 @@ func (f *FrontendAPI) localBranchNames(repoPath string) ([]string, error) {
 // purgeDeletedBranchIndexes resolves the active project with the same guards
 // the git-panel RPCs apply and fires the targeted purge on a detached
 // goroutine. No Project (and any unresolved project) has no storage to clean.
+// The launch goes through the purgeBranchLaunchFn seam (nil in production —
+// a plain `go`), which tests swap for a synchronous call.
 func (f *FrontendAPI) purgeDeletedBranchIndexes(branch string) {
 	path, id, err := f.activeGitProjectRoot()
 	if err != nil {
 		return
 	}
-	go f.purgeBranchIndexData(&project.ProjectInfo{ID: id, WorkspacePath: path}, branch)
+	launch := f.purgeBranchLaunchFn
+	if launch == nil {
+		launch = func(fn func()) { go fn() }
+	}
+	launch(func() {
+		f.purgeBranchIndexData(&project.ProjectInfo{ID: id, WorkspacePath: path}, branch)
+	})
 }
 
 // purgeBranchIndexData removes the stored index data of a just-deleted branch

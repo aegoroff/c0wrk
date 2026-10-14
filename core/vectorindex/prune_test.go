@@ -10,7 +10,9 @@ import (
 // newPruneTestService builds a discard-embedder service for the prune tests
 // and registers its Close on cleanup (before the TempDir removal — t.Cleanup
 // is LIFO — so the lexical bolt/zap handles are released before the unlink,
-// which Windows requires).
+// which Windows requires). Call it only AFTER every t.TempDir() of the test
+// has been created; creating TempDirs afterwards puts the removal ahead of
+// Close in the LIFO cleanup chain.
 func newPruneTestService(t *testing.T, parkCapacity int) *Service {
 	t.Helper()
 	svc, err := NewService(ServiceConfig{EmbeddingFunc: fakeEmbeddingFunc(), ParkCapacity: parkCapacity})
@@ -272,11 +274,17 @@ func TestDeleteBranchData_CollisionKeepsSharedIdentities(t *testing.T) {
 // is a silent no-op that creates nothing, and the branch of the live state
 // rooted at the target survives even when the caller names it.
 func TestDeleteBranchData_ProtectedIdentitiesAndActiveBranch(t *testing.T) {
+	// All TempDirs are created BEFORE the service: t.Cleanup is LIFO, so a
+	// service created first would close only after the TempDirs are removed,
+	// and Windows cannot unlink the still-open bolt/zap handles (the
+	// ordering contract newPruneTestService documents).
+	root := filepath.Join(t.TempDir(), "vi")
+	missing := filepath.Join(t.TempDir(), "missing")
+	dirA := filepath.Join(t.TempDir(), "A")
 	svc := newPruneTestService(t, 0)
 
 	// Synthetic default: the branch "default" maps onto the synthetic
 	// DefaultBranch identities, so its artifacts are untouchable.
-	root := filepath.Join(t.TempDir(), "vi")
 	fixtureBranchArtifacts(t, root, "default")
 	if removed := svc.DeleteBranchData(root, "default", nil); removed != 0 {
 		t.Fatalf("removed = %d, want 0 for the synthetic default identity", removed)
@@ -285,12 +293,11 @@ func TestDeleteBranchData_ProtectedIdentitiesAndActiveBranch(t *testing.T) {
 	pruneMustExist(t, filepath.Join(root, "lexical", defaultSyntheticLexicalDirName))
 
 	// Missing storage root: no-op that creates nothing.
-	if removed := svc.DeleteBranchData(filepath.Join(t.TempDir(), "missing"), "feature/x", nil); removed != 0 {
+	if removed := svc.DeleteBranchData(missing, "feature/x", nil); removed != 0 {
 		t.Fatalf("removed = %d, want 0 for a missing storage root", removed)
 	}
 
 	// Active-branch protection: the live state's own branch survives.
-	dirA := filepath.Join(t.TempDir(), "A")
 	if err := svc.SetProject("A", dirA); err != nil {
 		t.Fatalf("SetProject A: %v", err)
 	}
