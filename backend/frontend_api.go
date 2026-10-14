@@ -288,6 +288,13 @@ type FrontendAPI struct {
 	vectorRoots   *VectorRoots
 	vectorRootsMu sync.Mutex
 
+	// pruneStaleBranchesInFlight single-flights the background stale-branch
+	// index cleanup (pruneAbsentBranchVectorIndexes): rapid project toggles
+	// each fire a detached goroutine, and a second concurrent sweep of the
+	// same storage roots would only duplicate work — the skip is silent,
+	// the running sweep reads fresh git state anyway.
+	pruneStaleBranchesInFlight atomic.Bool
+
 	// vectorSetupMu guards deferredVectorProject — the handshake that lets a
 	// project switch whose vector-index setup was skipped (the manager
 	// factory was still being built by the background ONNX init) be applied
