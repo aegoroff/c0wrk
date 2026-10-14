@@ -27,10 +27,13 @@ function isMacLikePlatform(): boolean {
  * `event.key`, which follows the ACTIVE keyboard layout: on a Cyrillic
  * layout Ctrl+Z produces key='я', no key-name binding matches, and
  * CodeMirror has no native-undo fallback of its own. This matcher instead
- * recognizes the PHYSICAL key (`event.code`, layout-independent) and the
- * layout-printed character (`event.key.toLowerCase()`, covering layouts
- * like AZERTY/QWERTZ where Z sits on a different physical slot), so the
- * chords behave identically in every layout.
+ * recognizes the layout-printed character (`event.key.toLowerCase()`) —
+ * the SAME layout-following signal the key-name layer resolves bindings
+ * from, so a history chord recomputes into the same action the named
+ * layer would have taken (QWERTZ prints 'y' on the physical Z slot: its
+ * Ctrl+Y is redo, never undo) — and, for layouts that print neither Z nor
+ * Y at all (Cyrillic 'я' / 'н'), the layout-independent PHYSICAL key
+ * (`event.code`).
  *
  * Guarded against AltGr (ctrl+alt) and IME composition; anything not
  * recognized — including native browser chords like Ctrl+C — returns null
@@ -39,15 +42,16 @@ function isMacLikePlatform(): boolean {
 export function matchChatHistoryKey(event: KeyboardEvent): ChatHistoryAction | null {
   const mod = isMacLikePlatform() ? event.metaKey : event.ctrlKey
   if (!mod || event.altKey || event.isComposing) return null
-  // Z is checked first, mirroring historyKeymap's own precedence
-  // (Mod-z / Shift-Mod-z before Mod-y): the physical Z slot wins over the
-  // Y chord even on QWERTZ, where that slot prints 'y'.
-  if (event.code === 'KeyZ' || event.key.toLowerCase() === 'z') {
-    return event.shiftKey ? 'redo' : 'undo'
-  }
-  if (event.code === 'KeyY' || event.key.toLowerCase() === 'y') {
-    return 'redo'
-  }
+  // The printed character wins: it is the signal the key-name layer saw,
+  // so this fallback never contradicts a historyKeymap chord on layouts
+  // like QWERTZ, where the physical slots swap Z and Y.
+  const printed = event.key.toLowerCase()
+  if (printed === 'z') return event.shiftKey ? 'redo' : 'undo'
+  if (printed === 'y') return 'redo'
+  // Physical-key fallback for layouts printing neither Z nor Y (Cyrillic:
+  // Ctrl+я / Ctrl+н ride the same physical slots).
+  if (event.code === 'KeyZ') return event.shiftKey ? 'redo' : 'undo'
+  if (event.code === 'KeyY') return 'redo'
   return null
 }
 
@@ -55,8 +59,8 @@ export function matchChatHistoryKey(event: KeyboardEvent): ChatHistoryAction | n
  * Chat-specific keymap:
  * - Enter sends the message (unless autocomplete is active)
  * - Shift-Enter inserts a newline
- * - `any` fallback resolves undo/redo from the physical key + layout
- *   character (see matchChatHistoryKey)
+ * - `any` fallback resolves undo/redo from the layout-printed character +
+ *   physical key (see matchChatHistoryKey)
  */
 export function createChatKeymap(onSendRef: MutableRefObject<(() => void) | null>): Extension {
   return keymap.of([
@@ -76,10 +80,12 @@ export function createChatKeymap(onSendRef: MutableRefObject<(() => void) | null
       },
     },
     {
-      // Consulted for keydowns no key-name binding consumed. This keymap is
-      // the FIRST one in createChatExtensions, so its fallback is polled
-      // before any other extension's. Returning the command's result keeps
-      // the contract: false lets other bindings / native behavior continue.
+      // Consulted for keydowns no key-name binding consumed. It is the only
+      // `any` fallback among createChatExtensions' keymaps (autocompletion
+      // and the default/history keymaps bind named keys only), so no other
+      // extension's fallback competes with it. Returning the command's
+      // result keeps the contract: false lets other bindings / native
+      // behavior continue.
       any: (view, event) => {
         switch (matchChatHistoryKey(event)) {
           case 'undo':

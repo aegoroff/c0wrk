@@ -4,9 +4,11 @@
 // event.key, which follows the ACTIVE keyboard layout: on a Cyrillic layout
 // Ctrl+Z produces key='я', no key-name binding matches, and CodeMirror has
 // no native-undo fallback of its own. createChatKeymap's `any` binding
-// instead matches the physical key (event.code) and the layout-printed
-// character (event.key.toLowerCase()); being the first keymap in
-// createChatExtensions, its fallback is polled before any other extension's.
+// instead matches the layout-printed character (event.key.toLowerCase())
+// first — the same layout-following signal the key-name layer resolves
+// from — and falls back to the physical key (event.code) for layouts that
+// print neither Z nor Y; it is the only `any` fallback among the chat
+// extension set's keymaps.
 //
 // Views are driven through real keydown events dispatched on contentDOM —
 // the same path CodeMirror's keymap machinery uses in the browser. A
@@ -103,6 +105,23 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     expect(view.state.doc.toString()).toBe('')
   })
 
+  it('QWERTZ Ctrl+Y on an empty redo stack is a no-op, never an undo', () => {
+    const view = mountView()
+    type(view, 'Струс')
+    // Right after an edit the redo stack is empty: the named redo chord
+    // declines and the event reaches the `any` fallback. The fallback must
+    // recompute the printed 'y' as redo (declining as well) — misreading
+    // the physical Z slot here silently UNDID the edit.
+    pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true })
+    expect(view.state.doc.toString()).toBe('Струс')
+
+    // The same chord redoes once there is something to redo.
+    expect(pressKey(view, { key: 'z', code: 'KeyY', ctrlKey: true })).toBe(true)
+    expect(view.state.doc.toString()).toBe('')
+    expect(pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true })).toBe(true)
+    expect(view.state.doc.toString()).toBe('Струс')
+  })
+
   it('redoes a Cyrillic Ctrl+Shift+Z (key=Я, code=KeyZ)', () => {
     const view = mountView()
     type(view, 'привет')
@@ -169,8 +188,20 @@ describe('matchChatHistoryKey', () => {
     expect(
       matchChatHistoryKey(keyEvent({ key: 'Z', code: 'KeyZ', ctrlKey: true, shiftKey: true })),
     ).toBe('redo')
-    // QWERTZ: the physical Z slot prints 'y' — still undo, Z wins over Y.
-    expect(matchChatHistoryKey(keyEvent({ key: 'y', code: 'KeyZ', ctrlKey: true }))).toBe('undo')
+  })
+
+  it('follows the printed character against the physical slot (QWERTZ)', () => {
+    // QWERTZ: the redo chord Ctrl+Y prints 'y' on the physical Z slot — the
+    // printed character wins, this is redo and never undo.
+    expect(matchChatHistoryKey(keyEvent({ key: 'y', code: 'KeyZ', ctrlKey: true }))).toBe('redo')
+    expect(
+      matchChatHistoryKey(keyEvent({ key: 'Y', code: 'KeyZ', ctrlKey: true, shiftKey: true })),
+    ).toBe('redo')
+    // The undo chord Ctrl+Z prints 'z' on the physical Y slot.
+    expect(matchChatHistoryKey(keyEvent({ key: 'z', code: 'KeyY', ctrlKey: true }))).toBe('undo')
+    expect(
+      matchChatHistoryKey(keyEvent({ key: 'Z', code: 'KeyY', ctrlKey: true, shiftKey: true })),
+    ).toBe('redo')
   })
 
   it('maps Ctrl + physical Y to redo', () => {
@@ -214,6 +245,9 @@ describe('matchChatHistoryKey', () => {
       expect(
         matchChatHistoryKey(keyEvent({ key: 'я', code: 'KeyZ', metaKey: true, shiftKey: true })),
       ).toBe('redo')
+      // historyKeymap's mac redo chord is Cmd+Shift+Z (Mod-y is replaced on
+      // mac): the printed-'y' fallback provides Cmd+Y = redo there.
+      expect(matchChatHistoryKey(keyEvent({ key: 'y', code: 'KeyY', metaKey: true }))).toBe('redo')
     } finally {
       platformSpy.mockRestore()
     }
