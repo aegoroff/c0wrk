@@ -1057,6 +1057,12 @@ func (f *FrontendAPI) DeleteBranch(name string, force bool) error {
 		return err
 	}
 	f.emitGitStatusChanged(repoPath)
+	// Quiet background index cleanup: the deleted branch's stored artifacts
+	// (both indexes plus the sidecar pair, in the checkout's and every
+	// managed worktree's storage) go away immediately instead of waiting
+	// for the next project-switch sweep. Detached and fail-soft, silent by
+	// the same contract as the sweep — never a failure path of this RPC.
+	f.purgeDeletedBranchIndexes(branchName)
 	return nil
 }
 

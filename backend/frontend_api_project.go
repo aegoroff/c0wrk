@@ -482,6 +482,15 @@ func (f *FrontendAPI) SwitchProject(id string) error {
 	// SwitchProject call.
 	go f.autoFetchOnce(autoFetchTriggerSwitch)
 
+	// Same real-switch seam, same fire-and-forget silence: sweep BOTH
+	// indexes (chromem vector roots + bleve lexical dirs, plus per-branch
+	// sidecars) of every git branch — checkout storage and every managed
+	// worktree storage — that no longer exists in the local clone. Debug
+	// logs only; a skipped, failed or partial sweep never surfaces in the
+	// UI and never affects the switch outcome. See
+	// pruneAbsentBranchVectorIndexes and specs/domains/workspace.md.
+	go f.pruneAbsentBranchVectorIndexes(p)
+
 	return nil
 }
 
