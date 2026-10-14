@@ -6,7 +6,7 @@
 // lists).
 
 import { useCallback, useState } from 'react'
-import { ChevronDown, Plus } from 'lucide-react'
+import { ChevronDown, Palette, Plus } from 'lucide-react'
 
 import { deleteTheme, pickAndImportThemes } from '@/api/themes'
 import { emit } from '@/api/runtime'
@@ -108,7 +108,8 @@ export function ThemeSelector() {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <Palette className="h-4 w-4 text-muted-foreground" />
         <span className="text-sm font-medium">Theme</span>
       </div>
       <div className="flex items-center gap-1">

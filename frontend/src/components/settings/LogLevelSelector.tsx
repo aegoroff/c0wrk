@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Info } from 'lucide-react'
+import { Info, ScrollText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { getLogLevel, setLogLevel as apiSetLogLevel } from '@/api/config'
 import { logger } from '@/lib/logger'
@@ -42,7 +42,8 @@ export function LogLevelSelector() {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
+        <ScrollText className="h-4 w-4 text-muted-foreground" />
         <span className="text-sm font-medium">Log Level</span>
       </div>
       <div className="flex gap-1 p-1 bg-muted rounded-lg">

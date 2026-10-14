@@ -15,6 +15,7 @@ import {
   liveSessionsSignature,
   mergePendingOverride,
   sessionDisplayStatus,
+  sessionNameFromSnapshot,
   sortedLiveRows,
 } from './activeSessions'
 import type { LiveChatSnapshot, LiveSessionFlags } from './activeSessions'
@@ -553,5 +554,29 @@ describe('live overlay end to end (radar surfaces)', () => {
       s1: flags({ unfinishedTaskStatus: '' }),
     })
     expect(rows).toEqual([])
+  })
+})
+
+describe('sessionNameFromSnapshot', () => {
+  it('resolves the trimmed name from the global snapshot', () => {
+    expect(sessionNameFromSnapshot([makeSession({ id: 's1', name: '  Fix the bug  ' })], 's1')).toBe(
+      'Fix the bug',
+    )
+  })
+
+  it('returns null for a null id', () => {
+    expect(sessionNameFromSnapshot([makeSession()], null)).toBeNull()
+  })
+
+  it('returns null while the snapshot is not loaded', () => {
+    expect(sessionNameFromSnapshot(null, 'sess-1')).toBeNull()
+  })
+
+  it('returns null when the id is not in the snapshot', () => {
+    expect(sessionNameFromSnapshot([makeSession()], 'missing')).toBeNull()
+  })
+
+  it('treats a blank name as absent', () => {
+    expect(sessionNameFromSnapshot([makeSession({ name: '   ' })], 'sess-1')).toBeNull()
   })
 })

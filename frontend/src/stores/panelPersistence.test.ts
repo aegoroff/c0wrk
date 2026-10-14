@@ -201,7 +201,7 @@ describe('per-project workspace tab persistence', () => {
   })
 
   it('persist version matches the current schema', () => {
-    expect(useUIStore.persist.getOptions().version).toBe(6)
+    expect(useUIStore.persist.getOptions().version).toBe(7)
   })
 
   it('same-version corrupt tab values are dropped on rehydrate (merge, not migrate)', async () => {
@@ -263,7 +263,7 @@ describe('per-project workspace tab persistence', () => {
   })
 
   it('migrate validates workspaceTabByProject entry-by-entry and drops unknown tab values', async () => {
-    // A payload written by a hypothetical newer build (version > 6) carrying
+    // A payload written by a hypothetical newer build (version > 7) carrying
     // an unknown tab ('graph') and a non-string value alongside valid ones:
     // the migration must keep only the known values, mirroring the
     // fail-closed mergeGitPanel contract — an unknown tab matches no
@@ -283,7 +283,7 @@ describe('per-project workspace tab persistence', () => {
             p4: 42,
           },
         },
-        version: 7,
+        version: 8,
       }),
     )
 
@@ -457,5 +457,112 @@ describe('per-project research segment persistence', () => {
       p1: 'papers',
       p2: 'dashboard',
     })
+  })
+})
+
+describe('tabsEnabled flag persistence', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useUIStore.setState({ tabsEnabled: false })
+  })
+
+  it('defaults to false on fresh installs', async () => {
+    await useUIStore.persist.rehydrate()
+    expect(useUIStore.getState().tabsEnabled).toBe(false)
+  })
+
+  it('survives an app restart (persist round-trip)', async () => {
+    useUIStore.getState().setTabsEnabled(true)
+    expect(useUIStore.getState().tabsEnabled).toBe(true)
+
+    const persisted = localStorage.getItem(SIDEBAR_STORAGE_KEY)
+    expect(JSON.parse(persisted ?? '{}').state.tabsEnabled).toBe(true)
+
+    useUIStore.getState().setTabsEnabled(false)
+    localStorage.setItem(SIDEBAR_STORAGE_KEY, persisted!)
+
+    await useUIStore.persist.rehydrate()
+
+    expect(useUIStore.getState().tabsEnabled).toBe(true)
+  })
+
+  it('migrates a v6 payload: previous fields preserved, flag defaults to false', async () => {
+    localStorage.setItem(
+      SIDEBAR_STORAGE_KEY,
+      JSON.stringify({
+        state: {
+          sidebarCollapsed: true,
+          sidebarWidth: 250,
+          chatSessionListRatio: 0.3,
+          showSessionStats: true,
+          workspaceTabByProject: { p1: 'research' },
+          researchSegmentByProject: { p1: 'papers' },
+        },
+        version: 6,
+      }),
+    )
+
+    await useUIStore.persist.rehydrate()
+
+    const state = useUIStore.getState()
+    expect(state.tabsEnabled).toBe(false)
+    expect(state.sidebarCollapsed).toBe(true)
+    expect(state.sidebarWidth).toBe(250)
+    expect(state.chatSessionListRatio).toBe(0.3)
+    expect(state.showSessionStats).toBe(true)
+    expect(state.workspaceTabByProject).toEqual({ p1: 'research' })
+    expect(state.researchSegmentByProject).toEqual({ p1: 'papers' })
+  })
+
+  it('keeps a tabsEnabled=true carried in the payload through migration', async () => {
+    localStorage.setItem(
+      SIDEBAR_STORAGE_KEY,
+      JSON.stringify({
+        state: {
+          sidebarCollapsed: false,
+          sidebarWidth: 240,
+          chatSessionListRatio: 0.5,
+          showSessionStats: false,
+          tabsEnabled: true,
+          workspaceTabByProject: {},
+          researchSegmentByProject: {},
+        },
+        version: 6,
+      }),
+    )
+
+    await useUIStore.persist.rehydrate()
+
+    expect(useUIStore.getState().tabsEnabled).toBe(true)
+  })
+
+  it('drops a same-version wrong-typed flag on rehydrate (merge, not migrate)', async () => {
+    localStorage.setItem(
+      SIDEBAR_STORAGE_KEY,
+      JSON.stringify({
+        state: {
+          sidebarCollapsed: false,
+          sidebarWidth: 240,
+          chatSessionListRatio: 0.5,
+          showSessionStats: false,
+          tabsEnabled: 'yes',
+        },
+        version: 7,
+      }),
+    )
+
+    await useUIStore.persist.rehydrate()
+
+    expect(useUIStore.getState().tabsEnabled).toBe(false)
+  })
+
+  it('setTabsEnabled is a reference-stable no-op when unchanged', () => {
+    const before = useUIStore.getState()
+
+    useUIStore.getState().setTabsEnabled(false)
+    expect(useUIStore.getState()).toBe(before)
+
+    useUIStore.getState().setTabsEnabled(true)
+    expect(useUIStore.getState().tabsEnabled).toBe(true)
   })
 })

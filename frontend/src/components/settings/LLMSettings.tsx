@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from 'react'
 import { useLLMConfig } from './useLLMConfig'
-import { Plus, X } from 'lucide-react'
+import { Plus, Sparkles, X } from 'lucide-react'
 import { excludeEmbeddedModel, EMBEDDED_PROVIDER_NAME, FIXED_PROVIDERS } from '@/lib/llm-providers'
 import { useExperimentalStore } from '@/stores/experimentalStore'
 import type { ModelRef } from '@/lib/modelId'
@@ -199,7 +199,10 @@ export function LLMSettings({
     <div className="flex flex-col gap-6">
       {/* Global Default Model */}
       <div className="flex flex-col gap-2">
-        <label className="text-sm font-medium">Default Model</label>
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <Sparkles className="h-4 w-4 text-muted-foreground" />
+          Default Model
+        </label>
         <ModelPickerMenu
           ariaLabel="Default model"
           models={allEnabledModels}

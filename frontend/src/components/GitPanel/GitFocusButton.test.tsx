@@ -102,14 +102,17 @@ describe('GitFocusButton', () => {
     expect(button.getAttribute('title')).toContain('click to focus the current session')
   })
 
-  it('clicking focuses the panel on the current session worktree', () => {
+  it('clicking focuses the panel on the current session worktree', async () => {
     act(() => {
       useGitPanelStore.getState().setFocus(makeFocus({ path: '/repo', name: 'repo', kind: 'main', managed: false, pinned: false }))
       useGitPanelStore.getState().setFocusSessionPath('/repo/.worktrees/s-abc12345')
     })
 
     const button = renderButton()
-    act(() => {
+    // The click's busy flag flips back on a promise microtask
+    // (focusSessionWorkspace().finally(...)); the async act form flushes it
+    // before the scope exits, keeping the state update inside act.
+    await act(async () => {
       button.click()
     })
 

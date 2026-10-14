@@ -28,7 +28,8 @@ useSoundEvents()  (active session)   /   useBackgroundSessionWatcher  (backgroun
                              └── emit `notification_clicked` {notification_id, session_id, project_id}
                                     ▼
                        useNotificationClicks (App.tsx, mounted once)
-                             └── project switch + session select (activate + navigate)
+                             ├── tabsEnabled ON : tab engine — activate the session's tab (or create one)
+                             └── tabsEnabled OFF: project switch + session select (activate + navigate)
 ```
 
 Key points:
@@ -107,7 +108,8 @@ The activation order in the Go callback stays reveal-first: `showWindow` runs BE
 2. Empty `session_id` (the Settings preview banner) → logged no-op (focus-only click).
 3. Resolve the owning project: the payload's `project_id` first; otherwise the global session snapshot, with one immediate `refreshNow()` retry when the session is not found.
 4. Unknown session (even after the refresh) → logged no-op.
-5. Known session: `switchProjectWithState(projectId)` when the project differs (restores that project's UI state), then `selectSession(sessionId, projectId)`. A failed switch surfaces its own toast and selects nothing.
+5. Known session, flag OFF (`uiStore.tabsEnabled`, read at click time — a toggle applies to the next click without a remount): `switchProjectWithState(projectId)` when the project differs (restores that project's UI state), then `selectSession(sessionId, projectId)` — the pre-tab radar path; the tab layer is never read or written. A failed switch surfaces its own toast and selects nothing.
+6. Known session, flag ON: the click routes through the workspace tab engine ([tabs.md](tabs.md)) — the exact `{projectId, sessionId}` tab if one exists, else any tab already showing the session (session ids are globally unique), else a new tab created for the clicked context; `engine.activate(...)` then materializes the context (project switch + session restore inside the activation) and never rejects — a failed activation rolls the active tab back and logs a warning. The hook owns a BARE engine (no `attachWriteBack`), so a click can never install a second write-back; the app-level controller in `AppLayout` stays the only one.
 
 The Linux transport dispatches `App.notificationCallback` on its own goroutine, never inline on the godbus signal pump: the callback activates the window, which makes blocking X round trips, and a stalled pump makes godbus silently discard every subsequent signal — one slow activation would otherwise disable notification clicks until restart. Both the `ActionInvoked` and the reason-2 `NotificationClosed` handlers dispatch this way.
 
@@ -208,6 +210,7 @@ Two more lines bound the transport's health, once per run each: `system notifica
 - Exactly one `OnNotificationResponse` callback is registered per app run (init is memoized; a failed init is retried but never double-registers).
 - Banner ids are unique within a process (`c0wrk-notification-<GOOS>-<timestamp>-<seq>`).
 - `notification_clicked` payloads are validated (`isNotificationClickedData`); malformed ones are dropped and reported, never dispatched.
+- Banner-click navigation branches on `uiStore.tabsEnabled`, read at click time: flag ON routes through the tab engine's single activation path (a bare engine — no write-back), flag OFF keeps the pre-tab switch-then-select path and never touches the tab layer.
 - The Linux icon transport is fail-soft: a banner is never lost to an icon/export/D-Bus failure (fallback to the Wails transport), and exactly one side tracks each notification (no double delivery, no orphan clicks).
 - The Linux click callback runs on its own goroutine, leaving the godbus signal pump free to keep reading — window activation and signal delivery never share a goroutine.
 - The transport state lock is never held across the blocking `Notify` round trip; concurrent sends serialize on a dedicated send mutex, and a slow daemon can only delay other sends, never the pump or `Shutdown`.
@@ -235,5 +238,6 @@ Two more lines bound the transport's health, once per run each: `system notifica
 
 - [sound-notifications.md](sound-notifications.md) — the audible channel; the shared listener-coverage invariant and the foreground/background ownership model.
 - [stores.md](stores.md) — `systemNotificationStore` (the persisted master toggle).
+- [tabs.md](tabs.md) — the workspace tab layer behind the flag-ON click branch (the bare engine, tab matching, activation rollback).
 - [events.md](events.md) — event subscription; `useSoundEvents` and the background watcher are composed by `useSessionEvents`.
 - [../../contracts/event-catalog.md](../../contracts/event-catalog.md) — the `notification_clicked` global event.

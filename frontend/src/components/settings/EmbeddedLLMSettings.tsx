@@ -36,7 +36,7 @@
 // modal, both of which are scale-agnostic.
 
 import { useState } from 'react'
-import { AlertCircle } from 'lucide-react'
+import { AlertCircle, Cpu } from 'lucide-react'
 import { formatIdleCountdown } from '@/lib/formatters'
 import {
   useEmbeddedLLMBusy,
@@ -106,7 +106,10 @@ export function EmbeddedLLMSettings() {
   return (
     <div className="flex flex-col gap-3" data-testid="embedded-llm-settings">
       <div className="flex flex-col gap-1">
-        <h3 className="text-sm font-medium">Embedded LLM</h3>
+        <h3 className="flex items-center gap-2 text-sm font-medium">
+          <Cpu className="h-4 w-4 text-muted-foreground" />
+          Embedded LLM
+        </h3>
         <p className="text-xs text-muted-foreground">
           Run the pinned Bonsai 2 27B model entirely on this machine: c0wrk downloads a pinned
           inference runtime and the weights, supervises llama-server on 127.0.0.1 and registers it as

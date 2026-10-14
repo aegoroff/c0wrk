@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils'
 import { formatRelativeTime } from '@/lib/formatters'
 import { useSessionStatusIndicator } from '@/hooks/useSessionStatusIndicator'
 import type { SessionIndicatorStatus } from '@/hooks/useSessionStatusIndicator'
+import { SESSION_DOT_CLASSES, SESSION_DOT_TITLES } from '@/lib/activeSessions'
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { ItemAction, ItemActions } from './ItemAction'
 import { NO_PROJECT_ID } from '@/types/models'
@@ -83,18 +84,19 @@ function SessionRowContent({ session, isActive, status, onPin, onFork, onPromote
   const forkReason = status === 'active' || status === 'pending' ? 'Cannot fork while a task is running' : 'Cannot fork a session with an unfinished task'
   const promoteReason = status === 'active' || status === 'pending' ? 'Cannot promote while a task is running' : 'Cannot promote a session with an unfinished task'
 
+  // The status dot comes from the ONE shared map (lib/activeSessions) — the
+  // same tokens and wording the radar rows and the workspace tabs use, so the
+  // surfaces can never drift. `idle` has no dot.
+  const dotClass = SESSION_DOT_CLASSES[status]
+
   return (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        {status === 'pending' && (
-          <span className="size-1.5 shrink-0 rounded-full bg-warning" title="Awaiting your response" />
-        )}
-        {status === 'active' && <span className="size-1.5 shrink-0 rounded-full bg-success" title="Task running" />}
-        {status === 'failed' && (
-          <span className="size-1.5 shrink-0 rounded-full bg-destructive" title="Task failed — resume available" />
-        )}
-        {status === 'paused' && (
-          <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" title="Task paused" />
+        {dotClass !== undefined && (
+          <span
+            className={cn('size-1.5 shrink-0 rounded-full', dotClass)}
+            title={SESSION_DOT_TITLES[status]}
+          />
         )}
         {isActive && <Check className="size-3.5 shrink-0" />}
         {session.pinned && <Pin className="size-3 shrink-0 text-primary" />}

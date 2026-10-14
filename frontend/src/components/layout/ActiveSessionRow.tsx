@@ -15,26 +15,8 @@ import { Code2, MessageCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatRelativeTime } from '@/lib/formatters'
 import { EllipsisHint } from '@/components/chat/toolCards/shared/EllipsisHint'
-import type { SessionDisplayStatus } from '@/lib/activeSessions'
+import { SESSION_DOT_CLASSES, SESSION_DOT_TITLES, type SessionDisplayStatus } from '@/lib/activeSessions'
 import type { SessionInfo } from '@/types/models'
-
-/** Dot color per display status — same tokens as the badge cluster and the
- *  regular session list. `idle` has no dot (and no live row can be idle);
- *  `failed` is the badge's red, which the regular list never needs. */
-const STATUS_DOT_CLASSES: Partial<Record<SessionDisplayStatus, string>> = {
-  pending: 'bg-warning',
-  failed: 'bg-destructive',
-  active: 'bg-success',
-  paused: 'bg-muted-foreground',
-}
-
-/** Dot hover hint — same wording as SessionListItem's status dots. */
-const STATUS_DOT_TITLES: Partial<Record<SessionDisplayStatus, string>> = {
-  pending: 'Awaiting your response',
-  failed: 'Task failed — resume available',
-  active: 'Task running',
-  paused: 'Task paused',
-}
 
 export interface ActiveSessionRowProps {
   session: SessionInfo
@@ -49,13 +31,14 @@ export interface ActiveSessionRowProps {
 }
 
 export function ActiveSessionRow({ session, status, isActive, isChat, projectName }: ActiveSessionRowProps) {
-  const dotClass = STATUS_DOT_CLASSES[status]
+  const dotClass = SESSION_DOT_CLASSES[status]
+  const dotTitle = SESSION_DOT_TITLES[status]
   const showProject = !isChat && !!projectName
   return (
     <>
       <div className="flex min-w-0 flex-auto items-center gap-1.5">
         {dotClass && (
-          <span className={cn('size-1.5 shrink-0 rounded-full', dotClass)} title={STATUS_DOT_TITLES[status]} />
+          <span className={cn('size-1.5 shrink-0 rounded-full', dotClass)} title={dotTitle} />
         )}
         {isChat ? (
           <MessageCircle className="size-3 shrink-0" aria-label="Chat session" />

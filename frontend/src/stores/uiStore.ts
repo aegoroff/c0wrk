@@ -47,16 +47,19 @@ export type ResearchSegmentByProject = Record<string, ResearchSegment>
  * (hand-edited localStorage or a future shape written by a newer build)
  * matches no TabsTrigger/TabsContent and would render a blank workspace
  * panel, so it is dropped rather than trusted and the project falls back to
- * the default tab.
+ * the default tab. Also the single source of truth for the tab-snapshot
+ * validation in lib/tabSnapshot.
  */
-const WORKSPACE_TAB_VALUES = new Set<WorkspaceTab>(['explorer', 'git', 'semantics', 'research'])
+export const WORKSPACE_TAB_VALUES = new Set<WorkspaceTab>(['explorer', 'git', 'semantics', 'research'])
 
 /**
  * Valid ResearchSegment values — validated entry-by-entry on every rehydrate
  * (same fail-closed contract as WORKSPACE_TAB_VALUES): an unknown/corrupt
  * segment value falls back to the default rather than rendering a blank panel.
+ * Also the single source of truth for the tab-snapshot validation in
+ * lib/tabSnapshot.
  */
-const RESEARCH_SEGMENT_VALUES = new Set<ResearchSegment>(['dashboard', 'papers'])
+export const RESEARCH_SEGMENT_VALUES = new Set<ResearchSegment>(['dashboard', 'papers'])
 
 interface UIState {
   sidebarCollapsed: boolean
@@ -90,6 +93,15 @@ interface UIState {
    * shows the summary. Off by default. Persisted.
    */
   showSessionStats: boolean
+  /**
+   * Whether the workspace TAB BAR renders (the multi-tab layer from
+   * stores/tabStore). The tab layer itself exists unconditionally — with the
+   * flag off it is simply its "exactly one tab" special case (the UI offers no
+   * create/close controls), so flipping the flag on only reveals the tab bar
+   * above the already-living tab; there are no lifecycle transitions. Off by
+   * default. Persisted (the flag is a durable user preference).
+   */
+  tabsEnabled: boolean
 }
 
 interface UIActions {
@@ -103,6 +115,8 @@ interface UIActions {
   setSidebarWidth: (width: number) => void
   setChatSessionListRatio: (ratio: number) => void
   setShowSessionStats: (show: boolean) => void
+  /** Show/hide the workspace tab bar (see tabStore — the layer itself is always live). */
+  setTabsEnabled: (enabled: boolean) => void
 }
 
 /** Default workspace tab when a project has no remembered tab yet. */
@@ -159,6 +173,7 @@ export function mergeUIStore(
     sidebarWidth?: unknown
     chatSessionListRatio?: unknown
     showSessionStats?: unknown
+    tabsEnabled?: unknown
     workspaceTabByProject?: unknown
     researchSegmentByProject?: unknown
   }
@@ -200,6 +215,7 @@ export function mergeUIStore(
         : current.chatSessionListRatio,
     showSessionStats:
       typeof p.showSessionStats === 'boolean' ? p.showSessionStats : current.showSessionStats,
+    tabsEnabled: typeof p.tabsEnabled === 'boolean' ? p.tabsEnabled : current.tabsEnabled,
     workspaceTabByProject,
     researchSegmentByProject,
   }
@@ -214,6 +230,7 @@ export const useUIStore = create<UIState & UIActions>()(
       sidebarWidth: getDefaultSidebarWidth(),
       chatSessionListRatio: 0.5,
       showSessionStats: false,
+      tabsEnabled: false,
 
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
 
@@ -257,10 +274,14 @@ export const useUIStore = create<UIState & UIActions>()(
       }),
 
       setShowSessionStats: (show) => set({ showSessionStats: show }),
+
+      setTabsEnabled: (enabled) => set((s) => (
+        s.tabsEnabled === enabled ? s : { tabsEnabled: enabled }
+      )),
     }),
     {
       name: 'c0wrk-sidebar-collapsed',
-      version: 6,
+      version: 7,
       // Bump version and implement migration when adding/removing/renaming persisted fields.
       migrate: (persistedState, _version) => {
         const prev = (persistedState ?? {}) as {
@@ -268,6 +289,7 @@ export const useUIStore = create<UIState & UIActions>()(
           chatSessionListRatio?: number
           sidebarWidth?: number
           showSessionStats?: boolean
+          tabsEnabled?: boolean
           workspaceTabByProject?: WorkspaceTabByProject
           researchSegmentByProject?: ResearchSegmentByProject
         }
@@ -275,7 +297,9 @@ export const useUIStore = create<UIState & UIActions>()(
         // v3→v4 added showSessionStats (default off — the stats row is
         // opt-in); v4→v5 replaced the transient workspaceTab scalar with the
         // per-project workspaceTabByProject map; v5→v6 added the per-project
-        // researchSegmentByProject map (Research panel: dashboard | papers).
+        // researchSegmentByProject map (Research panel: dashboard | papers);
+        // v6→v7 added tabsEnabled (default off — the tab bar is opt-in; the
+        // tab layer itself lives in stores/tabStore and needs no migration).
         // On every migration (and fresh
         // installs) missing fields take their creator default; persist's
         // shallow merge already covers fresh installs, but explicit defaults
@@ -311,6 +335,7 @@ export const useUIStore = create<UIState & UIActions>()(
           chatSessionListRatio: prev.chatSessionListRatio ?? 0.5,
           sidebarWidth: prev.sidebarWidth ?? getDefaultSidebarWidth(),
           showSessionStats: prev.showSessionStats ?? false,
+          tabsEnabled: prev.tabsEnabled ?? false,
           workspaceTabByProject,
           researchSegmentByProject,
         }
@@ -322,6 +347,7 @@ export const useUIStore = create<UIState & UIActions>()(
         sidebarWidth: state.sidebarWidth,
         chatSessionListRatio: state.chatSessionListRatio,
         showSessionStats: state.showSessionStats,
+        tabsEnabled: state.tabsEnabled,
         workspaceTabByProject: state.workspaceTabByProject,
         researchSegmentByProject: state.researchSegmentByProject,
       }),

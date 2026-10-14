@@ -9,6 +9,7 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import { ConfigWarningBanner } from './ConfigWarningBanner'
 import { LogLevelSelector } from './LogLevelSelector'
 import { ThemeSelector } from './ThemeSelector'
+import { TabsSettings } from './TabsSettings'
 import { UIScaleSelector } from './UIScaleSelector'
 import { FontSettings } from './FontSettings'
 import { ProxySettings } from './ProxySettings'
@@ -23,7 +24,7 @@ import { CapabilitiesSettings } from './CapabilitiesSettings'
 import { SecuritySettings } from './SecuritySettings'
 import { UpdateSettings } from './UpdateSettings'
 import { ExperimentalSettings } from './ExperimentalSettings'
-import { Settings, Palette, Brain, Search, Shield, Info, Component, AlertTriangle, X, Gauge } from 'lucide-react'
+import { Settings, Palette, Brain, Search, Shield, Info, Component, AlertTriangle, X, Gauge, Database, Globe } from 'lucide-react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { hasDefaultModel } from '@/api/config'
 // The canonical app mark — the very same SVG Wails derives the bundled
@@ -255,11 +256,17 @@ export function SettingsModal() {
                 <ExperimentalSettings />
               </div>
               <div className="border-t border-border pt-4">
-                <h3 className="text-sm font-medium mb-3">HTTP Proxy</h3>
+                <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
+                  <Globe className="h-4 w-4 text-muted-foreground" />
+                  HTTP Proxy
+                </h3>
                 <ProxySettings />
               </div>
               <div className="border-t border-border pt-4">
-                <h3 className="text-sm font-medium mb-3">Vector Index</h3>
+                <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
+                  <Database className="h-4 w-4 text-muted-foreground" />
+                  Vector Index
+                </h3>
                 <VectorIndexSettings />
               </div>
             </div>
@@ -275,6 +282,12 @@ export function SettingsModal() {
                     reports no system font the dropdown simply offers Default
                     and the typed input carries the rest. */}
                 <FontSettings />
+              </div>
+              {/* Tabs sits last on the tab: a master switch that reshapes the
+                  whole workspace reads best after the pure appearance knobs
+                  (theme / scale / fonts) above it. */}
+              <div className="border-t border-border pt-4">
+                <TabsSettings />
               </div>
             </div>
           </TabsContent>

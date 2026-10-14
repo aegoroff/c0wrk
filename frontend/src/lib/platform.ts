@@ -16,3 +16,16 @@ export function isLinuxHost(): boolean {
     /Linux/i.test(navigator.platform || navigator.userAgent)
   )
 }
+
+/**
+ * Reports whether the app runs on a macOS host. Same signal pair as
+ * `isLinuxHost`: "Mac" matches MacIntel/Macintosh platform strings and the
+ * "Macintosh; Intel Mac OS X" userAgent, and no other host string contains
+ * it (Linux and Windows UAs never carry the substring).
+ */
+export function isMacHost(): boolean {
+  return (
+    typeof navigator !== 'undefined' &&
+    /Mac/i.test(navigator.platform || navigator.userAgent)
+  )
+}

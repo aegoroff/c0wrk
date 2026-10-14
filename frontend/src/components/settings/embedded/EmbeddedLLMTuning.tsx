@@ -9,6 +9,7 @@
 // (`-ngl 0` is an all-CPU launch shape). The write happens when the user
 // commits a count — the hint line below says so out loud.
 
+import { SlidersHorizontal } from 'lucide-react'
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
 import { NumberField } from '@/components/settings/NumberField'
 import {
@@ -44,7 +45,10 @@ export function EmbeddedLLMTuning(props: EmbeddedLLMTuningPrimaryProps) {
   return (
     <div className="flex flex-col gap-2" data-testid="embedded-llm-tuning">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <span className="text-sm font-medium text-foreground">Tuning</span>
+        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+          Tuning
+        </span>
         {props.reloadRequired && (
           <span className="text-xs text-warning" data-testid="embedded-llm-tuning-reload">
             Pending changes — Unload + Load applies them

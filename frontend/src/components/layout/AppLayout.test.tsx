@@ -19,16 +19,23 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 // --- stores: direct-field selector mocks (no localStorage needed) ---
+// Mutable so individual tests can flip tabsEnabled and assert the tab bar's
+// presence/absence in the shell DOM.
+const uiMock = vi.hoisted(() => ({
+  state: {
+    sidebarCollapsed: false,
+    toggleSidebarCollapsed: () => {},
+    sidebarWidth: 280,
+    setSidebarWidth: () => {},
+    tabsEnabled: false,
+  },
+}))
 vi.mock('@/stores/uiStore', () => ({
-  useUIStore: (select: (s: Record<string, unknown>) => unknown) =>
-    select({
-      sidebarCollapsed: false,
-      toggleSidebarCollapsed: () => {},
-      sidebarWidth: 280,
-      setSidebarWidth: () => {},
-    }),
+  useUIStore: (select: (s: Record<string, unknown>) => unknown) => select(uiMock.state),
   SIDEBAR_MIN: 180,
   SIDEBAR_MAX: 500,
+  // lib/tabSnapshot (via tabStore) builds its default snapshots from these.
+  getDefaultSidebarWidth: () => 280,
 }))
 vi.mock('@/stores/fileViewerStore', () => ({
   useFileViewerStore: (select: (s: Record<string, unknown>) => unknown) =>
@@ -39,6 +46,7 @@ vi.mock('@/stores/fileViewerStore', () => ({
       setWidth: () => {},
       setCollapsed: () => {},
     }),
+  getDefaultViewerWidth: () => 400,
 }))
 
 // --- shell dependencies: stubbed, not under test ---
@@ -47,6 +55,14 @@ vi.mock('@/hooks/useResize', () => ({
 }))
 vi.mock('@/components/ResizeHandle', () => ({ ResizeHandle: () => null }))
 vi.mock('./Sidebar', () => ({ Sidebar: () => null }))
+// The tab strip under test is wired in AppLayoutTests below; the real
+// component has its own suite.
+vi.mock('./TabBar', () => ({ TabBar: () => <div data-testid="tab-bar" /> }))
+// AppLayout owns the single controller mount; the real hook drags the engine,
+// project-switch state and four store subscriptions — stubbed here.
+vi.mock('@/hooks/useTabController', () => ({
+  useTabController: () => ({ activate: async () => {}, createAndActivate: async () => {}, writeBack: () => {} }),
+}))
 vi.mock('@/components/chat/ChatArea', () => ({ ChatArea: () => <div data-testid="chat-area" /> }))
 vi.mock('@/components/chat/BonsaiProfileBanner', () => ({ BonsaiProfileBanner: () => <div data-testid="bonsai-banner" /> }))
 vi.mock('@/components/layout/StatusBar', () => ({ StatusBar: () => null }))
@@ -104,5 +120,36 @@ describe('AppLayout shell sizing', () => {
     expect(classes).toContain('h-full')
     expect(classes).toContain('w-full')
     expect(classes).toContain('overflow-hidden')
+  })
+})
+
+describe('AppLayout tab-bar gate', () => {
+  afterEach(() => {
+    uiMock.state.tabsEnabled = false
+  })
+
+  it('renders NO tab strip in the DOM when tabsEnabled is off', () => {
+    uiMock.state.tabsEnabled = false
+    const shell = renderShell()
+    // The flag-off shell is the pre-tab UI: no bar, no wrapper artifacts.
+    expect(shell.querySelector('[data-testid="tab-bar"]')).toBeNull()
+    expect(document.body.textContent).not.toContain('Workspace tabs')
+  })
+
+  it('renders the tab strip shrink-0 above the flex-1 min-h-0 row when on', () => {
+    uiMock.state.tabsEnabled = true
+    const shell = renderShell()
+    const bar = shell.querySelector('[data-testid="tab-bar"]')
+    expect(bar).not.toBeNull()
+    // The bar is the column's FIRST child — above the main row.
+    expect(shell.firstElementChild).toBe(bar)
+    // The row wrapper directly follows the bar and takes the remaining space.
+    const row = bar?.nextElementSibling
+    const rowClasses = row?.className.split(/\s+/) ?? []
+    expect(rowClasses).toContain('flex-1')
+    expect(rowClasses).toContain('min-h-0')
+    // The root is now a column, and the heavy row still lives inside it.
+    expect(shell.className.split(/\s+/)).toContain('flex-col')
+    expect(row?.querySelector('[data-testid="chat-area"]')).not.toBeNull()
   })
 })

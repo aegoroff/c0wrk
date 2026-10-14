@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { isLinuxHost } from './platform'
+import { isLinuxHost, isMacHost } from './platform'
 
 // navigator.platform/userAgent are getter-backed in jsdom; defineProperty
 // shadows them deterministically per test (the project convention, cf. the
@@ -85,6 +85,57 @@ describe('isLinuxHost', () => {
     vi.stubGlobal('navigator', undefined)
     try {
       expect(isLinuxHost()).toBe(false)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('isMacHost', () => {
+  it('matches MacIntel via navigator.platform', () => {
+    let result = false
+    withNavigator('MacIntel', 'Mozilla/5.0 (Windows NT 10.0)', () => {
+      result = isMacHost()
+    })
+    expect(result).toBe(true)
+  })
+
+  it('matches Macintosh via navigator.platform', () => {
+    let result = false
+    withNavigator('Macintosh', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', () => {
+      result = isMacHost()
+    })
+    expect(result).toBe(true)
+  })
+
+  it('falls back to the macOS userAgent when platform is empty', () => {
+    let result = false
+    withNavigator('', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15', () => {
+      result = isMacHost()
+    })
+    expect(result).toBe(true)
+  })
+
+  it('rejects Linux x86_64', () => {
+    let result = true
+    withNavigator('Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64)', () => {
+      result = isMacHost()
+    })
+    expect(result).toBe(false)
+  })
+
+  it('rejects Win32', () => {
+    let result = true
+    withNavigator('Win32', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', () => {
+      result = isMacHost()
+    })
+    expect(result).toBe(false)
+  })
+
+  it('fails closed without a navigator', () => {
+    vi.stubGlobal('navigator', undefined)
+    try {
+      expect(isMacHost()).toBe(false)
     } finally {
       vi.unstubAllGlobals()
     }

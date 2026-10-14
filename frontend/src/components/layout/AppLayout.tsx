@@ -2,8 +2,11 @@ import { useEffect, useRef } from 'react'
 import { useUIStore, SIDEBAR_MIN, SIDEBAR_MAX } from '@/stores/uiStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useResize } from '@/hooks/useResize'
+import { useTabController } from '@/hooks/useTabController'
+import { useTabHotkeys } from '@/hooks/useTabHotkeys'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Sidebar } from './Sidebar'
+import { TabBar } from './TabBar'
 import { ChatArea } from '@/components/chat/ChatArea'
 import { BonsaiProfileBanner } from '@/components/chat/BonsaiProfileBanner'
 import { StatusBar } from '@/components/layout/StatusBar'
@@ -32,6 +35,7 @@ export function AppLayout() {
   const toggleSidebar = useUIStore((s) => s.toggleSidebarCollapsed)
   const sidebarWidth = useUIStore((s) => s.sidebarWidth)
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
+  const tabsEnabled = useUIStore((s) => s.tabsEnabled)
 
   const viewerWidth = useFileViewerStore((s) => s.width)
   const viewerCollapsed = useFileViewerStore((s) => s.collapsed)
@@ -42,6 +46,19 @@ export function AppLayout() {
   // Ref to the floating (unpinned) viewer container so a global
   // pointer/focus listener can detect focus moving outside it and collapse it.
   const floatingViewerRef = useRef<HTMLDivElement>(null)
+
+  // THE single tab-engine mount (activation path + write-back subscriptions).
+  // It lives here — not inside TabBar — so exactly one engine exists per app:
+  // the layer runs unconditionally (with the flag off the single tab is the
+  // live workspace mirror; enabling the flag merely reveals the bar above it).
+  const tabController = useTabController()
+
+  // System-standard tab-cycling shortcuts (Cmd+Shift+]/[ on macOS,
+  // Ctrl+Tab / Ctrl+PageDown-PgUp on Windows/Linux). Mounted unconditionally
+  // next to the single controller mount — the hook reads the flag and the
+  // tab layer at event time, so a disabled or single-tab layer leaves the
+  // keypress untouched. Every activation rides the same engine chain.
+  useTabHotkeys(tabController)
 
   const sidebarResize = useResize({
     initialWidth: sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth,
@@ -135,79 +152,92 @@ export function AppLayout() {
     // leaving auto/<percentage> values untouched — so a viewport-unit shell is
     // magnified past the window and forces horizontal + vertical scrollbars at
     // any scale ≠ 100%. The 100% chain lives on html/body/#root in index.css.
-    <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
-      {/* Sidebar */}
-      <Sidebar
-        width={sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth}
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={toggleSidebar}
-      />
+    //
+    // Root is a COLUMN: the workspace tab bar (only when uiStore.tabsEnabled
+    // is on) sits shrink-0 above the main row, which takes the rest via
+    // flex-1 min-h-0. With the flag off the bar is absent from the DOM
+    // entirely and the layout is byte-identical to the pre-tab shell.
+    <div className="flex h-full w-full flex-col overflow-hidden bg-background text-foreground">
+      {/* Workspace tab bar */}
+      {tabsEnabled && <TabBar controller={tabController} />}
 
-      {/* Resize handle between sidebar and main */}
-      {!sidebarCollapsed && (
-        <ResizeHandle
-          onMouseDown={sidebarResize.handleMouseDown}
-          onKeyDown={sidebarResize.handleKeyDown}
+      {/* The main row — sidebar | chat | viewer — fills whatever the column
+          leaves below the (optional) tab bar. min-h-0 lets the row shrink
+          instead of overflowing when the bar is shown. */}
+      <div className="flex min-h-0 flex-1">
+        {/* Sidebar */}
+        <Sidebar
+          width={sidebarCollapsed ? COLLAPSED_WIDTH : sidebarWidth}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={toggleSidebar}
         />
-      )}
 
-      {/* Main content area — relative so the floating viewer can overlay it */}
-      <div className="relative flex min-w-0 flex-1 flex-col">
-        <BonsaiProfileBanner />
-        <ChatArea />
-        <StatusBar />
+        {/* Resize handle between sidebar and main */}
+        {!sidebarCollapsed && (
+          <ResizeHandle
+            onMouseDown={sidebarResize.handleMouseDown}
+            onKeyDown={sidebarResize.handleKeyDown}
+          />
+        )}
 
-        {/* Floating (unpinned, expanded) viewer: absolute overlay anchored to
-            the right edge of the main column. Covers ~3/5 of the central chat
-            area by default (the persisted, user-resizable width), stays
-            resizable via its left-edge handle, and auto-collapses on outside
-            focus. Note: a collapsed floating viewer does NOT render here — it
-            is drawn by the docked block below as a slim in-flow bar (so it
-            never overlaps the chat), and expanding from that bar returns here. */}
-        {!viewerPinned && !viewerCollapsed && (
-          <div
-            ref={floatingViewerRef}
-            className="absolute right-0 top-0 bottom-0 z-20 flex flex-col border-l border-border bg-background shadow-xl"
-            style={{ width: viewerWidth }}
-          >
-            <ResizeHandle
-              // Left-edge handle of a right-aligned panel: drag left grows it.
-              onMouseDown={viewerResize.handleMouseDown}
-              onKeyDown={viewerResize.handleKeyDown}
-              className="absolute left-0 top-0 bottom-0 w-1 h-auto"
-            />
-            <FileViewerPanel />
-          </div>
+        {/* Main content area — relative so the floating viewer can overlay it */}
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <BonsaiProfileBanner />
+          <ChatArea />
+          <StatusBar />
+
+          {/* Floating (unpinned, expanded) viewer: absolute overlay anchored to
+              the right edge of the main column. Covers ~3/5 of the central chat
+              area by default (the persisted, user-resizable width), stays
+              resizable via its left-edge handle, and auto-collapses on outside
+              focus. Note: a collapsed floating viewer does NOT render here — it
+              is drawn by the docked block below as a slim in-flow bar (so it
+              never overlaps the chat), and expanding from that bar returns here. */}
+          {!viewerPinned && !viewerCollapsed && (
+            <div
+              ref={floatingViewerRef}
+              className="absolute right-0 top-0 bottom-0 z-20 flex flex-col border-l border-border bg-background shadow-xl"
+              style={{ width: viewerWidth }}
+            >
+              <ResizeHandle
+                // Left-edge handle of a right-aligned panel: drag left grows it.
+                onMouseDown={viewerResize.handleMouseDown}
+                onKeyDown={viewerResize.handleKeyDown}
+                className="absolute left-0 top-0 bottom-0 w-1 h-auto"
+              />
+              <FileViewerPanel />
+            </div>
+          )}
+        </div>
+
+        {/* Docked (in-flow) viewer: rendered whenever pinned OR collapsed.
+            When a floating (unpinned) viewer collapses — whether via the tab-bar
+            collapse button, the focus-outside auto-collapse, or the empty-tabs
+            auto-collapse — it "artificially" docks so a slim 40px expand
+            affordance stays visible (in-flow, so it never overlaps the chat)
+            instead of vanishing entirely. Expanding restores the floating overlay
+            because the user's `pinned` preference (false) is preserved: collapse
+            only changes *rendering*, never intent. */}
+        {(viewerPinned || viewerCollapsed) && (
+          <>
+            {/* Resize handle between main and file viewer */}
+            {!viewerCollapsed && (
+              <ResizeHandle
+                onMouseDown={viewerResize.handleMouseDown}
+                onKeyDown={viewerResize.handleKeyDown}
+              />
+            )}
+
+            {/* File viewer */}
+            <div
+              className="flex shrink-0 flex-col border-l border-border bg-background"
+              style={{ width: viewerCollapsed ? COLLAPSED_WIDTH : viewerWidth }}
+            >
+              <FileViewerPanel />
+            </div>
+          </>
         )}
       </div>
-
-      {/* Docked (in-flow) viewer: rendered whenever pinned OR collapsed.
-          When a floating (unpinned) viewer collapses — whether via the tab-bar
-          collapse button, the focus-outside auto-collapse, or the empty-tabs
-          auto-collapse — it "artificially" docks so a slim 40px expand
-          affordance stays visible (in-flow, so it never overlaps the chat)
-          instead of vanishing entirely. Expanding restores the floating overlay
-          because the user's `pinned` preference (false) is preserved: collapse
-          only changes *rendering*, never intent. */}
-      {(viewerPinned || viewerCollapsed) && (
-        <>
-          {/* Resize handle between main and file viewer */}
-          {!viewerCollapsed && (
-            <ResizeHandle
-              onMouseDown={viewerResize.handleMouseDown}
-              onKeyDown={viewerResize.handleKeyDown}
-            />
-          )}
-
-          {/* File viewer */}
-          <div
-            className="flex shrink-0 flex-col border-l border-border bg-background"
-            style={{ width: viewerCollapsed ? COLLAPSED_WIDTH : viewerWidth }}
-          >
-            <FileViewerPanel />
-          </div>
-        </>
-      )}
     </div>
   )
 }

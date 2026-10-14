@@ -13,9 +13,11 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }))
 
-import { APP_NAME, CHAT_LABEL, buildWindowTitle, useWindowTitle } from './useWindowTitle'
-import { useProjectStore } from '@/stores/projectStore'
-import { useSessionStore } from '@/stores/sessionStore'
+import { APP_NAME, CHAT_LABEL, buildWindowTitle, selectSessionNameFor, selectTitleScopeFor, useWindowTitle } from './useWindowTitle'
+import { useProjectStore, type ProjectState } from '@/stores/projectStore'
+import { useSessionStore, type SessionState } from '@/stores/sessionStore'
+import { createTab, useTabStore } from '@/stores/tabStore'
+import { useUIStore } from '@/stores/uiStore'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
 
 const NO_PROJECT_ID = '__no_project__'
@@ -90,6 +92,41 @@ describe('buildWindowTitle', () => {
   })
 })
 
+// --- Pure id-keyed lookups -----------------------------------------------------
+
+function projectState(projects: ProjectInfo[] | null): ProjectState {
+  return { projects, activeProjectId: null, lastRealProjectId: null, createDialogOpen: false }
+}
+
+function sessionState(sessions: SessionInfo[] | null): SessionState {
+  return { sessions, activeSessionId: null }
+}
+
+describe('selectTitleScopeFor / selectSessionNameFor', () => {
+  it('resolves a project id to its name and a session id to its name', () => {
+    const projects = projectState([makeProject({ id: 'proj-a', name: 'MyProject' })])
+    expect(selectTitleScopeFor(projects, 'proj-a')).toBe('MyProject')
+    expect(selectTitleScopeFor(projects, 'missing')).toBeNull()
+    expect(selectTitleScopeFor(projects, null)).toBeNull()
+
+    const sessions = sessionState([makeSession({ id: 'sess-1', name: 'Refactor auth' })])
+    expect(selectSessionNameFor(sessions, 'sess-1')).toBe('Refactor auth')
+    expect(selectSessionNameFor(sessions, 'missing')).toBeNull()
+    expect(selectSessionNameFor(sessions, null)).toBeNull()
+  })
+
+  it('maps the No Project entry to CHAT and loading stores to null', () => {
+    expect(
+      selectTitleScopeFor(
+        projectState([makeProject({ id: NO_PROJECT_ID, name: 'No Project', is_no_project: true })]),
+        NO_PROJECT_ID,
+      ),
+    ).toBe(CHAT_LABEL)
+    expect(selectTitleScopeFor(projectState(null), NO_PROJECT_ID)).toBeNull()
+    expect(selectSessionNameFor(sessionState(null), 'sess-1')).toBeNull()
+  })
+})
+
 // --- Hook wiring -------------------------------------------------------------
 
 let container: HTMLDivElement | null = null
@@ -116,6 +153,11 @@ function lastTitle(): string | undefined {
   return calls[calls.length - 1]?.[0] as string | undefined
 }
 
+/** Total number of title pushes — the effect-cycle guard metric. */
+function pushCount(): number {
+  return runtimeMocks.setWindowTitle.mock.calls.length
+}
+
 function resetStores() {
   useProjectStore.setState({
     projects: null,
@@ -124,6 +166,11 @@ function resetStores() {
     createDialogOpen: false,
   })
   useSessionStore.setState({ sessions: null, activeSessionId: null })
+  // A fresh boot always starts from exactly one default tab (the tab layer's
+  // ≥1-tab invariant), mirroring the app's flag-off special case.
+  const fresh = createTab()
+  useTabStore.setState({ tabs: [fresh], activeTabId: fresh.id })
+  useUIStore.setState({ tabsEnabled: false })
 }
 
 beforeEach(() => {
@@ -143,10 +190,22 @@ afterEach(() => {
   container = null
 })
 
+/**
+ * Point the active tab at the given context. In the flag-off special case the
+ * single tab mirrors the live project/session context — every test below that
+ * activates a project/session mirrors it onto the tab, exactly what the tab
+ * wiring does in the real app.
+ */
+function mirrorActiveTab(projectId: string | null, sessionId: string | null): void {
+  useTabStore.getState().updateActiveContext({ projectId, sessionId })
+}
+
 describe('useWindowTitle', () => {
   it('sets the bare app name on mount with nothing active', () => {
     renderHook()
     expect(lastTitle()).toBe('c0wrk')
+    // Exactly one push for one state — the baseline cycle guard.
+    expect(pushCount()).toBe(1)
   })
 
   it('adds the project segment once a project becomes active', () => {
@@ -156,6 +215,7 @@ describe('useWindowTitle', () => {
     act(() => {
       useProjectStore.getState().setProjects([project])
       useProjectStore.getState().setActiveProjectId('proj-a')
+      mirrorActiveTab('proj-a', null)
     })
 
     expect(lastTitle()).toBe('c0wrk - MyProject')
@@ -171,6 +231,7 @@ describe('useWindowTitle', () => {
       useProjectStore.getState().setActiveProjectId('proj-a')
       useSessionStore.getState().setSessions([session])
       useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
     })
 
     expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
@@ -186,18 +247,83 @@ describe('useWindowTitle', () => {
       useProjectStore.getState().setActiveProjectId(NO_PROJECT_ID)
       useSessionStore.getState().setSessions([session])
       useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab(NO_PROJECT_ID, 'sess-1')
     })
 
     expect(lastTitle()).toBe('c0wrk - CHAT: Quick question')
   })
 
-  it('follows a project rename without a project switch', () => {
+  it('follows the active tab ids even when the stores own active pointers differ', () => {
+    const projA = makeProject({ id: 'proj-a', name: 'Alpha' })
+    const projB = makeProject({ id: 'proj-b', name: 'Beta' })
+    const sessA = makeSession({ id: 'sess-a', project_id: 'proj-a', name: 'Refactor auth' })
+    const sessB = makeSession({ id: 'sess-b', project_id: 'proj-b', name: 'Write docs' })
+    renderHook()
+
+    act(() => {
+      useProjectStore.getState().setProjects([projA, projB])
+      useProjectStore.getState().setActiveProjectId('proj-a')
+      useSessionStore.getState().setSessions([sessA, sessB])
+      useSessionStore.getState().setActiveSessionId('sess-a')
+    })
+    expect(lastTitle()).toBe('c0wrk')
+
+    // The new tab is activated by addTab and points at project B — the title
+    // must show the TAB's context, not the stores' active pointers (which
+    // still say proj-a/sess-a).
+    act(() => {
+      useTabStore.getState().addTab({ projectId: 'proj-b', sessionId: 'sess-b' })
+    })
+
+    expect(lastTitle()).toBe('c0wrk - Beta: Write docs')
+  })
+
+  it('switching the active tab swaps the title to the incoming tab context', () => {
+    const projA = makeProject({ id: 'proj-a', name: 'Alpha' })
+    const projB = makeProject({ id: 'proj-b', name: 'Beta' })
+    const sessA = makeSession({ id: 'sess-a', project_id: 'proj-a', name: 'Refactor auth' })
+    const sessB = makeSession({ id: 'sess-b', project_id: 'proj-b', name: 'Write docs' })
+    renderHook()
+
+    act(() => {
+      useProjectStore.getState().setProjects([projA, projB])
+      useSessionStore.getState().setSessions([sessA, sessB])
+      mirrorActiveTab('proj-a', 'sess-a')
+    })
+    expect(lastTitle()).toBe('c0wrk - Alpha: Refactor auth')
+    expect(pushCount()).toBe(2)
+
+    const firstId = useTabStore.getState().activeTabId
+    let secondId = ''
+    act(() => {
+      secondId = useTabStore.getState().addTab({ projectId: 'proj-b', sessionId: 'sess-b' })
+    })
+    expect(secondId).not.toBe(firstId)
+    expect(lastTitle()).toBe('c0wrk - Beta: Write docs')
+
+    act(() => {
+      useTabStore.getState().activateTab(firstId)
+    })
+    expect(lastTitle()).toBe('c0wrk - Alpha: Refactor auth')
+
+    act(() => {
+      useTabStore.getState().activateTab(secondId)
+    })
+    expect(lastTitle()).toBe('c0wrk - Beta: Write docs')
+
+    // Every push corresponds to a real visible change: mount + 4 context
+    // states. An effect cycle would blow past this bound.
+    expect(pushCount()).toBe(5)
+  })
+
+  it('follows a project rename without a project switch (the tab holds only the id)', () => {
     const project = makeProject({ id: 'proj-a', name: 'MyProject' })
     renderHook()
 
     act(() => {
       useProjectStore.getState().setProjects([project])
       useProjectStore.getState().setActiveProjectId('proj-a')
+      mirrorActiveTab('proj-a', null)
     })
 
     act(() => {
@@ -217,6 +343,7 @@ describe('useWindowTitle', () => {
       useProjectStore.getState().setActiveProjectId('proj-a')
       useSessionStore.getState().setSessions([session])
       useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
     })
     expect(lastTitle()).toBe('c0wrk - MyProject: Session sess-1')
 
@@ -238,33 +365,133 @@ describe('useWindowTitle', () => {
       useProjectStore.getState().setActiveProjectId('proj-a')
       useSessionStore.getState().setSessions([session])
       useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
     })
     expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
 
     // Mirrors useProjectSwitchState: sessions are cleared before the
-    // destination list arrives, so the title honestly drops to two segments.
+    // destination list arrives, so the mirror drops the tab's session id
+    // first — the title honestly drops to two segments.
     act(() => {
       useSessionStore.getState().resetForProjectSwitch()
+      mirrorActiveTab('proj-a', null)
+    })
+
+    expect(lastTitle()).toBe('c0wrk - MyProject')
+
+    act(() => {
       useProjectStore.getState().setActiveProjectId('proj-b')
+      mirrorActiveTab('proj-b', null)
     })
 
     expect(lastTitle()).toBe('c0wrk - OtherProject')
   })
 
-  it('drops the project segment when the active project is deleted', () => {
+  it('degrades predictably when the tab project is deleted, then follows the engine CHAT fallback', () => {
     const project = makeProject({ id: 'proj-a', name: 'MyProject' })
+    const noProject = makeProject({ id: NO_PROJECT_ID, name: 'No Project', is_no_project: true })
+    renderHook()
+
+    act(() => {
+      useProjectStore.getState().setProjects([project, noProject])
+      useProjectStore.getState().setActiveProjectId('proj-a')
+      mirrorActiveTab('proj-a', null)
+    })
+    expect(lastTitle()).toBe('c0wrk - MyProject')
+
+    // ProjectSelector.handleDelete removes the project from the store BEFORE
+    // switching away, so for a moment the active tab still holds the dead id.
+    // The live lookup misses; the title degrades to the bare app name — no
+    // dangling segment, no stale name.
+    act(() => {
+      useProjectStore.getState().removeProject('proj-a')
+    })
+    expect(lastTitle()).toBe('c0wrk')
+
+    // The engine's fallback lands (remaining[0] — the No Project entry sorts
+    // first) and the tab context mirrors the switch: the CHAT scope appears.
+    act(() => {
+      useProjectStore.getState().setActiveProjectId(NO_PROJECT_ID)
+      mirrorActiveTab(NO_PROJECT_ID, null)
+    })
+    expect(lastTitle()).toBe('c0wrk - CHAT')
+  })
+
+  it('degrades to the project-only title when the tab session disappears from the list', () => {
+    const project = makeProject({ id: 'proj-a', name: 'MyProject' })
+    const session = makeSession({ id: 'sess-1', name: 'Refactor auth' })
     renderHook()
 
     act(() => {
       useProjectStore.getState().setProjects([project])
       useProjectStore.getState().setActiveProjectId('proj-a')
+      useSessionStore.getState().setSessions([session])
+      useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
     })
+    expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
+
+    // The tab still holds the deleted session's id; the live lookup misses
+    // and only the session segment drops.
+    act(() => {
+      useSessionStore.getState().removeSession('sess-1')
+    })
+
+    expect(lastTitle()).toBe('c0wrk - MyProject')
+  })
+
+  it('produces identical output with tabsEnabled on or off (no separate branch)', () => {
+    const project = makeProject({ id: 'proj-a', name: 'MyProject' })
+    const session = makeSession({ id: 'sess-1', name: 'Refactor auth' })
+    renderHook()
 
     act(() => {
-      useProjectStore.getState().removeProject('proj-a')
+      useProjectStore.getState().setProjects([project])
+      useProjectStore.getState().setActiveProjectId('proj-a')
+      useSessionStore.getState().setSessions([session])
+      useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
+    })
+    expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
+    const pushesWithFlagOff = pushCount()
+
+    // Flipping the persisted flag must neither change the title nor push
+    // anything new: the hook never reads the flag.
+    act(() => {
+      useUIStore.getState().setTabsEnabled(true)
+    })
+    expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
+    expect(pushCount()).toBe(pushesWithFlagOff)
+  })
+
+  it('does not touch the runtime when a ui-snapshot-only patch replaces the active tab', () => {
+    const project = makeProject({ id: 'proj-a', name: 'MyProject' })
+    const session = makeSession({ id: 'sess-1', name: 'Refactor auth' })
+    renderHook()
+
+    act(() => {
+      useProjectStore.getState().setProjects([project])
+      useProjectStore.getState().setActiveProjectId('proj-a')
+      useSessionStore.getState().setSessions([session])
+      useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
+    })
+    const pushesBefore = pushCount()
+
+    act(() => {
+      useTabStore.getState().updateActiveContext({
+        ui: {
+          workspaceTabByProject: { 'proj-a': 'git' },
+          researchSegmentByProject: {},
+          inputMode: { mode: 'terminal', height: 300, collapsedHeight: 200, isExpanded: true },
+        },
+      })
     })
 
-    expect(lastTitle()).toBe('c0wrk')
+    // The tab object was replaced, but its ids did not change — the primitive
+    // projections keep the component (and therefore the effect) idle.
+    expect(pushCount()).toBe(pushesBefore)
+    expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
   })
 
   it('does not touch the runtime when an activity bump leaves the text unchanged', () => {
@@ -277,14 +504,15 @@ describe('useWindowTitle', () => {
       useProjectStore.getState().setActiveProjectId('proj-a')
       useSessionStore.getState().setSessions([session])
       useSessionStore.getState().setActiveSessionId('sess-1')
+      mirrorActiveTab('proj-a', 'sess-1')
     })
-    const callsBefore = runtimeMocks.setWindowTitle.mock.calls.length
+    const pushesBefore = pushCount()
 
     act(() => {
       useSessionStore.getState().touchSession('sess-1')
     })
 
-    expect(runtimeMocks.setWindowTitle.mock.calls.length).toBe(callsBefore)
+    expect(pushCount()).toBe(pushesBefore)
     expect(lastTitle()).toBe('c0wrk - MyProject: Refactor auth')
   })
 })
