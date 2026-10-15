@@ -314,7 +314,7 @@ func TestNewWebviewGpuWatchdogArming(t *testing.T) {
 	}
 
 	t.Run("fresh auto arms with the stderr offset", func(t *testing.T) {
-		w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger)
+		w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, true, logger)
 		if w == nil {
 			t.Fatal("expected armed watchdog for fresh auto")
 		}
@@ -326,36 +326,45 @@ func TestNewWebviewGpuWatchdogArming(t *testing.T) {
 		}
 	})
 
+	// Review finding #155.2: without a usable stderr capture there is nothing
+	// to scan — detection could never fire, so the watchdog disarms (the
+	// launch policy is demoted to never by the same fact).
+	t.Run("unobserved stderr disarms", func(t *testing.T) {
+		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, false, logger); w != nil {
+			t.Fatal("expected disarmed watchdog without a usable stderr capture")
+		}
+	})
+
 	t.Run("active fallback disarms", func(t *testing.T) {
 		writeState(t, backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()})
-		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger); w != nil {
+		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, true, logger); w != nil {
 			t.Fatal("expected disarmed watchdog with an active fallback")
 		}
 	})
 
 	t.Run("explicit setting disarms", func(t *testing.T) {
 		writeState(t, backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyNever})
-		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger); w != nil {
+		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, true, logger); w != nil {
 			t.Fatal("expected disarmed watchdog for an explicit setting")
 		}
 	})
 
 	t.Run("explicit env override disarms", func(t *testing.T) {
 		writeState(t, backend.WebviewGpuState{})
-		if w := newWebviewGpuWatchdog("linux", "on-demand", agentDir, logDir, logger); w != nil {
+		if w := newWebviewGpuWatchdog("linux", "on-demand", agentDir, logDir, true, logger); w != nil {
 			t.Fatal("expected disarmed watchdog for an explicit env override")
 		}
 	})
 
 	t.Run("invalid env stays armed", func(t *testing.T) {
-		if w := newWebviewGpuWatchdog("linux", "  turbo ", agentDir, logDir, logger); w == nil {
+		if w := newWebviewGpuWatchdog("linux", "  turbo ", agentDir, logDir, true, logger); w == nil {
 			t.Fatal("expected armed watchdog for an invalid env value (fall-through to auto)")
 		}
 	})
 
 	t.Run("non-linux never arms", func(t *testing.T) {
 		writeState(t, backend.WebviewGpuState{})
-		if w := newWebviewGpuWatchdog("darwin", "", agentDir, logDir, logger); w != nil {
+		if w := newWebviewGpuWatchdog("darwin", "", agentDir, logDir, true, logger); w != nil {
 			t.Fatal("expected nil watchdog on darwin")
 		}
 	})
@@ -385,6 +394,39 @@ func TestWaitForInstanceLockRelease(t *testing.T) {
 	}
 	if !WaitForInstanceLockRelease(path, time.Second) {
 		t.Fatal("expected success after the holder released")
+	}
+}
+
+// TestWaitForGpuRelaunchHandover pins the relaunched child's handover contract
+// (review finding #155.1): while the predecessor retains the single-instance
+// lock past the budget — a legitimate teardown outlasting the old fixed 15 s
+// timeout — the handover FAILS with an error instead of failing open, because
+// a child that proceeds into Wails startup then relays its launch to the
+// quitting instance and exits: a one-shot relay, no replacement window. main
+// treats that error as terminal (no Wails startup). Once the predecessor has
+// actually exited, the same handover succeeds.
+func TestWaitForGpuRelaunchHandover(t *testing.T) {
+	path := config.SingleInstanceLockPath(t.TempDir())
+
+	// Predecessor still running: the short budget expires with the lock held.
+	lock, held, err := AcquireSingleInstanceLock(path)
+	if err != nil || !held {
+		t.Fatalf("acquire (predecessor): held=%v err=%v", held, err)
+	}
+	handoverErr := WaitForGpuRelaunchHandover(path, 300*time.Millisecond, discardLogger())
+	if handoverErr == nil {
+		t.Fatal("handover succeeded while the predecessor holds the lock; the replacement would become a one-shot relay")
+	}
+	if !strings.Contains(handoverErr.Error(), "300ms") {
+		t.Errorf("handover error %q should name the exhausted budget", handoverErr.Error())
+	}
+
+	// Predecessor exits mid-handover-window: the child proceeds.
+	if err := lock.Close(); err != nil {
+		t.Fatalf("close (predecessor exit): %v", err)
+	}
+	if err := WaitForGpuRelaunchHandover(path, time.Second, discardLogger()); err != nil {
+		t.Fatalf("handover after the predecessor exited: %v", err)
 	}
 }
 

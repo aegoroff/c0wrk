@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -47,6 +48,14 @@ const (
 	WebviewGpuSourceSetting      = "setting"
 	WebviewGpuSourceAuto         = "auto"
 	WebviewGpuSourceAutoFallback = "auto-fallback"
+	// WebviewGpuSourceAutoUnobserved names a launch where fresh auto would
+	// have resolved to the accelerated on-demand, but this run's stderr is
+	// not observable (the crash capture is unavailable), so the DMABUF
+	// watchdog could never detect a grey window — the resolution is demoted
+	// to never for the launch. Distinct from auto-fallback: nothing was
+	// detected and nothing is persisted; the next launch with a usable
+	// capture resolves on-demand again.
+	WebviewGpuSourceAutoUnobserved = "auto-unobserved"
 )
 
 // GpuFallbackReasonDmabufFailure is the fallback reason the startup watchdog
@@ -213,7 +222,7 @@ func UpdateWebviewGpuState(agentDir string, logger *slog.Logger, mutate func(*We
 // DeriveWebviewGpuRun.
 type WebviewGpuRun struct {
 	// Policy is the canonical effective policy; Source the layer that
-	// decided it (env | setting | auto | auto-fallback).
+	// decided it (env | setting | auto | auto-fallback | auto-unobserved).
 	Policy string
 	Source string
 	// Setting is the canonical persisted setting the resolution consumed
@@ -230,7 +239,17 @@ type WebviewGpuRun struct {
 // consumers share — desktop's wails.Run options and Init's running-policy
 // snapshot for the Settings RPCs — and the launch's single read of
 // webview_state.json: the consumed setting rides along in the result.
-func DeriveWebviewGpuRun(agentDir string, logger *slog.Logger) WebviewGpuRun {
+//
+// stderrObserved reports whether this launch has a usable stderr capture
+// (crashlog.Install succeeded and capture is not opted out). The DMABUF
+// watchdog detects the grey-window failure ONLY from that capture, so on
+// Linux an unobserved run must not apply the accelerated fresh-auto default:
+// enabling acceleration without any way to detect the resulting grey window
+// trades a working-but-slow UI for a broken one with no recovery path. The
+// resolution is demoted to never for the launch (source auto-unobserved,
+// explicit Warn at the call site). Explicit user choices — env or setting —
+// are never demoted, and an auto+fallback launch is already on never.
+func DeriveWebviewGpuRun(agentDir string, stderrObserved bool, logger *slog.Logger) WebviewGpuRun {
 	state := LoadWebviewGpuState(agentDir, logger)
 	setting := state.Setting()
 	if raw := os.Getenv(WebviewGpuPolicyEnvVar); strings.TrimSpace(raw) != "" {
@@ -239,5 +258,8 @@ func DeriveWebviewGpuRun(agentDir string, logger *slog.Logger) WebviewGpuRun {
 		}
 	}
 	policy, source := ResolveWebviewGpuPolicy(setting, state.FallbackActive())
+	if !stderrObserved && runtime.GOOS == "linux" && policy == WebviewGpuPolicyOnDemand && source == WebviewGpuSourceAuto {
+		return WebviewGpuRun{Policy: WebviewGpuPolicyNever, Source: WebviewGpuSourceAutoUnobserved, Setting: setting}
+	}
 	return WebviewGpuRun{Policy: policy, Source: source, Setting: setting}
 }

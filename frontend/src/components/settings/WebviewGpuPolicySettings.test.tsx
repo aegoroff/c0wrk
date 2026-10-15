@@ -131,6 +131,26 @@ describe('WebviewGpuPolicySettings', () => {
     expect(container.querySelector('[data-testid="webview-gpu-fallback"]')).toBeNull()
   })
 
+  it('explains the unobserved demotion — fresh auto without a stderr capture runs never', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64')
+    getPolicyMock.mockResolvedValue(
+      makeInfo({
+        running: 'never',
+        running_source: 'auto-unobserved',
+        restart_required: true,
+      }),
+    )
+    render()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const running = container.querySelector('[data-testid="webview-gpu-running"]')
+    expect(running?.textContent).toContain('never')
+    expect(running?.textContent).toContain('stderr capture unavailable')
+    // No fallback banner: nothing was detected — the run simply started safe.
+    expect(container.querySelector('[data-testid="webview-gpu-fallback"]')).toBeNull()
+  })
+
   it('keeps the UI usable when the load fails', async () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64')
     getPolicyMock.mockRejectedValue(new Error('bridge unavailable'))

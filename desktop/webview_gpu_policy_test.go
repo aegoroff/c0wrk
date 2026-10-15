@@ -84,26 +84,33 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 	// TestWailsWebviewGpuPolicyCompensatesCMapping).
 	//
 	// Resolution order under test: valid env override → persisted setting →
-	// auto (on-demand unless the watchdog fallback is active). An INVALID env
+	// auto (on-demand unless the watchdog fallback is active, or this run's
+	// stderr is unobservable — then never, review finding #155.2). An INVALID env
 	// value falls through to the setting instead of forcing never — deliberate
 	// change from the env-only era: the setting is user-visible now, the env
 	// var is an advanced hatch, and a typo must not silently disable GPU
 	// compositing (issue #34).
 	cases := []struct {
-		name    string
-		goos    string
-		env     string
-		state   *backend.WebviewGpuState
-		wantNil bool
-		wantC   int
+		name     string
+		goos     string
+		env      string
+		state    *backend.WebviewGpuState
+		observed bool
+		wantNil  bool
+		wantC    int
 	}{
-		{name: "unset env + no setting = auto → on-demand", goos: "linux", env: "", wantC: 1},
-		{name: "whitespace env + no setting = auto → on-demand", goos: "linux", env: "   ", wantC: 1},
+		{name: "unset env + no setting = auto → on-demand", goos: "linux", env: "", observed: true, wantC: 1},
+		{name: "whitespace env + no setting = auto → on-demand", goos: "linux", env: "   ", observed: true, wantC: 1},
 		{name: "always override", goos: "linux", env: "always", wantC: 0},
 		{name: "on-demand override", goos: "linux", env: "on-demand", wantC: 1},
 		{name: "ondemand alias", goos: "linux", env: "ondemand", wantC: 1},
 		{name: "never override", goos: "linux", env: "never", wantC: 2},
-		{name: "invalid env falls through to auto", goos: "linux", env: "speed", wantC: 1},
+		{name: "invalid env falls through to auto", goos: "linux", env: "speed", observed: true, wantC: 1},
+		// Review finding #155.2: fresh auto without a usable stderr capture is
+		// demoted to never — the DMABUF watchdog could never detect the grey
+		// window the accelerated default risks, so the run starts safe instead.
+		{name: "unobserved fresh auto → never", goos: "linux", env: "", observed: false, wantC: 2},
+		{name: "invalid env + unobserved falls through to demoted auto", goos: "linux", env: "speed", observed: false, wantC: 2},
 		{
 			name:  "invalid env falls through to setting",
 			goos:  "linux",
@@ -133,7 +140,9 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 			wantC: 2,
 		},
 		{
-			name: "setting on-demand",
+			// An explicit choice is never demoted: the user picked the
+			// accelerated policy knowing the trade-off.
+			name: "explicit on-demand survives unobserved",
 			goos: "linux", env: "",
 			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyOnDemand},
 			wantC: 1,
@@ -141,14 +150,24 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 		{
 			name: "explicit setting auto = auto",
 			goos: "linux", env: "",
-			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto},
-			wantC: 1,
+			observed: true,
+			state:    &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto},
+			wantC:    1,
 		},
 		{
 			name: "auto + active fallback → never",
 			goos: "linux", env: "",
-			state: &backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()},
-			wantC: 2,
+			observed: true,
+			state:    &backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()},
+			wantC:    2,
+		},
+		{
+			// Already never through the fallback: unobserved changes nothing.
+			name: "auto + fallback unobserved stays never",
+			goos: "linux", env: "",
+			observed: false,
+			state:    &backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()},
+			wantC:    2,
 		},
 		{
 			name: "explicit setting beats stale fallback",
@@ -162,8 +181,9 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 		{
 			name: "unknown persisted setting degrades to auto",
 			goos: "linux", env: "",
-			state: &backend.WebviewGpuState{GPUPolicy: "turbo"},
-			wantC: 1,
+			observed: true,
+			state:    &backend.WebviewGpuState{GPUPolicy: "turbo"},
+			wantC:    1,
 		},
 		{name: "darwin ignores override", goos: "darwin", env: "always", wantNil: true},
 		{name: "windows ignores override", goos: "windows", env: "always", wantNil: true},
@@ -177,7 +197,7 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 					t.Fatalf("save state: %v", err)
 				}
 			}
-			got := webviewGpuPolicyOptions(tc.goos, agentDir, logger)
+			got := webviewGpuPolicyOptions(tc.goos, agentDir, tc.observed, logger)
 			if tc.wantNil {
 				if got != nil {
 					t.Fatalf("expected nil options on %s, got %+v", tc.goos, got)

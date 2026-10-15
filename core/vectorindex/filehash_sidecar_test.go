@@ -89,16 +89,33 @@ func TestGetCollectionFileHashes_NoEmbeddingAfterPopulation(t *testing.T) {
 // budget when the GPU watchdog quits a fresh instance mid-backfill. The test's
 // embed func honours ctx the way the real embedder's short single inference
 // does; chromem itself checks ctx per document during the enumeration.
+//
+// Ordering is established by an `entered` barrier in the gated embed func, not
+// by timeouts (review finding #155.3): the pending flag alone does not prove
+// the migration goroutine ever reached the embedding-bearing query, and a
+// Close racing it would pass even against the pre-fix lock-holding query. The
+// deadlines below are hang watchdogs only. The gate release + background join
+// are registered as cleanup BEFORE any potentially fatal assertion, so a
+// failing run cannot strand the migration goroutine on the gate past the
+// temp-dir removal.
 func TestClose_DoesNotBlockBehindFileHashBackfill(t *testing.T) {
 	dir := t.TempDir()
 
 	var (
 		gateOpen atomic.Bool
 		block    = make(chan struct{})
+		entered  = make(chan struct{}, 1)
 		release  sync.Once
 	)
 	embed := func(ctx context.Context, _ string) ([]float32, error) {
 		if !gateOpen.Load() {
+			// Entered barrier: the migration goroutine has reached the gated
+			// embedding call and is about to block — the condition the Close
+			// assertion below needs.
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
 			select {
 			case <-block:
 			case <-ctx.Done():
@@ -153,6 +170,21 @@ func TestClose_DoesNotBlockBehindFileHashBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService B: %v", err)
 	}
+	// Idempotent gate release + background join, registered BEFORE any
+	// potentially fatal assertion below. Cleanups run LIFO after the temp dir
+	// was created, so a failing assertion can never leave the migration
+	// goroutine parked on the gate past the dir removal. Close itself joins
+	// migrationWG, so on the success path this cleanup only finds settled
+	// state — it is the join-before-resource-cleanup for every failure path.
+	t.Cleanup(func() {
+		unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if werr := b.WaitFileHashMigration(ctx); werr != nil {
+			t.Errorf("migration did not settle within the cleanup budget: %v", werr)
+		}
+		_ = b.Close()
+	})
 	if err := b.SetProject("proj", dir); err != nil {
 		t.Fatalf("SetProject B: %v", err)
 	}
@@ -161,6 +193,15 @@ func TestClose_DoesNotBlockBehindFileHashBackfill(t *testing.T) {
 	}
 	if !b.current.fileHashMigrationPending.Load() {
 		t.Fatal("expected file-hash migration to be pending (blocked on the gate)")
+	}
+
+	// Wait for the migration goroutine to ENTER the gated embedding call —
+	// the actual precondition under test. The deadline is a hang watchdog,
+	// not the ordering mechanism.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the migration never entered the gated embedding query")
 	}
 
 	// Close must NOT wait for the backfill: it takes s.mu (free now — the
@@ -177,7 +218,6 @@ func TestClose_DoesNotBlockBehindFileHashBackfill(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked behind the in-flight file-hash backfill")
 	}
-	t.Cleanup(unblock)
 }
 
 func TestSwitchBranch_FileHashMigrationIsAsync(t *testing.T) {

@@ -166,6 +166,15 @@ type App struct {
 	// Guarded by stateMu — see the block comment above.
 	shutdownHardDeadline time.Duration
 
+	// launchStderrObserved records whether this launch has a usable stderr
+	// capture (main.go, from the crashlog.Install outcome). Startup hands it
+	// to the FrontendAPI init so the Settings RPC's running-policy snapshot is
+	// derived from the same fact the wails.Run options consumed (a fresh-auto
+	// launch without observation runs never — see backend.DeriveWebviewGpuRun).
+	// Zero value = unobserved: the safe direction, and the honest report for a
+	// Startup that never ran. Guarded by stateMu — see the block comment above.
+	launchStderrObserved bool
+
 	// shutdownExitFn, when non-nil, replaces the forced-exit call in the
 	// shutdown watchdog's expiry path. Lets tests observe the forced exit
 	// without killing the test process (same purpose as quitFn / windowShowFn).
@@ -286,6 +295,19 @@ func (a *App) SetWailsLogger(wl *wailsLogAdapter) {
 // not apply (explicit choice, active fallback, safe resolution).
 func (a *App) SetWebviewGpuWatchdog(w *webviewGpuWatchdog) {
 	a.webviewGpuWatchdog = w
+}
+
+// SetWebviewGpuStderrObserved records whether this launch's stderr capture is
+// usable (main.go, from the crashlog.Install outcome, before wails.Run).
+// Startup hands the fact to the FrontendAPI init so the running-policy
+// snapshot is derived from the same input as the wails.Run options — an
+// unobserved fresh-auto launch runs never, and the Settings report must say
+// so. Exported deliberately: internal startup plumbing rides the Wails
+// binding surface by the same precedent as SetWebviewGpuWatchdog; the value
+// is a boolean main computes, so a renderer-supplied call could only flip an
+// already-consumed report flag, never re-resolve the running webview.
+func (a *App) SetWebviewGpuStderrObserved(observed bool) {
+	a.setLaunchStderrObserved(observed)
 }
 
 // startWebviewGpuWatchdog launches the bounded startup scan from DomReady —
@@ -505,6 +527,22 @@ func (a *App) shutdownDeadline() time.Duration {
 		return a.shutdownHardDeadline
 	}
 	return defaultShutdownHardDeadline
+}
+
+// setLaunchStderrObserved records whether this launch's stderr is observable
+// (main.go, before wails.Run).
+func (a *App) setLaunchStderrObserved(observed bool) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.launchStderrObserved = observed
+}
+
+// stderrObserved reports the launch's stderr-observation fact for the
+// FrontendAPI init (zero value = unobserved, the safe direction).
+func (a *App) stderrObserved() bool {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.launchStderrObserved
 }
 
 // setLogger records the active logger (Startup only).

@@ -301,9 +301,10 @@ func (a *App) Startup(ctx context.Context) {
 	// agentDir and logDir are already computed in phase 0
 
 	// Arm the hard shutdown deadline from config now, before any teardown path
-	// can run. Shutdown reads it (shutdownDeadline()); a zero value falls back
-	// to the built-in default.
-	a.setShutdownHardDeadline(time.Duration(cfg.Shutdown.HardDeadline) * time.Second)
+	// can run. Shutdown reads it (shutdownDeadline()); an unset (0) value
+	// resolves to the built-in default — the same mapping
+	// EffectiveShutdownDeadline hands the GPU-relaunch handover budget.
+	a.setShutdownHardDeadline(EffectiveShutdownDeadline(cfg.Shutdown.HardDeadline))
 
 	logLevel := cfg.LogLevel
 	log, sessionLogger = a.maybeReinitLogger(logLevel, sessionLogger, log, logDir)
@@ -434,18 +435,19 @@ func (a *App) Startup(ctx context.Context) {
 	})
 
 	a.buildFrontendAPI(application, backend.FrontendAPIConfig{
-		App:             application,
-		Logger:          log,
-		Config:          cfg,
-		ConfigPath:      configPath,
-		Store:           sessStore,
-		ProjStore:       projStore,
-		ReviewStore:     reviewStore,
-		SessionLogger:   sessionLogger,
-		LogLevel:        logLevel,
-		ProjectManager:  projectMgr,
-		AgentDir:        agentDir,
-		TerminalManager: termManager,
+		App:                      application,
+		Logger:                   log,
+		Config:                   cfg,
+		ConfigPath:               configPath,
+		Store:                    sessStore,
+		ProjStore:                projStore,
+		ReviewStore:              reviewStore,
+		SessionLogger:            sessionLogger,
+		LogLevel:                 logLevel,
+		ProjectManager:           projectMgr,
+		AgentDir:                 agentDir,
+		TerminalManager:          termManager,
+		WebviewGpuStderrObserved: a.stderrObserved(),
 		EmitEvent: func(eventName string, data ...any) {
 			a.emit(eventName, data...)
 		},

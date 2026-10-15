@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -22,11 +23,11 @@ import (
 // single-instance relay (which would exit it immediately).
 const GpuRelaunchWaitEnvVar = "C0WRK_GPU_RELAUNCH_WAIT_LOCK"
 
-// GpuRelaunchLockWaitTimeout bounds the relaunched child's wait for the
-// previous instance's advisory lock. Fail-open: on expiry the child proceeds
-// with normal startup and the Wails single-instance lock still has the final
-// say.
-const GpuRelaunchLockWaitTimeout = 15 * time.Second
+// gpuRelaunchHandoverMargin extends the handover budget past the predecessor's
+// shutdown hard deadline. When the deadline fires, the forced exit (marker
+// removal, exit banner, os.Exit) and the kernel dropping the advisory lock are
+// all bounded and fast — the slack only covers the scheduling tail.
+const gpuRelaunchHandoverMargin = 10 * time.Second
 
 const (
 	// gpuWatchdogScanInterval is how often the fresh stderr tail is rescanned
@@ -64,6 +65,45 @@ var gpuDmabufFailureSignatures = []string{
 	"Failed to create GBM buffer",
 }
 
+// GpuRelaunchHandoverBudget sizes the relaunched child's pre-startup wait for
+// the predecessor's exit. It must cover the predecessor's worst LEGITIMATE
+// teardown — bounded by the shutdown hard deadline (shutdown_watchdog.go: up
+// to ~46 s embedded-LLM stop, 66 s cumulative default, operator-raisable) —
+// because a child that gives up waiting early enters Wails startup, relays its
+// launch to the still-quitting instance, and exits: a one-shot relay that
+// loses the replacement window entirely. A deadline ≤ 0 (unset) resolves to
+// the built-in default.
+func GpuRelaunchHandoverBudget(shutdownDeadline time.Duration) time.Duration {
+	if shutdownDeadline <= 0 {
+		shutdownDeadline = defaultShutdownHardDeadline
+	}
+	return shutdownDeadline + gpuRelaunchHandoverMargin
+}
+
+// WaitForGpuRelaunchHandover is the relaunched child's pre-startup handover
+// (issue #34): it waits up to budget for the dying instance's advisory
+// single-instance lock to release — proof the predecessor has exited, since
+// the kernel drops the lock on every exit path. nil means the child may start.
+//
+// A budget expiry returns an ERROR the caller must treat as terminal. Unlike
+// the old fail-open 15 s wait, proceeding into Wails startup while the
+// predecessor still holds the lock would make this process a one-shot relay
+// (Wails forwards its launch data to the quitting instance and exits it), and
+// with the predecessor gone moments later no window remains at all — the
+// persisted fallback would only help a manual restart. Failing loudly keeps
+// that failure visible and bounded.
+func WaitForGpuRelaunchHandover(lockPath string, budget time.Duration, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	logger.Info("GPU-fallback relaunch: waiting for the previous instance to exit before starting up",
+		"lock", lockPath, "budget", budget.String())
+	if WaitForInstanceLockRelease(lockPath, budget) {
+		return nil
+	}
+	return fmt.Errorf("GPU-fallback relaunch handover: the previous instance still holds the single-instance lock after %s", budget)
+}
+
 // webviewGpuWatchdog detects a DMABUF renderer failure at startup while auto
 // mode resolved to the accelerated policy, persists an auto-fallback to
 // never, and relaunches the app so the fresh instance starts on the safe
@@ -90,20 +130,29 @@ type webviewGpuWatchdog struct {
 
 // NewWebviewGpuWatchdog arms the watchdog for this launch, or returns nil
 // when detection does not apply: non-Linux, an explicit setting, an active
-// fallback, an explicit env override, or any already-safe resolution. Must be
-// called after crashlog.Install (the offset snapshot below only makes sense
-// once fd 1/2 are redirected) and before wails.Run (the webview must not
-// render before the offset is taken).
-func NewWebviewGpuWatchdog(agentDir, logDir string, logger *slog.Logger) *webviewGpuWatchdog {
-	return newWebviewGpuWatchdog(runtime.GOOS, os.Getenv(backend.WebviewGpuPolicyEnvVar), agentDir, logDir, logger)
+// fallback, an explicit env override, an unusable stderr capture (there is
+// nothing to scan — the same fact DeriveWebviewGpuRun demotes fresh auto
+// with), or any already-safe resolution. Must be called after crashlog.Install
+// (the offset snapshot below only makes sense once fd 1/2 are redirected) and
+// before wails.Run (the webview must not render before the offset is taken).
+func NewWebviewGpuWatchdog(agentDir, logDir string, stderrObserved bool, logger *slog.Logger) *webviewGpuWatchdog {
+	return newWebviewGpuWatchdog(runtime.GOOS, os.Getenv(backend.WebviewGpuPolicyEnvVar), agentDir, logDir, stderrObserved, logger)
 }
 
-func newWebviewGpuWatchdog(goos, envRaw, agentDir, logDir string, logger *slog.Logger) *webviewGpuWatchdog {
+func newWebviewGpuWatchdog(goos, envRaw, agentDir, logDir string, stderrObserved bool, logger *slog.Logger) *webviewGpuWatchdog {
 	if goos != "linux" {
 		return nil
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
+	}
+	if !stderrObserved {
+		// Without the capture there is nothing to scan: detection could never
+		// fire. The launch-policy resolution has already pinned fresh auto to
+		// never for the same reason — arming would be dead weight.
+		logger.Debug("webview GPU watchdog disarmed: no usable stderr capture",
+			"stderr", crashlog.StderrLogPath(logDir))
+		return nil
 	}
 	state := backend.LoadWebviewGpuState(agentDir, logger)
 	if state.Setting() != backend.WebviewGpuPolicyAuto || state.FallbackActive() {

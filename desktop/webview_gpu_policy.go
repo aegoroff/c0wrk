@@ -84,12 +84,15 @@ func (p webviewGpuPolicy) wailsWebviewGpuPolicy() linux.WebviewGpuPolicy {
 // WebviewGpuPolicyOptions returns the Linux-specific Wails options carrying
 // the hardware-acceleration policy for this launch. It returns nil on
 // non-Linux platforms — the option only feeds the WebKitGTK frontend, so
-// macOS and Windows keep behaving exactly as before.
-func WebviewGpuPolicyOptions(agentDir string, logger *slog.Logger) *linux.Options {
-	return webviewGpuPolicyOptions(runtime.GOOS, agentDir, logger)
+// macOS and Windows keep behaving exactly as before. stderrObserved reports
+// whether this launch has a usable stderr capture (see DeriveWebviewGpuRun):
+// without one a fresh-auto launch is demoted to never, because the failure
+// watchdog could never detect the resulting grey window.
+func WebviewGpuPolicyOptions(agentDir string, stderrObserved bool, logger *slog.Logger) *linux.Options {
+	return webviewGpuPolicyOptions(runtime.GOOS, agentDir, stderrObserved, logger)
 }
 
-func webviewGpuPolicyOptions(goos, agentDir string, logger *slog.Logger) *linux.Options {
+func webviewGpuPolicyOptions(goos, agentDir string, stderrObserved bool, logger *slog.Logger) *linux.Options {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -103,12 +106,20 @@ func webviewGpuPolicyOptions(goos, agentDir string, logger *slog.Logger) *linux.
 	// Single launch-time read of the state file: the consumed setting rides
 	// along in the result, so the Debug record below needs no second load
 	// (a second read could also observe a state file the first did not).
-	run := backend.DeriveWebviewGpuRun(agentDir, logger)
+	run := backend.DeriveWebviewGpuRun(agentDir, stderrObserved, logger)
 	resolved := webviewGpuPolicyFromCanonical(run.Policy)
 	switch run.Source {
 	case backend.WebviewGpuSourceEnv:
 		logger.Info("webview GPU policy override",
 			"env", backend.WebviewGpuPolicyEnvVar, "value", run.Policy)
+	case backend.WebviewGpuSourceAutoUnobserved:
+		// Explicit diagnostic for the demotion (review finding #155.2): a
+		// silent accelerated default without any failure detection would
+		// leave a broken grey window as the first symptom. The user keeps an
+		// explicit override (env or setting) to force acceleration anyway.
+		logger.Warn("webview GPU policy pinned to never: fresh auto without a usable stderr capture "+
+			"(the DMABUF watchdog cannot observe this run; set C0WRK_WEBVIEW_GPU_POLICY or the Settings choice to override)",
+			"policy", run.Policy, "setting", run.Setting)
 	default:
 		logger.Debug("webview GPU policy resolved",
 			"policy", run.Policy, "source", run.Source, "setting", run.Setting)

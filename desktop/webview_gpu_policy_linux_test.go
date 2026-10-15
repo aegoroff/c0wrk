@@ -11,8 +11,9 @@ import (
 
 // TestWebviewGpuPolicyOptionsProductionEntry runs the production entry —
 // runtime.GOOS and the real env var — against a fresh state (auto →
-// on-demand, C-layer integer 1). The file is linux-tagged because the
-// production entry is a documented nil no-op on macOS and Windows
+// on-demand, C-layer integer 1; and auto without a usable stderr capture →
+// never, C-layer integer 2, review finding #155.2). The file is linux-tagged
+// because the production entry is a documented nil no-op on macOS and Windows
 // (webview_gpu_policy.go): asserting non-nil there would fail the darwin and
 // windows CI legs. The non-Linux nil path stays covered by the
 // darwin/windows cases of TestWebviewGpuPolicyOptions (the platform seam) in
@@ -20,11 +21,22 @@ import (
 func TestWebviewGpuPolicyOptionsProductionEntry(t *testing.T) {
 	t.Setenv(backend.WebviewGpuPolicyEnvVar, "")
 	agentDir := t.TempDir()
-	got := WebviewGpuPolicyOptions(agentDir, slog.New(slog.DiscardHandler))
+	got := WebviewGpuPolicyOptions(agentDir, true, slog.New(slog.DiscardHandler))
 	if got == nil {
 		t.Fatal("expected non-nil options on linux")
 	}
 	if int(got.WebviewGpuPolicy) != 1 {
 		t.Fatalf("fresh install default: want C-layer 1 (on-demand), got %d", int(got.WebviewGpuPolicy))
+	}
+
+	// A failed (or opted-out) stderr capture demotes the same fresh auto to
+	// never: acceleration without any way to detect the grey window is the
+	// one combination the auto mode must never apply.
+	got = WebviewGpuPolicyOptions(agentDir, false, slog.New(slog.DiscardHandler))
+	if got == nil {
+		t.Fatal("expected non-nil options on linux")
+	}
+	if int(got.WebviewGpuPolicy) != 2 {
+		t.Fatalf("unobserved fresh install: want C-layer 2 (never), got %d", int(got.WebviewGpuPolicy))
 	}
 }

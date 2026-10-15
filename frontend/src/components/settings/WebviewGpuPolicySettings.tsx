@@ -81,6 +81,7 @@ export function WebviewGpuPolicySettings() {
           Rendering now: <span className="text-foreground">{info.running}</span>
           {info.running_source === 'env' && ' (forced by C0WRK_WEBVIEW_GPU_POLICY)'}
           {info.running_source === 'auto-fallback' && ' (automatic fallback)'}
+          {info.running_source === 'auto-unobserved' && ' (stderr capture unavailable — no failure detection this run)'}
           {' — '}
           {info.restart_required ? 'restart to apply the new setting.' : 'up to date.'}
         </p>

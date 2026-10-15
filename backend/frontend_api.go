@@ -436,6 +436,14 @@ type FrontendAPIConfig struct {
 	// so the updater process — which waits for the parent PID to die — can
 	// proceed while Wails Shutdown hooks still run. Nil in tests (no-op).
 	QuitApp func()
+	// WebviewGpuStderrObserved mirrors what main.go resolved at launch: the
+	// crash capture installed successfully (and was not opted out of), so the
+	// DMABUF watchdog can see this run's stderr. The launch-policy formula
+	// (DeriveWebviewGpuRun) must consume the SAME fact main's wails.Run
+	// options consumed, or the Settings RPC's running snapshot would report a
+	// policy this launch does not actually run with. Zero value (false) is
+	// the safe direction: an unobserved run demotes fresh auto to never.
+	WebviewGpuStderrObserved bool
 }
 
 // NewFrontendAPI creates a new FrontendAPI with the given configuration.
@@ -601,8 +609,10 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	f.agentDir = cfg.AgentDir
 	// Derive the webview GPU run snapshot inside the same critical section
 	// (issue #34): the running policy must reflect the state file as it was
-	// at launch, not after any Settings write.
-	run := DeriveWebviewGpuRun(cfg.AgentDir, f.logger)
+	// at launch, not after any Settings write. The stderr-observation flag
+	// comes from the desktop layer (main's capture install outcome) so the
+	// snapshot matches the wails.Run resolution exactly.
+	run := DeriveWebviewGpuRun(cfg.AgentDir, cfg.WebviewGpuStderrObserved, f.logger)
 	f.webviewGpuRunning, f.webviewGpuRunningSource = run.Policy, run.Source
 	f.terminalManager = cfg.TerminalManager
 	f.emitEvent = cfg.EmitEvent

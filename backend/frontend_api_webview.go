@@ -14,7 +14,10 @@ type WebviewGpuPolicyInfo struct {
 	// never); "auto" when nothing was chosen yet.
 	Setting string `json:"setting"`
 	// Running is the canonical policy this launch resolved to, RunningSource
-	// the layer that decided it (env | setting | auto | auto-fallback).
+	// the layer that decided it (env | setting | auto | auto-fallback |
+	// auto-unobserved — the last being a fresh auto demoted to never because
+	// this launch has no usable stderr capture and the failure watchdog could
+	// not observe it).
 	Running       string `json:"running"`
 	RunningSource string `json:"running_source"`
 	// Fallback is non-nil while the watchdog has pinned auto to software

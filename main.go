@@ -2,10 +2,12 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	wailslogger "github.com/wailsapp/wails/v2/pkg/logger"
@@ -31,6 +33,24 @@ func main() {
 	code := mainImpl()
 	activeCapture.LogExit(code)
 	os.Exit(code)
+}
+
+// gpuRelaunchHandoverBudget resolves the relaunched child's handover budget
+// from the CONFIGURED shutdown deadline — the same config.yaml the quitting
+// instance read — so the child waits exactly as long as the predecessor is
+// legitimately allowed to tear down (plus margin). The load is best-effort
+// and read-only: a missing file (pristine install) or an unreadable one
+// falls back to the built-in default deadline.
+func gpuRelaunchHandoverBudget(agentDir string) time.Duration {
+	budget := desktop.GpuRelaunchHandoverBudget(desktop.EffectiveShutdownDeadline(0))
+	cfg, err := config.Load(config.ConfigPath(agentDir))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("GPU-fallback relaunch: config unreadable; handover budget sized from the default shutdown deadline", "error", err)
+		}
+		return budget
+	}
+	return desktop.GpuRelaunchHandoverBudget(desktop.EffectiveShutdownDeadline(cfg.Shutdown.HardDeadline))
 }
 
 func mainImpl() int {
@@ -81,12 +101,20 @@ func mainImpl() int {
 	// instance carries C0WRK_GPU_RELAUNCH_WAIT_LOCK=1 and waits for the
 	// quitting instance's advisory lock to release before starting up, so
 	// the previous instance's spawn-then-quit cannot race the fresh instance
-	// into the Wails single-instance relay (which would exit it). Bounded
-	// and fail-open — on timeout startup proceeds and the Wails lock has the
-	// final say.
+	// into the Wails single-instance relay (which would exit it). The wait
+	// budget covers the predecessor's worst legitimate teardown (its shutdown
+	// hard deadline — up to the ~46 s embedded-LLM stop — plus margin); a
+	// failed wait is TERMINAL: entering Wails startup anyway would relay this
+	// process's launch to the still-quitting instance and exit it, losing the
+	// replacement window entirely (the persisted fallback only helps a manual
+	// restart then).
 	if os.Getenv(desktop.GpuRelaunchWaitEnvVar) == "1" {
 		_ = os.Unsetenv(desktop.GpuRelaunchWaitEnvVar)
-		desktop.WaitForInstanceLockRelease(config.SingleInstanceLockPath(agentDir), desktop.GpuRelaunchLockWaitTimeout)
+		if err := desktop.WaitForGpuRelaunchHandover(config.SingleInstanceLockPath(agentDir), gpuRelaunchHandoverBudget(agentDir), slog.Default()); err != nil {
+			slog.Error("GPU-fallback relaunch: not starting after the failed handover "+
+				"(the fallback is persisted; the next manual start applies it)", "error", err)
+			return 1
+		}
 	}
 
 	// Single-instance gate (issue #98, ADR-075): take the app-level lock
@@ -131,12 +159,22 @@ func mainImpl() int {
 	// skips installation entirely: it lives only long enough to relay its
 	// launch data and exit, and its marker writes would poison the first
 	// instance's crash forensics (see the gate above and ADR-075).
+	//
+	// The outcome also decides this launch's webview GPU resolution: the
+	// DMABUF watchdog detects the grey-window failure ONLY through the
+	// captured stderr, so an unobserved run must not apply the accelerated
+	// fresh-auto default (backend.DeriveWebviewGpuRun demotes it to never —
+	// review finding #155.2). An intentional C0WRK_DISABLE_CRASH_CAPTURE=1
+	// opts out of recovery the same way; an explicit policy override (env or
+	// Settings) is never demoted.
+	var stderrObserved bool
 	if os.Getenv("C0WRK_DISABLE_CRASH_CAPTURE") != "1" && firstInstance {
 		capture, err := crashlog.Install(logDir)
 		if err != nil {
-			slog.Warn("crash capture unavailable; panics may leave no trace", "error", err)
+			slog.Warn("crash capture unavailable; panics may leave no trace and the webview GPU watchdog cannot observe this run", "error", err)
 		} else {
 			activeCapture = capture
+			stderrObserved = true
 		}
 	}
 
@@ -157,12 +195,16 @@ func mainImpl() int {
 
 	app := desktop.NewApp()
 	app.SetWailsLogger(wlog)
+	// Record the stderr-observation outcome BEFORE the startup phases read it:
+	// the FrontendAPI init derives the Settings RPC's running-policy snapshot
+	// from the same fact the wails.Run options below consume.
+	app.SetWebviewGpuStderrObserved(stderrObserved)
 	// Arm the Linux DMABUF-failure watchdog (issue #34) after crash capture —
 	// the stderr offset snapshot only makes sense once fd 1/2 are redirected —
 	// and before wails.Run, whose webview must not render first. Nil off Linux
 	// and whenever detection does not apply (explicit policy choice, active
-	// fallback, already-safe resolution).
-	app.SetWebviewGpuWatchdog(desktop.NewWebviewGpuWatchdog(agentDir, logDir, slog.Default()))
+	// fallback, no usable capture, already-safe resolution).
+	app.SetWebviewGpuWatchdog(desktop.NewWebviewGpuWatchdog(agentDir, logDir, stderrObserved, slog.Default()))
 
 	// Restore the persisted window size (written on resize/shutdown) so the
 	// app reopens at the size the user left it. On first run (no state file)
@@ -207,9 +249,11 @@ func mainImpl() int {
 		// C0WRK_WEBVIEW_GPU_POLICY (always | on-demand | never) → the
 		// persisted Settings choice (webview_state.json) → auto, which is
 		// on-demand unless the failure watchdog has persisted a fallback to
-		// never (the grey-window protection for wails#2977, issue #34).
+		// never (the grey-window protection for wails#2977, issue #34) or
+		// this run's stderr is unobservable (no capture — nothing could
+		// detect a grey window, so fresh auto pins to never instead).
 		// Returns nil on macOS/Windows, leaving those platforms untouched.
-		Linux: desktop.WebviewGpuPolicyOptions(agentDir, slog.Default()),
+		Linux: desktop.WebviewGpuPolicyOptions(agentDir, stderrObserved, slog.Default()),
 		// Single instance (issue #98, ADR-075): a LaunchServices-triggered
 		// second open (macOS notification-banner click against a stale or
 		// rebuilt bundle registration, a Finder re-open while the app runs)
