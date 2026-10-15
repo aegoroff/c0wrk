@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/v0lka/sp4rk/safeio"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -150,4 +151,33 @@ func (l *InstanceLock) Close() error {
 	err := l.file.Close()
 	l.file = nil
 	return err
+}
+
+// WaitForInstanceLockRelease polls the advisory single-instance lock until it
+// can be taken — meaning the previous holder exited, since the kernel drops
+// the lock on every exit path — or the timeout expires. It is the ordering
+// primitive behind the GPU-fallback relaunch (issue #34): the relaunched
+// child runs it before its own startup so the dying instance's exit cannot
+// race the fresh instance into the Wails single-instance relay. On success
+// the lock is released immediately — ownership is taken later by the normal
+// startup acquire. Fail-open: a setup error keeps polling until the timeout,
+// then reports false and the caller proceeds; the Wails lock has the final
+// say either way.
+func WaitForInstanceLockRelease(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := safeio.MkdirAllReal(filepath.Dir(path), 0o750); err == nil {
+			if file, err := safeio.OpenFileNoFollow(path, os.O_CREATE|os.O_RDWR, 0o640); err == nil {
+				held, lockErr := tryLockExclusive(file)
+				_ = file.Close()
+				if lockErr == nil && held {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(gpuRelaunchLockPollInterval)
+	}
 }

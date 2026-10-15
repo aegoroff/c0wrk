@@ -2,67 +2,20 @@ package desktop
 
 import (
 	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+
+	"github.com/v0lka/c0wrk/backend"
 )
 
-func TestParseWebviewGpuPolicy(t *testing.T) {
-	cases := []struct {
-		name    string
-		raw     string
-		want    webviewGpuPolicy
-		wantErr bool
-	}{
-		{name: "always", raw: "always", want: gpuPolicyAlways},
-		{name: "on-demand hyphenated", raw: "on-demand", want: gpuPolicyOnDemand},
-		{name: "ondemand alias", raw: "ondemand", want: gpuPolicyOnDemand},
-		{name: "never", raw: "never", want: gpuPolicyNever},
-		{name: "case-insensitive", raw: "  ALWAYS ", want: gpuPolicyAlways},
-		{name: "empty is invalid for parser", raw: "", wantErr: true},
-		{name: "unknown value", raw: "speed", wantErr: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseWebviewGpuPolicy(tc.raw)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %q, got policy %v", tc.raw, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parse %q: %v", tc.raw, err)
-			}
-			if got != tc.want {
-				t.Fatalf("parse %q: want %v, got %v", tc.raw, tc.want, got)
-			}
-		})
-	}
-}
-
-func TestParseWebviewGpuPolicyErrorContainsAllowedValues(t *testing.T) {
-	_, err := parseWebviewGpuPolicy("turbo")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	for _, want := range []string{"turbo", "always", "on-demand", "never"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q should mention %q", err, want)
-		}
-	}
-}
-
-// The Wails conversion deliberately does NOT use like-named constants: the
-// pinned Wails v2.16.0 C layer maps 0→ALWAYS, 1→ON_DEMAND, 2→NEVER while
-// the Go enum orders OnDemand=0, Always=1, Never=2. These tests pin the
-// compensation by NUMERIC value — the integer the C layer actually switches
-// on — never by named constant: if a future Wails upgrade reorders the Go
-// enum again (exactly what happened in v2.13.0), the constant names stay
-// the same but their numbers change, so a name-based assertion would keep
-// passing while the runtime silently swaps "always" and "on-demand". The
-// numeric pin fails loudly instead.
+// TestWailsWebviewGpuPolicyCompensatesCMapping pins the compensation by
+// NUMERIC value — the integer the C layer actually switches on — never by
+// named constant: if a future Wails upgrade reorders the Go enum again
+// (exactly what happened in v2.13.0), the constant names stay the same but
+// their numbers change, so a name-based assertion would keep passing while
+// the runtime silently swaps "always" and "on-demand". The numeric pin fails
+// loudly instead.
 func TestWailsWebviewGpuPolicyCompensatesCMapping(t *testing.T) {
 	// wantC is the integer crossing wails.Run into SetupWebview's switch in
 	// window.c (v2.16.0): 0→WEBKIT_…POLICY_ALWAYS, 1→…POLICY_ON_DEMAND,
@@ -108,6 +61,20 @@ func TestWailsWebviewGpuPolicyEnumOrderCanary(t *testing.T) {
 	}
 }
 
+func TestWebviewGpuPolicyString(t *testing.T) {
+	cases := map[webviewGpuPolicy]string{
+		gpuPolicyAlways:     backend.WebviewGpuPolicyAlways,
+		gpuPolicyOnDemand:   backend.WebviewGpuPolicyOnDemand,
+		gpuPolicyNever:      backend.WebviewGpuPolicyNever,
+		webviewGpuPolicy(9): backend.WebviewGpuPolicyNever,
+	}
+	for policy, want := range cases {
+		if got := policy.String(); got != want {
+			t.Fatalf("policy %d: want %q, got %q", policy, want, got)
+		}
+	}
+}
+
 func TestWebviewGpuPolicyOptions(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	// wantC pins the integer the C layer receives (window.c switch in the
@@ -115,26 +82,102 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 	// constants, which would keep passing through a Go-enum reorder while
 	// the runtime silently swaps policies (see
 	// TestWailsWebviewGpuPolicyCompensatesCMapping).
+	//
+	// Resolution order under test: valid env override → persisted setting →
+	// auto (on-demand unless the watchdog fallback is active). An INVALID env
+	// value falls through to the setting instead of forcing never — deliberate
+	// change from the env-only era: the setting is user-visible now, the env
+	// var is an advanced hatch, and a typo must not silently disable GPU
+	// compositing (issue #34).
 	cases := []struct {
 		name    string
 		goos    string
-		raw     string
+		env     string
+		state   *backend.WebviewGpuState
 		wantNil bool
 		wantC   int
 	}{
-		{name: "unset defaults to never on linux", goos: "linux", raw: "", wantC: 2},
-		{name: "whitespace-only defaults to never", goos: "linux", raw: "   ", wantC: 2},
-		{name: "always override", goos: "linux", raw: "always", wantC: 0},
-		{name: "on-demand override", goos: "linux", raw: "on-demand", wantC: 1},
-		{name: "ondemand alias", goos: "linux", raw: "ondemand", wantC: 1},
-		{name: "never override", goos: "linux", raw: "never", wantC: 2},
-		{name: "invalid value warns and defaults to never", goos: "linux", raw: "speed", wantC: 2},
-		{name: "darwin ignores override", goos: "darwin", raw: "always", wantNil: true},
-		{name: "windows ignores override", goos: "windows", raw: "always", wantNil: true},
+		{name: "unset env + no setting = auto → on-demand", goos: "linux", env: "", wantC: 1},
+		{name: "whitespace env + no setting = auto → on-demand", goos: "linux", env: "   ", wantC: 1},
+		{name: "always override", goos: "linux", env: "always", wantC: 0},
+		{name: "on-demand override", goos: "linux", env: "on-demand", wantC: 1},
+		{name: "ondemand alias", goos: "linux", env: "ondemand", wantC: 1},
+		{name: "never override", goos: "linux", env: "never", wantC: 2},
+		{name: "invalid env falls through to auto", goos: "linux", env: "speed", wantC: 1},
+		{
+			name:  "invalid env falls through to setting",
+			goos:  "linux",
+			env:   "speed",
+			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyNever},
+			wantC: 2,
+		},
+		{
+			name: "env override beats setting and fallback",
+			goos: "linux", env: "always",
+			state: &backend.WebviewGpuState{
+				GPUPolicy:    backend.WebviewGpuPolicyNever,
+				AutoFallback: dmabufFallbackFixture(),
+			},
+			wantC: 0,
+		},
+		{
+			name: "setting always",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAlways},
+			wantC: 0,
+		},
+		{
+			name: "setting never",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyNever},
+			wantC: 2,
+		},
+		{
+			name: "setting on-demand",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyOnDemand},
+			wantC: 1,
+		},
+		{
+			name: "explicit setting auto = auto",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto},
+			wantC: 1,
+		},
+		{
+			name: "auto + active fallback → never",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()},
+			wantC: 2,
+		},
+		{
+			name: "explicit setting beats stale fallback",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{
+				GPUPolicy:    backend.WebviewGpuPolicyAlways,
+				AutoFallback: dmabufFallbackFixture(),
+			},
+			wantC: 0,
+		},
+		{
+			name: "unknown persisted setting degrades to auto",
+			goos: "linux", env: "",
+			state: &backend.WebviewGpuState{GPUPolicy: "turbo"},
+			wantC: 1,
+		},
+		{name: "darwin ignores override", goos: "darwin", env: "always", wantNil: true},
+		{name: "windows ignores override", goos: "windows", env: "always", wantNil: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := webviewGpuPolicyOptions(tc.goos, tc.raw, logger)
+			t.Setenv(backend.WebviewGpuPolicyEnvVar, tc.env)
+			agentDir := t.TempDir()
+			if tc.state != nil {
+				if err := backend.SaveWebviewGpuState(agentDir, *tc.state); err != nil {
+					t.Fatalf("save state: %v", err)
+				}
+			}
+			got := webviewGpuPolicyOptions(tc.goos, agentDir, logger)
 			if tc.wantNil {
 				if got != nil {
 					t.Fatalf("expected nil options on %s, got %+v", tc.goos, got)
@@ -151,16 +194,18 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 	}
 }
 
-func TestWebviewGpuPolicyString(t *testing.T) {
-	cases := map[webviewGpuPolicy]string{
-		gpuPolicyAlways:     "always",
-		gpuPolicyOnDemand:   "on-demand",
-		gpuPolicyNever:      "never",
-		webviewGpuPolicy(9): "never",
+func TestWebviewGpuPolicyOptionsProductionEntry(t *testing.T) {
+	// The production entry resolves through runtime.GOOS and the real env
+	// var: on this machine it must agree with the linux-arm above for an
+	// identical fresh state (auto → on-demand). The non-Linux nil path is
+	// covered by webviewGpuPolicyOptions (the platform seam).
+	t.Setenv(backend.WebviewGpuPolicyEnvVar, "")
+	agentDir := t.TempDir()
+	got := WebviewGpuPolicyOptions(agentDir, slog.New(slog.DiscardHandler))
+	if got == nil {
+		t.Fatal("expected non-nil options on linux")
 	}
-	for policy, want := range cases {
-		if got := policy.String(); got != want {
-			t.Fatalf("policy %d: want %q, got %q", policy, want, got)
-		}
+	if int(got.WebviewGpuPolicy) != 1 {
+		t.Fatalf("fresh install default: want C-layer 1 (on-demand), got %d", int(got.WebviewGpuPolicy))
 	}
 }

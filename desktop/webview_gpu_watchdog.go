@@ -1,0 +1,272 @@
+package desktop
+
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"os"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/v0lka/c0wrk/backend"
+	"github.com/v0lka/c0wrk/backend/crashlog"
+	"github.com/v0lka/sp4rk/safeio"
+)
+
+// GpuRelaunchWaitEnvVar is set by the watchdog's relaunch on the child
+// process. mainImpl consumes it before the single-instance gate: the child
+// waits for the dying instance's advisory lock to release, so the watchdog's
+// spawn-then-quit ordering cannot race the fresh instance into the Wails
+// single-instance relay (which would exit it immediately).
+const GpuRelaunchWaitEnvVar = "C0WRK_GPU_RELAUNCH_WAIT_LOCK"
+
+// GpuRelaunchLockWaitTimeout bounds the relaunched child's wait for the
+// previous instance's advisory lock. Fail-open: on expiry the child proceeds
+// with normal startup and the Wails single-instance lock still has the final
+// say.
+const GpuRelaunchLockWaitTimeout = 15 * time.Second
+
+const (
+	// gpuWatchdogScanInterval is how often the fresh stderr tail is scanned
+	// once the frontend DOM is ready. The DMABUF failure prints at the
+	// webview's first paint, so the first scan almost always decides.
+	gpuWatchdogScanInterval = 2 * time.Second
+	// gpuWatchdogScanWindow bounds the detection to startup. The grey window
+	// is a buffer-allocation failure at renderer init — it does not appear
+	// minutes into a session — and an unbounded scan would risk a hostile
+	// self-relaunch while the user works (see specs/domains/webview-gpu-policy.md).
+	gpuWatchdogScanWindow = 30 * time.Second
+	// gpuWatchdogMaxTailBytes caps how much of the stderr tail is scanned per
+	// check. The failure signatures sit at the very start of this run's
+	// output; the cap only bounds pathological log growth before DomReady.
+	gpuWatchdogMaxTailBytes = int64(1 << 20)
+	// gpuRelaunchLockPollInterval is the poll period of the relaunched
+	// child's wait for the previous instance's advisory lock.
+	gpuRelaunchLockPollInterval = 100 * time.Millisecond
+)
+
+// gpuDmabufFailureSignatures are the stderr markers of the NVIDIA
+// GBM/DMABUF grey-window failure class (wails#2977, c0wrk issue #34):
+// WebKit's EGL image allocation failure and the NVIDIA GEM allocation
+// error quoted in the reports, plus the GBM buffer allocation failure
+// observed live on webkit2gtk 2.54 + NVIDIA 615 (the same class — the
+// window renders, then goes grey). Substring matches against this run's
+// captured stderr tail; extend the list as further failure wording is
+// reported — a miss leaves the grey window up (recoverable via Settings),
+// a false match only falls back to software rendering (also recoverable).
+var gpuDmabufFailureSignatures = []string{
+	"Failed to create EGL images for DMABufs",
+	"DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY failed",
+	"Failed to create GBM buffer",
+}
+
+// webviewGpuWatchdog detects a DMABUF renderer failure at startup while auto
+// mode resolved to the accelerated policy, persists an auto-fallback to
+// never, and relaunches the app so the fresh instance starts on the safe
+// policy. Detection covers FRESH auto only — an explicit user choice (setting
+// or env) is never second-guessed, and an instance that already fell back has
+// nothing left to detect.
+type webviewGpuWatchdog struct {
+	agentDir    string
+	logger      *slog.Logger
+	stderrPath  string
+	startOffset int64
+	started     atomic.Bool
+
+	// Seams for tests; nil means the production implementation.
+	scanTailFn func(path string, offset int64) []string
+	loadFn     func(agentDir string, logger *slog.Logger) backend.WebviewGpuState
+	persistFn  func(agentDir string, st backend.WebviewGpuState, logger *slog.Logger) error
+	relaunchFn func(logger *slog.Logger) error
+	nowFn      func() time.Time
+	quitFn     func()
+}
+
+// NewWebviewGpuWatchdog arms the watchdog for this launch, or returns nil
+// when detection does not apply: non-Linux, an explicit setting, an active
+// fallback, an explicit env override, or any already-safe resolution. Must be
+// called after crashlog.Install (the offset snapshot below only makes sense
+// once fd 1/2 are redirected) and before wails.Run (the webview must not
+// render before the offset is taken).
+func NewWebviewGpuWatchdog(agentDir, logDir string, logger *slog.Logger) *webviewGpuWatchdog {
+	return newWebviewGpuWatchdog(runtime.GOOS, os.Getenv(backend.WebviewGpuPolicyEnvVar), agentDir, logDir, logger)
+}
+
+func newWebviewGpuWatchdog(goos, envRaw, agentDir, logDir string, logger *slog.Logger) *webviewGpuWatchdog {
+	if goos != "linux" {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	state := backend.LoadWebviewGpuState(agentDir, logger)
+	if state.Setting() != backend.WebviewGpuPolicyAuto || state.FallbackActive() {
+		logger.Debug("webview GPU watchdog disarmed: detection covers fresh auto only",
+			"setting", state.Setting(), "fallback", state.FallbackActive())
+		return nil
+	}
+	// An explicit env override is an explicit choice: never second-guessed.
+	// An invalid value falls through to auto and stays armed.
+	if strings.TrimSpace(envRaw) != "" {
+		if _, err := backend.NormalizeWebviewGpuPolicy(envRaw); err == nil {
+			logger.Debug("webview GPU watchdog disarmed: explicit env override",
+				"env", backend.WebviewGpuPolicyEnvVar, "value", strings.TrimSpace(envRaw))
+			return nil
+		}
+	}
+	w := &webviewGpuWatchdog{
+		agentDir:   agentDir,
+		logger:     logger,
+		stderrPath: crashlog.StderrLogPath(logDir),
+	}
+	// Snapshot the capture size: everything appended after this point is
+	// this run's output (stderr.log is append-only; rotation happens only at
+	// install time, which has already run).
+	if info, err := os.Stat(w.stderrPath); err == nil {
+		w.startOffset = info.Size()
+	}
+	logger.Debug("webview GPU watchdog armed",
+		"stderr", w.stderrPath, "start_offset", w.startOffset)
+	return w
+}
+
+// start runs the bounded startup scan. Idempotent: DomReady fires again on
+// every frontend reload, and a second scanner would only double-scan.
+func (w *webviewGpuWatchdog) start() {
+	if w == nil || !w.started.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(gpuWatchdogScanInterval)
+		defer ticker.Stop()
+		deadline := time.After(gpuWatchdogScanWindow)
+		for {
+			select {
+			case <-ticker.C:
+				if w.check() {
+					return
+				}
+			case <-deadline:
+				w.logger.Debug("webview GPU watchdog disarmed: no DMABUF failure within the startup window",
+					"window", gpuWatchdogScanWindow.String())
+				return
+			}
+		}
+	}()
+}
+
+// check scans this run's stderr tail once. It returns true when the watchdog
+// has decided (failure detected and the fallback flow ran, or a terminal
+// error made further scans pointless) and false when the scan found nothing
+// and the window stays open.
+func (w *webviewGpuWatchdog) check() bool {
+	matched := w.scanTail()
+	if len(matched) == 0 {
+		return false
+	}
+	w.logger.Warn("webview GPU fallback: DMABUF renderer failure detected; pinning auto to software rendering",
+		"signatures", matched, "stderr", w.stderrPath)
+
+	state := w.loadState()
+	state.AutoFallback = &backend.WebviewGpuAutoFallback{
+		Policy:     backend.WebviewGpuPolicyNever,
+		Reason:     backend.GpuFallbackReasonDmabufFailure,
+		DetectedAt: w.now().UTC().Format(time.RFC3339),
+	}
+	// Persist BEFORE relaunching: the fallback record is what makes the
+	// fresh instance resolve auto to never. A failed persist must not
+	// relaunch — the fresh instance would resolve the accelerated policy
+	// again and grey-window in a loop.
+	if err := w.persist(state); err != nil {
+		w.logger.Error("webview GPU fallback: persisting fallback state failed; NOT relaunching "+
+			"(the relaunched instance would resolve the accelerated policy again)",
+			"error", err)
+		return true
+	}
+	if err := w.relaunch(); err != nil {
+		// The fallback is persisted, so the next start is safe; keep this
+		// instance alive rather than killing the session over a spawn
+		// failure (the current window may stay blank until a manual restart).
+		w.logger.Error("webview GPU fallback: relaunch failed; the fallback applies on the next start",
+			"error", err)
+		return true
+	}
+	w.logger.Info("webview GPU fallback: relaunching with software rendering",
+		"reason", backend.GpuFallbackReasonDmabufFailure)
+	w.quit()
+	return true
+}
+
+func (w *webviewGpuWatchdog) scanTail() []string {
+	if w.scanTailFn != nil {
+		return w.scanTailFn(w.stderrPath, w.startOffset)
+	}
+	return scanStderrTail(w.stderrPath, w.startOffset)
+}
+
+func (w *webviewGpuWatchdog) loadState() backend.WebviewGpuState {
+	if w.loadFn != nil {
+		return w.loadFn(w.agentDir, w.logger)
+	}
+	return backend.LoadWebviewGpuState(w.agentDir, w.logger)
+}
+
+func (w *webviewGpuWatchdog) persist(state backend.WebviewGpuState) error {
+	if w.persistFn != nil {
+		return w.persistFn(w.agentDir, state, w.logger)
+	}
+	return backend.SaveWebviewGpuState(w.agentDir, state)
+}
+
+func (w *webviewGpuWatchdog) relaunch() error {
+	if w.relaunchFn != nil {
+		return w.relaunchFn(w.logger)
+	}
+	return relaunchDetachedSelf(w.logger)
+}
+
+func (w *webviewGpuWatchdog) now() time.Time {
+	if w.nowFn != nil {
+		return w.nowFn()
+	}
+	return time.Now()
+}
+
+func (w *webviewGpuWatchdog) quit() {
+	if w.quitFn != nil {
+		w.quitFn()
+	}
+}
+
+// scanStderrTail reads at most gpuWatchdogMaxTailBytes of stderrPath
+// starting at startOffset (this run's first byte) and returns the failure
+// signatures it contains. Read errors, a missing capture file, and a
+// not-yet-grown tail all return nil — a missing capture disarms detection
+// for the run rather than failing it.
+func scanStderrTail(path string, startOffset int64) []string {
+	file, err := safeio.OpenFileNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || info.Size() <= startOffset {
+		return nil
+	}
+	if _, err := file.Seek(startOffset, io.SeekStart); err != nil {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(file, gpuWatchdogMaxTailBytes))
+	if err != nil {
+		return nil
+	}
+	var matched []string
+	for _, sig := range gpuDmabufFailureSignatures {
+		if bytes.Contains(data, []byte(sig)) {
+			matched = append(matched, sig)
+		}
+	}
+	return matched
+}

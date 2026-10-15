@@ -458,6 +458,10 @@ export function GetVectorIndexStatus() {
   return window['go']['desktop']['App']['GetVectorIndexStatus']();
 }
 
+export function GetWebviewGpuPolicy() {
+  return window['go']['desktop']['App']['GetWebviewGpuPolicy']();
+}
+
 export function HardenGitRepo(arg1) {
   return window['go']['desktop']['App']['HardenGitRepo'](arg1);
 }
@@ -788,6 +792,14 @@ export function SetUpdateSettings(arg1) {
 
 export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
+}
+
+export function SetWebviewGpuPolicy(arg1) {
+  return window['go']['desktop']['App']['SetWebviewGpuPolicy'](arg1);
+}
+
+export function SetWebviewGpuWatchdog(arg1) {
+  return window['go']['desktop']['App']['SetWebviewGpuWatchdog'](arg1);
 }
 
 export function ShowTestNotification() {

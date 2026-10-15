@@ -71,6 +71,12 @@ type App struct {
 	// messages are also duplicated to the session log.
 	wailsLogger *wailsLogAdapter
 
+	// webviewGpuWatchdog is the (Linux-only, possibly nil) DMABUF-failure
+	// watchdog armed in main before wails.Run and started from DomReady.
+	// Set strictly before the Wails UI loop begins, so a plain field is
+	// safely published (same ordering contract as wailsLogger).
+	webviewGpuWatchdog *webviewGpuWatchdog
+
 	db *sql.DB // shared SQLite connection; opened in Startup, closed in Shutdown. Guarded by stateMu.
 
 	// sessionLogger is stored so Shutdown can close it on early Startup exits
@@ -272,6 +278,30 @@ func NewApp() *App {
 // can be wired as a delegate once it is initialized in Startup.
 func (a *App) SetWailsLogger(wl *wailsLogAdapter) {
 	a.wailsLogger = wl
+}
+
+// SetWebviewGpuWatchdog stores the (possibly nil) DMABUF-failure watchdog
+// armed in main before wails.Run. Nil off Linux and whenever detection does
+// not apply (explicit choice, active fallback, safe resolution).
+func (a *App) SetWebviewGpuWatchdog(w *webviewGpuWatchdog) {
+	a.webviewGpuWatchdog = w
+}
+
+// startWebviewGpuWatchdog launches the bounded startup scan from DomReady —
+// the DMABUF failure prints at the webview's first paint, so from here on
+// this run's stderr capture contains everything the scan needs. The quit
+// path is wired to the live Wails context here, where it exists.
+func (a *App) startWebviewGpuWatchdog() {
+	w := a.webviewGpuWatchdog
+	if w == nil {
+		return
+	}
+	if w.quitFn == nil {
+		if ctx := a.wailsCtx(); ctx != nil {
+			w.quitFn = func() { wailsRuntime.Quit(ctx) }
+		}
+	}
+	w.start()
 }
 
 // PickDirectory opens a native directory picker dialog. The dialog reopens at

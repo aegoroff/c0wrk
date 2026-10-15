@@ -16,6 +16,7 @@ import { ProxySettings } from './ProxySettings'
 import { SoundSettings } from './SoundSettings'
 import { SystemNotificationSettings } from './SystemNotificationSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
+import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 import { LLMSettings } from './LLMSettings'
 import { ModelProfilesSettings } from './ModelProfilesSettings'
 import { SearchSettings } from './SearchSettings'
@@ -251,6 +252,9 @@ export function SettingsModal() {
               </div>
               <div className="border-t border-border pt-4">
                 <SessionStatsSettings />
+              </div>
+              <div className="border-t border-border pt-4">
+                <WebviewGpuPolicySettings />
               </div>
               <div className="border-t border-border pt-4">
                 <ExperimentalSettings />

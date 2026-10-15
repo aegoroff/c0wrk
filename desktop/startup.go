@@ -168,6 +168,7 @@ func (a *App) reloadFrontend(ctx context.Context) {
 func (a *App) DomReady(ctx context.Context) {
 	a.log().Debug("frontend DOM ready")
 	a.showWindow(ctx)
+	a.startWebviewGpuWatchdog()
 }
 
 // Startup is called when the Wails app starts.

@@ -73,6 +73,15 @@ type FrontendAPI struct {
 	sessionLogger *logger.SessionLogger
 	logLevel      string
 
+	// webviewGpuRunning/Source capture what THIS launch resolved (canonical
+	// policy and the deciding layer), derived once in Init — the same formula
+	// main.go's wails.Run options used, before any SetWebviewGpuPolicy could
+	// mutate the state file. "Restart required" is the pending-vs-running
+	// delta. Written once under configMu (see the seed-field comment above);
+	// readers snapshot both under configMu.RLock.
+	webviewGpuRunning       string
+	webviewGpuRunningSource string
+
 	// Workspace
 	watcher        *workspace.Watcher
 	watcherMu      sync.Mutex
@@ -590,6 +599,10 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	f.watcher = cfg.Watcher
 	f.projectManager = cfg.ProjectManager
 	f.agentDir = cfg.AgentDir
+	// Derive the webview GPU run snapshot inside the same critical section
+	// (issue #34): the running policy must reflect the state file as it was
+	// at launch, not after any Settings write.
+	f.webviewGpuRunning, f.webviewGpuRunningSource = DeriveWebviewGpuRun(cfg.AgentDir, f.logger)
 	f.terminalManager = cfg.TerminalManager
 	f.emitEvent = cfg.EmitEvent
 	f.appCtx = cfg.AppCtx

@@ -1,0 +1,288 @@
+package desktop
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/v0lka/c0wrk/backend"
+	"github.com/v0lka/c0wrk/backend/config"
+	"github.com/v0lka/c0wrk/backend/crashlog"
+)
+
+func TestScanStderrTailHonorsOffset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stderr.log")
+	// Pre-existing content carries the signature too — only bytes after the
+	// offset (this run's output) may trigger detection.
+	if err := os.WriteFile(path, []byte("old run: Failed to create EGL images for DMABufs\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := f.WriteString("new run: clean output\n"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	_ = f.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Offset 0 (no snapshot): the stale signature IS matched — the arm-time
+	// snapshot is what protects against it.
+	if got := scanStderrTail(path, 0); len(got) != 1 {
+		t.Fatalf("offset 0: want 1 signature, got %v", got)
+	}
+	// Offset = file size at arm time: the stale signature is skipped.
+	if got := scanStderrTail(path, info.Size()); len(got) != 0 {
+		t.Fatalf("arm-time offset: want no signatures, got %v", got)
+	}
+}
+
+func TestScanStderrTailMatchesSignatures(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stderr.log")
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"webkit egl failure", "some prefix Failed to create EGL images for DMABufs: EINVAL\n", 1},
+		{"nvidia gem failure", "NVIDIA: DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY failed: Invalid argument\n", 1},
+		{"gbm buffer failure (webkit 2.54 wording)", "Failed to create GBM buffer of size 1400x900: Недопустимый аргумент\n", 1},
+		{"both", "Failed to create EGL images for DMABufs\nDRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY failed\n", 2},
+		{"clean output", "Gtk-WARNING: whatever\n", 0},
+		{"lookalike", "failed to create egl images for dmabufs\n", 0}, // case-sensitive on purpose
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			got := scanStderrTail(path, 0)
+			if len(got) != tc.want {
+				t.Fatalf("want %d signatures, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestScanStderrTailMissingFileAndTailCap(t *testing.T) {
+	// Missing capture: detection silently disarms for the run.
+	if got := scanStderrTail(filepath.Join(t.TempDir(), "absent.log"), 0); got != nil {
+		t.Fatalf("missing file: want nil, got %v", got)
+	}
+
+	// A signature beyond the tail cap is not scanned: the cap bounds
+	// pathological growth, and first-paint failures sit at the tail start.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stderr.log")
+	payload := strings.Repeat("x", int(gpuWatchdogMaxTailBytes)) + "\nFailed to create EGL images for DMABufs\n"
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := scanStderrTail(path, 0); len(got) != 0 {
+		t.Fatalf("signature beyond the cap: want nil, got %v", got)
+	}
+}
+
+// newTestWatchdog builds a fully seam-injected watchdog recording the order
+// of persist → relaunch → quit in events.
+func newTestWatchdog(t *testing.T, matched []string, persistErr, relaunchErr error) (*webviewGpuWatchdog, *[]string, *backend.WebviewGpuState) {
+	t.Helper()
+	var events []string
+	var persisted backend.WebviewGpuState
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	w := &webviewGpuWatchdog{
+		agentDir:   t.TempDir(),
+		logger:     slog.New(slog.DiscardHandler),
+		stderrPath: filepath.Join(t.TempDir(), "stderr.log"),
+		nowFn:      func() time.Time { return now },
+		scanTailFn: func(string, int64) []string { return matched },
+		loadFn: func(string, *slog.Logger) backend.WebviewGpuState {
+			return backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto}
+		},
+		persistFn: func(_ string, st backend.WebviewGpuState, _ *slog.Logger) error {
+			events = append(events, "persist")
+			persisted = st
+			return persistErr
+		},
+		relaunchFn: func(*slog.Logger) error {
+			events = append(events, "relaunch")
+			return relaunchErr
+		},
+		quitFn: func() { events = append(events, "quit") },
+	}
+	return w, &events, &persisted
+}
+
+func TestWatchdogCheckDetectsPersistsRelaunchesQuits(t *testing.T) {
+	w, events, persisted := newTestWatchdog(t,
+		[]string{"Failed to create EGL images for DMABufs"}, nil, nil)
+
+	if !w.check() {
+		t.Fatal("check = false, want true (decision made)")
+	}
+	if want := []string{"persist", "relaunch", "quit"}; strings.Join(*events, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", *events, want)
+	}
+	if persisted.AutoFallback == nil {
+		t.Fatal("no fallback persisted")
+	}
+	if persisted.AutoFallback.Policy != backend.WebviewGpuPolicyNever {
+		t.Errorf("fallback policy = %q, want never", persisted.AutoFallback.Policy)
+	}
+	if persisted.AutoFallback.Reason != backend.GpuFallbackReasonDmabufFailure {
+		t.Errorf("fallback reason = %q, want %q", persisted.AutoFallback.Reason, backend.GpuFallbackReasonDmabufFailure)
+	}
+	if persisted.AutoFallback.DetectedAt != "2026-10-15T12:00:00Z" {
+		t.Errorf("detected_at = %q, want the injected now in UTC RFC3339", persisted.AutoFallback.DetectedAt)
+	}
+}
+
+func TestWatchdogCheckNoMatchKeepsWindowOpen(t *testing.T) {
+	w, events, _ := newTestWatchdog(t, nil, nil, nil)
+	if w.check() {
+		t.Fatal("check = true on a clean tail, want false")
+	}
+	if len(*events) != 0 {
+		t.Fatalf("events = %v, want none", *events)
+	}
+}
+
+func TestWatchdogCheckPersistFailureNeverRelaunches(t *testing.T) {
+	w, events, _ := newTestWatchdog(t,
+		[]string{"DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY failed"}, errors.New("disk full"), nil)
+
+	// Without the persisted fallback the relaunched instance would resolve
+	// the accelerated policy again and grey-window in a loop — relaunching is
+	// forbidden on persist failure.
+	if !w.check() {
+		t.Fatal("check = false, want true (terminal decision)")
+	}
+	if strings.Join(*events, ",") != "persist" {
+		t.Fatalf("events = %v, want [persist] only", *events)
+	}
+}
+
+func TestWatchdogCheckRelaunchFailureKeepsRunning(t *testing.T) {
+	w, events, _ := newTestWatchdog(t,
+		[]string{"Failed to create EGL images for DMABufs"}, nil, errors.New("spawn failed"))
+
+	// The fallback IS persisted; only the quit is withheld so the user keeps
+	// a live (albeit blank) session and the next start is safe.
+	if !w.check() {
+		t.Fatal("check = false, want true (terminal decision)")
+	}
+	if strings.Join(*events, ",") != "persist,relaunch" {
+		t.Fatalf("events = %v, want [persist relaunch]", *events)
+	}
+}
+
+// dmabufFallbackFixture mirrors the watchdog's fallback record shape.
+func dmabufFallbackFixture() *backend.WebviewGpuAutoFallback {
+	return &backend.WebviewGpuAutoFallback{
+		Policy:     backend.WebviewGpuPolicyNever,
+		Reason:     backend.GpuFallbackReasonDmabufFailure,
+		DetectedAt: "2026-10-15T00:00:00Z",
+	}
+}
+
+func TestNewWebviewGpuWatchdogArming(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	agentDir := t.TempDir()
+	logDir := t.TempDir()
+	stderrPath := crashlog.StderrLogPath(logDir)
+	if err := os.WriteFile(stderrPath, []byte("startup chatter\n"), 0o600); err != nil {
+		t.Fatalf("write stderr fixture: %v", err)
+	}
+
+	writeState := func(t *testing.T, st backend.WebviewGpuState) {
+		t.Helper()
+		if err := backend.SaveWebviewGpuState(agentDir, st); err != nil {
+			t.Fatalf("save state: %v", err)
+		}
+	}
+
+	t.Run("fresh auto arms with the stderr offset", func(t *testing.T) {
+		w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger)
+		if w == nil {
+			t.Fatal("expected armed watchdog for fresh auto")
+		}
+		if w.stderrPath != stderrPath {
+			t.Errorf("stderrPath = %q, want %q", w.stderrPath, stderrPath)
+		}
+		if w.startOffset != int64(len("startup chatter\n")) {
+			t.Errorf("startOffset = %d, want the pre-existing file size", w.startOffset)
+		}
+	})
+
+	t.Run("active fallback disarms", func(t *testing.T) {
+		writeState(t, backend.WebviewGpuState{AutoFallback: dmabufFallbackFixture()})
+		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger); w != nil {
+			t.Fatal("expected disarmed watchdog with an active fallback")
+		}
+	})
+
+	t.Run("explicit setting disarms", func(t *testing.T) {
+		writeState(t, backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyNever})
+		if w := newWebviewGpuWatchdog("linux", "", agentDir, logDir, logger); w != nil {
+			t.Fatal("expected disarmed watchdog for an explicit setting")
+		}
+	})
+
+	t.Run("explicit env override disarms", func(t *testing.T) {
+		writeState(t, backend.WebviewGpuState{})
+		if w := newWebviewGpuWatchdog("linux", "on-demand", agentDir, logDir, logger); w != nil {
+			t.Fatal("expected disarmed watchdog for an explicit env override")
+		}
+	})
+
+	t.Run("invalid env stays armed", func(t *testing.T) {
+		if w := newWebviewGpuWatchdog("linux", "  turbo ", agentDir, logDir, logger); w == nil {
+			t.Fatal("expected armed watchdog for an invalid env value (fall-through to auto)")
+		}
+	})
+
+	t.Run("non-linux never arms", func(t *testing.T) {
+		writeState(t, backend.WebviewGpuState{})
+		if w := newWebviewGpuWatchdog("darwin", "", agentDir, logDir, logger); w != nil {
+			t.Fatal("expected nil watchdog on darwin")
+		}
+	})
+}
+
+func TestWaitForInstanceLockRelease(t *testing.T) {
+	path := config.SingleInstanceLockPath(t.TempDir())
+
+	// No holder: the first poll takes the (freshly created) lock.
+	if !WaitForInstanceLockRelease(path, time.Second) {
+		t.Fatal("expected success with no lock holder")
+	}
+
+	// A live holder blocks the wait until the bounded timeout expires.
+	lock, held, err := AcquireSingleInstanceLock(path)
+	if err != nil || !held {
+		t.Fatalf("acquire: held=%v err=%v", held, err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	if WaitForInstanceLockRelease(path, 300*time.Millisecond) {
+		t.Fatal("wait succeeded while the lock was held")
+	}
+
+	// After the holder releases, the next wait succeeds.
+	if err := lock.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !WaitForInstanceLockRelease(path, time.Second) {
+		t.Fatal("expected success after the holder released")
+	}
+}

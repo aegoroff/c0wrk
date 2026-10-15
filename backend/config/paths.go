@@ -363,6 +363,20 @@ func WindowStatePath(agentDir string) string {
 	return filepath.Join(agentDir, "window_state.json")
 }
 
+// WebviewStatePath returns the path to webview_state.json inside the agent
+// directory. This file holds the persisted webview GPU-policy setting chosen
+// in Settings (auto | always | on-demand | never) plus the auto-mode fallback
+// record the failure watchdog writes after a detected DMABUF rendering
+// failure. It is deliberately NOT part of config.yaml: the policy must be
+// readable BEFORE wails.Run creates the webview, while config.yaml loads in
+// app.Startup only after the window exists — the same constraint that keeps
+// window_state.json outside config.yaml. The setting half is user-facing (the
+// Settings UI reads/writes it through RPCs), the fallback half is runtime
+// state owned by the watchdog.
+func WebviewStatePath(agentDir string) string {
+	return filepath.Join(agentDir, "webview_state.json")
+}
+
 // DialogStatePath returns the path to dialog_state.json inside the agent
 // directory. This file holds the last directory chosen in a native picker
 // dialog (e.g. PickDirectory for adding a project) so the next dialog opens

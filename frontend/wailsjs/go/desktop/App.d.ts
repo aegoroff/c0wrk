@@ -236,6 +236,8 @@ export function GetUpdateSettings():Promise<backend.UpdateSettings>;
 
 export function GetVectorIndexStatus():Promise<backend.VectorIndexStatus>;
 
+export function GetWebviewGpuPolicy():Promise<backend.WebviewGpuPolicyInfo>;
+
 export function HardenGitRepo(arg1:string):Promise<void>;
 
 export function HasDefaultModel():Promise<boolean>;
@@ -401,6 +403,10 @@ export function SetReviewStatus(arg1:string,arg2:string):Promise<void>;
 export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
+
+export function SetWebviewGpuPolicy(arg1:string):Promise<backend.WebviewGpuPolicyInfo>;
+
+export function SetWebviewGpuWatchdog(arg1:desktop.webviewGpuWatchdog):Promise<void>;
 
 export function ShowTestNotification():Promise<void>;
 

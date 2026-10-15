@@ -77,6 +77,18 @@ func mainImpl() int {
 	agentDir := config.AgentDir()
 	logDir := config.LogsDir(agentDir)
 
+	// GPU-fallback relaunch ordering (issue #34): a watchdog-relaunched
+	// instance carries C0WRK_GPU_RELAUNCH_WAIT_LOCK=1 and waits for the
+	// quitting instance's advisory lock to release before starting up, so
+	// the previous instance's spawn-then-quit cannot race the fresh instance
+	// into the Wails single-instance relay (which would exit it). Bounded
+	// and fail-open — on timeout startup proceeds and the Wails lock has the
+	// final say.
+	if os.Getenv(desktop.GpuRelaunchWaitEnvVar) == "1" {
+		_ = os.Unsetenv(desktop.GpuRelaunchWaitEnvVar)
+		desktop.WaitForInstanceLockRelease(config.SingleInstanceLockPath(agentDir), desktop.GpuRelaunchLockWaitTimeout)
+	}
+
 	// Single-instance gate (issue #98, ADR-075): take the app-level lock
 	// BEFORE any shared state is touched. A second process (on macOS,
 	// LaunchServices activating the app from a delivered notification banner
@@ -145,6 +157,12 @@ func mainImpl() int {
 
 	app := desktop.NewApp()
 	app.SetWailsLogger(wlog)
+	// Arm the Linux DMABUF-failure watchdog (issue #34) after crash capture —
+	// the stderr offset snapshot only makes sense once fd 1/2 are redirected —
+	// and before wails.Run, whose webview must not render first. Nil off Linux
+	// and whenever detection does not apply (explicit policy choice, active
+	// fallback, already-safe resolution).
+	app.SetWebviewGpuWatchdog(desktop.NewWebviewGpuWatchdog(agentDir, logDir, slog.Default()))
 
 	// Restore the persisted window size (written on resize/shutdown) so the
 	// app reopens at the size the user left it. On first run (no state file)
@@ -185,11 +203,13 @@ func mainImpl() int {
 			EnableFileDrop:     true,
 			DisableWebViewDrop: true,
 		},
-		// Linux-only webview hardware-acceleration policy, overridable via
-		// C0WRK_WEBVIEW_GPU_POLICY (always | on-demand | never; default
-		// never — the workaround Wails itself applies for wails#2977).
+		// Linux-only webview hardware-acceleration policy. Resolution order:
+		// C0WRK_WEBVIEW_GPU_POLICY (always | on-demand | never) → the
+		// persisted Settings choice (webview_state.json) → auto, which is
+		// on-demand unless the failure watchdog has persisted a fallback to
+		// never (the grey-window protection for wails#2977, issue #34).
 		// Returns nil on macOS/Windows, leaving those platforms untouched.
-		Linux: desktop.WebviewGpuPolicyOptions(slog.Default()),
+		Linux: desktop.WebviewGpuPolicyOptions(agentDir, slog.Default()),
 		// Single instance (issue #98, ADR-075): a LaunchServices-triggered
 		// second open (macOS notification-banner click against a stale or
 		// rebuilt bundle registration, a Finder re-open while the app runs)
