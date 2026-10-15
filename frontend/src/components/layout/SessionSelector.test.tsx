@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import type { ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { withVirtualTimers } from '@/test/virtualTime'
 
 const { apiMocks } = vi.hoisted(() => ({
   apiMocks: {
@@ -150,14 +151,22 @@ async function render(el: ReactNode): Promise<HTMLElement> {
   return container
 }
 
-const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+/** Drain pending microtasks so async handlers and store updates settle. */
+const flush = () =>
+  act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 
 async function openMenu(container: HTMLElement): Promise<HTMLElement> {
   const trigger = container.querySelector('button')!
-  await act(async () => {
+  // The dispatch sits INSIDE the virtual-time window: Radix attaches its
+  // post-open document-level work from a setTimeout(0), which must land on
+  // the fake clock and fire during the advance — deterministically, with no
+  // real time spent (timing-guard compliant).
+  await withVirtualTimers(() => {
     trigger.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-    await new Promise((r) => setTimeout(r, 10))
-  })
+  }, 10)
   const menu = document.body.querySelector('[role="menu"]')
   expect(menu).not.toBeNull()
   return menu as HTMLElement
@@ -732,14 +741,16 @@ describe('SessionSelector — search input focus', () => {
     const menu = await openMenu(container)
 
     const input = menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!
-    await act(async () => {
+    // The dispatch must sit INSIDE the virtual-time window so Radix's
+    // setTimeout(0) typeahead focus lands on the fake clock and the advance
+    // deterministically fires it.
+    await withVirtualTimers(() => {
       input.focus()
       // A REAL keydown — `typeInto` (native setter + input event) never
       // emits one, which is exactly what Radix's typeahead listens for.
       // 'n' matches only the footer "New Session..." item.
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }))
     })
-    await flush()
 
     expect(document.activeElement).toBe(input)
   })
@@ -901,12 +912,7 @@ describe('SessionSelector — branch new-session button', () => {
     })
 
     // ...without touching the ephemeral collapse state.
-    const trigger = container.querySelector('button')!
-    await act(async () => {
-      trigger.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-      await new Promise((r) => setTimeout(r, 10))
-    })
-    menu = document.body.querySelector('[role="menu"]') as HTMLElement
+    menu = await openMenu(container)
     expect(menuText(menu)).not.toContain('Feat A one')
   })
 })

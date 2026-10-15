@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { withVirtualTimers } from '@/test/virtualTime'
 
 // --- Mock the git API wrappers so tests never touch the Wails backend ---
 const { gitMocks } = vi.hoisted(() => ({
@@ -226,13 +227,12 @@ describe('BranchDropdown', () => {
     await openDropdown()
 
     const input = body().querySelector('input[placeholder="Search branches..."]') as HTMLInputElement
-    act(() => {
+    // The dispatch sits INSIDE the virtual-time window: Radix's typeahead
+    // focuses its match from a setTimeout(0), which must land on the fake
+    // clock and fire deterministically during the advance.
+    await withVirtualTimers(() => {
       input.focus()
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))
-    })
-    // Radix's typeahead focuses its match from a setTimeout(0) — let it fire.
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0))
     })
 
     // Branch rows are plain role=button divs (the menu holds no Radix items
