@@ -164,3 +164,61 @@ describe('handleNewSession — draft flow', () => {
     expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
   })
 })
+
+describe('handleNewSessionOnBranch — grouped-view per-branch draft', () => {
+  it('CODE project: arms a branch draft (no createBranch) and creates NO session', () => {
+    act(() => {
+      captured!.handleNewSessionOnBranch('feat/a')
+    })
+
+    // No RPC — the draft commits later, on the first real action.
+    expect(spies.createSession).not.toHaveBeenCalled()
+    // The drafted workspace pins the branch; createBranch=false because the
+    // branch already exists (CreateManagedSession adopts its managed tree).
+    expect(useSessionDraftStore.getState().draft).toEqual({
+      projectId: 'proj-1',
+      workspace: { kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' },
+    })
+  })
+
+  it('CODE project: clears the active session in memory, like New Session', () => {
+    useSessionStore.setState({ activeSessionId: 's-prev', sessions: [makeSession('s-prev')] })
+
+    act(() => {
+      captured!.handleNewSessionOnBranch('feat/a')
+    })
+
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+  })
+
+  it('replaces an armed draft with the branch choice', async () => {
+    await act(async () => {
+      await captured!.handleNewSession()
+    })
+
+    act(() => {
+      captured!.handleNewSessionOnBranch('feat/b')
+    })
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'feat/b',
+      createBranch: false,
+      startPoint: '',
+    })
+  })
+
+  it('CHAT (No Project): deliberate no-op — no draft, no session', () => {
+    useProjectStore.setState({
+      activeProjectId: '__no_project__',
+      projects: [makeProject({ id: '__no_project__', is_no_project: true })],
+    })
+
+    act(() => {
+      captured!.handleNewSessionOnBranch('feat/a')
+    })
+
+    expect(useSessionDraftStore.getState().draft).toBeNull()
+    expect(spies.createSession).not.toHaveBeenCalled()
+  })
+})

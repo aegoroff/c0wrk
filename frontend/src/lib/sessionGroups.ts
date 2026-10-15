@@ -21,6 +21,16 @@ export function branchGroupKey(branch: string): string {
   return `branch:${branch}`
 }
 
+/** DOM id of a collapsible section's content region — the `aria-controls`
+ *  target named by its header (Managed/Local in the grouped list, Archived in
+ *  SessionSelector) or by a managed branch's row toggle. The region div
+ *  renders exactly while the content does, so a set `aria-controls` always
+ *  names a live element. Branch names may contain `/` or `:` — legal id
+ *  characters (only CSS selectors would care, and we never select by these). */
+export function sessionRegionId(key: string): string {
+  return `session-region-${key}`
+}
+
 // ──────────────────────────────── Types ──────────────────────────────────────
 
 /** All non-archived sessions bound to one managed worktree branch (ADR-080).

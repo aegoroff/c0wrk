@@ -35,7 +35,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions) and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout; the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout; the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
 
 ## Core Types
 
@@ -64,9 +64,12 @@ the frontend API as-is; `Session.WorkspaceBinding()` returns a defensive copy.
 ### Creation (managed)
 
 The chat-side draft UX feeds this RPC: New Session arms a draft
-(`sessionDraftStore`); the chat toolbar's workspace selector and the
-BranchPicker's draft mode record the choice (`local` or a branch — selection
-never checks out); the first send / attachment / paste /
+(`sessionDraftStore`); the chat toolbar's workspace selector, the
+BranchPicker's draft mode, and the session selector's grouped view (each
+managed branch row's "+" action arms a `createBranch=false` draft for that
+branch — `useSessionActions.handleNewSessionOnBranch`) record the choice
+(`local` or a branch — selection never checks out); the first send /
+attachment / paste /
 terminal open commits it via `lib/sessionDraft.createSessionFromDraft()`,
 which calls `CreateManagedSession` for a branch draft and `CreateSession`
 otherwise.
