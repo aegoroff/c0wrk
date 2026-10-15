@@ -1,38 +1,61 @@
 // Tests that the chat editor's undo/redo chords are layout-agnostic.
 //
-// CodeMirror resolves historyKeymap's 'Mod-z' / 'Mod-y' bindings from
-// event.key, which follows the ACTIVE keyboard layout: on a Cyrillic layout
-// Ctrl+Z produces key='я', no key-name binding matches, and CodeMirror has
-// no native-undo fallback of its own. createChatKeymap's `any` binding
-// instead matches the layout-printed character (event.key.toLowerCase())
-// first — the same layout-following signal the key-name layer resolves
-// from — and falls back to the physical key (event.code) for layouts that
-// print neither Z nor Y; it is the only `any` fallback among the chat
-// extension set's keymaps.
+// CodeMirror resolves a keydown in three layers: (1) key-name bindings —
+// historyKeymap's 'Mod-z' / 'Mod-y' derive their name from event.key, which
+// follows the ACTIVE keyboard layout, so on a Cyrillic layout Ctrl+Z arrives
+// as key='я' and no named binding matches; (2) an else-if physical fallback
+// mapping event.keyCode onto a QWERTY key name (how mac Cmd+Shift+Z still
+// redoes on a Cyrillic layout); (3) the `any` fallback of every keymap,
+// consulted for each keydown no binding consumed. createChatKeymap's `any`
+// binding lives in layer (3): it matches the layout-printed character
+// (event.key.toLowerCase()) first — the same layout-following signal the
+// key-name layer resolves from — and falls back to the physical key
+// (event.code) for layouts that print neither Z nor Y; it is the only `any`
+// fallback among the chat extension set's keymaps. A recognized chord is
+// consumed even when the history command no-ops, so layer (2) can never
+// re-interpret the same keydown as the opposite chord.
 //
 // Views are driven through real keydown events dispatched on contentDOM —
-// the same path CodeMirror's keymap machinery uses in the browser. A
-// consumed chord is asserted via defaultPrevented (CodeMirror prevents the
-// event exactly when a binding ran); a returned `false` must leave it
-// unconsumed for native behavior.
+// the same path CodeMirror's keymap machinery uses in the browser. The
+// harness mirrors the KEYMAP slice of createChatExtensions exactly
+// (createChatKeymap + keymap.of([...defaultKeymap, ...historyKeymap]) +
+// history(), same order), so the named-binding layers a real browser
+// consults are in play, and every event carries the real physical keyCode
+// (90 for KeyZ, 89 for KeyY, ...) — jsdom otherwise reports 0, which would
+// leave layer (2) unexercised. A returned `false` means nothing consumed
+// the chord anywhere; `true` means SOMETHING did — our `any` layer, or
+// CodeMirror's own physical fallback resolving a named historyKeymap
+// binding (those prevent the event even when their command no-ops), which
+// is CM behavior outside this keymap's control.
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { EditorView } from '@codemirror/view'
+import { EditorView, keymap } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
-import { history } from '@codemirror/commands'
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import type { MutableRefObject } from 'react'
 
 import { createChatKeymap, matchChatHistoryKey } from './cmChatKeymap'
 
 const createdViews: EditorView[] = []
 
-/** Mount a throwaway chat editor carrying the keymap under test + history. */
+/**
+ * Mount a throwaway chat editor with the exact keymap composition of
+ * createChatExtensions' keymap slice (frontend/src/lib/cmChatExtensions.ts):
+ * the chat keymap under test, then the default+history named bindings,
+ * then history. Keep the order in sync with createChatExtensions.
+ */
 function mountView(onSend: (() => void) | null = null): EditorView {
   const onSendRef: MutableRefObject<(() => void) | null> = { current: onSend }
   const host = document.createElement('div')
   document.body.appendChild(host)
   const view = new EditorView({
-    state: EditorState.create({ extensions: [createChatKeymap(onSendRef), history()] }),
+    state: EditorState.create({
+      extensions: [
+        createChatKeymap(onSendRef),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        history(),
+      ],
+    }),
     parent: host,
   })
   createdViews.push(view)
@@ -47,6 +70,8 @@ function type(view: EditorView, text: string): void {
 /**
  * Dispatch a keydown on the editor's contentDOM; returns whether CodeMirror
  * consumed the chord (it prevents the event exactly when a binding ran).
+ * Callers pass the real physical keyCode for the key's code slot — a real
+ * browser always sets it (jsdom defaults to 0).
  */
 function pressKey(view: EditorView, init: KeyboardEventInit): boolean {
   const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
@@ -83,17 +108,17 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     type(view, 'привет')
     expect(view.state.doc.toString()).toBe('привет')
 
-    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true })).toBe(true)
+    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, keyCode: 90 })).toBe(true)
     expect(view.state.doc.toString()).toBe('')
   })
 
   it('redoes a Cyrillic Ctrl+Y (key=н, code=KeyY)', () => {
     const view = mountView()
     type(view, 'привет')
-    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true })
+    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, keyCode: 90 })
     expect(view.state.doc.toString()).toBe('')
 
-    expect(pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true })).toBe(true)
+    expect(pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true, keyCode: 89 })).toBe(true)
     expect(view.state.doc.toString()).toBe('привет')
   })
 
@@ -101,41 +126,46 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     const view = mountView()
     type(view, 'bonjour')
 
-    expect(pressKey(view, { key: 'z', code: 'KeyW', ctrlKey: true })).toBe(true)
+    expect(pressKey(view, { key: 'z', code: 'KeyW', ctrlKey: true, keyCode: 87 })).toBe(true)
     expect(view.state.doc.toString()).toBe('')
   })
 
-  it('QWERTZ Ctrl+Y on an empty redo stack is a no-op, never an undo', () => {
+  it('QWERTZ Ctrl+Y on an empty redo stack is a consumed no-op, never an undo', () => {
     const view = mountView()
     type(view, 'Струс')
-    // Right after an edit the redo stack is empty: the named redo chord
-    // declines and the event reaches the `any` fallback. The fallback must
-    // recompute the printed 'y' as redo (declining as well) — misreading
-    // the physical Z slot here silently UNDID the edit.
-    pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true })
+    // Right after an edit the redo stack is empty: the printed 'y' makes
+    // this redo, which no-ops. The chord must still be CONSUMED — a false
+    // would let the physical-keyCode fallback resolve the real keydown's
+    // keyCode 90 (physical slot Z) as Ctrl-z and silently UNDO the edit.
+    expect(pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true, keyCode: 90 })).toBe(true)
     expect(view.state.doc.toString()).toBe('Струс')
 
-    // The same chord redoes once there is something to redo.
-    expect(pressKey(view, { key: 'z', code: 'KeyY', ctrlKey: true })).toBe(true)
+    // The same chords work once there is history to act on.
+    expect(pressKey(view, { key: 'z', code: 'KeyY', ctrlKey: true, keyCode: 89 })).toBe(true)
     expect(view.state.doc.toString()).toBe('')
-    expect(pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true })).toBe(true)
+    expect(pressKey(view, { key: 'y', code: 'KeyZ', ctrlKey: true, keyCode: 90 })).toBe(true)
     expect(view.state.doc.toString()).toBe('Струс')
   })
 
   it('redoes a Cyrillic Ctrl+Shift+Z (key=Я, code=KeyZ)', () => {
     const view = mountView()
     type(view, 'привет')
-    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true })
+    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, keyCode: 90 })
     expect(view.state.doc.toString()).toBe('')
 
-    expect(pressKey(view, { key: 'Я', code: 'KeyZ', ctrlKey: true, shiftKey: true })).toBe(true)
+    expect(
+      pressKey(view, { key: 'Я', code: 'KeyZ', ctrlKey: true, shiftKey: true, keyCode: 90 }),
+    ).toBe(true)
     expect(view.state.doc.toString()).toBe('привет')
   })
 
-  it('leaves the chord unconsumed when there is nothing to undo', () => {
+  it('consumes empty history chords as intentional no-ops (never leaks to native behavior)', () => {
     const view = mountView()
-
-    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true })).toBe(false)
+    // Nothing to undo AND nothing to redo: both chords are still consumed,
+    // like historyKeymap's own bindings (their preventDefault defaults to
+    // true), and leave the document untouched.
+    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, keyCode: 90 })).toBe(true)
+    expect(pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true, keyCode: 89 })).toBe(true)
     expect(view.state.doc.toString()).toBe('')
   })
 
@@ -143,7 +173,7 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     const view = mountView()
     type(view, 'привет')
 
-    expect(pressKey(view, { key: 'с', code: 'KeyC', ctrlKey: true })).toBe(false)
+    expect(pressKey(view, { key: 'с', code: 'KeyC', ctrlKey: true, keyCode: 67 })).toBe(false)
     expect(view.state.doc.toString()).toBe('привет')
   })
 
@@ -151,23 +181,35 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     const view = mountView()
     type(view, 'ок')
 
-    expect(pressKey(view, { key: 'я', code: 'KeyZ' })).toBe(false)
-    expect(pressKey(view, { key: 'z', code: 'KeyZ' })).toBe(false)
-    expect(pressKey(view, { key: 'н', code: 'KeyY' })).toBe(false)
+    expect(pressKey(view, { key: 'я', code: 'KeyZ', keyCode: 90 })).toBe(false)
+    expect(pressKey(view, { key: 'z', code: 'KeyZ', keyCode: 90 })).toBe(false)
+    expect(pressKey(view, { key: 'н', code: 'KeyY', keyCode: 89 })).toBe(false)
     expect(view.state.doc.toString()).toBe('ок')
   })
 
   it('never intercepts AltGr chords (ctrl+alt)', () => {
     const view = mountView()
 
-    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, altKey: true })).toBe(false)
-    expect(pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true, altKey: true })).toBe(false)
+    expect(
+      pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, altKey: true, keyCode: 90 }),
+    ).toBe(false)
+    expect(
+      pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true, altKey: true, keyCode: 89 }),
+    ).toBe(false)
   })
 
   it('never intercepts chords during IME composition', () => {
     const view = mountView()
 
-    expect(pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, isComposing: true })).toBe(false)
+    // Our matcher declines composition events (the precise guard lives in
+    // the matchChatHistoryKey unit tests). The chord can still show up
+    // defaultPrevented: historyKeymap's own physical fallback resolves the
+    // real keydown's slot as Ctrl-z and its binding carries preventDefault
+    // by default — CM prevents it even though the command no-ops. That is
+    // CM behavior outside this keymap's control; what must not happen is
+    // an interception on OUR side.
+    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, isComposing: true, keyCode: 90 })
+    expect(view.state.doc.toString()).toBe('')
   })
 
   it('Enter still sends through the existing binding', () => {
@@ -175,9 +217,10 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     const view = mountView(onSend)
     type(view, 'привет')
 
-    expect(pressKey(view, { key: 'Enter' })).toBe(true)
+    expect(pressKey(view, { key: 'Enter', keyCode: 13 })).toBe(true)
     expect(onSend).toHaveBeenCalledTimes(1)
-    // Consumed by the send binding — no newline slipped in behind it.
+    // Consumed by the send binding — defaultKeymap's Enter binding (insert
+    // a newline) never ran behind it.
     expect(view.state.doc.toString()).toBe('привет')
   })
 })

@@ -23,10 +23,14 @@ function isMacLikePlatform(): boolean {
 /**
  * Layout-agnostic history matcher behind the chat editor's undo/redo.
  *
- * CodeMirror resolves `historyKeymap`'s 'Mod-z' / 'Mod-y' bindings from
- * `event.key`, which follows the ACTIVE keyboard layout: on a Cyrillic
- * layout Ctrl+Z produces key='я', no key-name binding matches, and
- * CodeMirror has no native-undo fallback of its own. This matcher instead
+ * CodeMirror resolves a keydown in three layers: (1) key-name bindings —
+ * `historyKeymap`'s 'Mod-z' / 'Mod-y' derive their name from `event.key`,
+ * which follows the ACTIVE keyboard layout, so on a Cyrillic layout
+ * Ctrl+Z arrives as key='я' and no named binding matches; (2) an else-if
+ * physical fallback that maps `event.keyCode` onto a QWERTY key name and
+ * re-resolves the chord (this is how mac Cmd+Shift+Z still redoes on a
+ * Cyrillic layout); (3) the `any` fallback of every keymap, consulted for
+ * each keydown no binding consumed. This matcher lives in layer (3) and
  * recognizes the layout-printed character (`event.key.toLowerCase()`) —
  * the SAME layout-following signal the key-name layer resolves bindings
  * from, so a history chord recomputes into the same action the named
@@ -34,6 +38,13 @@ function isMacLikePlatform(): boolean {
  * Ctrl+Y is redo, never undo) — and, for layouts that print neither Z nor
  * Y at all (Cyrillic 'я' / 'н'), the layout-independent PHYSICAL key
  * (`event.code`).
+ *
+ * The caller consumes a recognized chord even when the history command
+ * no-ops, mirroring historyKeymap's own bindings (their preventDefault
+ * defaults to true): that keeps layer (2) from re-interpreting the same
+ * declined keydown as the OPPOSITE chord — without it, a QWERTZ Ctrl+Y
+ * on an empty redo stack fell through to physical slot Z and silently
+ * undid the edit.
  *
  * Guarded against AltGr (ctrl+alt) and IME composition; anything not
  * recognized — including native browser chords like Ctrl+C — returns null
@@ -83,15 +94,21 @@ export function createChatKeymap(onSendRef: MutableRefObject<(() => void) | null
       // Consulted for keydowns no key-name binding consumed. It is the only
       // `any` fallback among createChatExtensions' keymaps (autocompletion
       // and the default/history keymaps bind named keys only), so no other
-      // extension's fallback competes with it. Returning the command's
-      // result keeps the contract: false lets other bindings / native
-      // behavior continue.
+      // extension's fallback competes with it. A recognized history chord
+      // ALWAYS consumes (true) — even when undo/redo no-ops on an empty
+      // stack, like historyKeymap's own bindings whose preventDefault
+      // defaults to true — so CodeMirror's physical-keyCode fallback layer
+      // cannot re-interpret the same keydown as the opposite chord (see
+      // matchChatHistoryKey). Unrecognized keys return false and keep the
+      // contract: other bindings / native behavior continue.
       any: (view, event) => {
         switch (matchChatHistoryKey(event)) {
           case 'undo':
-            return undo(view)
+            undo(view)
+            return true
           case 'redo':
-            return redo(view)
+            redo(view)
+            return true
           default:
             return false
         }
