@@ -29,9 +29,11 @@ const GpuRelaunchWaitEnvVar = "C0WRK_GPU_RELAUNCH_WAIT_LOCK"
 const GpuRelaunchLockWaitTimeout = 15 * time.Second
 
 const (
-	// gpuWatchdogScanInterval is how often the fresh stderr tail is scanned
-	// once the frontend DOM is ready. The DMABUF failure prints at the
-	// webview's first paint, so the first scan almost always decides.
+	// gpuWatchdogScanInterval is how often the fresh stderr tail is rescanned
+	// after the immediate first scan (the scanner fires one check as soon as
+	// the frontend DOM is ready). The DMABUF failure prints at the webview's
+	// first paint — before DomReady — so the first scan almost always decides;
+	// the ticker only covers a signature printed mid-load.
 	gpuWatchdogScanInterval = 2 * time.Second
 	// gpuWatchdogScanWindow bounds the detection to startup. The grey window
 	// is a buffer-allocation failure at renderer init — it does not appear
@@ -141,6 +143,16 @@ func (w *webviewGpuWatchdog) start() {
 		return
 	}
 	go func() {
+		// First scan fires immediately, before the first tick: the DMABUF
+		// failure prints at the webview's first paint, which precedes
+		// DomReady, so the tail already carries the signature when the
+		// scanner opens. Waiting for the ticker would add a full
+		// gpuWatchdogScanInterval of grey window to every fallback relaunch
+		// (observed: detection at DomReady+2s with the signature sitting in
+		// the tail the whole time).
+		if w.check() {
+			return
+		}
 		ticker := time.NewTicker(gpuWatchdogScanInterval)
 		defer ticker.Stop()
 		deadline := time.After(gpuWatchdogScanWindow)

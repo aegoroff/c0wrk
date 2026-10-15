@@ -699,7 +699,19 @@ func (s *Service) getCollectionFileHashes() (map[string]string, error) {
 // (at least RLock). ctx propagates cancellation to the underlying Query
 // (e.g. service shutdown while the background migration is in flight).
 func (ps *projectState) queryCollectionFileHashes(ctx context.Context, unitVec []float32) (map[string]string, error) {
-	count := ps.collection.Count()
+	return queryCollectionFileHashesFrom(ctx, ps.collection, unitVec)
+}
+
+// queryCollectionFileHashesFrom is queryCollectionFileHashes against an
+// explicitly captured collection reference. The migration's background
+// goroutine captures ps.collection under the write lock and then enumerates
+// the captured reference WITHOUT the lock (see migrateFileHashes), so the
+// heavy phase must not re-read ps.collection. chromem serializes access to
+// the collection internally; a state closed mid-query only drops the ps
+// reference, and the migration's post-query staleness re-check discards the
+// result.
+func queryCollectionFileHashesFrom(ctx context.Context, col *chromem.Collection, unitVec []float32) (map[string]string, error) {
+	count := col.Count()
 	if count == 0 {
 		return make(map[string]string), nil
 	}
@@ -707,9 +719,9 @@ func (ps *projectState) queryCollectionFileHashes(ctx context.Context, unitVec [
 	var results []chromem.Result
 	var err error
 	if unitVec != nil {
-		results, err = ps.collection.QueryEmbedding(ctx, unitVec, count, nil, nil)
+		results, err = col.QueryEmbedding(ctx, unitVec, count, nil, nil)
 	} else {
-		results, err = ps.collection.Query(ctx, " ", count, nil, nil)
+		results, err = col.Query(ctx, " ", count, nil, nil)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("querying collection for file list: %w", err)
@@ -881,30 +893,45 @@ func (s *Service) migrateFileHashes(ctx context.Context, ps *projectState, branc
 	defer s.migrationWG.Done()
 	defer close(done)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// clearIfCurrent clears the pending flag only when THIS migration is still
 	// the one registered on ps. A restore may have re-run loadFileHashes and
 	// installed a replacement migration (ps.migrationCh changed) while we were
 	// blocked on the lock; clearing the flag unconditionally here would then
 	// clobber the replacement's in-flight state and let parkCurrentLocked skip
-	// a legitimate sidecar save.
-	clearIfCurrent := func() {
+	// a legitimate sidecar save. The caller must hold s.mu.
+	clearIfCurrentLocked := func() {
 		if ps.migrationCh == done {
 			ps.fileHashMigrationPending.Store(false)
 		}
 	}
 
+	// Phase 1 — under the write lock: staleness check and collection capture.
 	// The branch may have changed (or the state been parked/closed) while we
 	// waited for the write lock; abandon a stale migration rather than
 	// overwriting another branch's sidecar.
+	s.mu.Lock()
 	if ctx.Err() != nil || ps.currentBranch != branch || ps.collection == nil {
-		clearIfCurrent()
+		clearIfCurrentLocked()
+		s.mu.Unlock()
 		return
 	}
+	col := ps.collection
+	s.mu.Unlock()
 
-	hashes, qErr := ps.queryCollectionFileHashes(ctx, s.unitQueryVector())
+	// The heavy phase runs WITHOUT the lock, mirroring migrateContentless:
+	// chromem serializes access to the captured collection internally, and the
+	// phase-2 staleness re-check discards the result if anything swapped the
+	// state meanwhile. Holding the write lock across the embedding-bearing
+	// enumeration stalled every state transition AND Close() — which must take
+	// the same lock to reach its cancellation calls — for the whole query on a
+	// large collection (observed: 6s on the c0wrk repo, i.e. the entire
+	// grey-window relaunch budget when a fresh instance quit mid-backfill).
+	hashes, qErr := queryCollectionFileHashesFrom(ctx, col, s.unitQueryVector())
+
+	// Phase 2 — re-acquire for the adoption.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if qErr != nil {
 		if ps.migrationCh == done {
 			// The backfill did not complete: ps.fileHashes stays the untrusted
@@ -914,12 +941,13 @@ func (s *Service) migrateFileHashes(ctx context.Context, ps *projectState, branc
 			ps.fileHashMigrationFailed.Store(true)
 		}
 		s.logger.Warn("failed to migrate file-hash sidecar from collection", "error", qErr)
-		clearIfCurrent()
+		clearIfCurrentLocked()
 		return
 	}
-	// Re-check after the embedding-bearing Query in case we raced a switch.
+	// Re-check after the embedding-bearing Query in case we raced a switch or
+	// a close during the unlocked query.
 	if ctx.Err() != nil || ps.currentBranch != branch || ps.collection == nil {
-		clearIfCurrent()
+		clearIfCurrentLocked()
 		return
 	}
 	ps.fileHashes = hashes

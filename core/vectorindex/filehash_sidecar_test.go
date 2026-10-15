@@ -80,6 +80,106 @@ func TestGetCollectionFileHashes_NoEmbeddingAfterPopulation(t *testing.T) {
 // when a non-empty collection exists but no sidecar does (the upgrade / new-
 // machine scenario). Instead the backfill is deferred to a background goroutine
 // and settles before ValidateCollection runs via WaitFileHashMigration.
+// TestClose_DoesNotBlockBehindFileHashBackfill pins the unlocked heavy phase
+// of the background sidecar backfill: Close() must acquire s.mu, cancel the
+// in-flight migration and finish while the backfill's embedding-bearing
+// enumeration is still blocked. Before the fix the query ran under the write
+// lock, so Close blocked on s.mu.Lock for the whole enumeration — observed as
+// a 6s vectorShutdown step on the c0wrk repo, the entire grey-window relaunch
+// budget when the GPU watchdog quits a fresh instance mid-backfill. The test's
+// embed func honours ctx the way the real embedder's short single inference
+// does; chromem itself checks ctx per document during the enumeration.
+func TestClose_DoesNotBlockBehindFileHashBackfill(t *testing.T) {
+	dir := t.TempDir()
+
+	var (
+		gateOpen atomic.Bool
+		block    = make(chan struct{})
+		release  sync.Once
+	)
+	embed := func(ctx context.Context, _ string) ([]float32, error) {
+		if !gateOpen.Load() {
+			select {
+			case <-block:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return []float32{0.1, 0.2}, nil
+	}
+	unblock := func() {
+		gateOpen.Store(true)
+		release.Do(func() { close(block) })
+	}
+
+	// Build a non-empty, persisted collection via service A (gate open so A
+	// embeds freely). Seed via raw chromem, NOT Service.AddDocuments: the
+	// commit path strips per-file metadata, while the backfill under test
+	// exists for pre-upgrade collections whose stored documents still carry
+	// content_hash (see TestSwitchBranch_FileHashMigrationIsAsync).
+	gateOpen.Store(true)
+	a, err := NewService(ServiceConfig{EmbeddingFunc: embed})
+	if err != nil {
+		t.Fatalf("NewService A: %v", err)
+	}
+	if err := a.SetProject("proj", dir); err != nil {
+		t.Fatalf("SetProject A: %v", err)
+	}
+	if err := a.SwitchBranch(context.Background(), "main"); err != nil {
+		t.Fatalf("SwitchBranch A: %v", err)
+	}
+	docs := []chromem.Document{
+		{ID: "d1", Content: "alpha", Metadata: map[string]string{"file_path": filepath.Join(dir, "a.go"), "content_hash": "hA"}},
+		{ID: "d2", Content: "beta", Metadata: map[string]string{"file_path": filepath.Join(dir, "b.go"), "content_hash": "hB"}},
+	}
+	if err := a.current.collection.AddDocuments(context.Background(), docs, 1); err != nil {
+		t.Fatalf("chromem AddDocuments A: %v", err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close A: %v", err)
+	}
+
+	// Upgrade scenario: collection present, sidecar absent — the reopen
+	// starts the background backfill.
+	sidecar := filepath.Join(dir, "file_hashes_"+collectionName("main")+".json")
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatalf("remove sidecar: %v", err)
+	}
+
+	// Reopen with the gate CLOSED: SwitchBranch defers the backfill to a
+	// goroutine that blocks mid-query on the embed gate.
+	gateOpen.Store(false)
+	b, err := NewService(ServiceConfig{EmbeddingFunc: embed})
+	if err != nil {
+		t.Fatalf("NewService B: %v", err)
+	}
+	if err := b.SetProject("proj", dir); err != nil {
+		t.Fatalf("SetProject B: %v", err)
+	}
+	if err := b.SwitchBranch(context.Background(), "main"); err != nil {
+		t.Fatalf("SwitchBranch B: %v", err)
+	}
+	if !b.current.fileHashMigrationPending.Load() {
+		t.Fatal("expected file-hash migration to be pending (blocked on the gate)")
+	}
+
+	// Close must NOT wait for the backfill: it takes s.mu (free now — the
+	// heavy query no longer holds it), cancels the migration ctx, and the
+	// ctx-aware embed unwinds the query. The gate stays CLOSED throughout:
+	// a Close that blocks behind the query hangs until the go-test timeout.
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close B: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked behind the in-flight file-hash backfill")
+	}
+	t.Cleanup(unblock)
+}
+
 func TestSwitchBranch_FileHashMigrationIsAsync(t *testing.T) {
 	dir := t.TempDir()
 

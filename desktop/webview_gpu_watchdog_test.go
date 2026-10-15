@@ -222,6 +222,81 @@ func dmabufFallbackFixture() *backend.WebviewGpuAutoFallback {
 	}
 }
 
+// TestWatchdogStartScansImmediately pins the immediate first scan: the
+// scanner goroutine must check the tail as it opens, not wait out the first
+// gpuWatchdogScanInterval tick. The failure signature prints at the webview's
+// first paint — before DomReady — so every tick of delay is grey window on
+// the fallback relaunch path. The 1s bound is deliberately below the 2s tick:
+// a scan that only fired from the ticker could not arrive inside it.
+func TestWatchdogStartScansImmediately(t *testing.T) {
+	scanned := make(chan struct{}, 1)
+	w := &webviewGpuWatchdog{
+		agentDir:   t.TempDir(),
+		logger:     slog.New(slog.DiscardHandler),
+		stderrPath: filepath.Join(t.TempDir(), "stderr.log"),
+		scanTailFn: func(string, int64) []string {
+			select {
+			case scanned <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	w.start()
+
+	select {
+	case <-scanned:
+	case <-time.After(1 * time.Second):
+		t.Fatal("the scanner's first scan did not fire immediately on start")
+	}
+}
+
+// TestWatchdogStartFirstScanDecidesWithoutTick pins the full decision flow on
+// the immediate first scan: a signature already in the tail (the common case
+// — the failure printed before DomReady) must persist, relaunch and quit
+// without waiting out a single ticker tick.
+func TestWatchdogStartFirstScanDecidesWithoutTick(t *testing.T) {
+	var events []string
+	record := func(e string) { events = append(events, e) }
+	done := make(chan struct{})
+	persisted := backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto}
+	w := &webviewGpuWatchdog{
+		agentDir:   t.TempDir(),
+		logger:     slog.New(slog.DiscardHandler),
+		stderrPath: filepath.Join(t.TempDir(), "stderr.log"),
+		nowFn:      func() time.Time { return time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC) },
+		scanTailFn: func(string, int64) []string {
+			return []string{"Failed to create EGL images for DMABufs"}
+		},
+		updateFn: func(mutate func(*backend.WebviewGpuState)) error {
+			record("persist")
+			mutate(&persisted)
+			return nil
+		},
+		relaunchFn: func(*slog.Logger) error {
+			record("relaunch")
+			return nil
+		},
+		quitFn: func() {
+			record("quit")
+			close(done)
+		},
+	}
+	w.start()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("the immediate first scan did not decide; events", events)
+	}
+	if want := []string{"persist", "relaunch", "quit"}; strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", events, want)
+	}
+	if persisted.AutoFallback == nil {
+		t.Fatal("no fallback persisted by the immediate first scan")
+	}
+}
+
 func TestNewWebviewGpuWatchdogArming(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	agentDir := t.TempDir()
