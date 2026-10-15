@@ -9,20 +9,24 @@
 //   branch name) → member sessions, then Local → sessions; section headers
 //   appear only when BOTH sections are non-empty (a lone Local section is the
 //   flat view) and share the branch combo's uppercase section styling;
-// - a branch-header click collapses/expands its group (ephemeral state) and
-//   NEVER closes the dropdown; the Managed/Local section headers collapse the
-//   same way;
+// - a branch-header selection (click or Enter) collapses/expands its group
+//   (ephemeral state) and NEVER closes the dropdown; the Managed/Local section
+//   headers collapse the same way;
 // - the popup is a fixed wide `w-[28rem]`;
 // - grouped mode separates the Managed and Local sections with the branch
 //   combo's hairline divider (only when both sections render headers);
-// - each managed branch row carries a "New session in this worktree" button
+// - each managed branch row carries a "New session in this worktree" item
 //   (the + action): it arms the ADR-080 draft pinned to that branch
 //   (createBranch=false — CreateManagedSession adopts the branch's existing
 //   managed tree per ADR-082), clears the active selection and closes the
 //   menu; it never toggles the branch's collapse state, and nothing but
-//   managed branch rows (flat mode, Local/Archived sections) has the button;
+//   managed branch rows (flat mode, Local/Archived sections) has the action;
 // - an active search force-expands every group and section and hides empty ones;
-// - the Archived section behaves exactly as before in both modes.
+// - the Archived section behaves exactly as before in both modes;
+// - every one of these controls is a REGISTERED Radix menu item — arrow keys
+//   traverse them and Enter/Space activate them (a group collapsed with the
+//   mouse stays reopenable from the keyboard; Radix prevents Tab inside the
+//   menu, so unregistered controls would be unreachable).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import type { ReactNode } from 'react'
@@ -172,13 +176,14 @@ async function openMenu(container: HTMLElement): Promise<HTMLElement> {
   return menu as HTMLElement
 }
 
-/** Plain header button of a managed branch group — found by its branch name. */
-function branchButton(menu: HTMLElement, branch: string): HTMLButtonElement {
-  const btn = Array.from(menu.querySelectorAll('button')).find((b) =>
-    b.textContent?.includes(branch),
+/** Branch-row collapse toggle — a registered menu item carrying the branch
+ *  name and the GitBranch glyph (member session rows never carry that glyph). */
+function branchToggle(menu: HTMLElement, branch: string): HTMLElement {
+  const item = Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
+    (el) => (el.textContent ?? '').includes(branch) && el.querySelector('svg.lucide-git-branch'),
   )
-  expect(btn, `branch header button for "${branch}"`).toBeTruthy()
-  return btn as HTMLButtonElement
+  expect(item, `branch toggle for "${branch}"`).toBeTruthy()
+  return item as HTMLElement
 }
 
 async function click(el: HTMLElement): Promise<void> {
@@ -201,6 +206,18 @@ async function typeInto(input: HTMLInputElement, text: string): Promise<void> {
 
 function menuText(menu: HTMLElement): string {
   return menu.textContent ?? ''
+}
+
+/**
+ * A real bubbling keydown on `el` — the dispatch path Radix's React handlers
+ * (content-level arrows, item Enter/Space) listen on. Roving-focus moves are
+ * applied from a setTimeout, so the dispatch sits inside the virtual-time
+ * window (deterministic, no real time spent — timing-guard compliant).
+ */
+async function pressKey(el: Element, key: string): Promise<void> {
+  await withVirtualTimers(() => {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+  }, 10)
 }
 
 beforeEach(() => {
@@ -239,7 +256,7 @@ describe('SessionSelector — flat mode (default)', () => {
     expect(text).toContain('Feat A two')
     expect(text).toContain('Checkout work')
     // The mode toggle is present and advertises the switch to grouped mode.
-    const toggle = menu.querySelector<HTMLButtonElement>('button[title="Group sessions by branch"]')
+    const toggle = menu.querySelector<HTMLElement>('[role="menuitem"][title="Group sessions by branch"]')
     expect(toggle).not.toBeNull()
     expect(useUIStore.getState().sessionListGrouped).toBe(false)
     void container
@@ -259,7 +276,7 @@ describe('SessionSelector — mode toggle', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    const toggle = menu.querySelector<HTMLButtonElement>('button[title="Group sessions by branch"]')!
+    const toggle = menu.querySelector<HTMLElement>('[role="menuitem"][title="Group sessions by branch"]')!
     expect(toggle).not.toBeNull()
     // Hover affordance (the user requirement) + a bigger hit area aligned
     // with the h-7 search input and the larger size-4 glyph.
@@ -283,7 +300,7 @@ describe('SessionSelector — mode toggle', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    expect(menu.querySelector('button[title="Group sessions by branch"]')).not.toBeNull()
+    expect(menu.querySelector('[role="menuitem"][title="Group sessions by branch"]')).not.toBeNull()
     expect(menu.querySelector('input')).toBeNull()
   })
 
@@ -295,14 +312,14 @@ describe('SessionSelector — mode toggle', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    await click(menu.querySelector<HTMLButtonElement>('button[title="Group sessions by branch"]')!)
+    await click(menu.querySelector<HTMLElement>('[role="menuitem"][title="Group sessions by branch"]')!)
 
     // The menu is still open and now renders the branch group.
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(useUIStore.getState().sessionListGrouped).toBe(true)
     expect(menuText(menu)).toContain('feat-a')
     // The toggle now advertises the way back.
-    expect(menu.querySelector('button[title="Show flat list"]')).not.toBeNull()
+    expect(menu.querySelector('[role="menuitem"][title="Show flat list"]')).not.toBeNull()
   })
 
   it('toggling back to flat restores the flat list without closing the menu', async () => {
@@ -315,7 +332,7 @@ describe('SessionSelector — mode toggle', () => {
     const menu = await openMenu(container)
     expect(menuText(menu)).toContain('feat-a')
 
-    await click(menu.querySelector<HTMLButtonElement>('button[title="Show flat list"]')!)
+    await click(menu.querySelector<HTMLElement>('[role="menuitem"][title="Show flat list"]')!)
 
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(useUIStore.getState().sessionListGrouped).toBe(false)
@@ -360,7 +377,7 @@ describe('SessionSelector — grouped layout', () => {
     // Branch rows carry the GitBranch icon (the fork action icon is a
     // different glyph, so this is specific to the group headers).
     for (const branch of ['feat-a', 'feat-b']) {
-      expect(branchButton(menu, branch).querySelector('svg')).not.toBeNull()
+      expect(branchToggle(menu, branch).querySelector('svg')).not.toBeNull()
     }
   })
 
@@ -380,7 +397,7 @@ describe('SessionSelector — grouped layout', () => {
     expect(text).toContain('Older session')
     // No branch header buttons exist (every button with a git-branch icon
     // would be one).
-    const branchHeaders = Array.from(menu.querySelectorAll('button')).filter((b) =>
+    const branchHeaders = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter((b) =>
       b.querySelector('svg.lucide-git-branch'),
     )
     expect(branchHeaders).toHaveLength(0)
@@ -398,8 +415,8 @@ describe('SessionSelector — grouped layout', () => {
     /** Direct-child menu button with the exact label. */
     const headerIn = (m: HTMLElement, label: string) =>
       Array.from(m.children).find(
-        (el) => el.tagName === 'BUTTON' && (el.textContent ?? '').trim() === label,
-      ) as HTMLButtonElement
+        (el) => el.getAttribute('role') === 'menuitem' && (el.textContent ?? '').trim() === label,
+      ) as HTMLElement
 
     // The Managed header is expanded and controls a live region holding the
     // branch rows and their member sessions.
@@ -412,9 +429,9 @@ describe('SessionSelector — grouped layout', () => {
     expect(managedRegion?.textContent).toContain('Feat A one')
 
     // A branch toggle controls exactly its own member sessions.
-    const branchToggle = branchButton(menu, 'feat-a')
-    expect(branchToggle.getAttribute('aria-expanded')).toBe('true')
-    const branchRegion = document.getElementById(branchToggle.getAttribute('aria-controls')!)
+    const featAToggle = branchToggle(menu, 'feat-a')
+    expect(featAToggle.getAttribute('aria-expanded')).toBe('true')
+    const branchRegion = document.getElementById(featAToggle.getAttribute('aria-controls')!)
     expect(branchRegion?.textContent).toContain('Feat A one')
     expect(branchRegion?.textContent).not.toContain('Feat B one')
 
@@ -425,9 +442,9 @@ describe('SessionSelector — grouped layout', () => {
     expect(document.getElementById(managedRegionId)).toBeNull()
 
     // Archived starts collapsed — aria-expanded says so up front.
-    const archivedHeader = Array.from(menu.querySelectorAll('button')).find((b) =>
+    const archivedHeader = Array.from(menu.querySelectorAll('[role="menuitem"]')).find((b) =>
       (b.textContent ?? '').startsWith('Archived'),
-    ) as HTMLButtonElement
+    ) as HTMLElement
     expect(archivedHeader.getAttribute('aria-expanded')).toBe('false')
   })
 })
@@ -445,7 +462,7 @@ describe('SessionSelector — popup chrome (width & section separators)', () => 
   }
 
   const isSectionHeader = (el: Element, label: string) =>
-    el.tagName === 'BUTTON' && (el.textContent ?? '').trim() === label
+    el.getAttribute('role') === 'menuitem' && (el.textContent ?? '').trim() === label
   const isSeparator = (el: Element) => el.getAttribute('role') === 'separator'
 
   it('opens a wider popup — fixed w-[28rem], the old w-96 is gone', async () => {
@@ -482,7 +499,7 @@ describe('SessionSelector — popup chrome (width & section separators)', () => 
 
     const managedIdx = childIndex(menu, (el) => isSectionHeader(el, 'Managed'))
     expect(managedIdx).toBeGreaterThanOrEqual(0)
-    const managedBtn = menu.children[managedIdx] as HTMLButtonElement
+    const managedBtn = menu.children[managedIdx] as HTMLElement
     await click(managedBtn)
     menu = document.body.querySelector('[role="menu"]') as HTMLElement
     expect(menuText(menu)).not.toContain('Feat A one')
@@ -522,7 +539,7 @@ describe('SessionSelector — branch collapse', () => {
     const menu = await openMenu(container)
 
     // Collapse the branch group.
-    await click(branchButton(menu, 'feat-a'))
+    await click(branchToggle(menu, 'feat-a'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).not.toContain('Feat A one')
     expect(menuText(menu)).not.toContain('Feat A two')
@@ -530,7 +547,7 @@ describe('SessionSelector — branch collapse', () => {
     expect(menuText(menu)).toContain('Checkout work')
 
     // Expand again.
-    await click(branchButton(menu, 'feat-a'))
+    await click(branchToggle(menu, 'feat-a'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).toContain('Feat A one')
     expect(menuText(menu)).toContain('Feat A two')
@@ -538,14 +555,14 @@ describe('SessionSelector — branch collapse', () => {
 })
 
 describe('SessionSelector — section collapse', () => {
-  /** Section header button — found by its exact label (Archived carries a count). */
-  function sectionButton(menu: HTMLElement, label: string): HTMLButtonElement {
-    const btn = Array.from(menu.querySelectorAll('button')).find((b) => {
+  /** Section header item — found by its exact label (Archived carries a count). */
+  function sectionHeader(menu: HTMLElement, label: string): HTMLElement {
+    const btn = Array.from(menu.querySelectorAll('[role="menuitem"]')).find((b) => {
       const t = (b.textContent ?? '').trim()
       return t === label || t.startsWith(`${label} (`)
     })
-    expect(btn, `section header button "${label}"`).toBeTruthy()
-    return btn as HTMLButtonElement
+    expect(btn, `section header "${label}"`).toBeTruthy()
+    return btn as HTMLElement
   }
 
   const bothSectionsFixture = (): SessionRow[] => [
@@ -560,7 +577,7 @@ describe('SessionSelector — section collapse', () => {
     const menu = await openMenu(container)
 
     for (const label of ['Managed', 'Local']) {
-      const btn = sectionButton(menu, label)
+      const btn = sectionHeader(menu, label)
       expect(btn.className).toContain('uppercase')
       expect(btn.className).toContain('font-semibold')
       expect(btn.className).toContain('text-xs')
@@ -575,14 +592,14 @@ describe('SessionSelector — section collapse', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    await click(sectionButton(menu, 'Managed'))
+    await click(sectionHeader(menu, 'Managed'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).not.toContain('feat-a')
     expect(menuText(menu)).not.toContain('Feat A one')
     // The Local section is untouched.
     expect(menuText(menu)).toContain('Checkout work')
 
-    await click(sectionButton(menu, 'Managed'))
+    await click(sectionHeader(menu, 'Managed'))
     expect(menuText(menu)).toContain('feat-a')
     expect(menuText(menu)).toContain('Feat A one')
   })
@@ -593,13 +610,13 @@ describe('SessionSelector — section collapse', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    await click(sectionButton(menu, 'Local'))
+    await click(sectionHeader(menu, 'Local'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).not.toContain('Checkout work')
     // The Managed branch group is untouched.
     expect(menuText(menu)).toContain('Feat A one')
 
-    await click(sectionButton(menu, 'Local'))
+    await click(sectionHeader(menu, 'Local'))
     expect(menuText(menu)).toContain('Checkout work')
   })
 
@@ -616,7 +633,7 @@ describe('SessionSelector — section collapse', () => {
     let menu = await openMenu(container)
 
     // Collapse the whole Managed section: branch content disappears.
-    await click(sectionButton(menu, 'Managed'))
+    await click(sectionHeader(menu, 'Managed'))
     expect(menuText(menu)).not.toContain('Alpha work')
 
     // Searching for a member inside the collapsed section force-expands it...
@@ -650,7 +667,7 @@ describe('SessionSelector — search in grouped mode', () => {
     let menu = await openMenu(container)
 
     // Collapse feat-a first: its member must disappear.
-    await click(branchButton(menu, 'feat-a'))
+    await click(branchToggle(menu, 'feat-a'))
     expect(menuText(menu)).not.toContain('Alpha work')
 
     // Searching for the hidden member force-expands its group...
@@ -712,7 +729,7 @@ describe('SessionSelector — whitespace-only search', () => {
 
       // The section is still interactive: expanding shows every archived row.
       await click(
-        Array.from(menu.querySelectorAll('button')).find((b) => b.textContent?.includes('Archived'))!,
+        Array.from(menu.querySelectorAll('[role="menuitem"]')).find((b) => b.textContent?.includes('Archived'))! as HTMLElement,
       )
       expect(menuText(menu)).toContain('Old archived')
       expect(menuText(menu)).toContain('Elder archived')
@@ -811,13 +828,13 @@ describe('SessionSelector — archived section unchanged', () => {
     expect(text).toContain('Archived (1)')
     expect(text).not.toContain('Old archived')
 
-    await click(Array.from(menu.querySelectorAll('button')).find((b) => b.textContent?.includes('Archived'))!)
+    await click(Array.from(menu.querySelectorAll('[role="menuitem"]')).find((b) => b.textContent?.includes('Archived'))! as HTMLElement)
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).toContain('Old archived')
   })
 })
 
-describe('SessionSelector — branch new-session button', () => {
+describe('SessionSelector — branch new-session action', () => {
   /** Two managed branches (feat-a newest) + a local row + an archived row. */
   const newSessionFixture = (): SessionRow[] => [
     makeSession({ id: 'm1', name: 'Feat A one', workspace_binding: managedBinding('feat-a'), last_active_at: new Date(NOW - 10_000).toISOString() }),
@@ -826,13 +843,13 @@ describe('SessionSelector — branch new-session button', () => {
     makeSession({ id: 'a1', name: 'Old archived', archived: true }),
   ]
 
-  /** The + action of one managed branch row — found by its full title. */
-  function newSessionButton(menu: HTMLElement, branch: string): HTMLButtonElement {
-    const btn = menu.querySelector<HTMLButtonElement>(
-      `button[title="New session in this worktree (${branch})"]`,
+  /** The + item of one managed branch row — found by its full title. */
+  function newSessionAction(menu: HTMLElement, branch: string): HTMLElement {
+    const btn = menu.querySelector<HTMLElement>(
+      `[role="menuitem"][title="New session in this worktree (${branch})"]`,
     )
     expect(btn, `new-session button for "${branch}"`).toBeTruthy()
-    return btn as HTMLButtonElement
+    return btn as HTMLElement
   }
 
   beforeEach(() => {
@@ -848,7 +865,7 @@ describe('SessionSelector — branch new-session button', () => {
     const menu = await openMenu(container)
 
     const buttons = Array.from(
-      menu.querySelectorAll<HTMLButtonElement>('button[title^="New session in this worktree"]'),
+      menu.querySelectorAll<HTMLElement>('[role="menuitem"][title^="New session in this worktree"]'),
     )
     // Exactly one per managed branch — the archived row, the local row and
     // every other row have none.
@@ -864,7 +881,7 @@ describe('SessionSelector — branch new-session button', () => {
     const menu = await openMenu(container)
 
     expect(
-      menu.querySelectorAll('button[title^="New session in this worktree"]'),
+      menu.querySelectorAll('[role="menuitem"][title^="New session in this worktree"]'),
     ).toHaveLength(0)
   })
 
@@ -875,7 +892,7 @@ describe('SessionSelector — branch new-session button', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    await click(newSessionButton(menu, 'feat-a'))
+    await click(newSessionAction(menu, 'feat-a'))
 
     // The menu closed so the chat area's draft state becomes visible...
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
@@ -897,12 +914,12 @@ describe('SessionSelector — branch new-session button', () => {
     let menu = await openMenu(container)
 
     // Collapse feat-a first: its member disappears.
-    await click(branchButton(menu, 'feat-a'))
+    await click(branchToggle(menu, 'feat-a'))
     menu = document.body.querySelector('[role="menu"]') as HTMLElement
     expect(menuText(menu)).not.toContain('Feat A one')
 
     // The + button stays reachable on the collapsed row and arms the draft...
-    await click(newSessionButton(menu, 'feat-a'))
+    await click(newSessionAction(menu, 'feat-a'))
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
     expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
       kind: 'branch',
@@ -914,5 +931,142 @@ describe('SessionSelector — branch new-session button', () => {
     // ...without touching the ephemeral collapse state.
     menu = await openMenu(container)
     expect(menuText(menu)).not.toContain('Feat A one')
+  })
+})
+
+describe('SessionSelector — keyboard reachability of the new controls', () => {
+  // 5 total sessions (the search input renders) with one managed branch, two
+  // local rows and an archived row: the grouping toggle, the Managed header,
+  // the branch toggle and its "+", the Local/Archived headers and the footer
+  // action all render as registered items.
+  const kbFixture = (): SessionRow[] => [
+    makeSession({ id: 'm1', name: 'Feat A one', workspace_binding: managedBinding('feat-a') }),
+    makeSession({ id: 'm2', name: 'Feat A two', workspace_binding: managedBinding('feat-a') }),
+    makeSession({ id: 'l1', name: 'Checkout one' }),
+    makeSession({ id: 'l2', name: 'Checkout two' }),
+    makeSession({ id: 'a1', name: 'Old work', archived: true }),
+  ]
+
+  /** Section header item by its exact label. */
+  function headerItem(m: HTMLElement, label: string): HTMLElement {
+    const el = Array.from(m.querySelectorAll('[role="menuitem"]')).find(
+      (item) => (item.textContent ?? '').trim() === label,
+    )
+    expect(el, `section header "${label}"`).toBeTruthy()
+    return el as HTMLElement
+  }
+
+  it('ArrowDown enters the collection at the grouping toggle and walks DOM order — toggle → Managed header', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = kbFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // Pointer-open leaves focus on the menu content itself; the first
+    // ArrowDown enters the roving collection at its FIRST item — the
+    // grouping toggle (the search input is not an item and is skipped).
+    await pressKey(menu, 'ArrowDown')
+    // Grouped mode is on, so the toggle advertises the flat switch.
+    const toggle = menu.querySelector<HTMLElement>('[role="menuitem"][title="Show flat list"]')!
+    expect(document.activeElement).toBe(toggle)
+
+    // Next in DOM order: the Managed section header — previously a plain
+    // button the arrows skipped entirely (Tab is prevented inside the menu).
+    await pressKey(toggle, 'ArrowDown')
+    expect(document.activeElement).toBe(headerItem(menu, 'Managed'))
+  })
+
+  it('Enter on the grouping toggle flips the mode without closing the menu', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = kbFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    await pressKey(menu, 'ArrowDown')
+    await pressKey(document.activeElement!, 'Enter')
+
+    // The menu is still open and the display mode flipped to flat.
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    expect(useUIStore.getState().sessionListGrouped).toBe(false)
+    expect(menuText(menu)).not.toContain('feat-a')
+    expect(menuText(menu)).toContain('Checkout one')
+  })
+
+  it('Enter on the Managed header collapses and re-expands the section — the menu stays open', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = kbFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // toggle → Managed header, then Enter to collapse.
+    await pressKey(menu, 'ArrowDown')
+    await pressKey(document.activeElement!, 'ArrowDown')
+    expect(document.activeElement).toBe(headerItem(menu, 'Managed'))
+    await pressKey(document.activeElement!, 'Enter')
+
+    expect(headerItem(menu, 'Managed').getAttribute('aria-expanded')).toBe('false')
+    expect(menuText(menu)).not.toContain('Feat A one')
+    // The Local section is untouched and the menu is still open.
+    expect(menuText(menu)).toContain('Checkout one')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+
+    // Enter again — the section re-expands (focus persisted through the
+    // header's in-place re-render).
+    await pressKey(document.activeElement!, 'Enter')
+    expect(menuText(menu)).toContain('Feat A one')
+  })
+
+  it('a branch group collapsed with the mouse is reachable and re-expandable from the keyboard', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = kbFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // Mouse: collapse feat-a.
+    await click(branchToggle(menu, 'feat-a'))
+    expect(menuText(menu)).not.toContain('Feat A one')
+
+    // Keyboard: toggle → Managed header → feat-a toggle (the collapsed row
+    // keeps its registered toggle and "+"), then Enter re-expands.
+    await pressKey(menu, 'ArrowDown')
+    await pressKey(document.activeElement!, 'ArrowDown')
+    await pressKey(document.activeElement!, 'ArrowDown')
+    expect(document.activeElement).toBe(branchToggle(menu, 'feat-a'))
+    await pressKey(document.activeElement!, 'Enter')
+
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    expect(menuText(menu)).toContain('Feat A one')
+    expect(menuText(menu)).toContain('Feat A two')
+  })
+
+  it('Enter on a branch "+" arms the branch draft and closes the menu', async () => {
+    // The real stores behind the branch-draft flow.
+    useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
+    useSessionDraftStore.getState().clearDraft()
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = kbFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // toggle → Managed header → feat-a toggle → feat-a "+".
+    await pressKey(menu, 'ArrowDown')
+    for (let i = 0; i < 3; i++) {
+      await pressKey(document.activeElement!, 'ArrowDown')
+    }
+    expect(document.activeElement?.getAttribute('title')).toBe('New session in this worktree (feat-a)')
+    await pressKey(document.activeElement!, 'Enter')
+
+    // The "+" select is NOT prevented — Radix's default close fires (and the
+    // onOpenChange path clears the search).
+    expect(document.body.querySelector('[role="menu"]')).toBeNull()
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'feat-a',
+      createBranch: false,
+      startPoint: '',
+    })
+    // The active selection was cleared (draft and selection are mutually
+    // exclusive — same contract as the click path).
+    expect(sessionMocks.selectSession).toHaveBeenCalledWith(null)
   })
 })

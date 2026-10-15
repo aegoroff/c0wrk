@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, GitBranch, Plus } from "lucide-react";
-import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
 import {
   LOCAL_SECTION_KEY,
@@ -70,13 +70,24 @@ export function SessionGroupedList({
               // below the row, still inside the keyed fragment.
               <Fragment key={key}>
                 <div className="flex w-full items-center pr-0.5">
-                  <button
-                    type="button"
+                  {/* The branch row is a flex wrapper holding TWO sibling menu
+                      items — the collapse toggle and the new-session action
+                      (interactive elements are never nested). Both are
+                      registered Radix items: arrow keys reach them, Enter/Space
+                      activate them. The toggle's onSelect preventDefaults so
+                      collapsing never dismisses the menu; the "+" select does
+                      NOT — Radix's default close is exactly what the action
+                      wants. */}
+                  <DropdownMenuItem
                     title={expanded ? "Hide branch sessions" : "Show branch sessions"}
                     className="flex min-w-0 flex-1 items-center gap-1 rounded-sm px-2 py-1 text-left text-sm hover:bg-muted/50"
                     aria-expanded={expanded}
                     aria-controls={sessionRegionId(key)}
-                    onClick={() => toggleSection(key)}
+                    onSelect={(event) => {
+                      // Keep the menu open — this item only flips the group.
+                      event.preventDefault();
+                      toggleSection(key);
+                    }}
                   >
                     {expanded ? (
                       <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
@@ -85,15 +96,14 @@ export function SessionGroupedList({
                     )}
                     <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 flex-1 truncate">{group.branch}</span>
-                  </button>
-                  <button
-                    type="button"
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     title={`New session in this worktree (${group.branch})`}
                     className="ml-0.5 shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted/50 active:bg-muted/30"
-                    onClick={() => onNewSessionOnBranch(group.branch)}
+                    onSelect={() => onNewSessionOnBranch(group.branch)}
                   >
                     <Plus className="size-3.5" />
-                  </button>
+                  </DropdownMenuItem>
                 </div>
                 {expanded && (
                   <div id={sessionRegionId(key)} role="presentation">
