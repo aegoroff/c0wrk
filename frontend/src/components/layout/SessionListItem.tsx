@@ -147,12 +147,17 @@ export interface SessionItemProps extends SessionItemCallbacks {
   isActive: boolean
   /** Outer element. 'dropdown' (DropdownMenuItem) or 'flat' (button). */
   variant?: 'dropdown' | 'flat'
+  /** Dropdown-only nesting cue: extra left padding for a session row rendered
+   *  INSIDE a branch group (SessionSelector grouped mode). Additive and
+   *  optional; ignored by variant='flat', so the CHAT-mode list is untouched. */
+  indented?: boolean
 }
 
 export function SessionItem({
   session,
   isActive,
   variant = 'dropdown',
+  indented = false,
   onSelect,
   onRename,
   onArchive,
@@ -185,7 +190,7 @@ export function SessionItem({
   }
 
   return (
-    <DropdownMenuItem className="group/item gap-2" onSelect={onSelect}>
+    <DropdownMenuItem className={cn('group/item gap-2', indented && 'pl-6')} onSelect={onSelect}>
       <SessionRowContent session={session} isActive={isActive} status={status} {...callbacks} />
     </DropdownMenuItem>
   )

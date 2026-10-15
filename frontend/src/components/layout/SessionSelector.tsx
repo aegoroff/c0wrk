@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUIStore } from "@/stores/uiStore";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -12,11 +13,14 @@ import { Button } from "@/components/ui/button";
 import {
   ChevronDown,
   ChevronRight,
+  GitBranch,
+  List,
   Plus,
 } from "lucide-react";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
+import { branchGroupKey, buildSessionGroups } from "@/lib/sessionGroups";
 
 /**
  * Dropdown session selector — used in CODE mode (a real project is active).
@@ -28,6 +32,9 @@ export function SessionSelector() {
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
+  // Grouped-by-branch display mode (persisted display-only flag in uiStore).
+  const sessionListGrouped = useUIStore((s) => s.sessionListGrouped);
+  const setSessionListGrouped = useUIStore((s) => s.setSessionListGrouped);
 
   const {
     createError,
@@ -54,9 +61,33 @@ export function SessionSelector() {
   // Archived sessions are collapsed by default; the header shows the count and
   // expands on click.
   const [archivedCollapsed, setArchivedCollapsed] = useState(true);
+  // Collapsed managed-branch groups (grouped mode). Ephemeral by design — the
+  // expand/collapse state lives only for this component's lifetime and resets
+  // on remount; keys are the stable `branch:<name>` collapse keys from
+  // lib/sessionGroups.
+  const [collapsedBranches, setCollapsedBranches] = useState<ReadonlySet<string>>(new Set());
 
   const activeSessionsList = useMemo(() => (sessions ?? []).filter((s) => !s.archived), [sessions]);
   const archivedList = useMemo(() => (sessions ?? []).filter((s) => s.archived), [sessions]);
+
+  // Grouping model (grouped mode only, but cheap enough to always compute):
+  // classification + ordering live entirely in lib/sessionGroups; the search
+  // filter there hides groups left without members.
+  const groups = useMemo(() => buildSessionGroups(sessions ?? [], { search }), [sessions, search]);
+  const searchActive = search.trim() !== "";
+  // Managed/Local section headers only render when BOTH sections are
+  // non-empty — a lone Local section IS the current flat view, and a lone
+  // Managed section speaks for itself through its branch rows.
+  const showSectionHeaders = groups.managed.length > 0 && groups.local.length > 0;
+
+  const toggleBranchGroup = useCallback((key: string) => {
+    setCollapsedBranches((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   const totalCount = activeSessionsList.length + archivedList.length;
   const showSearch = totalCount >= 5;
@@ -89,11 +120,12 @@ export function SessionSelector() {
     );
   }
 
-  const renderSessionItem = (session: SessionItemSummary) => (
+  const renderSessionItem = (session: SessionItemSummary, opts?: { indented?: boolean }) => (
     <SessionItem
       key={session.id}
       session={session}
       isActive={session.id === activeSessionId}
+      indented={opts?.indented}
       onSelect={() => {
         selectSession(session.id, session.project_id);
         setDropdownOpen(false);
@@ -108,6 +140,48 @@ export function SessionSelector() {
 
   const visibleActive = activeSessionsList.filter((s) => filterFn(s.name));
   const visibleArchived = archivedList.filter((s) => filterFn(s.name));
+
+  /**
+   * Grouped mode: Managed branch groups (each a GitBranch header row that
+   * collapses/expands its member sessions) then the Local section. The
+   * headers themselves render only when both sections are non-empty (see
+   * {@link showSectionHeaders}); an active search force-expands every group
+   * so matches inside a collapsed group stay reachable.
+   */
+  const renderGroupedList = () => (
+    <>
+      {showSectionHeaders && (
+        <div className="px-2 py-1 text-xs font-medium text-muted-foreground">Managed</div>
+      )}
+      {groups.managed.map((group) => {
+        const key = branchGroupKey(group.branch);
+        const expanded = searchActive || !collapsedBranches.has(key);
+        return (
+          <div key={key}>
+            <button
+              type="button"
+              title={expanded ? "Hide branch sessions" : "Show branch sessions"}
+              className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-left text-sm hover:bg-muted/50"
+              onClick={() => toggleBranchGroup(key)}
+            >
+              {expanded ? (
+                <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+              )}
+              <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{group.branch}</span>
+            </button>
+            {expanded && group.sessions.map((s) => renderSessionItem(s, { indented: true }))}
+          </div>
+        );
+      })}
+      {showSectionHeaders && (
+        <div className="px-2 py-1 text-xs font-medium text-muted-foreground">Local</div>
+      )}
+      {groups.local.map((s) => renderSessionItem(s))}
+    </>
+  );
 
   return (
     <div className="border-b border-border px-2 py-1">
@@ -130,6 +204,19 @@ export function SessionSelector() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-96">
+            {/* Grouped-by-branch mode toggle. A plain button on purpose (not a
+                DropdownMenuItem): flipping the display mode must not dismiss
+                the menu. The icon shows the mode you switch TO. */}
+            <div className="flex items-center justify-end px-1 pb-0.5">
+              <button
+                type="button"
+                title={sessionListGrouped ? "Show flat list" : "Group sessions by branch"}
+                className="rounded p-1 text-muted-foreground hover:bg-muted/50"
+                onClick={() => setSessionListGrouped(!sessionListGrouped)}
+              >
+                {sessionListGrouped ? <List className="size-3.5" /> : <GitBranch className="size-3.5" />}
+              </button>
+            </div>
             {showSearch && (
               <>
                 <div className="px-2 py-1">
@@ -145,7 +232,7 @@ export function SessionSelector() {
               </>
             )}
 
-            {visibleActive.map(renderSessionItem)}
+            {sessionListGrouped ? renderGroupedList() : visibleActive.map((s) => renderSessionItem(s))}
 
             {visibleArchived.length > 0 && (
               <>
@@ -163,7 +250,7 @@ export function SessionSelector() {
                   )}
                   Archived ({visibleArchived.length})
                 </button>
-                {!archivedCollapsed && visibleArchived.map(renderSessionItem)}
+                {!archivedCollapsed && visibleArchived.map((s) => renderSessionItem(s))}
               </>
             )}
 
