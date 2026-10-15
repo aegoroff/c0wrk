@@ -67,7 +67,10 @@ var gpuDmabufFailureSignatures = []string{
 // never, and relaunches the app so the fresh instance starts on the safe
 // policy. Detection covers FRESH auto only — an explicit user choice (setting
 // or env) is never second-guessed, and an instance that already fell back has
-// nothing left to detect.
+// nothing left to detect. The fresh-auto condition is re-checked under the
+// RMW lock at write time: a Settings choice landing inside the detection
+// window suppresses the fallback record (the relaunch still runs — the
+// explicit choice applies on the fresh instance).
 type webviewGpuWatchdog struct {
 	agentDir    string
 	logger      *slog.Logger
@@ -176,7 +179,20 @@ func (w *webviewGpuWatchdog) check() bool {
 	// concurrently (Settings RPC) can neither be clobbered by this write
 	// nor wipe the fallback before it lands.
 	detectedAt := w.now().UTC().Format(time.RFC3339)
+	skipFallback := false
 	if err := w.updateState(func(state *backend.WebviewGpuState) {
+		// Re-check fresh-auto under the RMW lock: the arm-time snapshot may
+		// be stale — a Settings choice can land inside the detection window.
+		// The user's explicit choice rules: writing the fallback anyway would
+		// create an inert record ResolveWebviewGpuPolicy ignores while the UI
+		// keeps showing the auto-disabled banner. The relaunch below still
+		// runs either way — this instance is stuck on the failed accelerated
+		// resolution, and the fresh one applies the explicit setting (its own
+		// watchdog disarms for a non-auto setting, so there is no loop).
+		if state.Setting() != backend.WebviewGpuPolicyAuto {
+			skipFallback = true
+			return
+		}
 		state.AutoFallback = &backend.WebviewGpuAutoFallback{
 			Policy:     backend.WebviewGpuPolicyNever,
 			Reason:     backend.GpuFallbackReasonDmabufFailure,
@@ -189,15 +205,26 @@ func (w *webviewGpuWatchdog) check() bool {
 		return true
 	}
 	if err := w.relaunch(); err != nil {
-		// The fallback is persisted, so the next start is safe; keep this
-		// instance alive rather than killing the session over a spawn
-		// failure (the current window may stay blank until a manual restart).
-		w.logger.Error("webview GPU fallback: relaunch failed; the fallback applies on the next start",
-			"error", err)
+		// Keep this instance alive rather than killing the session over a
+		// spawn failure: with the fallback persisted the next start is safe,
+		// and with the explicit setting the fresh start applies it — the
+		// current window may stay blank until a manual restart either way.
+		if skipFallback {
+			w.logger.Error("webview GPU fallback: relaunch failed; restart manually to apply the explicit setting",
+				"error", err)
+		} else {
+			w.logger.Error("webview GPU fallback: relaunch failed; the fallback applies on the next start",
+				"error", err)
+		}
 		return true
 	}
-	w.logger.Info("webview GPU fallback: relaunching with software rendering",
-		"reason", backend.GpuFallbackReasonDmabufFailure)
+	if skipFallback {
+		w.logger.Info("webview GPU fallback: the setting left auto during detection; relaunching on the user's explicit choice",
+			"reason", backend.GpuFallbackReasonDmabufFailure)
+	} else {
+		w.logger.Info("webview GPU fallback: relaunching with software rendering",
+			"reason", backend.GpuFallbackReasonDmabufFailure)
+	}
 	w.quit()
 	return true
 }

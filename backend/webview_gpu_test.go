@@ -228,36 +228,41 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 
 	t.Run("unset env + no setting = auto", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
-		policy, source := DeriveWebviewGpuRun(agentDir, nil)
-		if policy != WebviewGpuPolicyOnDemand || source != WebviewGpuSourceAuto {
-			t.Fatalf("got %q/%q, want on-demand/auto", policy, source)
+		run := DeriveWebviewGpuRun(agentDir, nil)
+		if run.Policy != WebviewGpuPolicyOnDemand || run.Source != WebviewGpuSourceAuto || run.Setting != WebviewGpuPolicyAuto {
+			t.Fatalf("got %+v, want on-demand/auto/auto", run)
 		}
 	})
 
 	t.Run("valid env wins over setting and fallback", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "never")
 		writeState(t, WebviewGpuState{GPUPolicy: WebviewGpuPolicyAlways, AutoFallback: dmabufFallbackFixture()})
-		policy, source := DeriveWebviewGpuRun(agentDir, nil)
-		if policy != WebviewGpuPolicyNever || source != WebviewGpuSourceEnv {
-			t.Fatalf("got %q/%q, want never/env", policy, source)
+		run := DeriveWebviewGpuRun(agentDir, nil)
+		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceEnv {
+			t.Fatalf("got %+v, want never/env", run)
+		}
+		// The consumed setting rides along even when the env override wins —
+		// the startup Debug log reports it without a second state-file read.
+		if run.Setting != WebviewGpuPolicyAlways {
+			t.Fatalf("Setting = %q, want always", run.Setting)
 		}
 	})
 
 	t.Run("invalid env falls through to the setting", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "  turbo ")
 		writeState(t, WebviewGpuState{GPUPolicy: WebviewGpuPolicyNever})
-		policy, source := DeriveWebviewGpuRun(agentDir, nil)
-		if policy != WebviewGpuPolicyNever || source != WebviewGpuSourceSetting {
-			t.Fatalf("got %q/%q, want never/setting", policy, source)
+		run := DeriveWebviewGpuRun(agentDir, nil)
+		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceSetting || run.Setting != WebviewGpuPolicyNever {
+			t.Fatalf("got %+v, want never/setting/never", run)
 		}
 	})
 
 	t.Run("auto + fallback", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
 		writeState(t, WebviewGpuState{AutoFallback: dmabufFallbackFixture()})
-		policy, source := DeriveWebviewGpuRun(agentDir, nil)
-		if policy != WebviewGpuPolicyNever || source != WebviewGpuSourceAutoFallback {
-			t.Fatalf("got %q/%q, want never/auto-fallback", policy, source)
+		run := DeriveWebviewGpuRun(agentDir, nil)
+		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceAutoFallback || run.Setting != WebviewGpuPolicyAuto {
+			t.Fatalf("got %+v, want never/auto-fallback/auto", run)
 		}
 	})
 }

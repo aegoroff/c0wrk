@@ -602,7 +602,8 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// Derive the webview GPU run snapshot inside the same critical section
 	// (issue #34): the running policy must reflect the state file as it was
 	// at launch, not after any Settings write.
-	f.webviewGpuRunning, f.webviewGpuRunningSource = DeriveWebviewGpuRun(cfg.AgentDir, f.logger)
+	run := DeriveWebviewGpuRun(cfg.AgentDir, f.logger)
+	f.webviewGpuRunning, f.webviewGpuRunningSource = run.Policy, run.Source
 	f.terminalManager = cfg.TerminalManager
 	f.emitEvent = cfg.EmitEvent
 	f.appCtx = cfg.AppCtx

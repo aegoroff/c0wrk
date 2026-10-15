@@ -82,6 +82,9 @@ Watchdog (armed ONLY for fresh auto with an accelerated resolution):
         ▼
   persist auto_fallback → relaunch detached (child waits for the
   advisory lock release via C0WRK_GPU_RELAUNCH_WAIT_LOCK) → quit
+        │ setting left auto during the window (a Settings write
+        │  landed under the RMW lock) → NO fallback record,
+        │  the relaunch still runs
         │ persist failed → NO relaunch (fail-safe against a loop)
         ▼
   fresh instance: auto + fallback → never (software rendering)
@@ -93,9 +96,9 @@ Watchdog (armed ONLY for fresh auto with an accelerated resolution):
 - The default resolution is `auto` → `on-demand`, the WebKit default; `never` applies only through an explicit choice or the watchdog fallback. Passing the Linux options explicitly pins the rendering against a future Wails default change.
 - `wailsWebviewGpuPolicy` is the single place aware of the v2.16.0 Go-enum/C-layer mismatch (`linux.go`: OnDemand=0, Always=1, Never=2 vs `window.c` `SetupWebview`: 0→ALWAYS, 1→ON_DEMAND, 2→NEVER); like-named constants are deliberately NOT used there, and the mapping yields the C-layer integer that selects the WebKit policy matching the canonical name.
 - Tests pin the compensation by C-layer numeric value (`0/1/2`), and an enum-order canary (`TestWailsWebviewGpuPolicyEnumOrderCanary`) pins the Go enum's numeric order — so a Wails upgrade that reorders either side fails the desktop test suite loudly instead of silently swapping `always`/`on-demand` at runtime.
-- The watchdog arms ONLY for fresh `auto` with an accelerated resolution: an explicit setting or env value is never second-guessed, an already-fallen-back instance has nothing left to detect, and non-Linux never arms. An invalid env value keeps detection armed (a typo is not an explicit choice).
+- The watchdog arms ONLY for fresh `auto` with an accelerated resolution: an explicit setting or env value is never second-guessed, an already-fallen-back instance has nothing left to detect, and non-Linux never arms. An invalid env value keeps detection armed (a typo is not an explicit choice). The fresh-auto condition is re-checked under the RMW lock at write time: a Settings choice landing inside the detection window suppresses the fallback record — writing it anyway would create a record `ResolveWebviewGpuPolicy` ignores while the UI keeps showing the auto-disabled banner. The relaunch still runs: the running instance is stuck on the failed accelerated resolution, and the fresh one applies the explicit choice (its own watchdog disarms for a non-auto setting — no relaunch loop).
 - Detection scans only the bytes appended to stderr.log AFTER the arm-time offset (this run's output; the file is append-only and rotates only at install time), within a bounded startup window after DomReady (2 s interval, 30 s deadline). The grey window is a first-paint buffer-allocation failure; an unbounded scan would risk a hostile self-relaunch while the user works.
-- The fallback persists BEFORE the relaunch. A failed persist NEVER relaunches — the fresh instance would resolve the accelerated policy again and grey-window in a loop. A failed relaunch quits nothing: the fallback is already persisted, the next start is safe, and the user keeps a live session.
+- The fallback persists BEFORE the relaunch. A failed persist NEVER relaunches — the fresh instance would resolve the accelerated policy again and grey-window in a loop. A failed relaunch quits nothing: the fallback is already persisted, the next start is safe, and the user keeps a live session (with the record suppressed by a concurrent explicit choice, the next start applies that choice instead — equally safe).
 - The relaunched child carries `C0WRK_GPU_RELAUNCH_WAIT_LOCK=1` and waits (bounded, fail-open) for the previous instance's advisory lock to release before starting up — the spawn-then-quit ordering cannot race the fresh instance into the Wails single-instance relay.
 - The fallback is sticky until the user acts: ANY `SetWebviewGpuPolicy` clears it — a concrete value pins itself, re-choosing `auto` is the retry action, and the watchdog re-arms for the next launch.
 - `RestartRequired` in the RPC report is always false while the running policy came from the env source: the override wins on the next launch too, so no restart could apply a change.

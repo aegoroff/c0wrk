@@ -209,17 +209,35 @@ func UpdateWebviewGpuState(agentDir string, logger *slog.Logger, mutate func(*We
 	return SaveWebviewGpuState(agentDir, state)
 }
 
+// WebviewGpuRun is a fresh launch's webview GPU resolution, as returned by
+// DeriveWebviewGpuRun.
+type WebviewGpuRun struct {
+	// Policy is the canonical effective policy; Source the layer that
+	// decided it (env | setting | auto | auto-fallback).
+	Policy string
+	Source string
+	// Setting is the canonical persisted setting the resolution consumed
+	// ("auto" when nothing was chosen or the persisted value is unparsable).
+	// Informational — the startup Debug log reports it — and deliberately
+	// returned here so consumers never re-read webview_state.json just to
+	// log it.
+	Setting string
+}
+
 // DeriveWebviewGpuRun resolves the effective policy and its deciding layer
 // for a fresh launch: a valid env override wins, otherwise the persisted
 // setting (with its auto resolution). This is the single formula both
 // consumers share — desktop's wails.Run options and Init's running-policy
-// snapshot for the Settings RPCs.
-func DeriveWebviewGpuRun(agentDir string, logger *slog.Logger) (policy, source string) {
+// snapshot for the Settings RPCs — and the launch's single read of
+// webview_state.json: the consumed setting rides along in the result.
+func DeriveWebviewGpuRun(agentDir string, logger *slog.Logger) WebviewGpuRun {
 	state := LoadWebviewGpuState(agentDir, logger)
+	setting := state.Setting()
 	if raw := os.Getenv(WebviewGpuPolicyEnvVar); strings.TrimSpace(raw) != "" {
 		if p, err := NormalizeWebviewGpuPolicy(raw); err == nil {
-			return p, WebviewGpuSourceEnv
+			return WebviewGpuRun{Policy: p, Source: WebviewGpuSourceEnv, Setting: setting}
 		}
 	}
-	return ResolveWebviewGpuPolicy(state.Setting(), state.FallbackActive())
+	policy, source := ResolveWebviewGpuPolicy(setting, state.FallbackActive())
+	return WebviewGpuRun{Policy: policy, Source: source, Setting: setting}
 }

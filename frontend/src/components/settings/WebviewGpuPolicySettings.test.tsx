@@ -16,6 +16,8 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }))
 
+import { logger } from '@/lib/logger'
+
 import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 
 function makeInfo(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
@@ -40,6 +42,7 @@ describe('WebviewGpuPolicySettings', () => {
     root = createRoot(container)
     getPolicyMock.mockReset()
     setPolicyMock.mockReset()
+    vi.mocked(logger.error).mockClear()
   })
 
   afterEach(() => {
@@ -137,5 +140,26 @@ describe('WebviewGpuPolicySettings', () => {
     })
     // Buttons still render (auto selected by default display state); no crash.
     expect(container.querySelector('[data-testid="webview-gpu-never"]')).not.toBeNull()
+  })
+
+  it('logs a failed set exactly once — the component is the single logging site', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64')
+    getPolicyMock.mockResolvedValue(makeInfo())
+    setPolicyMock.mockRejectedValue(new Error('persist failed'))
+    render()
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const neverButton = container.querySelector('[data-testid="webview-gpu-never"]') as HTMLButtonElement
+    await act(async () => {
+      neverButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
+    // The api layer propagates the rejection without logging it; the
+    // component's catch is the one diagnostic a failed choice produces.
+    expect(vi.mocked(logger.error)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Failed to set webview GPU policy:', expect.any(Error))
   })
 })

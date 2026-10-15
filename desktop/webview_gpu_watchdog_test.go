@@ -190,6 +190,29 @@ func TestWatchdogCheckRelaunchFailureKeepsRunning(t *testing.T) {
 	}
 }
 
+func TestWatchdogCheckSkipsFallbackForExplicitSetting(t *testing.T) {
+	w, events, persisted := newTestWatchdog(t,
+		[]string{"Failed to create EGL images for DMABufs"}, nil, nil)
+	// A Settings write landed inside the detection window: the state the
+	// mutate observes under the RMW lock is no longer auto. Writing the
+	// fallback anyway would create an inert record the resolver ignores
+	// while the UI keeps showing the auto-disabled banner.
+	*persisted = backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyNever}
+
+	if !w.check() {
+		t.Fatal("check = false, want true (decision made)")
+	}
+	// persist → relaunch → quit: the running instance is stuck on the failed
+	// accelerated resolution, and the fresh one applies the explicit setting
+	// (its own watchdog disarms for a non-auto setting — no relaunch loop).
+	if want := []string{"persist", "relaunch", "quit"}; strings.Join(*events, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", *events, want)
+	}
+	if persisted.AutoFallback != nil {
+		t.Fatalf("an inert fallback record was written despite the explicit setting: %+v", persisted.AutoFallback)
+	}
+}
+
 // dmabufFallbackFixture mirrors the watchdog's fallback record shape.
 func dmabufFallbackFixture() *backend.WebviewGpuAutoFallback {
 	return &backend.WebviewGpuAutoFallback{

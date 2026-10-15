@@ -1,7 +1,6 @@
 // Webview GPU-policy API (issue #34) — Linux-only webview hardware-acceleration
 // setting, persisted in webview_state.json and consumed at webview creation.
 
-import { logger } from '@/lib/logger'
 import { getApp } from './runtime'
 
 export type WebviewGpuPolicySetting = 'auto' | 'always' | 'on-demand' | 'never'
@@ -55,13 +54,13 @@ export function getWebviewGpuPolicy(): Promise<WebviewGpuPolicyInfo> {
  * Persists the user's choice. Any explicit choice clears the watchdog
  * fallback: a concrete policy pins itself, and re-choosing auto is the
  * "retry accelerated rendering" action. Applies on the next app start.
+ *
+ * Rejection propagation only — the calling component owns error logging,
+ * exactly like getWebviewGpuPolicy (a single diagnostic per failed call).
  */
 export function setWebviewGpuPolicy(setting: WebviewGpuPolicySetting): Promise<WebviewGpuPolicyInfo> {
   if (!WEBVIEW_GPU_SETTINGS.includes(setting)) {
     return Promise.reject(new Error(`unknown webview GPU policy setting: ${setting}`))
   }
-  return callApp('SetWebviewGpuPolicy', isWebviewGpuPolicyInfo, setting).catch((err) => {
-    logger.error('SetWebviewGpuPolicy failed:', err)
-    throw err
-  })
+  return callApp('SetWebviewGpuPolicy', isWebviewGpuPolicyInfo, setting)
 }

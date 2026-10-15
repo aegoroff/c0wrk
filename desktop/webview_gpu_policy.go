@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 
@@ -93,22 +94,24 @@ func webviewGpuPolicyOptions(goos, agentDir string, logger *slog.Logger) *linux.
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if goos != "linux" {
-		if raw := os.Getenv(backend.WebviewGpuPolicyEnvVar); raw != "" {
+		if raw := os.Getenv(backend.WebviewGpuPolicyEnvVar); strings.TrimSpace(raw) != "" {
 			logger.Debug("webview GPU policy override ignored: Linux-only option",
 				"env", backend.WebviewGpuPolicyEnvVar, "value", raw, "goos", goos)
 		}
 		return nil
 	}
-	policy, source := backend.DeriveWebviewGpuRun(agentDir, logger)
-	resolved := webviewGpuPolicyFromCanonical(policy)
-	switch source {
+	// Single launch-time read of the state file: the consumed setting rides
+	// along in the result, so the Debug record below needs no second load
+	// (a second read could also observe a state file the first did not).
+	run := backend.DeriveWebviewGpuRun(agentDir, logger)
+	resolved := webviewGpuPolicyFromCanonical(run.Policy)
+	switch run.Source {
 	case backend.WebviewGpuSourceEnv:
 		logger.Info("webview GPU policy override",
-			"env", backend.WebviewGpuPolicyEnvVar, "value", policy)
+			"env", backend.WebviewGpuPolicyEnvVar, "value", run.Policy)
 	default:
-		setting := backend.LoadWebviewGpuState(agentDir, logger).Setting()
 		logger.Debug("webview GPU policy resolved",
-			"policy", policy, "source", source, "setting", setting)
+			"policy", run.Policy, "source", run.Source, "setting", run.Setting)
 	}
 	return &linux.Options{WebviewGpuPolicy: resolved.wailsWebviewGpuPolicy()}
 }
