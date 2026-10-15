@@ -1,6 +1,8 @@
 package desktop
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"github.com/v0lka/c0wrk/backend"
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/crashlog"
+	"github.com/v0lka/c0wrk/backend/session"
 )
 
 func TestScanStderrTailHonorsOffset(t *testing.T) {
@@ -99,7 +102,10 @@ func TestScanStderrTailMissingFileAndTailCap(t *testing.T) {
 func newTestWatchdog(t *testing.T, matched []string, persistErr, relaunchErr error) (*webviewGpuWatchdog, *[]string, *backend.WebviewGpuState) {
 	t.Helper()
 	var events []string
-	var persisted backend.WebviewGpuState
+	// Seed the persisted state the way a real load would (fresh auto), then
+	// let the watchdog's mutate land on it — mirroring the production
+	// load-modify-save inside backend.UpdateWebviewGpuState.
+	persisted := backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto}
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	w := &webviewGpuWatchdog{
 		agentDir:   t.TempDir(),
@@ -107,12 +113,9 @@ func newTestWatchdog(t *testing.T, matched []string, persistErr, relaunchErr err
 		stderrPath: filepath.Join(t.TempDir(), "stderr.log"),
 		nowFn:      func() time.Time { return now },
 		scanTailFn: func(string, int64) []string { return matched },
-		loadFn: func(string, *slog.Logger) backend.WebviewGpuState {
-			return backend.WebviewGpuState{GPUPolicy: backend.WebviewGpuPolicyAuto}
-		},
-		persistFn: func(_ string, st backend.WebviewGpuState, _ *slog.Logger) error {
+		updateFn: func(mutate func(*backend.WebviewGpuState)) error {
 			events = append(events, "persist")
-			persisted = st
+			mutate(&persisted)
 			return persistErr
 		},
 		relaunchFn: func(*slog.Logger) error {
@@ -284,5 +287,82 @@ func TestWaitForInstanceLockRelease(t *testing.T) {
 	}
 	if !WaitForInstanceLockRelease(path, time.Second) {
 		t.Fatal("expected success after the holder released")
+	}
+}
+
+// TestWebviewGpuWatchdogQuitBypassesCloseGuard pins the relaunch quit's
+// interaction with the exit guard: the quit the watchdog issues after a
+// successful relaunch must NOT be intercepted by ShouldPreventClose — the
+// confirmation modal lives in the grey webview being replaced, so an
+// intercepted fallback quit would strand an unanswerable dialog and cancel
+// the auto-recovery. startWebviewGpuWatchdog wires w.quitFn to
+// a.gpuFallbackQuit; the pre-set started flag keeps start() from spawning
+// the scanner goroutine in this test.
+func TestWebviewGpuWatchdogQuitBypassesCloseGuard(t *testing.T) {
+	f := newExitGuardFixture([]session.ActiveSessionInfo{{ID: "sess-1"}})
+	// Intercept the instance logger: the paths under test announce their
+	// decisions at Info, and that output must not leak into the test run
+	// (asserted below instead).
+	var logs bytes.Buffer
+	f.app.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Without the bypass the guard intercepts (and would render the modal
+	// into the webview the watchdog is about to replace).
+	if !f.app.ShouldPreventClose(context.Background()) {
+		t.Fatal("expected the guard to intercept a plain quit while a session is active")
+	}
+
+	w := &webviewGpuWatchdog{}
+	w.started.Store(true) // start() must not spawn the scanner goroutine here
+	f.app.webviewGpuWatchdog = w
+	f.app.startWebviewGpuWatchdog()
+	if w.quitFn == nil {
+		t.Fatal("startWebviewGpuWatchdog did not wire the quit path")
+	}
+
+	w.quitFn()
+	if !f.app.exitConfirmed.Load() {
+		t.Error("expected the fallback quit to arm the close-guard bypass")
+	}
+	if f.quitCalls != 1 {
+		t.Errorf("expected exactly one quit call, got %d", f.quitCalls)
+	}
+	if !strings.Contains(logs.String(), "webview GPU fallback: quitting for the relaunched instance") {
+		t.Errorf("expected the fallback-quit Info record, got:\n%s", logs.String())
+	}
+	if f.app.ShouldPreventClose(context.Background()) {
+		t.Error("expected the fallback quit to pass the close guard")
+	}
+	if len(f.emitted) != 1 {
+		t.Errorf("expected no additional exit_requested events, got %v", f.emitted)
+	}
+}
+
+// TestGpuFallbackQuitNoContextDoesNotArmBypass pins the guard-rail of the
+// bypass invariant: without a live Wails context there is no quit, so the
+// bypass flag must stay unarmed (a stale armed flag would silently disable
+// the close guard for the rest of the process).
+func TestGpuFallbackQuitNoContextDoesNotArmBypass(t *testing.T) {
+	app := NewApp()
+	quitCalls := 0
+	app.quitFn = func(context.Context) { quitCalls++ }
+	// The guard-rail path announces its refusal at Error — intercepted here
+	// and asserted, never leaked into the test output.
+	var logs bytes.Buffer
+	app.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	app.gpuFallbackQuit()
+
+	if app.exitConfirmed.Load() {
+		t.Error("the bypass flag must not be armed without a Wails context")
+	}
+	if quitCalls != 0 {
+		t.Errorf("expected no quit call, got %d", quitCalls)
+	}
+	if n := strings.Count(logs.String(), "level=ERROR"); n != 1 {
+		t.Errorf("expected exactly one ERROR record, got %d:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "webview GPU fallback: no Wails context; cannot quit for the relaunch") {
+		t.Errorf("expected the no-context refusal message, got:\n%s", logs.String())
 	}
 }

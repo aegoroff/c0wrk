@@ -45,10 +45,14 @@ func (f *FrontendAPI) SetWebviewGpuPolicy(setting string) (WebviewGpuPolicyInfo,
 	if err != nil {
 		return WebviewGpuPolicyInfo{}, err
 	}
-	state := LoadWebviewGpuState(f.agentDir, f.logger)
-	state.GPUPolicy = normalized
-	state.AutoFallback = nil
-	if err := SaveWebviewGpuState(f.agentDir, state); err != nil {
+	// The RMW runs under the webview_state lock, serialized against the
+	// watchdog's fallback persist: both writers rewrite the whole file, and
+	// an unlocked last-writer-wins could drop either side's change.
+	err = UpdateWebviewGpuState(f.agentDir, f.logger, func(state *WebviewGpuState) {
+		state.GPUPolicy = normalized
+		state.AutoFallback = nil
+	})
+	if err != nil {
 		return WebviewGpuPolicyInfo{}, err
 	}
 	f.log().Info("webview GPU policy setting changed", "setting", normalized)

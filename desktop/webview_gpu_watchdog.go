@@ -77,8 +77,7 @@ type webviewGpuWatchdog struct {
 
 	// Seams for tests; nil means the production implementation.
 	scanTailFn func(path string, offset int64) []string
-	loadFn     func(agentDir string, logger *slog.Logger) backend.WebviewGpuState
-	persistFn  func(agentDir string, st backend.WebviewGpuState, logger *slog.Logger) error
+	updateFn   func(mutate func(*backend.WebviewGpuState)) error
 	relaunchFn func(logger *slog.Logger) error
 	nowFn      func() time.Time
 	quitFn     func()
@@ -169,17 +168,21 @@ func (w *webviewGpuWatchdog) check() bool {
 	w.logger.Warn("webview GPU fallback: DMABUF renderer failure detected; pinning auto to software rendering",
 		"signatures", matched, "stderr", w.stderrPath)
 
-	state := w.loadState()
-	state.AutoFallback = &backend.WebviewGpuAutoFallback{
-		Policy:     backend.WebviewGpuPolicyNever,
-		Reason:     backend.GpuFallbackReasonDmabufFailure,
-		DetectedAt: w.now().UTC().Format(time.RFC3339),
-	}
 	// Persist BEFORE relaunching: the fallback record is what makes the
 	// fresh instance resolve auto to never. A failed persist must not
 	// relaunch — the fresh instance would resolve the accelerated policy
-	// again and grey-window in a loop.
-	if err := w.persist(state); err != nil {
+	// again and grey-window in a loop. The load-modify-save runs under
+	// backend's webview_state RMW lock, so a user choice landing
+	// concurrently (Settings RPC) can neither be clobbered by this write
+	// nor wipe the fallback before it lands.
+	detectedAt := w.now().UTC().Format(time.RFC3339)
+	if err := w.updateState(func(state *backend.WebviewGpuState) {
+		state.AutoFallback = &backend.WebviewGpuAutoFallback{
+			Policy:     backend.WebviewGpuPolicyNever,
+			Reason:     backend.GpuFallbackReasonDmabufFailure,
+			DetectedAt: detectedAt,
+		}
+	}); err != nil {
 		w.logger.Error("webview GPU fallback: persisting fallback state failed; NOT relaunching "+
 			"(the relaunched instance would resolve the accelerated policy again)",
 			"error", err)
@@ -206,18 +209,15 @@ func (w *webviewGpuWatchdog) scanTail() []string {
 	return scanStderrTail(w.stderrPath, w.startOffset)
 }
 
-func (w *webviewGpuWatchdog) loadState() backend.WebviewGpuState {
-	if w.loadFn != nil {
-		return w.loadFn(w.agentDir, w.logger)
+// updateState persists the fallback record through backend's serialized
+// webview-state update: the whole load-modify-save cycle is atomic with
+// respect to the Settings RPC's SetWebviewGpuPolicy (both writers rewrite the
+// whole file — see backend.UpdateWebviewGpuState).
+func (w *webviewGpuWatchdog) updateState(mutate func(*backend.WebviewGpuState)) error {
+	if w.updateFn != nil {
+		return w.updateFn(mutate)
 	}
-	return backend.LoadWebviewGpuState(w.agentDir, w.logger)
-}
-
-func (w *webviewGpuWatchdog) persist(state backend.WebviewGpuState) error {
-	if w.persistFn != nil {
-		return w.persistFn(w.agentDir, state, w.logger)
-	}
-	return backend.SaveWebviewGpuState(w.agentDir, state)
+	return backend.UpdateWebviewGpuState(w.agentDir, w.logger, mutate)
 }
 
 func (w *webviewGpuWatchdog) relaunch() error {

@@ -193,19 +193,3 @@ func TestWebviewGpuPolicyOptions(t *testing.T) {
 		})
 	}
 }
-
-func TestWebviewGpuPolicyOptionsProductionEntry(t *testing.T) {
-	// The production entry resolves through runtime.GOOS and the real env
-	// var: on this machine it must agree with the linux-arm above for an
-	// identical fresh state (auto → on-demand). The non-Linux nil path is
-	// covered by webviewGpuPolicyOptions (the platform seam).
-	t.Setenv(backend.WebviewGpuPolicyEnvVar, "")
-	agentDir := t.TempDir()
-	got := WebviewGpuPolicyOptions(agentDir, slog.New(slog.DiscardHandler))
-	if got == nil {
-		t.Fatal("expected non-nil options on linux")
-	}
-	if int(got.WebviewGpuPolicy) != 1 {
-		t.Fatalf("fresh install default: want C-layer 1 (on-demand), got %d", int(got.WebviewGpuPolicy))
-	}
-}

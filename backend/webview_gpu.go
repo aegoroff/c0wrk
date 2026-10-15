@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/sp4rk/safeio"
@@ -186,6 +187,26 @@ func SaveWebviewGpuState(agentDir string, st WebviewGpuState) error {
 		return err
 	}
 	return safeio.WriteFileAtomic(config.WebviewStatePath(agentDir), data, 0o600)
+}
+
+// webviewGpuStateMu serializes read-modify-write cycles on webview_state.json.
+// Two independent writers RMW the whole file — the Settings RPC
+// (SetWebviewGpuPolicy) and the desktop watchdog's fallback persist — and both
+// go through UpdateWebviewGpuState, so a user choice landing between the
+// watchdog's load and save can neither be clobbered by it nor wipe the
+// fallback a moment before it is written back. Plain Load/Save callers stay
+// lock-free: SaveWebviewGpuState replaces the file atomically, so readers
+// always observe one complete state.
+var webviewGpuStateMu sync.Mutex
+
+// UpdateWebviewGpuState applies mutate to the freshly loaded state and saves
+// the result atomically, under the webview_state.json RMW lock.
+func UpdateWebviewGpuState(agentDir string, logger *slog.Logger, mutate func(*WebviewGpuState)) error {
+	webviewGpuStateMu.Lock()
+	defer webviewGpuStateMu.Unlock()
+	state := LoadWebviewGpuState(agentDir, logger)
+	mutate(&state)
+	return SaveWebviewGpuState(agentDir, state)
 }
 
 // DeriveWebviewGpuRun resolves the effective policy and its deciding layer

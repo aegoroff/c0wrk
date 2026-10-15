@@ -2,6 +2,7 @@
 // setting, persisted in webview_state.json and consumed at webview creation.
 
 import { logger } from '@/lib/logger'
+import { getApp } from './runtime'
 
 export type WebviewGpuPolicySetting = 'auto' | 'always' | 'on-demand' | 'never'
 
@@ -36,11 +37,9 @@ function isWebviewGpuPolicyInfo(value: unknown): value is WebviewGpuPolicyInfo {
 }
 
 async function callApp<T>(method: string, guard: (v: unknown) => v is T, ...args: unknown[]): Promise<T> {
-  if (typeof window === 'undefined' || !window.go?.desktop?.App) {
-    throw new Error('Wails runtime unavailable')
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = await (window.go.desktop.App as any)[method](...args)
+  // getApp() is the shared bridge accessor (./runtime): it throws when the
+  // Wails bindings are absent (vitest, SSR), like every other api/* module.
+  const raw: unknown = await getApp()[method](...args)
   if (!guard(raw)) {
     throw new Error(`malformed ${method} payload`)
   }

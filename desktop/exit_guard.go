@@ -60,7 +60,10 @@ func (a *App) updateQuitPending() bool {
 // runtime.Quit all funnel through OnBeforeClose — so this single hook guards
 // the whole quit surface, but it also means the confirmed quit re-enters it:
 // ConfirmExit arms a.exitConfirmed first, and this hook lets that attempt
-// through instead of intercepting it again.
+// through instead of intercepting it again — as does the webview-GPU
+// watchdog's post-relaunch quit (gpuFallbackQuit): the sessions it would
+// protect are auto-resumed in the relaunched instance, while the dialog
+// itself would render into the grey webview being replaced.
 //
 // An intercepted attempt tears nothing down. The hook emits
 // app:exit_requested (with the active-session list) and returns
