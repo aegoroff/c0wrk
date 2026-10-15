@@ -37,7 +37,10 @@ function isMacLikePlatform(): boolean {
  * layer would have taken (QWERTZ prints 'y' on the physical Z slot: its
  * Ctrl+Y is redo, never undo) — and, for layouts that print neither Z nor
  * Y at all (Cyrillic 'я' / 'н'), the layout-independent PHYSICAL key
- * (`event.code`).
+ * (`event.code`). A printed Latin letter other than z/y is always
+ * declined: on Dvorak the physical Y slot prints 'f', so Cmd/Ctrl+F must
+ * stay an unrelated chord (preserving the keymap's pre-existing behavior
+ * for every other Latin-letter shortcut) instead of becoming a redo.
  *
  * The caller consumes a recognized chord even when the history command
  * no-ops, mirroring historyKeymap's own bindings (their preventDefault
@@ -59,11 +62,22 @@ export function matchChatHistoryKey(event: KeyboardEvent): ChatHistoryAction | n
   const printed = event.key.toLowerCase()
   if (printed === 'z') return event.shiftKey ? 'redo' : 'undo'
   if (printed === 'y') return 'redo'
+  // Any other printed Latin letter keeps its own shortcut: layouts like
+  // Dvorak print ordinary letters on the Z/Y physical slots (physical
+  // KeyY prints 'f'), and Cmd/Ctrl+F must stay an unrelated chord rather
+  // than become a redo. The physical fallback below is reserved for
+  // layouts that print no Latin letter at all.
+  if (isLatinLetter(printed)) return null
   // Physical-key fallback for layouts printing neither Z nor Y (Cyrillic:
   // Ctrl+я / Ctrl+н ride the same physical slots).
   if (event.code === 'KeyZ') return event.shiftKey ? 'redo' : 'undo'
   if (event.code === 'KeyY') return 'redo'
   return null
+}
+
+/** Single ASCII letter a–z (after lowercasing). */
+function isLatinLetter(printed: string): boolean {
+  return printed.length === 1 && printed >= 'a' && printed <= 'z'
 }
 
 /**

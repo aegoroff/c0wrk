@@ -10,7 +10,9 @@
 // binding lives in layer (3): it matches the layout-printed character
 // (event.key.toLowerCase()) first — the same layout-following signal the
 // key-name layer resolves from — and falls back to the physical key
-// (event.code) for layouts that print neither Z nor Y; it is the only `any`
+// (event.code) for layouts that print neither Z nor Y nor any other Latin
+// letter (a printed 'f' — Dvorak's physical KeyY — keeps its own chord,
+// never a redo); it is the only `any`
 // fallback among the chat extension set's keymaps. A recognized chord is
 // consumed even when the history command no-ops, so layer (2) can never
 // re-interpret the same keydown as the opposite chord.
@@ -147,6 +149,24 @@ describe('createChatKeymap — undo/redo across keyboard layouts', () => {
     expect(view.state.doc.toString()).toBe('Струс')
   })
 
+  it("Dvorak's printed 'f' on the physical KeyY slot never redoes (Ctrl+F regression)", () => {
+    const view = mountView()
+    type(view, 'привет')
+    pressKey(view, { key: 'я', code: 'KeyZ', ctrlKey: true, keyCode: 90 })
+    expect(view.state.doc.toString()).toBe('')
+
+    // Dvorak prints 'f' on the physical KeyY slot. The pre-fix build
+    // re-interpreted this unrelated chord as the physical slot's redo and
+    // CONSUMED it — mutating the draft from an unrelated shortcut. It must
+    // stay unconsumed and leave the nonempty redo stack untouched.
+    expect(pressKey(view, { key: 'f', code: 'KeyY', ctrlKey: true, keyCode: 70 })).toBe(false)
+    expect(view.state.doc.toString()).toBe('')
+
+    // The redo stack is intact: the proper redo chord still restores.
+    expect(pressKey(view, { key: 'н', code: 'KeyY', ctrlKey: true, keyCode: 89 })).toBe(true)
+    expect(view.state.doc.toString()).toBe('привет')
+  })
+
   it('redoes a Cyrillic Ctrl+Shift+Z (key=Я, code=KeyZ)', () => {
     const view = mountView()
     type(view, 'привет')
@@ -280,7 +300,22 @@ describe('matchChatHistoryKey', () => {
     expect(matchChatHistoryKey(keyEvent({ key: 'с', code: 'KeyC', ctrlKey: true }))).toBeNull()
   })
 
+  it("declines Dvorak's printed Latin letters on the Z/Y physical slots", () => {
+    // On Dvorak the physical KeyY slot prints 'f': Ctrl+F is an unrelated
+    // chord — a printed Latin letter other than z/y — and must stay
+    // unconsumed, never a redo (PR #157 review comment 1).
+    expect(matchChatHistoryKey(keyEvent({ key: 'f', code: 'KeyY', ctrlKey: true }))).toBeNull()
+    expect(
+      matchChatHistoryKey(keyEvent({ key: 'F', code: 'KeyY', ctrlKey: true, shiftKey: true })),
+    ).toBeNull()
+  })
+
   it('rides Cmd instead of Ctrl on Mac-like platforms', () => {
+    // The matcher reads the platform PER CALL, so a spy is enough here.
+    // Keymap-level mac integration (the Cmd bindings CodeMirror builds at
+    // module load) is covered by the per-platform suites in
+    // cmChatKeymap.platform-*.test.ts, which pin the platform before the
+    // editor modules load.
     const platformSpy = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel')
     try {
       expect(matchChatHistoryKey(keyEvent({ key: 'я', code: 'KeyZ', ctrlKey: true }))).toBeNull()
@@ -291,6 +326,10 @@ describe('matchChatHistoryKey', () => {
       // historyKeymap's mac redo chord is Cmd+Shift+Z (Mod-y is replaced on
       // mac): the printed-'y' fallback provides Cmd+Y = redo there.
       expect(matchChatHistoryKey(keyEvent({ key: 'y', code: 'KeyY', metaKey: true }))).toBe('redo')
+      // Dvorak on mac prints 'f' on the physical KeyY slot: Cmd+F keeps its
+      // own behavior — the printed Latin letter declines before the
+      // physical fallback can turn it into a redo.
+      expect(matchChatHistoryKey(keyEvent({ key: 'f', code: 'KeyY', metaKey: true }))).toBeNull()
     } finally {
       platformSpy.mockRestore()
     }
