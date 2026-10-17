@@ -354,7 +354,8 @@ export function hasPendingActions(response: PendingActionsResponse | null): bool
     response.step_limits.length > 0 ||
     response.plan_approvals.length > 0 ||
     response.ask_user.length > 0 ||
-    response.goal_proposals.length > 0
+    response.goal_proposals.length > 0 ||
+    response.goal_suggestions.length > 0
   )
 }
 

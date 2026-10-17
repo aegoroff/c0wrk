@@ -521,7 +521,19 @@ func (a *App) buildGoalProposalCallback(uiEmit func(session.Event)) coretools.Go
 // suggestion card. decision is "accept" or "decline".
 type goalSuggestionResponse struct {
 	Decision string
+	// Shutdown marks the teardown drain's resolution: the app is quitting and
+	// no user answer exists. The adapter surfaces it as
+	// errGoalSuggestionShutdown so the core gate fails OPEN — an app quit is
+	// not a user decline, so session-scoped suppression must not engage.
+	Shutdown bool
 }
+
+// errGoalSuggestionShutdown is returned by the adapter when a pending
+// goal-suggestion wait was resolved by the shutdown drain instead of a user
+// answer. The core gate treats every error as fail-open (plain path, no
+// suppression); the sentinel exists so the drain can produce that outcome
+// explicitly instead of masquerading as a (false, nil) user decline.
+var errGoalSuggestionShutdown = errors.New("goal suggestion wait aborted by app shutdown")
 
 // buildGoalSuggestionCallback returns the closure that turns the orchestrator
 // gate's suggestion offer into a Wails event and waits for the frontend
@@ -573,6 +585,13 @@ func (g *goalSuggestionAdapter) ProposeGoalSuggestion(ctx context.Context, sessi
 
 	select {
 	case resp := <-ch:
+		if resp.Shutdown {
+			// The teardown drain resolved the card — NOT a user decline.
+			// Surface the sentinel so the gate fails open without engaging
+			// session suppression (the drain has already removed the entry,
+			// mirroring resolveGoalSuggestion for the normal branch).
+			return false, errGoalSuggestionShutdown
+		}
 		return resp.Decision == "accept", nil
 	case <-ctx.Done():
 		g.app.pendingGoalSuggestions.Delete(requestID)

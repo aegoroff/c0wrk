@@ -2,8 +2,10 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/v0lka/c0wrk/backend/session"
 	core "github.com/v0lka/c0wrk/core"
@@ -185,5 +187,70 @@ func TestGoalSuggestionAdapter_AcceptRoundTrip(t *testing.T) {
 	o := <-done
 	if o.err != nil || !o.accepted {
 		t.Errorf("ProposeGoalSuggestion = (%v, %v), want (true, nil)", o.accepted, o.err)
+	}
+}
+
+// TestGoalSuggestionAdapter_ShutdownDrainSignalsError pins the drain
+// contract end-to-end: a SHUTDOWN resolution surfaces as an error
+// (errGoalSuggestionShutdown), never as a (false, nil) user decline — the
+// core gate fails open on errors and must not engage session suppression
+// because the app quit while the card was open.
+func TestGoalSuggestionAdapter_ShutdownDrainSignalsError(t *testing.T) {
+	a := &App{}
+	registered := make(chan struct{})
+	adapter := &goalSuggestionAdapter{
+		ctx: context.Background(),
+		app: a,
+		uiEmit: func(session.Event) {
+			close(registered)
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := adapter.ProposeGoalSuggestion(context.Background(), "sess-sd", core.GoalSuggestion{Suggest: true, Reason: "r"})
+		done <- err
+	}()
+
+	<-registered
+	// Resolve through the drain, exactly the way Shutdown does.
+	a.drainPendingGoalSuggestions()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errGoalSuggestionShutdown) {
+			t.Errorf("ProposeGoalSuggestion error = %v, want errGoalSuggestionShutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("adapter did not return after the shutdown drain")
+	}
+}
+
+// TestDrainPendingGoalSuggestionsSignalsShutdown verifies the drain itself:
+// every pending entry receives the SHUTDOWN signal (not a synthetic decline)
+// and is removed from the pending map.
+func TestDrainPendingGoalSuggestionsSignalsShutdown(t *testing.T) {
+	a := &App{}
+	ch := make(chan goalSuggestionResponse, 1)
+	a.pendingGoalSuggestions.Store("req-drain", &pendingGoalSuggestionEntry{
+		ch:        ch,
+		sessionID: "sess-drain",
+	})
+	t.Cleanup(func() { a.pendingGoalSuggestions.Delete("req-drain") })
+
+	a.drainPendingGoalSuggestions()
+
+	select {
+	case resp := <-ch:
+		if !resp.Shutdown {
+			t.Errorf("drain delivered Decision=%q Shutdown=%v, want the SHUTDOWN signal", resp.Decision, resp.Shutdown)
+		}
+		if resp.Decision != "" {
+			t.Errorf("drain delivered a synthetic decision %q, want none", resp.Decision)
+		}
+	default:
+		t.Fatal("drain did not deliver a response to the pending entry")
+	}
+	if _, stillThere := a.pendingGoalSuggestions.Load("req-drain"); stillThere {
+		t.Error("drain left the pending entry in the map")
 	}
 }

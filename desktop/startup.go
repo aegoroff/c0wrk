@@ -727,20 +727,12 @@ func (a *App) Shutdown(ctx context.Context) {
 		a.pendingGoalProposals.Delete(key)
 		return true
 	})
-	// Shutdown resolves a pending goal-suggestion as a decline: the gate
-	// fails open (no suppression — the app quit is not a user decline), the
-	// plain Conductor path would have continued, and the task ends here
-	// anyway.
-	a.pendingGoalSuggestions.Range(func(key, value any) bool {
-		if e, ok := value.(*pendingGoalSuggestionEntry); ok {
-			select {
-			case e.ch <- goalSuggestionResponse{Decision: "decline"}:
-			default:
-			}
-		}
-		a.pendingGoalSuggestions.Delete(key)
-		return true
-	})
+	// Shutdown resolves a pending goal-suggestion with the SHUTDOWN signal —
+	// never a synthetic decline: an app quit is not a user answer, so the
+	// gate must fail open (plain path, NO session suppression) instead of
+	// misreading the drain as an explicit "no" and silently suppressing every
+	// future suggestion in the session. See drainPendingGoalSuggestions.
+	a.drainPendingGoalSuggestions()
 	shutdownStep("pendingActionDrains")
 
 	// Close-path reads go through the locked accessors: Shutdown runs on the
@@ -776,6 +768,28 @@ func (a *App) Shutdown(ctx context.Context) {
 	if sl := a.sessionLog(); sl != nil {
 		_ = sl.Close()
 	}
+}
+
+// drainPendingGoalSuggestions resolves every pending goal-suggestion card
+// with the SHUTDOWN signal (goalSuggestionResponse.Shutdown), which the
+// adapter surfaces as errGoalSuggestionShutdown — an error, not a user
+// decline. The core gate fails open on any error: the plain path continues
+// (and dies with the teardown) and session suppression is NOT engaged.
+// Extracted from Shutdown so the not-a-decline contract has a direct unit
+// test; the other pending-action drains stay inline because their synthetic
+// responses (deny/cancel) are already the documented semantics of those
+// prompts.
+func (a *App) drainPendingGoalSuggestions() {
+	a.pendingGoalSuggestions.Range(func(key, value any) bool {
+		if e, ok := value.(*pendingGoalSuggestionEntry); ok {
+			select {
+			case e.ch <- goalSuggestionResponse{Shutdown: true}:
+			default:
+			}
+		}
+		a.pendingGoalSuggestions.Delete(key)
+		return true
+	})
 }
 
 // wireWailsEventListeners subscribes to Wails frontend events for tool confirmations,

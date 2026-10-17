@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/v0lka/sp4rk/agent/router"
@@ -207,5 +208,39 @@ func TestRunGoalLoopRouted_DeriveFailureFork(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("explicit entry: result = nil, want the historical clean-exit result")
+	}
+}
+
+// TestClassifyDerivationFailure pins the derivation-failure fork's
+// classification — in particular that a USER CANCEL is a clean exit in BOTH
+// entry modes, even on the suggested entry whose fallback would otherwise run
+// the whole task as a plain Conductor pass after the user just declined the
+// goal framing.
+func TestClassifyDerivationFailure(t *testing.T) {
+	genuine := errors.New("deriveGoal: agent completed without calling propose_goal")
+	tests := []struct {
+		name     string
+		derr     error
+		fallback bool
+		want     derivationFailureOutcome
+	}{
+		{"context cancel bubbles", context.Canceled, true, derivationBubble},
+		{"deadline exceeds bubbles", context.DeadlineExceeded, false, derivationBubble},
+		{"user cancel is a clean exit on the suggested entry", errGoalDerivationCancelled, true, derivationCleanExit},
+		{"user cancel is a clean exit on the explicit entry", errGoalDerivationCancelled, false, derivationCleanExit},
+		{
+			"cancel wrapped by the double-failure wrap still classifies as cancel",
+			fmt.Errorf("%w (conductor run also errored: %w)", errGoalDerivationCancelled, errors.New("boom")),
+			true, derivationCleanExit,
+		},
+		{"genuine failure falls back on the suggested entry", genuine, true, derivationFallbackPlain},
+		{"genuine failure is a clean exit on the explicit entry", genuine, false, derivationCleanExit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDerivationFailure(tt.derr, tt.fallback); got != tt.want {
+				t.Errorf("classifyDerivationFailure(%v, %v) = %v, want %v", tt.derr, tt.fallback, got, tt.want)
+			}
+		})
 	}
 }

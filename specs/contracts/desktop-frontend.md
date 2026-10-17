@@ -273,7 +273,7 @@ Every git RPC in this table resolves its repository root through the **Git-panel
 
 | Method           | Parameters | Returns       | Description |
 | ---------------- | ---------- | ------------- | ----------- |
-| `GetPendingActions` | sessionID  | (*PendingActionsResponse, error) | Unresolved pending actions for a session (tool confirmations, ask-user forms, step-limit/resume prompts, goal proposals) |
+| `GetPendingActions` | sessionID  | (*PendingActionsResponse, error) | Unresolved pending actions for a session (tool confirmations, ask-user forms, step-limit/resume prompts, goal proposals, goal-suggestion offers) |
 | `PickDirectory`  | —          | (string, error) | Native directory picker dialog |
 | `ConfirmExit`    | —          | error           | Close-guard answer: the user confirmed quitting despite active sessions (counterpart to the `app:exit_requested` event, see [event-catalog.md](event-catalog.md)). Arms the exit-confirmed bypass flag and triggers a graceful Wails quit, which re-enters `OnBeforeClose` (allowed through by the flag) and then runs the normal `Shutdown` sequence. Lives in `desktop/exit_guard.go`; must remain on `App` — it requires the Wails context |
 | `PickAttachmentFiles` | —     | ([]string, error) | Native multi-select file picker exposing two filters: "Supported documents" (built from `core/markitdown.SupportedExtensions()`) and "Images" (`*.png;*.jpg;*.jpeg;*.gif;*.webp`). No "All files" filter — a wildcard resolves to a dynamic UTType on macOS that corrupts the panel's content-type filter. Returns `([]string{}, nil)` on cancel. Must remain on `App` — it requires the Wails context like `PickDirectory` |

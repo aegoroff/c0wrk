@@ -330,12 +330,18 @@ export interface PendingGoalProposal {
   verification_mode?: string
 }
 
+export interface PendingGoalSuggestion {
+  request_id: string
+  reason: string
+}
+
 export interface PendingActionsResponse {
   tool_confirms: PendingToolConfirm[]
   step_limits: PendingStepLimit[]
   plan_approvals: PendingPlanApproval[]
   ask_user: PendingAskUser[]
   goal_proposals: PendingGoalProposal[]
+  goal_suggestions: PendingGoalSuggestion[]
 }
 
 // isPendingActionsResponse validates the GetPendingActions response shape.
@@ -350,7 +356,7 @@ export interface PendingActionsResponse {
 function isPendingActionsResponse(d: unknown): boolean {
   if (typeof d !== 'object' || d === null) return false
   const o = d as Record<string, unknown>
-  const kinds = [o.tool_confirms, o.step_limits, o.plan_approvals, o.ask_user, o.goal_proposals]
+  const kinds = [o.tool_confirms, o.step_limits, o.plan_approvals, o.ask_user, o.goal_proposals, o.goal_suggestions]
   return kinds.every(k => k === undefined || k === null || Array.isArray(k))
 }
 
@@ -398,6 +404,12 @@ function isPendingGoalProposal(v: unknown): v is PendingGoalProposal {
     && typeof v.verify === 'string'
 }
 
+function isPendingGoalSuggestion(v: unknown): v is PendingGoalSuggestion {
+  return isObj(v)
+    && typeof v.request_id === 'string'
+    && typeof v.reason === 'string'
+}
+
 /** Filter one kind's array down to well-formed elements (null/absent → []),
  *  so a single malformed entry is skipped instead of poisoning reconciliation. */
 function filterKind<T>(raw: unknown, guard: (v: unknown) => v is T): T[] {
@@ -407,7 +419,8 @@ function filterKind<T>(raw: unknown, guard: (v: unknown) => v is T): T[] {
 
 /**
  * Fetch all pending HITL prompts (tool_confirm, step_limit, plan_review,
- * ask_user) currently blocking a session's agent goroutine. Called on
+ * ask_user, goal_proposal, goal_suggestion) currently blocking a session's
+ * agent goroutine. Called on
  * session switch to resurface prompts whose events were missed while the
  * session was in the background, and to reconcile stale persisted prompts
  * (a persisted HITL message NOT in this response has already been resolved).
@@ -433,6 +446,7 @@ export async function getPendingActions(sessionId: string): Promise<PendingActio
       plan_approvals: filterKind<PendingPlanApproval>(o.plan_approvals, isPendingPlanApproval),
       ask_user: filterKind<PendingAskUser>(o.ask_user, isPendingAskUser),
       goal_proposals: filterKind<PendingGoalProposal>(o.goal_proposals, isPendingGoalProposal),
+      goal_suggestions: filterKind<PendingGoalSuggestion>(o.goal_suggestions, isPendingGoalSuggestion),
     }
   } catch (err) {
     logger.error('Failed to get pending actions:', err)

@@ -1,9 +1,11 @@
 import type { ChatMessageUI, MessageType } from '@/types/messages'
 
 /**
- * The four HITL (human-in-the-loop) prompt message types — interactive prompts
+ * The HITL (human-in-the-loop) prompt message types — interactive prompts
  * that block a session's agent goroutine while awaiting a user response:
- * tool_confirm, ask_user, step_limit, plan_review.
+ * tool_confirm, ask_user, step_limit, plan_review, goal_proposal, and
+ * goal_suggestion (the post-routing offer card blocks the task BEFORE any
+ * execution starts — the gate waits for the answer the same way).
  *
  * Single source of truth shared by every consumer of "is this message a HITL
  * prompt?":
@@ -31,11 +33,12 @@ export const HITL_PROMPT_TYPES: ReadonlySet<MessageType> = new Set([
   'step_limit',
   'plan_review',
   'goal_proposal',
+  'goal_suggestion',
 ])
 
 /**
  * Pure check: does the ordered message list contain an unresolved HITL prompt
- * (tool_confirm / ask_user / step_limit / plan_review / goal_proposal)?
+ * (any type in HITL_PROMPT_TYPES)?
  * Lives here — a module with no store or React dependency — so every consumer
  * (useSessionStatusIndicator, lib/activeSessions) shares ONE implementation.
  */

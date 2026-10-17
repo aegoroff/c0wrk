@@ -61,7 +61,7 @@ function flags(overrides: Partial<LiveSessionFlags> = {}): LiveSessionFlags {
 }
 
 function emptyPending(): PendingActionsResponse {
-  return { tool_confirms: [], step_limits: [], plan_approvals: [], ask_user: [], goal_proposals: [] }
+  return { tool_confirms: [], step_limits: [], plan_approvals: [], ask_user: [], goal_proposals: [], goal_suggestions: [] }
 }
 
 describe('isLiveSession', () => {
@@ -338,6 +338,7 @@ describe('hasPendingActions', () => {
       { plan_approvals: [{ request_id: 'r2', plan_path: 'p', plan_content: '' }] },
       { ask_user: [{ request_id: 'r3', questions: [] }] },
       { goal_proposals: [{ request_id: 'r4', condition: 'c', verify: 'v' }] },
+      { goal_suggestions: [{ request_id: 'r5', reason: 'goal-shaped task' }] },
     ]
     for (const kind of kinds) {
       expect(hasPendingActions({ ...emptyPending(), ...kind } as PendingActionsResponse)).toBe(true)

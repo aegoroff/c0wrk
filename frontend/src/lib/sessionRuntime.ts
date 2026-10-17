@@ -38,7 +38,8 @@ export function stalePromptMatchField(type: MessageType): string | null {
     case 'ask_user':
     case 'step_limit':
     case 'plan_review':
-    case 'goal_proposal': return 'request_id'
+    case 'goal_proposal':
+    case 'goal_suggestion': return 'request_id'
     case 'task_failed_resumable': return 'task_id'
     default: return null
   }
@@ -557,15 +558,14 @@ export function reconcilePendingActions(sessionId: string, pending: PendingActio
     })
   }
 
-  // Goal proposals. NOTE: goal_proposal is intentionally NOT added to the
-  // resolve-stale branch above: the backend's GetPendingActions does not yet
-  // report goal_proposals, so the pending set is always empty here, and
-  // treating "not in pending" as stale would falsely resolve every persisted
-  // proposal. The genuine stale case (restart with no running task) is handled
-  // by reconcileRuntimeStatus via HITL_PROMPT_TYPES. This add-missing branch is
-  // forward-compatible — it stays a no-op until the backend populates the
-  // goal_proposals field. Persisted proposals reappear via history reload
-  // (role goal_proposal) regardless.
+  // Goal proposals and goal-mode suggestions. NOTE: neither goal kind is in
+  // the resolve-stale branch above — "not in pending" is decided by the LIVE
+  // pending map, whose entry exists exactly while the agent goroutine waits;
+  // the genuine stale case (restart with no running task) is handled by
+  // reconcileRuntimeStatus via HITL_PROMPT_TYPES. The add-missing branches
+  // resurface a genuinely-pending card whose event was missed while the
+  // session was in the background; persisted cards reappear via history
+  // reload regardless (roles goal_proposal / goal_suggestion).
   for (const g of pending.goal_proposals) {
     const id = `goal-proposal-${g.request_id}`
     if (existingIDs.has(id)) continue
@@ -594,12 +594,37 @@ export function reconcilePendingActions(sessionId: string, pending: PendingActio
     })
   }
 
+  for (const s of pending.goal_suggestions) {
+    const id = `goal-suggestion-${s.request_id}`
+    if (existingIDs.has(id)) continue
+    store.addMessage(sessionId, {
+      id,
+      sessionId,
+      type: 'goal_suggestion',
+      content: s.reason,
+      metadata: {
+        request_id: s.request_id,
+        reason: s.reason,
+        resolved: false,
+      } as Record<string, unknown>,
+      timestamp: Date.now(),
+    })
+    // Keep the goal store in sync for a background-delivered suggestion that
+    // surfaces here on session switch (mirrors handleGoalSuggestionEvent).
+    useGoalStore.getState().setPendingSuggestion(sessionId, {
+      request_id: s.request_id,
+      session_id: sessionId,
+      reason: s.reason,
+    })
+  }
+
   // A genuinely pending prompt means the session's agent goroutine is blocked
   // on the user RIGHT NOW (the backend reports only prompts with a live
   // waiter). Surface that in the activity label — mirrors what the live HITL
   // handlers set and overrides any pre-HITL phase the runtime status reported.
   const pendingCount = pending.tool_confirms.length + pending.step_limits.length
     + pending.plan_approvals.length + pending.ask_user.length + pending.goal_proposals.length
+    + pending.goal_suggestions.length
   if (pendingCount > 0) {
     store.setActivityStatus(sessionId, 'Waiting for your response...')
   }
