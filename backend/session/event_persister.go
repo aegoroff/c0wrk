@@ -262,6 +262,12 @@ func (p *EventPersister) Persist(evt Event) {
 		// GetPendingActions after a reload (the agent remains blocked until
 		// the user confirms/cancels via the goal_proposal_response flow).
 		role = "goal_proposal"
+	case "goal_suggestion":
+		// Persist the goal-mode suggestion pending action so the offer (and
+		// its outcome, via the resolved metadata) survives reloads — mirroring
+		// goal_proposal. The gate blocks the task until the user answers via
+		// the goal_suggestion_response flow.
+		role = "goal_suggestion"
 	case "context_compaction":
 		// Auto compaction (executor fill-trigger / conductor compact-on-start):
 		// a durable record of a history mutation. The row renders as the

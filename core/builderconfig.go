@@ -703,6 +703,10 @@ type BuilderOrchestrationConfig struct {
 // BuilderGoalLoopConfig holds goal-loop settings.
 type BuilderGoalLoopConfig struct {
 	Verification string // "independent" (default) | "off"
+	// Suggest carries the goal-mode suggestion gate settings. Enabled is
+	// already resolved from the config layer's pointer-bool (nil = on), so
+	// core sees a plain effective gate.
+	Suggest GoalSuggestSettings
 }
 
 // BuilderE2SConfig mirrors config.E2SConfig for the subset core consumes. core

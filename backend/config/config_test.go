@@ -2148,6 +2148,76 @@ goal_loop:
 	}
 }
 
+// TestGoalSuggestConfig_DefaultsOn verifies that the goal-mode suggestion
+// gate defaults to ENABLED with the complexity-2 consult floor when the
+// suggest section is absent.
+func TestGoalSuggestConfig_DefaultsOn(t *testing.T) {
+	content := securityGroupsTestBase
+	configPath := writeTestConfig(t, content)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if !cfg.GoalLoop.Suggest.SuggestEnabled() {
+		t.Errorf("expected goal_loop.suggest to default to enabled (nil pointer), got disabled")
+	}
+	if cfg.GoalLoop.Suggest.MinComplexity != 2 {
+		t.Errorf("expected default min_complexity 2, got %d", cfg.GoalLoop.Suggest.MinComplexity)
+	}
+}
+
+// TestGoalSuggestConfig_ExplicitOff verifies that an explicit
+// goal_loop.suggest.enabled: false disables the gate and survives a load
+// round-trip, and that an explicit true stays on.
+func TestGoalSuggestConfig_ExplicitOff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"explicit false", "false", false},
+		{"explicit true", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := securityGroupsTestBase + `
+goal_loop:
+  suggest:
+    enabled: ` + tc.val + `
+`
+			configPath := writeTestConfig(t, content)
+
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("Load() failed: %v", err)
+			}
+			if got := cfg.GoalLoop.Suggest.SuggestEnabled(); got != tc.want {
+				t.Errorf("SuggestEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGoalSuggestConfig_RejectsInvalidMinComplexity verifies that a
+// min_complexity outside [0,5] is a config error, not a silent clamp.
+func TestGoalSuggestConfig_RejectsInvalidMinComplexity(t *testing.T) {
+	content := securityGroupsTestBase + `
+goal_loop:
+  suggest:
+    min_complexity: 9
+`
+	configPath := writeTestConfig(t, content)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatalf("expected error for min_complexity 9, got nil")
+	}
+	if !contains(err.Error(), "min_complexity") {
+		t.Errorf("expected error to mention 'min_complexity', got: %v", err)
+	}
+}
+
 // securityGroupsTestBase is the minimal LLM section every security-groups test
 // needs so Load reaches the security validation stage.
 const securityGroupsTestBase = `

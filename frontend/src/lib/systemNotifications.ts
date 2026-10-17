@@ -17,7 +17,7 @@
 //
 // The event → content mapping (`classifyNotificationContent`) is pure and
 // mirrors `classifySessionEvent` (hooks/events/useSoundEvents.ts): the same
-// nine events, the same task_complete success disambiguation, the same
+// event set, the same task_complete success disambiguation, the same
 // defensive `unknown` reads. It returns per-type title/body strings instead of
 // a bare kind, because a banner carries text, not a tone.
 
@@ -65,7 +65,7 @@ function readString(data: unknown, field: string): string | undefined {
  * Pure mapping from a session event to its notification content.
  *
  * Returns null for events that should stay silent. This is the notification
- * counterpart of `classifySessionEvent`: same nine events, same
+ * counterpart of `classifySessionEvent`: same event set, same
  * task_complete success disambiguation, same defensive `unknown` reads —
  * but each event type yields its own title/body pair (a banner must tell the
  * user WHAT needs attention, not just that something does).
@@ -133,6 +133,12 @@ export function classifyNotificationContent(
         kind: 'attention',
         title: 'Goal proposal ready',
         body: 'A goal proposal needs your review before execution continues.',
+      }
+    case 'goal_suggestion':
+      return {
+        kind: 'attention',
+        title: 'Goal mode suggested',
+        body: 'Goal mode looks like a better fit for this task — the offer is waiting for your answer.',
       }
 
     // --- error ---

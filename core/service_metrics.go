@@ -22,6 +22,10 @@ const (
 	ServiceKindOptimizeRewrite ServiceKind = "optimize_rewrite"
 	// ServiceKindCompactionSummary is context-compaction summarization.
 	ServiceKindCompactionSummary ServiceKind = "compaction_summarize"
+	// ServiceKindGoalSuggest is the post-routing goal-mode suitability
+	// classifier (core/goal_suggest.go): a fresh non-goal task's message is
+	// judged for obvious goal-mode fit before the Conductor run starts.
+	ServiceKindGoalSuggest ServiceKind = "goal_suggest"
 )
 
 // ServiceOutcome classifies the terminal result of a service call.

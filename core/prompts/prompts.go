@@ -161,6 +161,12 @@ var ReflectorSystem string
 //go:embed router_system.md
 var RouterSystem string
 
+// Goal-mode suitability prompt (post-routing classifier — decides whether to
+// offer goal mode to the user; see core/goal_suggest.go)
+
+//go:embed goal_suggest.md
+var GoalSuggest string
+
 // Verification mandate — injected into tool-enabled system prompts
 
 //go:embed verification_mandate.md

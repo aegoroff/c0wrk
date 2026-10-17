@@ -78,6 +78,8 @@ export function bookmarkDefaultTitle(item: DisplayItem): string {
       return 'Plan review'
     case 'goal_proposal':
       return 'Proposed goal'
+    case 'goal_suggestion':
+      return 'Goal mode suggestion'
     case 'checklist':
       return 'Checklist'
   }

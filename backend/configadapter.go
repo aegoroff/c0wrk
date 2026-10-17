@@ -344,6 +344,10 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 		},
 		GoalLoop: core.BuilderGoalLoopConfig{
 			Verification: cfg.GoalLoop.Verification,
+			Suggest: core.GoalSuggestSettings{
+				Enabled:       cfg.GoalLoop.Suggest.SuggestEnabled(),
+				MinComplexity: cfg.GoalLoop.Suggest.MinComplexity,
+			},
 		},
 		E2S: core.BuilderE2SConfig{
 			Enabled:                 cfg.Experimental.Enabled,

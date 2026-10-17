@@ -12,6 +12,8 @@ export function AbortMerge():Promise<void>;
 
 export function AbortRebase():Promise<void>;
 
+export function AcceptGoalSuggestion(arg1:string,arg2:string):Promise<void>;
+
 export function ActiveProjectDir():Promise<string>;
 
 export function AddBookmark(arg1:string,arg2:string,arg3:string):Promise<session.SessionBookmark>;
@@ -73,6 +75,8 @@ export function CreateProject(arg1:string,arg2:string):Promise<project.ProjectIn
 export function CreateSession():Promise<session.SessionInfo>;
 
 export function CreateTag(arg1:string,arg2:string):Promise<void>;
+
+export function DeclineGoalSuggestion(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteBookmark(arg1:string,arg2:string):Promise<void>;
 
