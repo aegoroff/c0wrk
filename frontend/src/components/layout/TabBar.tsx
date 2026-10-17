@@ -125,26 +125,40 @@ export function TabBar({ controller }: TabBarProps) {
     // Zoom-safe by construction: fixed token heights, no viewport units — the
     // bar is a plain flex row shrinking to zero under the h-full app shell.
     <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-background px-2">
-      {/* Overflow scrolls; the custom-scrollbar keeps the 8px app-wide look. */}
-      <div
-        role="tablist"
-        aria-label="Workspace tabs"
-        onKeyDown={handleTablistKeyDown}
-        className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
-      >
-        {tabs.map((tab) => (
-          <TabRow
-            key={tab.id}
-            tab={tab}
-            active={tab.id === activeTabId}
-            controller={controller}
-            onClose={handleClose}
-          />
-        ))}
+      {/* The «+» rides WITH the strip: this scroll container holds the
+          content-width tablist plus the button, so the button always sits
+          right after the last tab — including when the strip overflows and
+          scrolls (browser tab-strip convention; the custom-scrollbar keeps
+          the 8px app-wide look). The button stays OUTSIDE the tablist
+          itself: only role="tab" rows belong in an ARIA tablist. */}
+      <div className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <div
+          role="tablist"
+          aria-label="Workspace tabs"
+          onKeyDown={handleTablistKeyDown}
+          className="flex shrink-0 items-center gap-1"
+        >
+          {tabs.map((tab) => (
+            <TabRow
+              key={tab.id}
+              tab={tab}
+              active={tab.id === activeTabId}
+              controller={controller}
+              onClose={handleClose}
+            />
+          ))}
+        </div>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0"
+          onClick={handleAdd}
+          aria-label="New tab"
+          title="New tab"
+        >
+          <Plus className="size-4" />
+        </Button>
       </div>
-      <Button variant="ghost" size="icon-sm" onClick={handleAdd} aria-label="New tab" title="New tab">
-        <Plus className="size-4" />
-      </Button>
       <Button
         variant="ghost"
         size="icon-sm"
