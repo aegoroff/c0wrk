@@ -18,20 +18,29 @@ interface SessionActionConfirmDialogProps {
 /**
  * Confirmation dialog for destructive session actions (archive/delete) on a
  * busy session — one with a running, paused, or unfinished task that the
- * backend will cancel first. Rendered by both session list surfaces.
+ * backend will cancel first. Group actions (a branch group's members, see
+ * `PendingSessionAction.sessionIds`) render plural copy naming the branch.
+ * Rendered by both session list surfaces.
  */
 export function SessionActionConfirmDialog({ pending, onConfirm, onCancel }: SessionActionConfirmDialogProps) {
   const isArchive = pending?.kind === 'archive'
+  const isGroup = (pending?.sessionIds?.length ?? 0) > 1
   return (
     <Dialog open={pending !== null} onOpenChange={(open) => { if (!open) onCancel() }}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{isArchive ? 'Archive session?' : 'Delete session?'}</DialogTitle>
+          <DialogTitle>
+            {isGroup ? (isArchive ? 'Archive sessions?' : 'Delete sessions?') : isArchive ? 'Archive session?' : 'Delete session?'}
+          </DialogTitle>
           <DialogDescription>
             {pending
-              ? isArchive
-                ? `"${pending.sessionName}" has a task in progress or unfinished. Archiving will cancel it and make the session read-only.`
-                : `"${pending.sessionName}" has a task in progress or unfinished. Deleting will cancel it and permanently remove the session and its files.`
+              ? isGroup
+                ? isArchive
+                  ? `Branch "${pending.sessionName}" groups ${pending.sessionIds!.length} sessions and at least one has a task in progress or unfinished. Archiving will cancel it and make the sessions read-only.`
+                  : `Branch "${pending.sessionName}" groups ${pending.sessionIds!.length} sessions. Deleting will cancel any running tasks and permanently remove the sessions and their files.`
+                : isArchive
+                  ? `"${pending.sessionName}" has a task in progress or unfinished. Archiving will cancel it and make the session read-only.`
+                  : `"${pending.sessionName}" has a task in progress or unfinished. Deleting will cancel it and permanently remove the session and its files.`
               : ''}
           </DialogDescription>
         </DialogHeader>

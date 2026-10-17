@@ -1,4 +1,4 @@
-import type { SessionInfo } from '@/types/models'
+import type { SessionInfo, WorkspaceBinding } from '@/types/models'
 
 // ──────────────────────────── Collapse keys ──────────────────────────────────
 
@@ -8,10 +8,14 @@ import type { SessionInfo } from '@/types/models'
  *
  * - every managed branch group collapses under `branch:<branch>`
  *   (see {@link branchGroupKey});
- * - the whole managed section collapses under `managed`;
+ * - the whole worktrees section collapses under `managed` (kept value — see
+ *   {@link MANAGED_SECTION_KEY});
  * - the local section under `local`;
  * - the archive section under `archived`.
  */
+/** Collapse key of the worktrees section — kept as 'managed' (the value the
+ *  sidebar has always persisted) so existing collapse state survives the
+ *  section's rename. */
 export const MANAGED_SECTION_KEY = 'managed'
 export const LOCAL_SECTION_KEY = 'local'
 export const ARCHIVED_SECTION_KEY = 'archived'
@@ -22,7 +26,7 @@ export function branchGroupKey(branch: string): string {
 }
 
 /** DOM id of a collapsible section's content region — the `aria-controls`
- *  target named by its header (Managed/Local in the grouped list, Archived in
+ *  target named by its header (Worktrees/Local in the grouped list, Archived in
  *  SessionSelector) or by a managed branch's row toggle. The region div
  *  renders exactly while the content does, so a set `aria-controls` always
  *  names a live element. Branch names may contain `/` or `:` — legal id
@@ -33,9 +37,9 @@ export function sessionRegionId(key: string): string {
 
 // ──────────────────────────────── Types ──────────────────────────────────────
 
-/** All non-archived sessions bound to one managed worktree branch (ADR-080).
- *  Several sessions may share a branch — shared trees are legal since
- *  ADR-082 — so they merge into a single group. */
+/** All sessions — live or archived — bound to one managed worktree branch
+ *  (ADR-080). Several sessions may share a branch — shared trees are legal
+ *  since ADR-082 — so they merge into a single group. */
 export interface ManagedBranchGroup {
   /** The pinned branch name (from `workspace_binding.branch`). */
   readonly branch: string
@@ -46,21 +50,29 @@ export interface ManagedBranchGroup {
 /**
  * The ordered sidebar grouping model for one project's sessions:
  *
- * 1. `managed` — branch groups, ordered by each group's freshest session.
+ * 1. `worktrees` — branch groups, GROUP-pinned first, then by each group's
+ *    freshest session.
  * 2. `local` — sessions pinned to the project checkout (`kind: 'local'`) or
  *    carrying no `workspace_binding` at all (older backends / CHAT).
- * 3. `archived` — archived sessions regardless of binding.
+ * 3. `archivedWorktrees` — archived sessions on managed branches, grouped by
+ *    branch under the same rules as `worktrees`.
+ * 4. `archivedLocal` — archived sessions with a local binding or no binding.
  */
 export interface SessionGroups {
-  readonly managed: ManagedBranchGroup[]
+  readonly worktrees: ManagedBranchGroup[]
   readonly local: SessionInfo[]
-  readonly archived: SessionInfo[]
+  readonly archivedWorktrees: ManagedBranchGroup[]
+  readonly archivedLocal: SessionInfo[]
 }
 
 export interface BuildSessionGroupsOptions {
   /** Case-insensitive substring filter on the session name. Blank/whitespace
    *  values disable filtering. Groups left without members are omitted. */
   readonly search?: string
+  /** Branch names the user PINNED at the group level (pinnedGroupsStore) —
+   *  a pinned group floats above the unpinned ones of its section. Does NOT
+   *  touch per-session pins, which only order members inside a group. */
+  readonly pinnedBranches?: readonly string[]
 }
 
 // ──────────────────────────────── Sorting ────────────────────────────────────
@@ -98,6 +110,44 @@ function sortByActivity(sessions: readonly SessionInfo[]): SessionInfo[] {
   return [...sessions].sort(compareByActivity)
 }
 
+/** Branch key of a managed binding. The backend always pins `branch`; fall
+ *  back to the tree name (then a sentinel) so a malformed payload still
+ *  groups. */
+function managedBranchKey(binding: WorkspaceBinding): string {
+  return binding.branch || binding.worktree_name || '(unknown)'
+}
+
+/** Merge `session` into the branch group `branch` — sessions sharing one
+ *  branch form a single group (shared managed trees are legal per ADR-082). */
+function addToBranchGroups(
+  byBranch: Map<string, SessionInfo[]>,
+  branch: string,
+  session: SessionInfo,
+): void {
+  const members = byBranch.get(branch)
+  if (members) members.push(session)
+  else byBranch.set(branch, [session])
+}
+
+/** Materialise branch groups under the canonical rules: members sorted
+ *  pinned → freshness, groups ordered by the GROUP-level pin (pinned groups
+ *  first), then each group's freshest session (most recent first),
+ *  alphabetical branch name as the deterministic tiebreak. */
+function orderedBranchGroups(
+  byBranch: Map<string, SessionInfo[]>,
+  pinned: ReadonlySet<string>,
+): ManagedBranchGroup[] {
+  return [...byBranch.entries()]
+    .map(([branch, members]) => ({ branch, sessions: sortByActivity(members) }))
+    .sort((a, b) => {
+      const byGroupPin = Number(pinned.has(b.branch)) - Number(pinned.has(a.branch))
+      if (byGroupPin !== 0) return byGroupPin
+      const byFreshness = freshestActivity(b.sessions) - freshestActivity(a.sessions)
+      if (byFreshness !== 0) return byFreshness
+      return a.branch.localeCompare(b.branch)
+    })
+}
+
 // ──────────────────────────────── Grouping ───────────────────────────────────
 
 /**
@@ -105,8 +155,11 @@ function sortByActivity(sessions: readonly SessionInfo[]): SessionInfo[] {
  *
  * Classification (per session, after the optional search filter):
  *
- * - `session.archived` → the `archived` bucket (binding ignored);
- * - `workspace_binding.kind === 'managed_worktree'` → the managed group of
+ * - `session.archived` on a managed binding → the `archivedWorktrees` group of
+ *   `binding.branch`, under exactly the grouping/ordering rules of the live
+ *   `worktrees` section;
+ * - other archived sessions (local binding or none) → `archivedLocal`;
+ * - `workspace_binding.kind === 'managed_worktree'` → the worktrees group of
  *   `binding.branch`; sessions sharing one branch merge into a single group
  *   (shared managed trees are legal per ADR-082);
  * - everything else (`kind: 'local'` or no binding at all) → `local`.
@@ -115,8 +168,9 @@ function sortByActivity(sessions: readonly SessionInfo[]): SessionInfo[] {
  *
  * - sessions inside every bucket/group: pinned → freshness (the
  *   {@link compareByActivity} order);
- * - managed branch groups: by their freshest session, most recent first;
- *   alphabetical branch name as the deterministic tiebreak.
+ * - managed branch groups: GROUP-pinned branches first (the
+ *   `pinnedBranches` option), then by their freshest session, most recent
+ *   first; alphabetical branch name as the deterministic tiebreak.
  *
  * Search filters by name (case-insensitive substring, trimmed); groups left
  * without members simply do not appear in the result, so the UI hides them.
@@ -134,41 +188,32 @@ export function buildSessionGroups(
       : [...sessions]
 
   const local: SessionInfo[] = []
-  const archived: SessionInfo[] = []
+  const archivedLocal: SessionInfo[] = []
   const byBranch = new Map<string, SessionInfo[]>()
+  const archivedByBranch = new Map<string, SessionInfo[]>()
+  const pinned = new Set(options.pinnedBranches ?? [])
 
   for (const session of visible) {
+    const binding = session.workspace_binding
     if (session.archived) {
-      archived.push(session)
+      if (binding?.kind === 'managed_worktree') {
+        addToBranchGroups(archivedByBranch, managedBranchKey(binding), session)
+      } else {
+        archivedLocal.push(session)
+      }
       continue
     }
-    const binding = session.workspace_binding
     if (binding?.kind === 'managed_worktree') {
-      // The backend always pins `branch` on managed bindings; fall back to the
-      // tree name (then a sentinel) so a malformed payload still groups.
-      const branch = binding.branch || binding.worktree_name || '(unknown)'
-      const members = byBranch.get(branch)
-      if (members) members.push(session)
-      else byBranch.set(branch, [session])
+      addToBranchGroups(byBranch, managedBranchKey(binding), session)
       continue
     }
     local.push(session)
   }
 
-  const managed: ManagedBranchGroup[] = [...byBranch.entries()]
-    .map(([branch, members]) => ({
-      branch,
-      sessions: sortByActivity(members),
-    }))
-    .sort((a, b) => {
-      const byFreshness = freshestActivity(b.sessions) - freshestActivity(a.sessions)
-      if (byFreshness !== 0) return byFreshness
-      return a.branch.localeCompare(b.branch)
-    })
-
   return {
-    managed,
+    worktrees: orderedBranchGroups(byBranch, pinned),
     local: sortByActivity(local),
-    archived: sortByActivity(archived),
+    archivedWorktrees: orderedBranchGroups(archivedByBranch, pinned),
+    archivedLocal: sortByActivity(archivedLocal),
   }
 }

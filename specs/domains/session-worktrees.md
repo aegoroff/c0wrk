@@ -291,7 +291,6 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   project/session switch ──► GetSessionWorkspace(sessionID)
                             └► SetGitPanelFocus(session workspace)   // default target
   worktree switcher ────────► SetGitPanelFocus(tree path)            // explicit
-  focus button ─────────────► SetGitPanelFocus(session workspace)     // snap back
   worktree delete ──────────► DeleteWorktree(path, force, unlock)     // any linked tree; focus re-resolved
   branch-in-new-worktree ───► CreateBranchInWorktree(name, base)      // focus neither switched nor consulted
   any git RPC ◄──────────── resolveGitRepoRoot() = resolveGitFocusRoot()
@@ -504,7 +503,7 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 - Frontend UI for the managed lifecycle: the draft-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…`, and the BranchPicker's draft mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch draft from the remote ref) into `sessionDraftStore`; provisioning runs at draft commit via `CreateManagedSession` with no in-place checkout. Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
-  (BranchPicker + BranchDropdown), the header focus button, and the
+  (BranchPicker + BranchDropdown) and the
   follow-the-session sync (`useGitFocusSync`, mounted at the App root) —
   together with the panel-side management RPCs and their UI: `DeleteWorktree`
   behind the Worktrees section's hover delete (mandatory
