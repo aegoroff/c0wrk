@@ -3,7 +3,6 @@ package backend
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -229,7 +228,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 
 	t.Run("unset env + no setting = auto", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
-		run := DeriveWebviewGpuRun(agentDir, true, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, true, nil)
 		if run.Policy != WebviewGpuPolicyOnDemand || run.Source != WebviewGpuSourceAuto || run.Setting != WebviewGpuPolicyAuto {
 			t.Fatalf("got %+v, want on-demand/auto/auto", run)
 		}
@@ -239,24 +238,25 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 	// capture is demoted to never — the DMABUF watchdog could never detect
 	// the grey window, so the accelerated default must not apply. Off Linux
 	// the whole policy machinery is inert, so the resolution is unchanged.
+	// The goos parameter makes both branches deterministic on every platform
+	// (CI red fix: the formula must not read runtime.GOOS behind the
+	// callers' backs — the desktop table's goos seam used to be ignored).
 	t.Run("unobserved fresh auto demotes on linux only", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
-		run := DeriveWebviewGpuRun(agentDir, false, nil)
-		if runtime.GOOS == "linux" {
-			if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceAutoUnobserved || run.Setting != WebviewGpuPolicyAuto {
-				t.Fatalf("got %+v, want never/auto-unobserved/auto", run)
-			}
-			return
+		run := DeriveWebviewGpuRun("linux", agentDir, false, nil)
+		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceAutoUnobserved || run.Setting != WebviewGpuPolicyAuto {
+			t.Fatalf("linux: got %+v, want never/auto-unobserved/auto", run)
 		}
+		run = DeriveWebviewGpuRun("darwin", agentDir, false, nil)
 		if run.Policy != WebviewGpuPolicyOnDemand || run.Source != WebviewGpuSourceAuto || run.Setting != WebviewGpuPolicyAuto {
-			t.Fatalf("got %+v, want on-demand/auto/auto off Linux (no policy machinery)", run)
+			t.Fatalf("darwin: got %+v, want on-demand/auto/auto off Linux (no policy machinery)", run)
 		}
 	})
 
 	t.Run("unobserved explicit setting is never demoted", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
 		writeState(t, WebviewGpuState{GPUPolicy: WebviewGpuPolicyOnDemand})
-		run := DeriveWebviewGpuRun(agentDir, false, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, false, nil)
 		if run.Policy != WebviewGpuPolicyOnDemand || run.Source != WebviewGpuSourceSetting {
 			t.Fatalf("got %+v, want on-demand/setting (explicit choices survive)", run)
 		}
@@ -264,7 +264,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 
 	t.Run("unobserved env override is never demoted", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "always")
-		run := DeriveWebviewGpuRun(agentDir, false, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, false, nil)
 		if run.Policy != WebviewGpuPolicyAlways || run.Source != WebviewGpuSourceEnv {
 			t.Fatalf("got %+v, want always/env (explicit override survives)", run)
 		}
@@ -273,7 +273,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 	t.Run("unobserved auto + fallback stays auto-fallback", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
 		writeState(t, WebviewGpuState{AutoFallback: dmabufFallbackFixture()})
-		run := DeriveWebviewGpuRun(agentDir, false, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, false, nil)
 		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceAutoFallback {
 			t.Fatalf("got %+v, want never/auto-fallback (already safe, no demotion)", run)
 		}
@@ -282,7 +282,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 	t.Run("valid env wins over setting and fallback", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "never")
 		writeState(t, WebviewGpuState{GPUPolicy: WebviewGpuPolicyAlways, AutoFallback: dmabufFallbackFixture()})
-		run := DeriveWebviewGpuRun(agentDir, true, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, true, nil)
 		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceEnv {
 			t.Fatalf("got %+v, want never/env", run)
 		}
@@ -296,7 +296,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 	t.Run("invalid env falls through to the setting", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "  turbo ")
 		writeState(t, WebviewGpuState{GPUPolicy: WebviewGpuPolicyNever})
-		run := DeriveWebviewGpuRun(agentDir, true, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, true, nil)
 		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceSetting || run.Setting != WebviewGpuPolicyNever {
 			t.Fatalf("got %+v, want never/setting/never", run)
 		}
@@ -305,7 +305,7 @@ func TestDeriveWebviewGpuRun(t *testing.T) {
 	t.Run("auto + fallback", func(t *testing.T) {
 		t.Setenv(WebviewGpuPolicyEnvVar, "")
 		writeState(t, WebviewGpuState{AutoFallback: dmabufFallbackFixture()})
-		run := DeriveWebviewGpuRun(agentDir, true, nil)
+		run := DeriveWebviewGpuRun("linux", agentDir, true, nil)
 		if run.Policy != WebviewGpuPolicyNever || run.Source != WebviewGpuSourceAutoFallback || run.Setting != WebviewGpuPolicyAuto {
 			t.Fatalf("got %+v, want never/auto-fallback/auto", run)
 		}

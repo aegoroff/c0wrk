@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -612,7 +613,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// at launch, not after any Settings write. The stderr-observation flag
 	// comes from the desktop layer (main's capture install outcome) so the
 	// snapshot matches the wails.Run resolution exactly.
-	run := DeriveWebviewGpuRun(cfg.AgentDir, cfg.WebviewGpuStderrObserved, f.logger)
+	run := DeriveWebviewGpuRun(runtime.GOOS, cfg.AgentDir, cfg.WebviewGpuStderrObserved, f.logger)
 	f.webviewGpuRunning, f.webviewGpuRunningSource = run.Policy, run.Source
 	f.terminalManager = cfg.TerminalManager
 	f.emitEvent = cfg.EmitEvent

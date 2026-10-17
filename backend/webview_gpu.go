@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -240,6 +239,9 @@ type WebviewGpuRun struct {
 // snapshot for the Settings RPCs — and the launch's single read of
 // webview_state.json: the consumed setting rides along in the result.
 //
+// goos is the host platform the resolution targets ("linux" gates the
+// demotion below — production passes runtime.GOOS, tests pass the platform
+// explicitly so the linux branch is exercised on every runner).
 // stderrObserved reports whether this launch has a usable stderr capture
 // (crashlog.Install succeeded and capture is not opted out). The DMABUF
 // watchdog detects the grey-window failure ONLY from that capture, so on
@@ -249,7 +251,7 @@ type WebviewGpuRun struct {
 // resolution is demoted to never for the launch (source auto-unobserved,
 // explicit Warn at the call site). Explicit user choices — env or setting —
 // are never demoted, and an auto+fallback launch is already on never.
-func DeriveWebviewGpuRun(agentDir string, stderrObserved bool, logger *slog.Logger) WebviewGpuRun {
+func DeriveWebviewGpuRun(goos, agentDir string, stderrObserved bool, logger *slog.Logger) WebviewGpuRun {
 	state := LoadWebviewGpuState(agentDir, logger)
 	setting := state.Setting()
 	if raw := os.Getenv(WebviewGpuPolicyEnvVar); strings.TrimSpace(raw) != "" {
@@ -258,7 +260,7 @@ func DeriveWebviewGpuRun(agentDir string, stderrObserved bool, logger *slog.Logg
 		}
 	}
 	policy, source := ResolveWebviewGpuPolicy(setting, state.FallbackActive())
-	if !stderrObserved && runtime.GOOS == "linux" && policy == WebviewGpuPolicyOnDemand && source == WebviewGpuSourceAuto {
+	if !stderrObserved && goos == "linux" && policy == WebviewGpuPolicyOnDemand && source == WebviewGpuSourceAuto {
 		return WebviewGpuRun{Policy: WebviewGpuPolicyNever, Source: WebviewGpuSourceAutoUnobserved, Setting: setting}
 	}
 	return WebviewGpuRun{Policy: policy, Source: source, Setting: setting}

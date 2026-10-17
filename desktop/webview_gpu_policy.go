@@ -106,7 +106,7 @@ func webviewGpuPolicyOptions(goos, agentDir string, stderrObserved bool, logger 
 	// Single launch-time read of the state file: the consumed setting rides
 	// along in the result, so the Debug record below needs no second load
 	// (a second read could also observe a state file the first did not).
-	run := backend.DeriveWebviewGpuRun(agentDir, stderrObserved, logger)
+	run := backend.DeriveWebviewGpuRun(goos, agentDir, stderrObserved, logger)
 	resolved := webviewGpuPolicyFromCanonical(run.Policy)
 	switch run.Source {
 	case backend.WebviewGpuSourceEnv:
