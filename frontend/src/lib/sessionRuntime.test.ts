@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
-import { reconcileRuntimeStatus, reconcilePendingActions, refreshCompactionAvailability, stalePromptMatchField } from './sessionRuntime'
+import { reconcileRuntimeStatus, reconcilePendingActions, refreshCompactionAvailability, stalePromptMatchField, applyRuntimeTaskFlags } from './sessionRuntime'
 import { handleSessionPausedEvent, handleSessionResumedEvent } from '@/hooks/events/sessionLifecycleHandlers'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -54,6 +54,68 @@ function sessionMessages(): ChatMessageUI[] {
   const s = useChatStore.getState()
   return (s.messageOrder[SESSION] ?? []).map(id => s.messages[SESSION]![id]!) 
 }
+
+describe('applyRuntimeTaskFlags', () => {
+  beforeEach(resetStore)
+
+  it('marks a cooperatively paused task (paused, not active, pausing cleared)', () => {
+    useChatStore.setState({ pausing: { [SESSION]: true }, taskActive: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: false, has_unfinished_task: true, paused: true })
+
+    expect(useChatStore.getState().paused[SESSION]).toBe(true)
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+  })
+
+  it('clears paused and restores taskActive for a running task, keeping an in-flight pause', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: true, has_unfinished_task: true, paused: true })
+
+    // `active` wins over a stale paused flag; the in-memory pause window
+    // (pausing) survives because the backend status cannot see it.
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+    expect(useChatStore.getState().pausing[SESSION]).toBe(true)
+  })
+
+  it('clears paused/pausing for an idle (no unfinished task) session', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: false, has_unfinished_task: false, paused: false })
+
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+  })
+
+  it('never leaves a paused/pausing affordance while compacting', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: true, has_unfinished_task: true, paused: true, compacting: true })
+
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+  })
+
+  it('restores paused even when the switch-time fast restore wins the race and suppresses the reconcile', () => {
+    // The reported bug: useTaskFlagRestore applies its snapshot FIRST (stamping
+    // taskFlagsEventAt) while ChatArea's reconcile read an EARLIER snapshot, so
+    // the reconcile's stale-snapshot guard skips its own flag restore. Because
+    // the fast restore now applies the SAME snapshot via applyRuntimeTaskFlags,
+    // the paused flag is correct regardless of which reader lands first.
+    const olderReadAt = Date.now() - 5000
+    const status = { active: false, has_unfinished_task: true, paused: true }
+
+    applyRuntimeTaskFlags(SESSION, status)
+    reconcileRuntimeStatus(SESSION, status, olderReadAt)
+
+    expect(useChatStore.getState().paused[SESSION]).toBe(true)
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
+})
 
 describe('reconcileRuntimeStatus', () => {
   beforeEach(resetStore)
