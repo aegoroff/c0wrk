@@ -74,12 +74,16 @@ type Config struct {
 	ShellExec     ShellExecConfig     `yaml:"shell_exec"`
 	Orchestration OrchestrationConfig `yaml:"orchestration"`
 	GoalLoop      GoalLoopConfig      `yaml:"goal_loop"`
-	VectorIndex   VectorIndexConfig   `yaml:"vector_index"`
-	Proxy         ProxyConfig         `yaml:"proxy"`
-	Terminal      TerminalConfig      `yaml:"terminal"`
-	Git           GitConfig           `yaml:"git"`
-	Runtime       RuntimeConfig       `yaml:"runtime"`
-	Notifications NotificationsConfig `yaml:"notifications"`
+	// PromptSuggestions gates the proactive follow-up prompts the chat input
+	// offers after a task finishes successfully (full or partial). See
+	// PromptSuggestionsConfig (ADR-088).
+	PromptSuggestions PromptSuggestionsConfig `yaml:"prompt_suggestions"`
+	VectorIndex       VectorIndexConfig       `yaml:"vector_index"`
+	Proxy             ProxyConfig             `yaml:"proxy"`
+	Terminal          TerminalConfig          `yaml:"terminal"`
+	Git               GitConfig               `yaml:"git"`
+	Runtime           RuntimeConfig           `yaml:"runtime"`
+	Notifications     NotificationsConfig     `yaml:"notifications"`
 
 	// ModelProfiles configures optimizations applied when running on a "small"
 	// (low-capacity / cheaper) LLM. Only the two durable operator choices are
@@ -2429,6 +2433,25 @@ type GoalSuggestConfig struct {
 
 // SuggestEnabled resolves the effective feature gate: unset (nil) means on.
 func (c GoalSuggestConfig) SuggestEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// PromptSuggestionsConfig gates the proactive follow-up prompts (ADR-088):
+// after a task finishes with outcome full or partial, a fail-open one-shot
+// service call generates a small set of suggested next prompts per kind and
+// the chat input offers them (↑/↓/→).
+type PromptSuggestionsConfig struct {
+	// Enabled gates the whole feature. Pointer-bool: nil (unset) defaults to
+	// true; an explicit false opts out entirely — the manager's outcome gate
+	// never fires, so a disabled feature costs zero LLM calls, zero store
+	// writes, and zero events.
+	Enabled *bool `yaml:"enabled"`
+}
+
+// SuggestionsEnabled resolves the effective feature gate: unset (nil) means
+// on (ADR-088 D9: the feature is fail-open and bounded, so it defaults to
+// enabled; the section exists as the documented opt-out extension point).
+func (c PromptSuggestionsConfig) SuggestionsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
 }
 

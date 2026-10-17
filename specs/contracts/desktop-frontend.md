@@ -36,6 +36,7 @@ Frontend communicates with Go exclusively through Wails IPC. No direct Go import
 | `VectorStoreEntry`         | backend  | backend → frontend | Vector search result                |
 | `BlackboardStateResponse`  | backend  | backend → frontend | Task state for resume UI            |
 | `AttachmentInfo`           | backend  | backend → frontend | Pending attachment metadata (snake_case; content excluded). Document attachments carry markdown excluded; image attachments additionally carry `is_image: true` and a `thumbnail` JPEG data URI |
+| `PromptSuggestionsResponse` | backend | backend → frontend | `GetPromptSuggestions` payload: the active suggestion set the chat input offers (rows `{id, session_id, task_id, kind, text, status, created_at}` as persisted — in the `new_session` case `session_id` names the ORIGINATING session) plus the backend's routing decision `source` (`continuation` \| `new_session` \| `none`, the context consulted — set even when the set is empty) |
 
 ## RPC Surface
 
@@ -74,6 +75,13 @@ All methods on `*desktop.App` (promoted from `*backend.FrontendAPI`) are callabl
 | `GetSessionTokens`    | sessionID                    | SessionTokensResponse     | Get token usage for session (getter, no error return). Overlays the live emitter token snapshot (context tokens used/max, fresh fill percent, model) over the persisted session row when the session is in memory, so the status-bar context badge survives a switch back to a running session |
 | `GetBlackboardAttachmentMarkdown` | sessionID, attachmentID | (string, error) | Fetch a blackboard attachment's stored markdown (excluded from `GetAttachments` metadata) |
 | `ResolvePendingMessage` | sessionID, role, matchField, matchValue, extra | error | Mark a pending tool_confirm / ask_user / step_limit / plan_review message as resolved in the DB (merging `extra` fields) so it does not reappear as pending on session reload |
+
+### Prompt Suggestions (`backend/frontend_api_suggestions.go`)
+
+| Method                     | Parameters        | Returns                    | Description             |
+| -------------------------- | ----------------- | -------------------------- | ----------------------- |
+| `GetPromptSuggestions`     | sessionID, projectID | PromptSuggestionsResponse | Restore the active suggestion set for the chat input on session open/switch (ADR-088 D8; see [../domains/prompt-suggestions.md](../domains/prompt-suggestions.md)). The backend routes by session CONTENT: a session with a transcript is served its own active `goal_advance` set (`source: "continuation"`); an empty or brand-new session is served the project's freshest active `next_task` set — a newest-first scan over the project window, the same 10 sessions ADR-088 D3 generates over (`source: "new_session"`; returned rows keep the ORIGINATING `session_id`, the frontend never re-keys by it); a No-Project (CHAT) session offers nothing (`source: "none"`). The branch decision is made by content, not row availability — a content session with no active continuation set stays on the continuation branch with an empty set rather than falling through to the project window. Read-only getter (no error return): every store read failure degrades to an empty set with a Debug log — the subsystem's fail-open contract (D9) |
+| `SetPromptSuggestionsEnabled` | enabled        | error                      | Toggle the `prompt_suggestions.enabled` gate (ADR-088) and persist it to config.yaml. A request matching the stored EFFECTIVE value is a no-op (nil config = on, so enabling an unset config writes nothing); a failed disk write rolls the in-memory value back so the rejected toggle is indistinguishable from a rejected request. On success the session manager's outcome gate is flipped in the same beat (no restart) and `config:updated` is announced. The effective value also rides `ConfigResponse.prompt_suggestions.enabled` (nil config = on, false when the config is not loaded) |
 
 ### Attachments (`backend/frontend_api_attachment.go`)
 

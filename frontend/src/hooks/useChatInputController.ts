@@ -6,7 +6,7 @@ import { useInputModeStore } from '@/stores/inputModeStore'
 import { useChatInputStore, getInputState, NULL_SESSION_KEY } from '@/stores/chatInputStore'
 import { useAttachmentsStore, useHasActiveUploads } from '@/stores/attachmentsStore'
 import { useMessageSender } from '@/hooks/useMessageSender'
-import { useChatEditor, type ChatEditorAPI } from '@/hooks/useChatEditor'
+import { useChatEditor, type ChatEditorAPI, type ChatSuggestionNavAction } from '@/hooks/useChatEditor'
 import { usePasteHandler } from '@/hooks/usePasteHandler'
 import { extractRefs, partitionRefs } from '@/lib/parseReferences'
 import { mentionableNamesInContext } from '@/lib/capabilityModes'
@@ -14,7 +14,9 @@ import { sessionKindForSession } from '@/lib/sessionKind'
 import { resolveUnfinishedStatus } from '@/lib/activeSessions'
 import { optimizePrompt } from '@/api/prompt'
 import { pauseSession, resumeSession } from '@/api/chat'
-import { computeChatInputDisabled, computeChatPlaceholder } from '@/lib/chatInputLock'
+import { computeChatInputDisabled, computeSuggestionPlaceholder, isChatSessionIdle } from '@/lib/chatInputLock'
+import { usePromptSuggestions, usePromptSelectedIndex, usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
+import { usePromptSuggestionsSync } from '@/hooks/usePromptSuggestionsSync'
 import { createSessionFromDraft } from '@/lib/sessionDraft'
 import { listAgents } from '@/api/agents'
 import { listSkills } from '@/api/skills'
@@ -78,6 +80,12 @@ export interface ChatInputController {
 export function useChatInputController(): ChatInputController {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  // Prompt-suggestions sync (ADR-088): refetches the store on session/project
+  // switches (session creation selects the new session, so it rides the same
+  // trigger) and on the backend's `prompt_suggestions` event; resets the store
+  // without an active session. Mounted here — the one surface that already
+  // knows both identities.
+  usePromptSuggestionsSync(activeSessionId, activeProjectId)
   const taskActive = useChatStore((s) => (activeSessionId ? s.taskActive[activeSessionId] ?? false : false))
   // `paused` drives the toolbar's Resume (vs Send) affordance, so it MUST agree
   // with the sidebar dot / radar — which resolve the effective unfinished-task
@@ -176,7 +184,15 @@ export function useChatInputController(): ChatInputController {
   // owns aborting the compaction itself.
   const showCancel = taskActive || paused || isProcessing || compacting
 
-  const placeholderText = computeChatPlaceholder(lockInput)
+  // Prompt suggestions (ADR-088): the store's single-slot snapshot, keyed to
+  // the active session (selectors return the stable empty set / -1 while the
+  // store still holds another session's snapshot). A non-empty set in the
+  // idle state takes over the placeholder (the multi-line browse hint); the
+  // refs feed the arrow keymap below.
+  const suggestions = usePromptSuggestions(activeSessionId)
+  const selectedIndex = usePromptSelectedIndex(activeSessionId)
+
+  const placeholderText = computeSuggestionPlaceholder(lockInput, suggestions, selectedIndex)
 
   // The editor needs a stable onSend reference, but handleSend captures the
   // editor itself. We resolve the cycle by holding the latest handleSend in a
@@ -190,6 +206,14 @@ export function useChatInputController(): ChatInputController {
   // extension always invokes the latest handler via its internal ref.
   const onPasteHolder: { current: (data: DataTransfer) => Promise<void> } = {
     current: async () => {},
+  }
+
+  // Same forward-reference trick for the suggestion-nav keymap: the real
+  // handler needs the editor (→ inserts into it), which only exists after
+  // the hook returns. The mount-once keymap reads the holder fresh on every
+  // keydown, so the assignment below is picked up immediately.
+  const onSuggestionNavHolder: { current: (action: ChatSuggestionNavAction) => boolean } = {
+    current: () => false,
   }
 
   const editor = useChatEditor({
@@ -209,7 +233,35 @@ export function useChatInputController(): ChatInputController {
       useChatInputStore.getState().setDraft(activeSessionId ?? NULL_SESSION_KEY, text)
     },
     onPaste: (data: DataTransfer) => onPasteHolder.current(data),
+    onSuggestionNav: (action: ChatSuggestionNavAction) => onSuggestionNavHolder.current(action),
   })
+
+  // Suggestion keyboard navigation (ADR-088): armed only while the ACTIVE
+  // session's suggestion set is non-empty AND the session is in the same
+  // idle state whose placeholder carries the browse hint — the keys do
+  // exactly what the placeholder says, nothing more (a compacting/pausing/
+  // working window keeps its own placeholder and must never let → inject
+  // text into a locked editor). The keymap's own guards handle the
+  // empty-input / modifier / IME / autocomplete cases. ↑↓ move the store's
+  // clamped selection; → inserts the previewed row — exactly what the
+  // placeholder is showing — as REAL editor content (insertAtCursor's
+  // dispatch persists the draft via the update listener; nothing is sent).
+  // The selection resets afterwards, so the next emptied input starts
+  // unselected again.
+  onSuggestionNavHolder.current = (action: ChatSuggestionNavAction): boolean => {
+    if (!isChatSessionIdle(lockInput)) return false
+    const st = usePromptSuggestionsStore.getState()
+    if (st.sessionId !== activeSessionId || st.suggestions.length === 0) return false
+    if (action === 'up' || action === 'down') {
+      st.moveSelection(action === 'up' ? -1 : 1)
+      return true
+    }
+    const row = st.suggestions[st.selectedIndex >= 0 ? st.selectedIndex : 0]
+    if (!row) return false
+    editor.insertAtCursor(row.text)
+    st.clearSelection()
+    return true
+  }
 
   // Per-session draft swap: when the active session changes, the editor's
   // current text is saved under the session we are LEAVING and the newly
