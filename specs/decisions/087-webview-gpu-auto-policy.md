@@ -1,4 +1,4 @@
-# ADR-086: Linux Webview GPU Auto Policy — On-Demand by Default with a Detected Fallback
+# ADR-087: Linux Webview GPU Auto Policy — On-Demand by Default with a Detected Fallback
 
 ## Status
 

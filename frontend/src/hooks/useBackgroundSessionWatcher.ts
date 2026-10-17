@@ -33,10 +33,10 @@ import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isToolConfirmData, isAskUserData, isStepLimitData, isPlanReviewReadyData, isGoalProposalData, isGoalStatusData, isGoalProgressData } from '@/types/events'
+import { isToolConfirmData, isAskUserData, isStepLimitData, isPlanReviewReadyData, isGoalProposalData, isGoalStatusData, isGoalProgressData, isGoalSuggestionData } from '@/types/events'
 import type { SessionEventKey } from '@/types/events'
 import { handleToolConfirmEvent, handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent } from './events/hitlHandlers'
-import { handleGoalProposalEvent, handleGoalStatusEvent, handleGoalProgressEvent } from './events/goalHandlers'
+import { handleGoalProposalEvent, handleGoalStatusEvent, handleGoalProgressEvent, handleGoalSuggestionEvent } from './events/goalHandlers'
 import { handleSessionPausedEvent, handleSessionResumedEvent } from './events/sessionLifecycleHandlers'
 import { classifySessionEvent, notifySessionCue } from './events/useSoundEvents'
 import { playSound } from '@/lib/sound'
@@ -278,6 +278,17 @@ export function useBackgroundSessionWatcher(): void {
         onSessionEvent(sessionId, 'goal_progress', (data) => {
           if (!isGoalProgressData(data)) { reportDroppedEvent('goal_progress', data); return }
           handleGoalProgressEvent(sessionId, data)
+        }),
+      )
+      // Goal suggestion — the post-routing gate blocks a background session's
+      // task until the user answers. Without this listener the offer would be
+      // lost and the agent goroutine would hang (HITL parity, mirroring the
+      // goal_proposal subscription above).
+      cleanups.push(
+        onSessionEvent(sessionId, 'goal_suggestion', (data) => {
+          if (!isGoalSuggestionData(data)) { reportDroppedEvent('goal_suggestion', data); return }
+          announceBackgroundCue(sessionId, 'goal_suggestion', data)
+          handleGoalSuggestionEvent(sessionId, data)
         }),
       )
     }

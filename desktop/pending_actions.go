@@ -10,11 +10,12 @@ import (
 // the frontend can reconstruct the pending-action UI without relying on the
 // event having been caught live.
 type PendingActionsResponse struct {
-	ToolConfirms  []PendingToolConfirm  `json:"tool_confirms"`
-	StepLimits    []PendingStepLimit    `json:"step_limits"`
-	PlanApprovals []PendingPlanApproval `json:"plan_approvals"`
-	AskUser       []PendingAskUser      `json:"ask_user"`
-	GoalProposals []PendingGoalProposal `json:"goal_proposals"`
+	ToolConfirms    []PendingToolConfirm    `json:"tool_confirms"`
+	StepLimits      []PendingStepLimit      `json:"step_limits"`
+	PlanApprovals   []PendingPlanApproval   `json:"plan_approvals"`
+	AskUser         []PendingAskUser        `json:"ask_user"`
+	GoalProposals   []PendingGoalProposal   `json:"goal_proposals"`
+	GoalSuggestions []PendingGoalSuggestion `json:"goal_suggestions"`
 }
 
 // PendingToolConfirm describes a pending tool confirmation.
@@ -56,9 +57,17 @@ type PendingGoalProposal struct {
 	VerificationMode string `json:"verification_mode,omitempty"`
 }
 
+// PendingGoalSuggestion describes a pending goal-mode activation offer (the
+// post-routing suggestion card).
+type PendingGoalSuggestion struct {
+	RequestID string `json:"request_id"`
+	Reason    string `json:"reason"`
+}
+
 // GetPendingActions returns all pending HITL prompts for a session — tool
-// confirmations, step-limit prompts, plan approvals, and ask-user questions
-// that are currently blocking the session's agent goroutine. The frontend
+// confirmations, step-limit prompts, plan approvals, ask-user questions,
+// goal-proposal sign-offs, and goal-mode suggestion offers that are currently
+// blocking the session's agent goroutine. The frontend
 // calls this on session switch to resurface prompts whose events were missed
 // while the session was in the background (no live event listener caught
 // them) and to reconcile stale persisted prompts (a prompt in the DB that is
@@ -68,14 +77,15 @@ func (a *App) GetPendingActions(sessionID string) (*PendingActionsResponse, erro
 	// nil slice to JSON `null` (not `[]`), and the frontend's shape guard
 	// (isPendingActionsResponse) rejects the response when any kind is null —
 	// which would silently disable HITL reconciliation on session switch.
-	// A session almost never has all four kinds pending at once, so without
+	// A session almost never has every kind pending at once, so without
 	// this the response was effectively always rejected.
 	resp := &PendingActionsResponse{
-		ToolConfirms:  []PendingToolConfirm{},
-		StepLimits:    []PendingStepLimit{},
-		PlanApprovals: []PendingPlanApproval{},
-		AskUser:       []PendingAskUser{},
-		GoalProposals: []PendingGoalProposal{},
+		ToolConfirms:    []PendingToolConfirm{},
+		StepLimits:      []PendingStepLimit{},
+		PlanApprovals:   []PendingPlanApproval{},
+		AskUser:         []PendingAskUser{},
+		GoalProposals:   []PendingGoalProposal{},
+		GoalSuggestions: []PendingGoalSuggestion{},
 	}
 
 	a.pendingConfirmations.Range(func(key, value any) bool {
@@ -144,6 +154,18 @@ func (a *App) GetPendingActions(sessionID string) (*PendingActionsResponse, erro
 			Condition:        e.payload.Condition,
 			Verify:           e.payload.Verify,
 			VerificationMode: e.payload.VerificationMode,
+		})
+		return true
+	})
+
+	a.pendingGoalSuggestions.Range(func(_, value any) bool {
+		e, ok := value.(*pendingGoalSuggestionEntry)
+		if !ok || e.sessionID != sessionID {
+			return true
+		}
+		resp.GoalSuggestions = append(resp.GoalSuggestions, PendingGoalSuggestion{
+			RequestID: e.payload.RequestID,
+			Reason:    e.payload.Reason,
 		})
 		return true
 	})

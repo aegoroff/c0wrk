@@ -15,6 +15,7 @@ export type MessageType =
   | 'autonomy_decision'
   | 'goal_proposal'
   | 'goal_status'
+  | 'goal_suggestion'
 
 export interface ChatMessageUI {
   id: string
@@ -32,6 +33,7 @@ export type DisplayItemKind =
   | 'context_compaction' | 'memory_read' | 'plan_review' | 'checklist'
   | 'autonomy_decision'
   | 'goal_proposal'
+  | 'goal_suggestion'
 
 /**
  * Lifecycle status of a subagent / plan-step chat block. `interrupted` is a
@@ -71,6 +73,13 @@ export type DisplayItem =
        *  means the default ('executable'). Shown/editable in the approval
        *  panel and round-tripped through confirmGoal. */
       verification_mode: string
+    }
+  | {
+      kind: 'goal_suggestion'
+      message: ChatMessageUI
+      /** The classifier's user-facing explanation of why the request fits
+       *  goal mode (in the user's language). */
+      reason: string
     }
   | { kind: 'checklist'; id: string; stepId: string | null; items: Array<{ text: string; checked: boolean }>; active: boolean }
 

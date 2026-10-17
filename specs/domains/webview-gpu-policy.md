@@ -147,6 +147,6 @@ already persisted, so the next manual start applies it.
 ## Related Specs
 
 - [crash-logging.md](crash-logging.md) — the captured stderr.log the watchdog scans, and the sibling env-var escape-hatch pattern (`C0WRK_DISABLE_CRASH_CAPTURE`)
-- [086-webview-gpu-auto-policy.md](../decisions/086-webview-gpu-auto-policy.md) — why the default changed from `never` to `auto`
+- [087-webview-gpu-auto-policy.md](../decisions/087-webview-gpu-auto-policy.md) — why the default changed from `never` to `auto`
 - [018-macos-webview-recovery.md](../decisions/018-macos-webview-recovery.md) - the other platform-specific webview workaround, decision-record form
 - [desktop-frontend.md](../contracts/desktop-frontend.md) — the Get/SetWebviewGpuPolicy RPC contract

@@ -55,6 +55,10 @@ Regardless of band, a global skill-prescribed clause overrides the bands when an
 
 ## c0wrk Routing Policy
 
+### Post-Routing Goal-Mode Suggestion Gate
+
+The router itself never judges goal-mode suitability (its decision shape is closed — see ADR-012 and [ADR-086](../../decisions/086-goal-mode-suggestion.md)). Instead, on a FRESH plain task, c0wrk runs a post-routing policy step after `routeOrContinue` returns: a one-shot classifier (`ServiceKindGoalSuggest`, `core/prompts/goal_suggest.md`) receives the raw message plus the advisory routing decision and, on an obvious goal-mode fit, a blocking desktop card offers activation BEFORE any execution starts. Acceptance enters the goal loop with THIS routing decision (`runGoalLoopRouted` — the one-routing-decision invariant holds, no second router call); a decline continues the plain path and suppresses suggestions for the session. Every failure fails open. Cheap preconditions (domain ≠ `general`, complexity ≥ `goal_loop.suggest.min_complexity`) keep the classifier away from messages that can never be goals. The continuation fast-path short-circuits the gate exactly where it short-circuits the router. See [goal-mode.md](../goal-mode.md) (Suggested Activation) for the full contract.
+
 ### Skill Merge
 
 Selected (router-matched) skills are merged with user-specified skills (from `/skill` references in the message) via `mergeSkillNames()` — a deduplicated union where router-matched skills come first. The combined set is activated for the task (system prompt injection, tool policy overrides). When `HandleOptions.UserSkills` is non-empty, the orchestrator augments the routing message with skill descriptions (`buildSkillAugmentedRoutingMessage`) so the router classifies domain/complexity based on the skill's purpose.
@@ -64,7 +68,6 @@ Selected (router-matched) skills are merged with user-specified skills (from `/s
 When `opts.TaskID` is non-empty (a continuation) AND the restored blackboard has BOTH an existing plan AND a routing decision, the orchestrator **skips the router LLM call entirely**, reuses the prior `RoutingDecision`, and reactivates skills. The plan gate prevents a plan-less continuation from mis-routing (e.g. "continue step 10" without a plan would be misclassified). Every FIRST user message passes through `Route`; only continuations with a restored plan AND routing take the fast-path.
 
 ### No Project Mode
-
 In No Project (CHAT) mode, `SetNoProjectMode()` disables only `semantic_search` — there is no vector index without a project, so the tool would fail or return stale results from the previous CODE-mode project. All other tools, including `ripgrep` and `glob`, stay available under the normal `security.groups` policies, and no extra shell-command blacklist is installed (dev/build commands such as `git` follow the regular `execute` group policy). The routing domain is honest: code-flavored CHAT questions classify as `"code"` — its compaction strategy (`sliding_window`) assumes no project — instead of being rewritten to `"general"`.
 
 ## Error Handling

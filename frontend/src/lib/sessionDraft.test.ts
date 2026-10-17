@@ -7,7 +7,7 @@
 // draft armed; success adds + selects + clears; a stale cross-project draft
 // is ignored and retired.
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 import type { Mock } from 'vitest'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
 import { createSessionFromDraft } from '@/lib/sessionDraft'
@@ -156,6 +156,60 @@ describe('createSessionFromDraft', () => {
     expect(useSessionDraftStore.getState().committing).toBe(false)
   })
 
+  it.each(['resolve', 'reject'] as const)(
+    'keeps the managed RPC snapshot until explicit %s, then clears it', async (outcome) => {
+      useSessionDraftStore.getState().startDraft('proj-1')
+      useSessionDraftStore.getState().setDraftWorkspace({
+        kind: 'branch', branch: 'feat/new', createBranch: true, startPoint: 'main',
+      })
+      const draft = useSessionDraftStore.getState().draft
+      let resolve!: (value: SessionInfo) => void
+      let reject!: (reason: unknown) => void
+      createManagedSessionMock.mockReturnValue(new Promise<SessionInfo>((onResolve, onReject) => {
+        resolve = onResolve
+        reject = onReject
+      }))
+      const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+      onTestFinished(() => errorSpy.mockRestore())
+      // Observe rejection immediately, before explicitly settling the RPC.
+      const pending = createSessionFromDraft().then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+
+      expect(createManagedSessionMock).toHaveBeenCalledExactlyOnceWith('feat/new', true, 'main')
+      expect(createSessionMock).not.toHaveBeenCalled()
+      expect(useSessionDraftStore.getState().committing).toBe(true)
+      expect(useSessionDraftStore.getState().committingDraft).toBe(draft)
+      expect(useSessionDraftStore.getState().draft).toBe(draft)
+      expect(useSessionStore.getState().sessions).toBeNull()
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+      expect(errorSpy).not.toHaveBeenCalled()
+
+      const created = makeSession({ id: 's-managed' })
+      const error = new Error('managed provisioning failed')
+      if (outcome === 'resolve') resolve(created)
+      else reject(error)
+      const result = await pending
+
+      expect(useSessionDraftStore.getState().committing).toBe(false)
+      expect(useSessionDraftStore.getState().committingDraft).toBeNull()
+      if (outcome === 'resolve') {
+        expect(result).toEqual({ value: created })
+        expect(useSessionStore.getState().sessions).toEqual([created])
+        expect(useSessionStore.getState().activeSessionId).toBe(created.id)
+        expect(useSessionDraftStore.getState().draft).toBeNull()
+        expect(errorSpy).not.toHaveBeenCalled()
+      } else {
+        expect(result).toEqual({ error })
+        expect(useSessionStore.getState().sessions).toBeNull()
+        expect(useSessionStore.getState().activeSessionId).toBeNull()
+        expect(useSessionDraftStore.getState().draft).toBe(draft)
+        expect(errorSpy).toHaveBeenCalledExactlyOnceWith('Failed to create session from draft:', error)
+      }
+    },
+  )
+
   it('a draft from another project is ignored and retired', async () => {
     useSessionDraftStore.getState().startDraft('proj-other')
     useSessionDraftStore
@@ -170,17 +224,26 @@ describe('createSessionFromDraft', () => {
     expect(useSessionDraftStore.getState().draft).toBeNull()
   })
 
-  it('toggles committing around the RPC window', async () => {
-    let resolveCreation: (s: SessionInfo) => void = () => {}
+  it.each([false, true])('toggles committing around the local RPC window (draft: %s)', async (withDraft) => {
+    if (withDraft) useSessionDraftStore.getState().startDraft('proj-1')
+    const draft = useSessionDraftStore.getState().draft
+    let resolveCreation!: (s: SessionInfo) => void
     createSessionMock.mockReturnValue(
       new Promise<SessionInfo>((resolve) => {
         resolveCreation = resolve
       }),
     )
     const pending = createSessionFromDraft()
+    expect(createSessionMock).toHaveBeenCalledOnce()
+    expect(createManagedSessionMock).not.toHaveBeenCalled()
     expect(useSessionDraftStore.getState().committing).toBe(true)
+    expect(useSessionDraftStore.getState().committingDraft).toBe(draft)
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
     resolveCreation(makeSession())
     await pending
     expect(useSessionDraftStore.getState().committing).toBe(false)
+    expect(useSessionDraftStore.getState().committingDraft).toBeNull()
+    expect(useSessionDraftStore.getState().draft).toBeNull()
+    expect(useSessionStore.getState().activeSessionId).toBe('s-1')
   })
 })

@@ -363,7 +363,11 @@ func TestHandleBranchSwitch_AnnouncesPreOpenState(t *testing.T) {
 // branch with no collection. Retrying that same branch name is therefore not a
 // same-branch no-op — SwitchBranch really re-opens — and must be announced. A
 // guard comparing branch names alone would skip it and leave the pill on
-// whatever the failed open last published.
+// whatever the failed open last published. The failed open itself must also
+// TERMINATE the announcement with `unavailable`: without it the loading state
+// published before the open stays in the manager snapshot and the UI stream
+// until the next branch change or project switch, parking the status bar on
+// "Preparing index…" for the rest of the session.
 func TestHandleBranchSwitch_AnnouncesRetryAfterFailedOpen(t *testing.T) {
 	ctx := context.Background()
 	emb := fakeEmbeddingFunc()
@@ -403,8 +407,24 @@ func TestHandleBranchSwitch_AnnouncesRetryAfterFailedOpen(t *testing.T) {
 	if err := os.WriteFile(branchRootPath(root, "blocked"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("write blocking file: %v", err)
 	}
+
+	// Only the failed switch's own emissions matter below; drop IndexFull's.
+	mu.Lock()
+	states = nil
+	mu.Unlock()
+
 	if _, err := indexer.HandleBranchSwitch(ctx, wsDir, "blocked"); err == nil {
 		t.Fatal("HandleBranchSwitch to a blocked branch root must fail")
+	}
+
+	// The failed open must terminate the pre-open announcement: loading first,
+	// then the terminal unavailable — never a dangling loading state.
+	mu.Lock()
+	failed := slices.Clone(states)
+	mu.Unlock()
+	if len(failed) != 2 || failed[0] != IndexStateLoading || failed[1] != IndexStateUnavailable {
+		t.Errorf("failed-open emissions = %v, want [%q %q]",
+			failed, IndexStateLoading, IndexStateUnavailable)
 	}
 
 	// The failed open left the outgoing branch name behind with no collection.
@@ -432,6 +452,95 @@ func TestHandleBranchSwitch_AnnouncesRetryAfterFailedOpen(t *testing.T) {
 	}
 	if col := svc.GetCollection(); col == nil {
 		t.Error("the retry did not restore a collection")
+	}
+}
+
+// TestFailedPassWithoutCollectionAnnouncesUnavailable pins the honesty
+// conditional in IndexFull/IndexIncremental's deferred terminal emission. A
+// pass that fails while NO collection exists (a watcher pass or an
+// init/reindex attempt after a failed branch open) must terminate with
+// `unavailable`: announcing `ready` would claim queryable data that does not
+// exist, flipping the honest post-failure state back to a green pill within a
+// second of the next file edit. With a LIVE collection the previous data is
+// still queryable, so the same failure class must keep terminating with
+// `ready`.
+func TestFailedPassWithoutCollectionAnnouncesUnavailable(t *testing.T) {
+	ctx := context.Background()
+	// The persistence root is created before the close cleanup is registered:
+	// t.Cleanup runs LIFO, so Close releases root.bolt before the TempDir
+	// RemoveAll — an open handle fails that removal on Windows (EBUSY).
+	persistDir := t.TempDir()
+	svc, err := NewService(ServiceConfig{EmbeddingFunc: fakeEmbeddingFunc()})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	if err := svc.SetProject("p", persistDir); err != nil {
+		t.Fatalf("SetProject: %v", err)
+	}
+	// No SwitchBranch: no collection exists — the exact shape a failed open
+	// leaves behind.
+	if svc.GetCollection() != nil {
+		t.Fatal("precondition: a fresh SetProject must leave no collection")
+	}
+
+	var mu sync.Mutex
+	var states []IndexState
+	indexer := NewIndexer(IndexerConfig{
+		Service: svc,
+		ChunkFn: fakeChunkFunc,
+		HashFn:  fakeHashFunc,
+		OnProgress: func(_ IndexPhase, state IndexState, _, _ int, _ string) {
+			mu.Lock()
+			states = append(states, state)
+			mu.Unlock()
+		},
+	})
+	snapshot := func() []IndexState {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(states)
+	}
+	wsDir := createTestWorkspace(t)
+
+	// Incremental over the missing collection fails at ValidateCollection and
+	// must terminate with exactly one `unavailable` emission.
+	if err := indexer.IndexIncremental(ctx, wsDir); err == nil {
+		t.Fatal("IndexIncremental without a collection must fail")
+	}
+	if got := snapshot(); len(got) != 1 || got[0] != IndexStateUnavailable {
+		t.Errorf("incremental emissions without a collection = %v, want [%q]",
+			got, IndexStateUnavailable)
+	}
+
+	// Full over the missing collection walks fine but has nothing to add to.
+	mu.Lock()
+	states = nil
+	mu.Unlock()
+	if err := indexer.IndexFull(ctx, wsDir); err == nil {
+		t.Fatal("IndexFull without a collection must fail")
+	}
+	if got := snapshot(); len(got) < 2 || got[0] != IndexStateIndexing ||
+		got[len(got)-1] != IndexStateUnavailable || slices.Contains(got, IndexStateReady) {
+		t.Errorf("full emissions without a collection = %v, want %q progress terminating with %q and no %q",
+			got, IndexStateIndexing, IndexStateUnavailable, IndexStateReady)
+	}
+
+	// Positive control: the same failure class with a LIVE collection still
+	// terminates with `ready` — the previous data remains queryable. A
+	// workspace path that does not exist fails the validation walk.
+	if err := svc.SwitchBranch(ctx, "main"); err != nil {
+		t.Fatalf("SwitchBranch main: %v", err)
+	}
+	mu.Lock()
+	states = nil
+	mu.Unlock()
+	if err := indexer.IndexIncremental(ctx, filepath.Join(wsDir, "does-not-exist")); err == nil {
+		t.Fatal("IndexIncremental over a missing workspace must fail")
+	}
+	if got := snapshot(); len(got) == 0 || got[len(got)-1] != IndexStateReady {
+		t.Errorf("incremental emissions with a live collection = %v, want terminal %q",
+			got, IndexStateReady)
 	}
 }
 

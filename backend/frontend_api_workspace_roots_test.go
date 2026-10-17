@@ -112,8 +112,8 @@ func TestGetFileDiff_WorktreeFileDiffsInItsOwnRepo(t *testing.T) {
 		t.Fatal("GetFileDiff for a modified worktree file = empty, want the worktree's own diff")
 	}
 
-	// Containment is still enforced against the ACTIVE project root: the
-	// worktree lives inside the checkout, so the RPC must not reject it.
+	// Containment still accepts this repository's managed-tree descendants,
+	// including paths whose leaf does not exist yet.
 	if _, err := h.api.GetFileDiff(filepath.Join(tree, "definitely", "relative", "no", "such", "file.txt")); err != nil {
 		t.Fatalf("containment must accept in-project worktree paths: %v", err)
 	}
@@ -121,8 +121,8 @@ func TestGetFileDiff_WorktreeFileDiffsInItsOwnRepo(t *testing.T) {
 
 // TestResolveWorkspacePath_AcceptsWorktreePaths pins the write-containment
 // contract for session trees: ListDirectory/WriteFile resolve paths inside
-// the managed container (the container is inside the project root by
-// design), so the explorer and the editor keep working for managed sessions.
+// a validated managed tree, even outside the checkout, so the explorer and
+// editor keep working for managed sessions.
 func TestResolveWorkspacePath_AcceptsWorktreePaths(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
@@ -141,8 +141,14 @@ func TestResolveWorkspacePath_AcceptsWorktreePaths(t *testing.T) {
 	if absErr != nil || absPath != wantAbs {
 		t.Fatalf("absPath = %q, want %q", absPath, wantAbs)
 	}
-	if absRoot != h.project.WorkspacePath {
-		t.Fatalf("absRoot = %q, want the project checkout %q", absRoot, h.project.WorkspacePath)
+	if absRoot != tree {
+		t.Fatalf("absRoot = %q, want the managed tree %q", absRoot, tree)
+	}
+	if _, err := h.api.ListDirectory(tree, false); err != nil {
+		t.Fatalf("ListDirectory(%q): %v", tree, err)
+	}
+	if err := h.api.WriteFile(managed.ID, filepath.Join(tree, "file.txt"), "updated\n"); err != nil {
+		t.Fatalf("WriteFile(%q): %v", tree, err)
 	}
 
 	// A path outside the project (and outside session infra) stays rejected.
@@ -151,23 +157,24 @@ func TestResolveWorkspacePath_AcceptsWorktreePaths(t *testing.T) {
 	}
 }
 
-// TestManagedWorktreesDirInsideRepo documents the structural fact the
-// traversal gate depends on: the managed container is nested inside the
-// repository checkout, so root containment alone cannot isolate sibling
-// session trees (the gate in core/tools restores that isolation).
-func TestManagedWorktreesDirInsideRepo(t *testing.T) {
+// New managed trees live outside the checkout; the legacy container remains
+// supported by the traversal gate for previously provisioned trees.
+func TestManagedWorktreesDirOutsideRepo(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	managed, err := h.api.CreateManagedSession("", true, "")
 	if err != nil {
 		t.Fatalf("CreateManagedSession: %v", err)
 	}
-	container := config.ManagedWorktreesDir(h.project.WorkspacePath)
+	container, err := config.NewManagedWorktreesDir(h.agentDir, h.project.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ok, err := config.IsWithinPath(h.project.WorkspacePath, container)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatalf("container %q must live inside the checkout %q", container, h.project.WorkspacePath)
+	if ok {
+		t.Fatalf("container %q must live outside the checkout %q", container, h.project.WorkspacePath)
 	}
 	ok, err = config.IsWithinPath(container, managed.WorkspaceBinding.WorkspacePath)
 	if err != nil {

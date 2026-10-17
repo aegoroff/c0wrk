@@ -462,6 +462,13 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.GoalLoop.Verification == "" {
 		cfg.GoalLoop.Verification = "independent"
 	}
+	// Goal-mode suggestion defaults: the feature is on unless explicitly
+	// disabled (pointer-bool nil = enabled); the classifier is consulted
+	// from complexity 2 upward — complexity-1 requests (greetings, factual
+	// questions) can never be goals, so consulting them wastes an LLM call.
+	if cfg.GoalLoop.Suggest.MinComplexity == 0 {
+		cfg.GoalLoop.Suggest.MinComplexity = 2
+	}
 
 	// Vector index / hybrid search defaults. Hybrid is a pointer-bool so
 	// callers can distinguish "unset" (defaults applied below) from an

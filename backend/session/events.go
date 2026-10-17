@@ -228,6 +228,20 @@ type GoalProposalPayload struct {
 	VerificationMode string `json:"verification_mode,omitempty"`
 }
 
+// GoalSuggestionPayload is sent to the frontend when the post-routing
+// goal-mode suggestion gate judged a fresh task's message obviously
+// goal-suited. It surfaces as a pending action that blocks the task until the
+// user answers (accept enters the goal loop before any work starts; decline
+// continues the plain Conductor path and suppresses further suggestions for
+// the session).
+type GoalSuggestionPayload struct {
+	RequestID string `json:"request_id"`
+	SessionID string `json:"session_id"`
+	// Reason is the classifier's short user-facing explanation (in the
+	// user's language) of WHY the request fits goal mode.
+	Reason string `json:"reason"`
+}
+
 // --- Emitter event data types (typed Data field payloads) ---
 // These mirror the event data produced by the EventEmitter methods,
 // enabling type-safe assertions in the emitFunc / persistence layer.

@@ -217,6 +217,7 @@ describe('activeSessionsStore', () => {
         plan_approvals: [],
         ask_user: [{ request_id: 'r1', questions: [] }],
         goal_proposals: [],
+          goal_suggestions: [],
       })
       expect(useActiveSessionsStore.getState().pendingOverride).toEqual({ s1: true })
     })
@@ -229,6 +230,7 @@ describe('activeSessionsStore', () => {
         plan_approvals: [],
         ask_user: [],
         goal_proposals: [],
+          goal_suggestions: [],
       })
       expect(useActiveSessionsStore.getState().pendingOverride).toEqual({})
     })
@@ -340,6 +342,7 @@ describe('activeSessionsStore', () => {
         plan_approvals: [],
         ask_user: [{ request_id: 'r1', questions: [] }],
         goal_proposals: [],
+          goal_suggestions: [],
       })
 
       await sweepPendingActions()

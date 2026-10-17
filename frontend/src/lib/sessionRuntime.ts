@@ -38,7 +38,8 @@ export function stalePromptMatchField(type: MessageType): string | null {
     case 'ask_user':
     case 'step_limit':
     case 'plan_review':
-    case 'goal_proposal': return 'request_id'
+    case 'goal_proposal':
+    case 'goal_suggestion': return 'request_id'
     case 'task_failed_resumable': return 'task_id'
     default: return null
   }
@@ -149,6 +150,51 @@ export function applyWorkUnitSettled(sessionId: string, stepId: string, status: 
 }
 
 /**
+ * Apply the task-flag snapshot (`taskActive` / `paused` / `pausing`) for
+ * `sessionId` from a runtime status. THE single implementation of the flag
+ * decision, shared by BOTH readers of the same backend snapshot:
+ *
+ * - the post-history-load reconcile ({@link reconcileRuntimeStatus}), and
+ * - the switch-time fast restore (`useTaskFlagRestore`).
+ *
+ * They MUST share it. The fast restore's write stamps `taskFlagsEventAt`, which
+ * makes the (possibly slower) reconcile below skip its OWN flag restore via the
+ * stale-snapshot guard — so if the fast restore applied only `taskActive`, a
+ * cooperatively PAUSED checkpoint would leave `chatStore.paused` unset. The
+ * chat toolbar (which, unlike the sidebar dot / radar, reads the live flag with
+ * no DB fallback) would then paint a plain Send button instead of Resume while
+ * the list and radar showed the session paused.
+ *
+ * - compacting: the compaction flow owns the session; neither Pause nor Resume
+ *   is meaningful and a stale pause signal must not survive.
+ * - paused (and not active): a cooperative checkpoint — Resume + Stop, input
+ *   unlocked.
+ * - otherwise: running (`taskActive`) or idle; a pause-in-flight flag survives
+ *   while the task is still active (the backend status cannot see the in-memory
+ *   pause window), and is cleared once the task is no longer active.
+ */
+export function applyRuntimeTaskFlags(sessionId: string, status: SessionRuntimeStatus): void {
+  const store = useChatStore.getState()
+  if (status.compacting) {
+    store.setPausing(sessionId, false)
+    store.setPaused(sessionId, false)
+    store.setTaskActive(sessionId, status.active)
+    return
+  }
+  if (status.paused && !status.active) {
+    store.setPausing(sessionId, false)
+    store.setPaused(sessionId, true)
+    store.setTaskActive(sessionId, false)
+    return
+  }
+  store.setPaused(sessionId, false)
+  store.setTaskActive(sessionId, status.active)
+  if (!status.active) {
+    store.setPausing(sessionId, false)
+  }
+}
+
+/**
  * Reconcile the chat-store state for `sessionId` with the backend runtime status.
  *
  * - `active` → restore the "task running" flag (input disabled, no false idle).
@@ -168,10 +214,29 @@ export function applyWorkUnitSettled(sessionId: string, stepId: string, status: 
  * (taskActive/paused/pausing, prompt resolution, resume banner) still comes
  * from the snapshot, which stays authoritative for them.
  *
+ * `flagsSnapshotReadAt` is the read time the TASK-FLAG freshness guard uses,
+ * defaulting to `snapshotReadAt`. It exists for callers whose snapshot is
+ * taken long after their loading window began (ChatArea's post-history-load
+ * reconcile reads the status AFTER the history RPC resolves): a flag
+ * transition that lands during the load — above all the OPTIMISTIC SEND
+ * ACTIVATION (setTaskActive(true) in useMessageSender, stamped
+ * taskFlagsEventAt before the SendMessage RPC is even issued) — is fresher
+ * than any snapshot whose read merely postdates it, because the backend may
+ * not have activated the session yet when the status RPC is handled. Guarding
+ * the flags against the LOAD START instead makes any live transition during
+ * the load beat the snapshot; the activation race that intermittently killed
+ * the flag mid-run (settling the live work block to `interrupted` while the
+ * loop kept streaming) is closed at this source.
+ *
  * Returns the messages that were resolved as stale (so the caller can persist
  * the resolution to the backend). Messages already resolved are skipped.
  */
-export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntimeStatus, snapshotReadAt?: number): ChatMessageUI[] {
+export function reconcileRuntimeStatus(
+  sessionId: string,
+  status: SessionRuntimeStatus,
+  snapshotReadAt?: number,
+  flagsSnapshotReadAt?: number,
+): ChatMessageUI[] {
   const store = useChatStore.getState()
 
   // Stale-snapshot guard: runtimeEventAt is stamped by the streaming/activity
@@ -189,9 +254,15 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   // activity events (chunks) stamp runtimeEventAt without owning the flags,
   // so a background-started run still gets its flags restored from the
   // snapshot — while a live pause/resume/terminal transition (which stamps
-  // the flags map) must never be reverted by an older snapshot.
+  // the flags map) must never be reverted by an older snapshot. The guard's
+  // read time is `flagsSnapshotReadAt` (falling back to snapshotReadAt): a
+  // caller whose snapshot postdates a long loading window (ChatArea's
+  // post-history reconcile) passes its LOAD START there, so a flag transition
+  // landing during the load — above all the optimistic send activation — is
+  // never reverted by a snapshot that cannot yet see the run on the backend.
   const hasFresherTaskFlags =
-    snapshotReadAt !== undefined && (useChatStore.getState().taskFlagsEventAt[sessionId] ?? 0) > snapshotReadAt
+    snapshotReadAt !== undefined &&
+    (useChatStore.getState().taskFlagsEventAt[sessionId] ?? 0) > (flagsSnapshotReadAt ?? snapshotReadAt)
 
   // Re-seed the SINGLE live unfinished-task overlay (chatStore.unfinishedTaskStatus)
   // every status surface reads. After a reload chatStore's map is empty, so the
@@ -235,17 +306,21 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
     }
   }
 
+  // Task flags (taskActive / paused / pausing) are applied from the snapshot
+  // unless a LIVE flag transition landed after it (hasFresherTaskFlags). One
+  // call covers all three branches below — compacting, paused, and
+  // running/idle — via applyRuntimeTaskFlags, which the switch-time fast
+  // restore (useTaskFlagRestore) shares so the two readers cannot drift.
+  if (!hasFresherTaskFlags) {
+    applyRuntimeTaskFlags(sessionId, status)
+  }
+
   // The compaction flow owns the session: the task it paused shows neither
   // paused affordances nor a "did not finish" banner — compaction_finished
   // and the flow's auto-resume own the terminal transitions. Mirrors the
   // paused branch's stale-HITL resolution so prompts from before the flow
   // (if any) resolve identically.
   if (status.compacting) {
-    if (!hasFresherTaskFlags) {
-      store.setPausing(sessionId, false)
-      store.setPaused(sessionId, false)
-      store.setTaskActive(sessionId, status.active)
-    }
     if (!hasFresherLiveState) {
       store.setActivityStatus(sessionId, 'Compacting')
       store.clearStreamingText(sessionId)
@@ -265,11 +340,6 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   // Resume button) over a live task. The active branch below clears paused
   // and restores taskActive=true instead.
   if (status.paused && !status.active) {
-    if (!hasFresherTaskFlags) {
-      store.setPausing(sessionId, false)
-      store.setPaused(sessionId, true)
-      store.setTaskActive(sessionId, false)
-    }
     // A checkpointed task has no open assistant stream; any frozen streaming
     // text predates the pause and would render a phantom partial answer.
     // Skipped when a live event already updated the label/stream after the
@@ -285,19 +355,6 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
     // task is resumable via the Resume button or a nudge message.
     return resolveStaleHitlPrompts(sessionId)
   }
-  if (!hasFresherTaskFlags) {
-    store.setPaused(sessionId, false)
-    store.setTaskActive(sessionId, status.active)
-    // A pause-in-flight flag survives while the task is still running: the
-    // backend status has no visibility into the in-memory pause window, so
-    // clearing it here would unlock the input for a send the backend then
-    // rejects with ErrPausePending. Once the task is no longer active the flag
-    // is stale and is cleared.
-    if (!status.active) {
-      store.setPausing(sessionId, false)
-    }
-  }
-
   if (status.active) {
     // Replace the frozen activity label (the session advanced while the user
     // was viewing another session/project — its events had no listener) with
@@ -526,15 +583,14 @@ export function reconcilePendingActions(sessionId: string, pending: PendingActio
     })
   }
 
-  // Goal proposals. NOTE: goal_proposal is intentionally NOT added to the
-  // resolve-stale branch above: the backend's GetPendingActions does not yet
-  // report goal_proposals, so the pending set is always empty here, and
-  // treating "not in pending" as stale would falsely resolve every persisted
-  // proposal. The genuine stale case (restart with no running task) is handled
-  // by reconcileRuntimeStatus via HITL_PROMPT_TYPES. This add-missing branch is
-  // forward-compatible — it stays a no-op until the backend populates the
-  // goal_proposals field. Persisted proposals reappear via history reload
-  // (role goal_proposal) regardless.
+  // Goal proposals and goal-mode suggestions. NOTE: neither goal kind is in
+  // the resolve-stale branch above — "not in pending" is decided by the LIVE
+  // pending map, whose entry exists exactly while the agent goroutine waits;
+  // the genuine stale case (restart with no running task) is handled by
+  // reconcileRuntimeStatus via HITL_PROMPT_TYPES. The add-missing branches
+  // resurface a genuinely-pending card whose event was missed while the
+  // session was in the background; persisted cards reappear via history
+  // reload regardless (roles goal_proposal / goal_suggestion).
   for (const g of pending.goal_proposals) {
     const id = `goal-proposal-${g.request_id}`
     if (existingIDs.has(id)) continue
@@ -563,12 +619,37 @@ export function reconcilePendingActions(sessionId: string, pending: PendingActio
     })
   }
 
+  for (const s of pending.goal_suggestions) {
+    const id = `goal-suggestion-${s.request_id}`
+    if (existingIDs.has(id)) continue
+    store.addMessage(sessionId, {
+      id,
+      sessionId,
+      type: 'goal_suggestion',
+      content: s.reason,
+      metadata: {
+        request_id: s.request_id,
+        reason: s.reason,
+        resolved: false,
+      } as Record<string, unknown>,
+      timestamp: Date.now(),
+    })
+    // Keep the goal store in sync for a background-delivered suggestion that
+    // surfaces here on session switch (mirrors handleGoalSuggestionEvent).
+    useGoalStore.getState().setPendingSuggestion(sessionId, {
+      request_id: s.request_id,
+      session_id: sessionId,
+      reason: s.reason,
+    })
+  }
+
   // A genuinely pending prompt means the session's agent goroutine is blocked
   // on the user RIGHT NOW (the backend reports only prompts with a live
   // waiter). Surface that in the activity label — mirrors what the live HITL
   // handlers set and overrides any pre-HITL phase the runtime status reported.
   const pendingCount = pending.tool_confirms.length + pending.step_limits.length
     + pending.plan_approvals.length + pending.ask_user.length + pending.goal_proposals.length
+    + pending.goal_suggestions.length
   if (pendingCount > 0) {
     store.setActivityStatus(sessionId, 'Waiting for your response...')
   }

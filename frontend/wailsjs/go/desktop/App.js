@@ -10,6 +10,10 @@ export function AbortRebase() {
   return window['go']['desktop']['App']['AbortRebase']();
 }
 
+export function AcceptGoalSuggestion(arg1, arg2) {
+  return window['go']['desktop']['App']['AcceptGoalSuggestion'](arg1, arg2);
+}
+
 export function ActiveProjectDir() {
   return window['go']['desktop']['App']['ActiveProjectDir']();
 }
@@ -132,6 +136,10 @@ export function CreateSession() {
 
 export function CreateTag(arg1, arg2) {
   return window['go']['desktop']['App']['CreateTag'](arg1, arg2);
+}
+
+export function DeclineGoalSuggestion(arg1, arg2) {
+  return window['go']['desktop']['App']['DeclineGoalSuggestion'](arg1, arg2);
 }
 
 export function DeleteBookmark(arg1, arg2) {

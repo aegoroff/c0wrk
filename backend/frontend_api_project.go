@@ -49,6 +49,10 @@ func (f *FrontendAPI) DeleteProject(id string) error {
 		return errors.New("cannot delete the No Project pseudo-project")
 	}
 
+	if err := config.CheckProjectWorktreesReleased(f.agentDir, id); err != nil {
+		return err
+	}
+
 	// Per-root vector managers (ADR-080) are released FIRST — shutdown drops
 	// their open chromem handles so the directory removal below works on
 	// Windows too. Managed-session worktree indexes live under

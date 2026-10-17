@@ -19,6 +19,7 @@ describe('sessionDraftStore', () => {
     const s = useSessionDraftStore.getState()
     expect(s.draft).toBeNull()
     expect(s.committing).toBe(false)
+    expect(s.committingDraft).toBeNull()
   })
 
   it('startDraft arms a local draft for the project', () => {
@@ -65,7 +66,31 @@ describe('sessionDraftStore', () => {
     expect(useSessionDraftStore.getState().draft).toBeNull()
   })
 
-  it('setCommitting toggles the in-flight flag', () => {
+  it('keeps the committed snapshot across draft edits, retirement and a new project draft', () => {
+    const { startDraft, setDraftWorkspace, clearDraft, setCommitting } = useSessionDraftStore.getState()
+    startDraft('proj-1')
+    setDraftWorkspace({ kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
+    const committed = useSessionDraftStore.getState().draft
+    setCommitting(true)
+    expect(useSessionDraftStore.getState().committingDraft).toBe(committed)
+
+    setDraftWorkspace({ kind: 'local' })
+    expect(useSessionDraftStore.getState().committingDraft).toBe(committed)
+    clearDraft()
+    expect(useSessionDraftStore.getState().committingDraft).toBe(committed)
+    startDraft('proj-other')
+    expect(useSessionDraftStore.getState().committingDraft).toBe(committed)
+    expect(useSessionDraftStore.getState().committing).toBe(true)
+
+    setCommitting(false)
+    expect(useSessionDraftStore.getState().committingDraft).toBeNull()
+    expect(useSessionDraftStore.getState().committing).toBe(false)
+    expect(useSessionDraftStore.getState().draft).toEqual({
+      projectId: 'proj-other', workspace: { kind: 'local' },
+    })
+  })
+
+  it('setCommitting toggles the in-flight flag without a draft snapshot', () => {
     useSessionDraftStore.getState().setCommitting(true)
     expect(useSessionDraftStore.getState().committing).toBe(true)
     useSessionDraftStore.getState().setCommitting(false)

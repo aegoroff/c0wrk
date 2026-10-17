@@ -403,6 +403,63 @@ func (a *App) handleGoalProposalResponse(payload map[string]any, log *slog.Logge
 	}
 }
 
+// resolveGoalSuggestion delivers a user decision to a blocked goal-suggestion
+// channel and marks the persisted goal_suggestion message resolved. Returns
+// true when a pending suggestion was found and resolved, false otherwise.
+// Shared by the event-based path (handleGoalSuggestionResponse) and the
+// RPC-based path (FrontendAPI.AcceptGoalSuggestion/DeclineGoalSuggestion, via
+// the manager resolver).
+func (a *App) resolveGoalSuggestion(requestID, decision string) bool {
+	if requestID == "" {
+		return false
+	}
+	dataVal, ok := a.pendingGoalSuggestions.Load(requestID)
+	if !ok {
+		return false
+	}
+	entry, ok := dataVal.(*pendingGoalSuggestionEntry)
+	if !ok {
+		a.pendingGoalSuggestions.Delete(requestID)
+		return false
+	}
+
+	select {
+	case entry.ch <- goalSuggestionResponse{Decision: decision}:
+	default:
+		// Channel already resolved or receiver gone — clean up the stale entry.
+	}
+	a.pendingGoalSuggestions.Delete(requestID)
+
+	// Mark the persisted goal_suggestion message as resolved so it doesn't
+	// reappear as pending on session reload.
+	if err := a.resolvePendingMessage(entry.sessionID, "goal_suggestion", "request_id", requestID, map[string]any{
+		"resolved": true,
+		"decision": decision,
+	}); err != nil {
+		a.log().Warn("failed to resolve persisted goal_suggestion message", "request_id", requestID, "error", err)
+	}
+	return true
+}
+
+// handleGoalSuggestionResponse is the body of the EventGoalSuggestionResponse
+// listener. Extracted from wireWailsEventListeners so it can be unit-tested
+// without a live Wails runtime.
+func (a *App) handleGoalSuggestionResponse(payload map[string]any, log *slog.Logger) {
+	requestID, ok := stringField(payload, "request_id", "goal_suggestion response", log)
+	if !ok {
+		return
+	}
+	decision, _ := payload["decision"].(string)
+	if decision != "accept" && decision != "decline" {
+		log.Warn("goal suggestion response has unrecognized decision", "request_id", requestID, "decision", decision)
+		return
+	}
+
+	if !a.resolveGoalSuggestion(requestID, decision) {
+		log.Warn("no pending goal suggestion for request_id", "request_id", requestID)
+	}
+}
+
 // parseAskUserAnswers extracts the typed answers slice from the untyped JSON
 // payload. Missing or malformed entries are silently skipped — the question
 // IDs are owned by the orchestrator and unrecognized IDs would be rejected

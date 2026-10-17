@@ -122,6 +122,11 @@ export function areDisplayItemsEqual(a: DisplayItem, b: DisplayItem): boolean {
         ia.verification_mode === ib.verification_mode
       )
     }
+    case 'goal_suggestion': {
+      const ia = a as Extract<DisplayItem, { kind: 'goal_suggestion' }>
+      const ib = b as typeof ia
+      return ia.message === ib.message && ia.reason === ib.reason
+    }
     case 'tool': {
       const ia = a as ToolItem
       const ib = b as ToolItem

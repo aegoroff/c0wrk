@@ -43,7 +43,7 @@ func withGitRepo(t *testing.T, fn func(*FrontendAPI, string)) {
 	gitInit(t, tmpDir)
 	commitFile(t, tmpDir, "committed.txt", "v1\n")
 
-	f := &FrontendAPI{activeProjectPath: tmpDir}
+	f := &FrontendAPI{activeProjectPath: tmpDir, activeProjectID: "git-test", agentDir: gittest.TempDir(t)}
 	f.seedPublished.Store(true)
 	fn(f, tmpDir)
 }
@@ -68,7 +68,7 @@ func TestCreateBranchInWorktree_SymlinkedProjectPath(t *testing.T) {
 		t.Fatalf("create repo symlink alias: %v", err)
 	}
 
-	f := &FrontendAPI{activeProjectPath: alias}
+	f := &FrontendAPI{activeProjectPath: alias, activeProjectID: "git-test", agentDir: gittest.TempDir(t)}
 	f.seedPublished.Store(true)
 	if err := f.CreateBranchInWorktree("feature-one", ""); err != nil {
 		t.Fatalf("CreateBranchInWorktree through a symlinked project path: %v", err)
@@ -1611,7 +1611,11 @@ func TestCreateBranchInWorktree_FromHead(t *testing.T) {
 		if entry.Kind != workspace.WorktreeManaged {
 			t.Errorf("tree kind: got %q, want %q", entry.Kind, workspace.WorktreeManaged)
 		}
-		wantPath, err := config.ManagedWorktreePath(dir, "feature-x")
+		owner, err := f.newWorktreeOwner(f.activeProjectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPath, err := owner.NewPath(dir, "feature-x")
 		if err != nil {
 			t.Fatalf("ManagedWorktreePath: %v", err)
 		}
@@ -1699,7 +1703,11 @@ func TestCreateBranchInWorktree_TreeNameSlugAndSuffix(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("branch feature+one is not checked out in any worktree; trees: %+v", trees)
 		}
-		wantPath, err := config.ManagedWorktreePath(dir, "feature-one-2")
+		owner, err := f.newWorktreeOwner(f.activeProjectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPath, err := owner.NewPath(dir, "feature-one-2")
 		if err != nil {
 			t.Fatalf("ManagedWorktreePath: %v", err)
 		}

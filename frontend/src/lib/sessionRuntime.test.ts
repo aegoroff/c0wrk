@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
-import { reconcileRuntimeStatus, reconcilePendingActions, refreshCompactionAvailability, stalePromptMatchField } from './sessionRuntime'
+import { reconcileRuntimeStatus, reconcilePendingActions, refreshCompactionAvailability, stalePromptMatchField, applyRuntimeTaskFlags } from './sessionRuntime'
 import { handleSessionPausedEvent, handleSessionResumedEvent } from '@/hooks/events/sessionLifecycleHandlers'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useGoalStore } from '@/stores/goalStore'
 import type { ChatMessageUI } from '@/types/messages'
 import { getSessionRuntimeStatus } from '@/api/chat'
 import type { PendingActionsResponse } from '@/api/chat'
@@ -54,6 +55,68 @@ function sessionMessages(): ChatMessageUI[] {
   const s = useChatStore.getState()
   return (s.messageOrder[SESSION] ?? []).map(id => s.messages[SESSION]![id]!) 
 }
+
+describe('applyRuntimeTaskFlags', () => {
+  beforeEach(resetStore)
+
+  it('marks a cooperatively paused task (paused, not active, pausing cleared)', () => {
+    useChatStore.setState({ pausing: { [SESSION]: true }, taskActive: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: false, has_unfinished_task: true, paused: true })
+
+    expect(useChatStore.getState().paused[SESSION]).toBe(true)
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+  })
+
+  it('clears paused and restores taskActive for a running task, keeping an in-flight pause', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: true, has_unfinished_task: true, paused: true })
+
+    // `active` wins over a stale paused flag; the in-memory pause window
+    // (pausing) survives because the backend status cannot see it.
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+    expect(useChatStore.getState().pausing[SESSION]).toBe(true)
+  })
+
+  it('clears paused/pausing for an idle (no unfinished task) session', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: false, has_unfinished_task: false, paused: false })
+
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+  })
+
+  it('never leaves a paused/pausing affordance while compacting', () => {
+    useChatStore.setState({ paused: { [SESSION]: true }, pausing: { [SESSION]: true } })
+
+    applyRuntimeTaskFlags(SESSION, { active: true, has_unfinished_task: true, paused: true, compacting: true })
+
+    expect(useChatStore.getState().paused[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().pausing[SESSION]).toBeUndefined()
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+  })
+
+  it('restores paused even when the switch-time fast restore wins the race and suppresses the reconcile', () => {
+    // The reported bug: useTaskFlagRestore applies its snapshot FIRST (stamping
+    // taskFlagsEventAt) while ChatArea's reconcile read an EARLIER snapshot, so
+    // the reconcile's stale-snapshot guard skips its own flag restore. Because
+    // the fast restore now applies the SAME snapshot via applyRuntimeTaskFlags,
+    // the paused flag is correct regardless of which reader lands first.
+    const olderReadAt = Date.now() - 5000
+    const status = { active: false, has_unfinished_task: true, paused: true }
+
+    applyRuntimeTaskFlags(SESSION, status)
+    reconcileRuntimeStatus(SESSION, status, olderReadAt)
+
+    expect(useChatStore.getState().paused[SESSION]).toBe(true)
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
+})
 
 describe('reconcileRuntimeStatus', () => {
   beforeEach(resetStore)
@@ -307,6 +370,20 @@ describe('reconcileRuntimeStatus', () => {
     expect(askUser?.metadata?.stale).toBe(true)
   })
 
+  it('resolves a stale goal_suggestion offer when nothing is unfinished', () => {
+    // An offer card persisted before an app restart: the orchestrator
+    // goroutine that awaited the answer is gone, so the card can never be
+    // answered and must resolve as stale (goal_suggestion is in
+    // HITL_PROMPT_TYPES, like every other HITL prompt).
+    addMsg({ id: 'gs-1', type: 'goal_suggestion', metadata: { request_id: 'r7', reason: 'why', resolved: false } })
+
+    reconcileRuntimeStatus(SESSION, { active: false, has_unfinished_task: false, paused: false })
+
+    const suggestion = sessionMessages().find(m => m.type === 'goal_suggestion')
+    expect(suggestion?.metadata?.resolved).toBe(true)
+    expect(suggestion?.metadata?.stale).toBe(true)
+  })
+
   it('leaves plan_review untouched when the session is still active', () => {
     addMsg({ id: 'pr-1', type: 'plan_review', metadata: { request_id: 'r1', resolved: false } })
 
@@ -426,6 +503,70 @@ describe('reconcileRuntimeStatus', () => {
     expect(useChatStore.getState().activityStatus[SESSION]).toBeUndefined()
     expect(useChatStore.getState().streamingText[SESSION]).toBeUndefined()
   })
+
+  it('flagsSnapshotReadAt: an activation landing during the load is never reverted by the snapshot', () => {
+    fixedRuntimeClock()
+    // The load effect started at 999_000; the user sent a message while the
+    // history RPC was in flight — the optimistic activation stamped
+    // taskFlagsEventAt at 1_000_000. The status RPC was READ at 1_000_500
+    // (after the send) but the backend had not activated the session yet when
+    // it was handled, so the snapshot still claims active=false. Guarding the
+    // flags against the LOAD START (not the late read) must skip the flag
+    // application: reverting here would settle the live turn's work block to
+    // `interrupted` while the loop keeps streaming.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: false, has_unfinished_task: false, paused: false },
+      1_000_500,
+      999_000,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+    // The rest of the snapshot still applies: the flag guard is scoped to the
+    // flags only (no live activity event intervened, so the label comes from
+    // the snapshot).
+    expect(useChatStore.getState().activityStatus[SESSION]).toBeUndefined()
+  })
+
+  it('flagsSnapshotReadAt: a live terminal clear during the load still beats an active snapshot', () => {
+    fixedRuntimeClock()
+    // Mirror direction: the task settled live during the load (the terminal
+    // event cleared the flag at 1_000_000); a snapshot read at 1_000_500 that
+    // still says active=true must not resurrect it.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+    useChatStore.getState().setTaskActive(SESSION, false)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: true, has_unfinished_task: false, paused: false },
+      1_000_500,
+      999_000,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
+
+  it('without flagsSnapshotReadAt the flag guard defaults to the snapshot read (behavior unchanged)', () => {
+    fixedRuntimeClock()
+    // The legacy contract: only a flag write NEWER than the snapshot read
+    // wins. A stamp older than the read is the snapshot's business — this is
+    // what makes the plain switch-time reconcile authoritative for flags when
+    // no live transition intervened.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: false, has_unfinished_task: false, paused: false },
+      1_000_500,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
 })
 
 describe('reconcileRuntimeStatus → live unfinished-task overlay', () => {
@@ -511,6 +652,7 @@ describe('reconcilePendingActions', () => {
       plan_approvals: [],
       ask_user: [{ request_id: 'r1', questions: [{ question: 'Proceed?', options: [] }] }],
       goal_proposals: [],
+      goal_suggestions: [],
     } as unknown as PendingActionsResponse)
 
     expect(useChatStore.getState().activityStatus[SESSION]).toBe('Waiting for your response...')
@@ -524,6 +666,7 @@ describe('reconcilePendingActions', () => {
     plan_approvals: [],
     ask_user: [],
     goal_proposals: [],
+    goal_suggestions: [],
   }
 
   it('resolves HITL prompts absent from the pending set and returns them', () => {
@@ -564,6 +707,25 @@ describe('reconcilePendingActions', () => {
     expect(added?.id).toBe('ask-user-r2')
     expect(added?.metadata?.request_id).toBe('r2')
   })
+
+  it('adds a missing goal_suggestion card and syncs the goal store', () => {
+    const pending: PendingActionsResponse = {
+      ...EMPTY_PENDING,
+      goal_suggestions: [{ request_id: 'r9', reason: 'multi-step build' }],
+    }
+
+    reconcilePendingActions(SESSION, pending)
+
+    const added = sessionMessages().find(m => m.type === 'goal_suggestion')
+    expect(added?.id).toBe('goal-suggestion-r9')
+    expect(added?.content).toBe('multi-step build')
+    expect(added?.metadata?.request_id).toBe('r9')
+    expect(added?.metadata?.resolved).toBe(false)
+    expect(useGoalStore.getState().pendingSuggestion[SESSION]).toMatchObject({
+      request_id: 'r9',
+      reason: 'multi-step build',
+    })
+  })
 })
 
 describe('stalePromptMatchField', () => {
@@ -572,6 +734,8 @@ describe('stalePromptMatchField', () => {
     expect(stalePromptMatchField('ask_user')).toBe('request_id')
     expect(stalePromptMatchField('step_limit')).toBe('request_id')
     expect(stalePromptMatchField('plan_review')).toBe('request_id')
+    expect(stalePromptMatchField('goal_proposal')).toBe('request_id')
+    expect(stalePromptMatchField('goal_suggestion')).toBe('request_id')
     expect(stalePromptMatchField('task_failed_resumable')).toBe('task_id')
   })
 

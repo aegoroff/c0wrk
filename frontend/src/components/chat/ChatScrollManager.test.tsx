@@ -638,6 +638,42 @@ describe('ChatScrollManager session-switch scroll persistence', () => {
     expect(viewport.scrollTop).toBe(12_000)
   })
 
+  // The settle-collapse of the live turn's work block is the largest single
+  // shrink the transcript ever takes (Radix unmounts the collapsed
+  // CollapsibleContent). The collapse-reposition gate in CollapsibleBlock
+  // deliberately leaves the landing of an at-bottom viewport to THIS writer,
+  // so the shrink must re-pin explicitly — a missing re-pin parks the
+  // viewport past the shortened content end (an empty chat area the user
+  // must scroll out of by hand). The write is a no-op whenever the browser's
+  // scrollTop clamp already did the job: it targets the bottom either way.
+  it('re-pins to the bottom when the content shrinks while following the tail (settle collapse)', () => {
+    pinGeometry(10_000, 600)
+    const viewport = renderViewport('s2')
+    expect(viewport.scrollTop).toBe(10_000)
+    const ro = ResizeObserverStub.instances[ResizeObserverStub.instances.length - 1]!
+    // The settling block collapses: the content height drops far below the
+    // followed position.
+    pinGeometry(2_400, 600)
+    act(() => { ro.fire() })
+    expect(viewport.scrollTop).toBe(2_400)
+  })
+
+  it('does not move the viewport when the content shrinks after the user scrolled up', () => {
+    pinGeometry(10_000, 600)
+    const viewport = renderViewport('s2')
+    act(() => {
+      viewport.scrollTop = 3_000
+      viewport.dispatchEvent(new Event('scroll'))
+    })
+    const ro = ResizeObserverStub.instances[ResizeObserverStub.instances.length - 1]!
+    pinGeometry(2_400, 600)
+    act(() => { ro.fire() })
+    // Mirrors the growth branch: a shrink must not jerk a user who is reading
+    // earlier content (the browser's own scrollTop clamp remains the only
+    // actor for that case).
+    expect(viewport.scrollTop).toBe(3_000)
+  })
+
   // The browser delivers a programmatic scrollTop write's scroll event
   // asynchronously, at its rendering steps — by which time the content may
   // have grown past the write's target (async markdown/highlight layout, an

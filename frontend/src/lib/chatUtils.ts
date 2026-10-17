@@ -38,6 +38,7 @@ type ChatRole = 'user' | 'assistant' | 'tool_call' | 'tool_result'
   | 'autonomy_decision'
   | 'goal_proposal'
   | 'goal_status'
+  | 'goal_suggestion'
 
 export const roleToType: Record<ChatRole, MessageType> = {
   user: 'user', assistant: 'assistant', tool_call: 'tool_call', tool_result: 'tool_result',
@@ -72,6 +73,7 @@ export const roleToType: Record<ChatRole, MessageType> = {
   autonomy_decision: 'autonomy_decision',
   goal_proposal: 'goal_proposal',
   goal_status: 'goal_status',
+  goal_suggestion: 'goal_suggestion',
 }
 
 /** Convert a persisted ChatMessage to ChatMessageUI, matching live event shape. */
@@ -256,7 +258,7 @@ export function groupMessages(messages: ChatMessageUI[], workUnitStatus?: Record
       }
       case 'tool_call': handleToolCall(msg, meta, planStepId, stepIndexMap, toolItemsByKey, pendingResults, pushItem, toolItemById); break
       case 'tool_result': handleToolResult(meta, toolItemsByKey, pendingResults); break
-      case 'tool_confirm': case 'ask_user': case 'task_failed_resumable': case 'step_limit': case 'plan_review': case 'goal_proposal':
+      case 'tool_confirm': case 'ask_user': case 'task_failed_resumable': case 'step_limit': case 'plan_review': case 'goal_proposal': case 'goal_suggestion':
         handleActionMessage(msg, meta, items, activeActions, toolItemById); break
       case 'context_compaction': {
         const bp = (meta?.before_percent as number) ?? 0

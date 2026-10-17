@@ -100,13 +100,12 @@ func TestWorkspaceBindingRejectsInvalidAndMutation(t *testing.T) {
 			t.Fatalf("accepted invalid mutation: %+v", i)
 		}
 	}
-	// A tampered stored path is not a binding change: the execution path is
-	// derived, so the save succeeds and rewrites the canonical value.
+	// A tampered stored path is refused rather than relocated silently.
 	tampered := base
 	tampered.WorkspaceBinding = cloneWorkspaceBinding(base.WorkspaceBinding)
 	tampered.WorkspaceBinding.WorkspacePath = root
-	if err := s.SaveSession(ctx, tampered); err != nil {
-		t.Fatalf("rejected path re-derivation: %v", err)
+	if err := s.SaveSession(ctx, tampered); err == nil {
+		t.Error("SaveSession(tampered workspace path) = nil, want rejection")
 	}
 	canonical, err := s.LoadSession(ctx, base.ID)
 	if err != nil || !reflect.DeepEqual(canonical.WorkspaceBinding, base.WorkspaceBinding) {

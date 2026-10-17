@@ -18,7 +18,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 ## Key Files
 
 - `core/workspace/worktrees.go` — the safe git-worktree primitive service: `ListWorktrees` (strict porcelain parsing, main/managed/external classification), `AddWorktree`/`RecreateWorktree`/`RemoveWorktree`/`PruneWorktrees` with per-repo serialization, branch-occupancy validation, structural path validation and the explicit failure taxonomy; installs the `/.worktrees/` exclusion into the common dir's `info/exclude`
-- `backend/worktrees/owner.go` — `Owner`: the backend ownership coordinator (Provision/Recreate/Release/List/Inspect); every path derived via `config.ManagedWorktreePath`, managed-only mutation, release never deletes branches
+- `backend/worktrees/owner.go` — `Owner`: the backend ownership coordinator (Provision/Recreate/Release/List/Inspect); every path constructed/validated through centralized config helpers; existing identities resolve independently of the creation root, managed-only mutation, release never deletes branches
 - `backend/frontend_api_worktrees.go` — the Git lifecycle owner driving the coordinator from the session flows: `CreateManagedSession` (draft → provision → `CreateSessionFromDraft` → persist, compensated on runtime/DB failure), the `WorkspaceEnsurer` installed on the session manager (restore validation + recreation warning), `forkManagedSession` (new tree at source committed HEAD), and the deletion protocol (`DeleteSessionWithOptions`, `SessionDeleteBlockedError`)
 - `core/pathsegments.go` — `WorktreesRelativePath` (the shared `.worktrees` segment constant)
 - `backend/session/workspace_binding.go` — `WorkspaceKind`, `WorkspaceBinding`, `WorkspaceEnsurer`, `NormalizeWorkspaceBinding`, `SessionDraft`/`NewSessionDraft`, context DTOs (`ProjectContext`, `GitPanelTarget`, `SessionContexts`)
@@ -27,7 +27,8 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `backend/session/persistence.go` — binding-aware `SaveSession`/`LoadSession`/`ListSessions*`; immutable-identity upsert
 - `backend/session/persistence_fork.go` — `ForkSessionWithBinding` (managed fork requires a new tree + derived branch)
 - `backend/session/manager.go` — `CreateSessionFromDraft` (commit a prepared workspace), `SetWorkspaceEnsurer` + the restore-time ensure inside `getOrRestoreSession`'s single-flight, `HasSession` (non-restoring existence), binding-aware lazy restore and `WorkspacePathFor`
-- `backend/config/paths.go` — `ManagedWorktreesDir`, `ManagedWorktreePath` (the only place `.worktrees` paths are constructed or validated)
+- `core/worktree_paths.go` — config-independent legacy/marked-container ownership recognition, project-scoped (marker-independent) durable-path recognition, and safe marker creation, shared by backend path helpers and primitive classification
+- `backend/config/paths.go` — `NewManagedWorktreesDir`, `WorktreePathInContainer`, `ManagedWorktreeNameFromPath`/`ManagedWorktreeNameFromPathProject`, `ManagedWorktreeLegacyPath`, `ManagedWorktreeRootForPath`, legacy `ManagedWorktreesDir`/`ManagedWorktreePath`, and project-deletion preflight
 - `backend/frontend_api_git_focus.go` — the Git-panel focus model: `SetGitPanelFocus`/`GetGitPanelFocus`/`ListProjectWorktrees` RPCs, `resolveGitFocusRoot` (the focus resolution behind `resolveGitRepoRoot`), owning-session metadata, the pinned-branch guard (`ErrPinnedWorktreeBranch`, `refusePinnedBranchSwitch`), the fail-soft vector-registry re-point every accepted focus move carries (`focusVectorRoots` → `ApplyFocus`), and `DeleteWorktree` (removes any linked tree of the active project with the session-release cleanup contract)
 - `backend/frontend_api_git.go` — `CreateBranchInWorktree`, the Git-panel RPC that births a branch and its managed tree atomically from a base ref (through `worktrees.Owner.ProvisionNewBranch`), never switching or consulting the focus
 - `backend/frontend_api_vector.go` — vector-index RPC surface (`SearchVectorStore`/`GetVectorIndexStatus`/`ReindexVectorIndex`, all routed to the Git-panel FOCUS root), focus-target resolution (`resolveVectorIndexTarget` — the project switch resolves the saved session's tree), worktree-scoped storage (`config.WorktreeVectorIndexPath`), release cleanup (`deleteWorktreeVectorIndex`: registry release → storage → per-tree cache) and provisioning seeding (`seedWorktreeEmbeddingCache`: copies the checkout's embedding cache into a fresh tree's cache root)
@@ -36,6 +37,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
 - `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions) and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout; the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
+- `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the draft commit's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside (not inside) the locked workspace trigger
 
 ## Core Types
 
@@ -44,7 +46,7 @@ type WorkspaceKind string // "local" | "managed_worktree"
 
 type WorkspaceBinding struct {
     Kind          WorkspaceKind
-    WorkspacePath string // derived at validation; stored copy is advisory
+    WorkspacePath string // durable managed path; local follows the project root
     WorktreeName  string // managed only; single portable path component
     Branch        string // managed only; pinned at selection, not live HEAD
 }
@@ -71,6 +73,26 @@ terminal open commits it via `lib/sessionDraft.createSessionFromDraft()`,
 which calls `CreateManagedSession` for a branch draft and `CreateSession`
 otherwise.
 
+While the managed creation RPC is pending, the chat toolbar renders a small
+spinner beside the workspace selector, without a visible label. Its accessible
+name and hover/focus tooltip are `Preparing worktree…`; the accessible name is
+carried as the `role="status"` live region's own text content (a visually
+hidden `sr-only` span) rather than an `aria-label` — a live region announces its
+content, so screen readers reliably announce it on insertion. The focusable
+indicator is outside the disabled selector trigger, so its hint remains
+reachable while workspace selection is locked. It uses the existing `sessionDraftStore.committing`
+lifecycle, not an independent busy flag. `setCommitting(true)` captures the
+committed draft as `committingDraft` (project and workspace); the spinner is
+shown only for a branch snapshot owned by the active project in draft mode.
+Retiring or replacing the selection draft during navigation never attributes
+an old project's RPC to a new project's draft. The same lifecycle clears both
+`committing` and its snapshot in `finally`, on success or failure. The spinner
+covers the whole RPC wait, including synchronous embedding-cache seeding; it
+neither moves provisioning earlier nor makes the cache seed asynchronous.
+Local creation, another project's RPC, existing-session pinned chips, and
+selectors hidden by the experimental/No-Project/no-active-project gates show
+no preparation spinner. Existing-session workspace pins remain immutable.
+
 ```
 UI → RPC CreateManagedSession(branch, createBranch, startPoint)
   → NewSessionDraft(projectID, nil)                 // identity reserved, nothing created
@@ -86,9 +108,9 @@ UI → RPC CreateManagedSession(branch, createBranch, startPoint)
       no holder              → provision below
   → worktrees.Owner.ProvisionNewBranch / ProvisionBranch
                                                     // serialized git worktree add at
-                                                    // <repo>/.worktrees/s-<short id>; branch
-                                                    // occupancy validated; /.worktrees/
-                                                    // exclusion installed in info/exclude
+                                                    // <base>/<project-id>/worktrees/s-<short id>;
+                                                    // branch occupancy validated; legacy
+                                                    // /.worktrees/ exclusion retained
   → Manager.CreateSessionFromDraft(draft, repoRoot) // validates, then builds orchestrator
   → store.SaveSession(info)                         // persisted binding REQUIRED
 ```
@@ -137,8 +159,13 @@ survives the lost tree.
 
 Lazy restore and `WorkspacePathFor` decode the stored binding and normalize it
 against the project's *current* root: `local` follows the checkout wherever it
-is registered; `managed_worktree` re-derives
-`<repoRoot>/.worktrees/<name>`. For managed bindings `getOrRestoreSession`
+is registered; `managed_worktree` preserves its validated stored path,
+independent of `git.worktrees_root`. Only a managed binding with an empty path
+uses the legacy `<repoRoot>/.worktrees/<name>` derivation. A recorded path is
+recognized by the project's legacy/marked container or its project-scoped
+`<base>/<projectID>/worktrees` layout, independent of the repository marker's
+presence. Foreign containers, name/path mismatches and symlinked trees are
+explicit validation failures, not reasons to relocate a tree. For managed bindings `getOrRestoreSession`
 runs the installed `WorkspaceEnsurer` (backend `ensureManagedWorkspace`)
 inside the restore single-flight, before the orchestrator is built:
 `worktrees.Owner.Recreate` guarantees the tree exists on the pinned branch —
@@ -307,7 +334,7 @@ frontend (useGitFocusSync, mounted at the App root)  backend
 - The pinned-branch decision: `CheckoutBranch`, `CreateBranch`,
   `CheckoutRemoteBranch`, and renaming the pinned branch are refused with
   `ErrPinnedWorktreeBranch` while the focus is a managed session worktree
-  (classification via the `.worktrees` container containment — no git spawn);
+  (classification via legacy or repository-marked container ownership — no git spawn);
   checking out the pin itself stays allowed, and the local checkout and
   external trees keep normal checkout. Switching a managed tree off its pin
   would desynchronize the immutable binding and break restore/recreate.
@@ -342,9 +369,12 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   sees the committed binding (release skipped) or removes the tree first and
   the adoption rolls its just-committed session back — no row, no in-memory
   session; a retry then provisions a fresh tree for the surviving branch.
-- Execution paths are derived, never trusted from storage: `local` ⇒ project
-  root, `managed_worktree` ⇒ `ManagedWorktreePath(repoRoot, name)`; a stored
-  `workspace_path` that disagrees is rewritten to the derived value.
+- Managed execution paths are durable identity: normalization validates and
+  preserves the stored path, independent of the current creation root and of
+  the repository marker (a project-scoped `<base>/<projectID>/worktrees` path is
+  recognized by its project-id layout); an empty legacy managed path derives
+  from `<repoRoot>/.worktrees/<name>`. Local execution follows the project's
+  current registered checkout.
 - CHAT (`__no_project__`) sessions have no binding; a non-nil binding for them
   is invalid.
 - `GitPanelTarget` may name only the owning project's checkout or one of its
@@ -370,15 +400,18 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   branch and its tree are born atomically from the base in the managed
   container, and the currently focused tree is never checked out into the
   new branch.
-- `.worktrees` paths are constructed exclusively via `backend/config`
-  helpers; the name is validated (portable, no traversal, no device names) and
-  the container/tree must not be a symlink and must be inside the repo.
+- Managed paths are constructed and validated through `backend/config`
+  helpers and shared `core/worktree_paths.go` ownership checks. Names are
+  portable single components; trees and containers are real directories.
+  New containers are outside the checkout. Legacy checkout-local containers
+  remain valid without any migration.
 - Worktree mutations flow only through `core/workspace` primitives (hardened
   spawns, serialized per repo, explicit failure taxonomy) and the backend
   `worktrees.Owner`; mutating worktree operations never run arbitrary
   user/agent commands.
-- The managed container is hidden via the common dir's `info/exclude`
-  (`/.worktrees/`, idempotent, atomic); `.gitignore` is never modified.
+- The legacy checkout-local container is hidden via the common dir's
+  `info/exclude` (`/.worktrees/`, idempotent, atomic); new containers live
+  outside the checkout, and `.gitignore` is never modified.
 - No operation in the provisioning path deletes a branch; session deletion
   removes the tree and its metadata only.
 - Deletion never resurrects: `Manager.DeleteSession` refuses sessions not
@@ -391,8 +424,8 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   the root from the executor context — a session always searches its own
   tree, regardless of which session is active or focused — while the
   user-facing RPCs follow the Git-panel focus. Membership is decided by
-  containment in the project's `.worktrees` container, never by comparing
-  paths to the checkout, and an unknown root is rejected rather than
+  legacy or repository-marked container ownership, independent of current
+  config, and an unknown root is rejected rather than
   silently indexed. No send ever re-points shared index state.
 - Releasing a managed tree releases its registry manager first (open chromem
   handles dropped so removal is Windows-safe), then removes its vector-index
@@ -407,10 +440,36 @@ frontend (useGitFocusSync, mounted at the App root)  backend
 
 ## Configuration
 
-No `config.yaml` keys. The managed container is always
-`<repo>/.worktrees/`, excluded from the main checkout's status via the common
-`info/exclude` (installed by the primitives). CHAT workspaces remain
-`~/.c0wrk/projects/__no_project__/<id>/workspace`.
+No settings UI or RPC exposes the root. `git.worktrees_root` is an optional
+absolute, clean, literal filesystem path (no tilde or environment expansion).
+Empty/unset selects `<agentDir>/projects`; a custom value replaces that base.
+Fresh trees use `<base>/<project-id>/worktrees/<name>`; the usual default is
+`~/.c0wrk/projects/<project-id>/worktrees/<name>`. Editing YAML takes effect
+on restart and affects only fresh session trees, forks, and Git-panel
+branch-in-worktree creation. Existing worktrees stay at their original paths;
+there is no migration.
+
+At provisioning, existing operator/system prefixes of the base are resolved.
+Project/container/tree descendants remain real directories, and the concrete
+container is outside (and does not contain) the repository checkout. Each new
+container carries an owner-only `.c0wrk-worktree-repository` regular-file
+marker identifying its canonical repository. Classification of arbitrary
+git-listed trees uses that marker (with the legacy container), not current
+config, so orphan adoption, focus pinning, and vector routing still recognize
+old containers after config changes. Markers survive tree deletion to permit
+recreation at the persisted path. A durable binding additionally records a
+project-scoped `<base>/<project-id>/worktrees/<name>` path that is recognized
+by its project-id layout WITHOUT the marker, so a recorded identity stays
+decodable and restorable after the marker or the app-data container is removed;
+only foreign or arbitrary paths are refused (containment and symlink-safety are
+still enforced). Legacy `<repo>/.worktrees/<name>` paths remain managed without
+markers; only those legacy targets install the common `info/exclude` entry.
+
+Vector storage/cache paths remain project/name-keyed and are not relocated.
+Project deletion refuses while its default app-data worktree container holds
+entries other than the marker, before any session or vector teardown; explicit
+worktree removal supplies the existing dirty/lock confirmations first.
+CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 
 ## Extension Points
 
@@ -429,10 +488,11 @@ No `config.yaml` keys. The managed container is always
   contract: the focus target stays UI state resolved server-side and is
   never written back into the session binding; `Owner.List`/`Inspect` back
   the worktree views.
-- Project deletion: `DeleteProject` currently removes in-memory sessions and
-  the project directory; releasing the managed trees of the project's
-  store-only sessions (same confirmation protocol as session deletion) is a
-  follow-up consumer of the same `Owner.Release` seam.
+- Project deletion: `DeleteProject` refuses before teardown while the default
+  app-data container holds worktrees. After explicit removal it removes
+  in-memory sessions and project data. Coordinated removal of custom-root
+  and legacy trees during project deletion (with the same dirty/lock protocol)
+  remains a follow-up consumer of `Owner.Release`; those trees are not moved.
 - Additional kinds (if ever needed) extend `WorkspaceKind` and
   `NormalizeWorkspaceBinding` only — storage, restore, and fork identity flow
   through the same validation.

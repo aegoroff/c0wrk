@@ -59,6 +59,7 @@ func lexicalBranchDirName(branch string) string {
 func (s *Service) SwitchBranch(ctx context.Context, branchName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.publishIndexAvailabilityLocked()
 
 	if branchName == s.current.currentBranch && s.current.collection != nil {
 		return nil
@@ -1528,6 +1529,10 @@ func (s *Service) RebuildCollection(ctx context.Context) error {
 		return fmt.Errorf("creating fresh collection %q: %w", name, err)
 	}
 	s.current.collection = col
+	// Publish: the fresh collection replaces the old one (possibly nil → non-nil
+	// when the branch was never opened), and the lock-free UI status reader must
+	// see it without waiting on the indexing that follows.
+	s.publishIndexAvailabilityLocked()
 	// Reset the sidecar: a rebuilt collection is empty until re-indexed. Also
 	// drop any in-flight migration: there is nothing left to backfill.
 	if s.current.migrationCancel != nil {

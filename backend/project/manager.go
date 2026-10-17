@@ -241,6 +241,10 @@ func (m *Manager) DeleteProject(id string) error {
 		return fmt.Errorf("project %q not found", id)
 	}
 
+	if err := config.CheckProjectWorktreesReleased(m.agentDir, id); err != nil {
+		return err
+	}
+
 	// Delete from store first (FK cascade handles sessions+messages)
 	if err := m.store.DeleteProject(ctx, id); err != nil {
 		return fmt.Errorf("failed to delete project from store: %w", err)

@@ -14,6 +14,7 @@ import {
   isLiveSession,
   liveSessionsSignature,
   mergePendingOverride,
+  resolveUnfinishedStatus,
   sessionDisplayStatus,
   sessionNameFromSnapshot,
   sortedLiveRows,
@@ -60,7 +61,7 @@ function flags(overrides: Partial<LiveSessionFlags> = {}): LiveSessionFlags {
 }
 
 function emptyPending(): PendingActionsResponse {
-  return { tool_confirms: [], step_limits: [], plan_approvals: [], ask_user: [], goal_proposals: [] }
+  return { tool_confirms: [], step_limits: [], plan_approvals: [], ask_user: [], goal_proposals: [], goal_suggestions: [] }
 }
 
 describe('isLiveSession', () => {
@@ -337,6 +338,7 @@ describe('hasPendingActions', () => {
       { plan_approvals: [{ request_id: 'r2', plan_path: 'p', plan_content: '' }] },
       { ask_user: [{ request_id: 'r3', questions: [] }] },
       { goal_proposals: [{ request_id: 'r4', condition: 'c', verify: 'v' }] },
+      { goal_suggestions: [{ request_id: 'r5', reason: 'goal-shaped task' }] },
     ]
     for (const kind of kinds) {
       expect(hasPendingActions({ ...emptyPending(), ...kind } as PendingActionsResponse)).toBe(true)
@@ -503,6 +505,22 @@ describe('effectiveUnfinishedStatus — live overlay outranks the DB snapshot', 
     // DB loaded mid-task says in_progress; the live overlay knows it settled.
     const session = makeSession({ unfinished_task_status: 'in_progress' })
     expect(effectiveUnfinishedStatus(session, flags({ unfinishedTaskStatus: '' }))).toBe('')
+  })
+})
+
+describe('resolveUnfinishedStatus — the single live-overlay-??-DB rule', () => {
+  it('falls back to the DB status when the live overlay is absent', () => {
+    expect(resolveUnfinishedStatus(undefined, 'paused')).toBe('paused')
+  })
+
+  it('prefers a PRESENT live overlay, including an explicit "" (settled)', () => {
+    expect(resolveUnfinishedStatus('failed', 'paused')).toBe('failed')
+    expect(resolveUnfinishedStatus('', 'paused')).toBe('')
+  })
+
+  it('returns "" when neither source has a value', () => {
+    expect(resolveUnfinishedStatus(undefined, undefined)).toBe('')
+    expect(resolveUnfinishedStatus(undefined, '')).toBe('')
   })
 })
 

@@ -128,7 +128,7 @@ func (f *FrontendAPI) storedProjectRoot(projectID string) (string, bool) {
 // The registry Release must happen FIRST: it shuts the manager down (dropping
 // its open chromem handles so the directory removal works on Windows too)
 // before DeleteProjectData wipes the storage.
-func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string) {
+func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string, releasedPath ...string) {
 	f.seedAcquire()
 	vr := f.vectorRootsRegistry()
 	root, err := config.ManagedWorktreePath(repoRoot, name)
@@ -136,6 +136,9 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		f.log().Debug("vector index: cannot derive worktree root for release",
 			"project", projectID, "worktree", name, "error", err)
 		root = filepath.Join(config.ManagedWorktreesDir(repoRoot), name)
+	}
+	if len(releasedPath) > 0 && releasedPath[0] != "" {
+		root = canonicalWorktreeRoot(releasedPath[0])
 	}
 	mgr := vr.Release(root)
 	// Legacy rows keep a symlinked (or otherwise unresolved) ancestor in
@@ -498,10 +501,11 @@ func (f *FrontendAPI) vectorIndexStatusFromManager(vm *vectorindex.Manager) Vect
 	svc := vm.Service()
 	indices := make([]string, 0, 2)
 	if svc != nil {
-		if svc.GetCollection() != nil {
+		vector, lexical := svc.IndexAvailability()
+		if vector {
 			indices = append(indices, "vector")
 		}
-		if svc.GetLexical() != nil {
+		if lexical {
 			indices = append(indices, "lexical")
 		}
 	}

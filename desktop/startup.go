@@ -72,6 +72,15 @@ type pendingGoalProposalEntry struct {
 	payload   session.GoalProposalPayload
 }
 
+// pendingGoalSuggestionEntry wraps the goal-suggestion response channel with
+// the session ID and payload, mirroring pendingGoalProposalEntry for the
+// post-routing goal-mode suggestion card.
+type pendingGoalSuggestionEntry struct {
+	ch        chan goalSuggestionResponse
+	sessionID string
+	payload   session.GoalSuggestionPayload
+}
+
 // wakeReloadDelay is how long deferredWakeReload waits between detecting a
 // power-state wake and re-navigating the frontend. The reload cannot run
 // inline inside the NSWorkspaceDidWake observer block: on macOS 26 the
@@ -364,6 +373,7 @@ func (a *App) Startup(ctx context.Context) {
 	askUserFunc := a.buildAskUserCallback(uiEmitFunc)
 	planApprovalFunc := a.buildPlanApprovalCallback(uiEmitFunc)
 	goalProposer := a.buildGoalProposalCallback(uiEmitFunc)
+	goalSuggestionProposer := a.buildGoalSuggestionCallback(uiEmitFunc)
 	confirmFunc := a.buildConfirmCallback(uiEmitFunc)
 	hitlHandler := a.buildStepLimitCallback(uiEmitFunc)
 
@@ -432,6 +442,15 @@ func (a *App) Startup(ctx context.Context) {
 	// funnel through a single resolution on the desktop pending map.
 	application.Manager().SetGoalProposalResolver(func(requestID, decision, condition, verify, verificationMode string) bool {
 		return a.resolveGoalProposal(requestID, decision, condition, verify, verificationMode)
+	})
+	application.SetGoalSuggestionProposer(goalSuggestionProposer)
+
+	// Register the goal-suggestion resolver so the RPC-based path
+	// (FrontendAPI.AcceptGoalSuggestion/DeclineGoalSuggestion) and the
+	// event-based path both funnel through a single resolution on the desktop
+	// pending map.
+	application.Manager().SetGoalSuggestionResolver(func(requestID, decision string) bool {
+		return a.resolveGoalSuggestion(requestID, decision)
 	})
 
 	a.buildFrontendAPI(application, backend.FrontendAPIConfig{
@@ -711,6 +730,12 @@ func (a *App) Shutdown(ctx context.Context) {
 		a.pendingGoalProposals.Delete(key)
 		return true
 	})
+	// Shutdown resolves a pending goal-suggestion with the SHUTDOWN signal —
+	// never a synthetic decline: an app quit is not a user answer, so the
+	// gate must fail open (plain path, NO session suppression) instead of
+	// misreading the drain as an explicit "no" and silently suppressing every
+	// future suggestion in the session. See drainPendingGoalSuggestions.
+	a.drainPendingGoalSuggestions()
 	shutdownStep("pendingActionDrains")
 
 	// Close-path reads go through the locked accessors: Shutdown runs on the
@@ -746,6 +771,28 @@ func (a *App) Shutdown(ctx context.Context) {
 	if sl := a.sessionLog(); sl != nil {
 		_ = sl.Close()
 	}
+}
+
+// drainPendingGoalSuggestions resolves every pending goal-suggestion card
+// with the SHUTDOWN signal (goalSuggestionResponse.Shutdown), which the
+// adapter surfaces as errGoalSuggestionShutdown — an error, not a user
+// decline. The core gate fails open on any error: the plain path continues
+// (and dies with the teardown) and session suppression is NOT engaged.
+// Extracted from Shutdown so the not-a-decline contract has a direct unit
+// test; the other pending-action drains stay inline because their synthetic
+// responses (deny/cancel) are already the documented semantics of those
+// prompts.
+func (a *App) drainPendingGoalSuggestions() {
+	a.pendingGoalSuggestions.Range(func(key, value any) bool {
+		if e, ok := value.(*pendingGoalSuggestionEntry); ok {
+			select {
+			case e.ch <- goalSuggestionResponse{Shutdown: true}:
+			default:
+			}
+		}
+		a.pendingGoalSuggestions.Delete(key)
+		return true
+	})
 }
 
 // wireWailsEventListeners subscribes to Wails frontend events for tool confirmations,
@@ -799,6 +846,14 @@ func (a *App) wireWailsEventListeners(log *slog.Logger, uiEmitFunc func(session.
 			return
 		}
 		a.handleGoalProposalResponse(payload, log)
+	})
+
+	wailsRuntime.EventsOn(a.wailsCtx(), backend.EventGoalSuggestionResponse, func(data ...any) {
+		payload, ok := extractPayload("goal_suggestion response", data, log)
+		if !ok {
+			return
+		}
+		a.handleGoalSuggestionResponse(payload, log)
 	})
 }
 
