@@ -31,6 +31,7 @@ import { formatRelativeTime } from '@/lib/formatters'
 import { useChatStore } from '@/stores/chatStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { usePinnedGroupsStore } from '@/stores/pinnedGroupsStore'
+import { useProjectStore } from '@/stores/projectStore'
 import type { SessionGroups } from '@/lib/sessionGroups'
 import type { SessionInfo } from '@/types/models'
 import type { SessionItemSummary } from './SessionListItem'
@@ -62,7 +63,17 @@ function makeHandlers(): Handlers {
 
 /** Minimal in-test collapse state — the same force-expand semantics the real
  *  useCollapsibleSections hook applies for an active search. */
-function Harness({ groups, handlers }: { groups: SessionGroups; handlers: Handlers }) {
+function Harness({
+  groups,
+  handlers,
+  fullBranchIds,
+}: {
+  groups: SessionGroups
+  handlers: Handlers
+  /** Overrides the default identity lookup (the tests' groups are unfiltered);
+   *  a wider lookup simulates the search-narrowed view SessionSelector wires. */
+  fullBranchIds?: (branch: string) => string[]
+}) {
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
   const isSectionExpanded = useCallback(
@@ -85,6 +96,10 @@ function Harness({ groups, handlers }: { groups: SessionGroups; handlers: Handle
     ),
     [],
   )
+  const fullIds =
+    fullBranchIds ??
+    ((branch: string) =>
+      groups.worktrees.find((g) => g.branch === branch)?.sessions.map((s) => s.id) ?? [])
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
@@ -99,6 +114,7 @@ function Harness({ groups, handlers }: { groups: SessionGroups; handlers: Handle
           toggleSection={toggleSection}
           renderSessionItem={renderSessionItem}
           onNewSessionOnBranch={handlers.onNewSessionOnBranch}
+          fullBranchIds={fullIds}
           onArchiveGroup={handlers.onArchiveGroup}
           onDeleteGroup={handlers.onDeleteGroup}
         />
@@ -240,8 +256,10 @@ beforeEach(() => {
   // The activity dot reads the REAL stores — start every test from all-idle.
   useChatStore.setState({ taskActive: {}, paused: {}, unfinishedTaskStatus: {}, messageOrder: {}, messages: {} })
   useActiveSessionsStore.setState({ pendingOverride: {} })
-  // The pin action toggles the REAL pinned-groups store — start unpinned.
-  usePinnedGroupsStore.setState({ pinnedBranches: [] })
+  // The pin action toggles the REAL pinned-groups store — start unpinned,
+  // on the fixture's project (pins are keyed per project).
+  useProjectStore.setState({ activeProjectId: 'p1' })
+  usePinnedGroupsStore.setState({ pinsByProject: {} })
 })
 
 afterEach(() => {
@@ -330,7 +348,7 @@ describe('SessionGroupedList — branch-row actions', () => {
     await focusItem(menu, 'Pin group (feat-a)')
     await pressKey(document.activeElement!, 'Enter')
 
-    expect(usePinnedGroupsStore.getState().pinnedBranches).toContain('feat-a')
+    expect(usePinnedGroupsStore.getState().pinsByProject.p1).toContain('feat-a')
     // Menu stays open (preventDefault)...
     expect(menuIsOpen()).toBe(true)
     // ...and the group did NOT collapse — aria-expanded unchanged, members visible.
@@ -340,20 +358,20 @@ describe('SessionGroupedList — branch-row actions', () => {
   })
 
   it('clicking the pin action on a pinned group unpins it and never collapses the group', async () => {
-    usePinnedGroupsStore.setState({ pinnedBranches: ['feat-a'] })
+    usePinnedGroupsStore.setState({ pinsByProject: { p1: ['feat-a'] } })
     const { menu } = await setup()
     const toggle = branchToggle(menu, 'feat-a')
 
     await click(branchAction(menu, 'Unpin group (feat-a)'))
 
-    expect(usePinnedGroupsStore.getState().pinnedBranches).not.toContain('feat-a')
+    expect(usePinnedGroupsStore.getState().pinsByProject.p1).not.toContain('feat-a')
     expect(menuIsOpen()).toBe(true)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
     expect(document.body.querySelector('[data-testid="session-m1"]')).not.toBeNull()
   })
 
   it('shows an always-visible pin icon on the pinned group row itself (not only the Unpin action)', async () => {
-    usePinnedGroupsStore.setState({ pinnedBranches: ['feat-a'] })
+    usePinnedGroupsStore.setState({ pinsByProject: { p1: ['feat-a'] } })
     const { menu } = await setup()
 
     const pinnedRowIcons = Array.from(
@@ -385,6 +403,27 @@ describe('SessionGroupedList — branch-row actions', () => {
     await click(branchAction(second.menu, 'Delete sessions (feat-a)'))
     expect(second.handlers.onDeleteGroup).toHaveBeenCalledWith('feat-a', ['m1', 'm2'])
     expect(menuIsOpen()).toBe(false)
+  })
+
+  it('group archive/delete pass the FULL membership from fullBranchIds, not the rendered rows', async () => {
+    const handlers = makeHandlers()
+    // Simulate the search-narrowed view: the list renders a SUBSET of the
+    // branch (m2 hidden), while fullBranchIds — the SessionSelector wiring —
+    // returns every member. The destructive gesture must target the latter.
+    const container = await render(
+      <Harness
+        groups={{
+          ...makeGroups(),
+          worktrees: [{ branch: 'feat-a', sessions: [makeGroups().worktrees[0]!.sessions[0]!] }],
+        }}
+        handlers={handlers}
+        fullBranchIds={() => ['m1', 'm2']}
+      />,
+    )
+    const menu = await openMenu(container)
+
+    await click(branchAction(menu, 'Archive sessions (feat-a)'))
+    expect(handlers.onArchiveGroup).toHaveBeenCalledWith('feat-a', ['m1', 'm2'])
   })
 
   it('Enter on the collapse toggle collapses and re-expands the group without closing the menu', async () => {

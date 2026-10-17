@@ -1,22 +1,13 @@
 import { Fragment, useMemo, type ReactNode } from "react";
-import {
-  Archive,
-  ChevronDown,
-  ChevronRight,
-  GitBranch,
-  Pin,
-  PinOff,
-  Plus,
-  Trash2,
-} from "lucide-react";
+import { Archive, Pin, PinOff, Plus, Trash2 } from "lucide-react";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
-import { ItemActions } from "./ItemAction";
-import { formatRelativeTime } from "@/lib/formatters";
+import { BranchRow, branchActionItemClasses } from "./BranchRow";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useActiveSessionsStore } from "@/stores/activeSessionsStore";
-import { usePinnedGroupsStore } from "@/stores/pinnedGroupsStore";
+import { useProjectStore } from "@/stores/projectStore";
+import { useGroupPins } from "@/stores/pinnedGroupsStore";
 import {
   SESSION_DOT_CLASSES,
   SESSION_DOT_TITLES,
@@ -28,7 +19,7 @@ import {
   LOCAL_SECTION_KEY,
   MANAGED_SECTION_KEY,
   branchGroupKey,
-  lastActiveTime,
+  freshestSession,
   sessionRegionId,
   type SessionGroups,
 } from "@/lib/sessionGroups";
@@ -51,18 +42,17 @@ interface SessionGroupedListProps {
   renderSessionItem: (session: SessionItemSummary, opts?: { indented?: boolean }) => ReactNode;
   /** Arms the ADR-080 branch draft AND closes the menu (clearing the search). */
   onNewSessionOnBranch: (branch: string) => void;
+  /**
+   * Unfiltered member ids of a LIVE branch group — group actions act on the
+   * WHOLE branch even while a search narrows the visible rows, so the
+   * confirmation dialog counts the full membership.
+   */
+  fullBranchIds: (branch: string) => string[];
   /** Archive every member of the group (arms confirmation when a member is busy). */
   onArchiveGroup: (branch: string, ids: string[]) => void;
   /** Delete every member of the group (always arms confirmation). */
   onDeleteGroup: (branch: string, ids: string[]) => void;
 }
-
-/** Shared styling of the branch-row action items inside the hover overlay —
- *  the same compact icon-button look the always-visible "+" used to have.
- *  Exported for the archived branch rows in SessionSelector, which mirror
- *  this overlay with their own action set. */
-export const branchActionItemClasses =
-  "shrink-0 rounded p-0.5 hover:bg-muted/50 active:bg-muted/30";
 
 /** Badge flag → session status — indexed in the radar's own precedence order:
  *  the FIRST true flag wins the dot (red failure → yellow attention → green
@@ -126,14 +116,15 @@ export function SessionGroupedList({
   toggleSection,
   renderSessionItem,
   onNewSessionOnBranch,
+  fullBranchIds,
   onArchiveGroup,
   onDeleteGroup,
 }: SessionGroupedListProps) {
-  // The GROUP-level pin (pinnedGroupsStore): a pinned branch floats above the
-  // unpinned groups of the section (lib/sessionGroups ordering) — member
-  // sessions keep their own per-session pins untouched.
-  const pinnedBranches = usePinnedGroupsStore((s) => s.pinnedBranches);
-  const togglePinnedBranch = usePinnedGroupsStore((s) => s.togglePinnedBranch);
+  // The GROUP-level pin (pinnedGroupsStore, keyed by project): a pinned
+  // branch floats above the unpinned groups of the section (lib/sessionGroups
+  // ordering) — member sessions keep their own per-session pins untouched.
+  const activeProjectId = useProjectStore((s) => s.activeProjectId);
+  const { pinnedBranches, togglePinnedBranch } = useGroupPins(activeProjectId);
   return (
     <>
       {showSectionHeaders && (
@@ -150,95 +141,60 @@ export function SessionGroupedList({
           {groups.worktrees.map((group) => {
             const key = branchGroupKey(group.branch);
             const expanded = isSectionExpanded(key, searchActive);
-            const ids = group.sessions.map((s) => s.id);
             const groupPinned = pinnedBranches.includes(group.branch);
-            // The row's clock is the group's freshest member (the same
-            // freshness the group ORDER uses — lib/sessionGroups).
-            const freshest =
-              group.sessions.length > 0
-                ? group.sessions.reduce((a, b) =>
-                    lastActiveTime(b) > lastActiveTime(a) ? b : a,
-                  )
-                : null;
             return (
               <Fragment key={key}>
-                {/* The branch row is ONE registered menu item (the collapse
-                    toggle) carrying the branch name, the group's radar-style
-                    activity dot (BranchActivityDot — visible while collapsed
-                    too), the freshest member's relative time (the session-row
-                    styling) and a hover
-                    overlay of FOUR nested registered menu items — the row
-                    actions. Radix registers the nested items in the same
-                    roving-focus collection, so arrow keys traverse toggle →
-                    actions; the overlay stops click/key bubbles so activating
-                    an action never toggles the group, and the pin item's
-                    preventDefault keeps the menu open. */}
-                <DropdownMenuItem
-                  title={expanded ? "Hide branch sessions" : "Show branch sessions"}
-                  className="group/item w-full min-w-0 gap-1 rounded-sm px-2 py-1 text-left text-sm hover:bg-muted/50"
-                  aria-expanded={expanded}
-                  aria-controls={sessionRegionId(key)}
-                  onSelect={(event) => {
-                    // Keep the menu open — this item only flips the group.
-                    event.preventDefault();
-                    toggleSection(key);
-                  }}
-                >
-                  {expanded ? (
-                    <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
-                  )}
-                  <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-                  {groupPinned && <Pin className="size-3 shrink-0 text-primary" />}
-                  <span className="min-w-0 flex-1 truncate">{group.branch}</span>
-                  <BranchActivityDot sessions={group.sessions} />
-                  {freshest && (
-                    <span className="text-xs text-muted-foreground">
-                      {formatRelativeTime(freshest.last_active_at || freshest.created_at)}
-                    </span>
-                  )}
-                  <ItemActions>
-                    <DropdownMenuItem
-                      title={`New session in this worktree (${group.branch})`}
-                      className={branchActionItemClasses}
-                      // No preventDefault — Radix's default close is exactly
-                      // what the draft-arming "+" gesture wants.
-                      onSelect={() => onNewSessionOnBranch(group.branch)}
-                    >
-                      <Plus className="size-3.5" />
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
-                      className={branchActionItemClasses}
-                      onSelect={(event) => {
-                        // A state flip, not an action — keep the menu open.
-                        event.preventDefault();
-                        togglePinnedBranch(group.branch);
-                      }}
-                    >
-                      {groupPinned ? (
-                        <PinOff className="size-3 text-primary" />
-                      ) : (
-                        <Pin className="size-3 text-primary" />
-                      )}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      title={`Archive sessions (${group.branch})`}
-                      className={branchActionItemClasses}
-                      onSelect={() => onArchiveGroup(group.branch, ids)}
-                    >
-                      <Archive className="size-3 text-warning" />
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      title={`Delete sessions (${group.branch})`}
-                      className={branchActionItemClasses}
-                      onSelect={() => onDeleteGroup(group.branch, ids)}
-                    >
-                      <Trash2 className="size-3 text-destructive" />
-                    </DropdownMenuItem>
-                  </ItemActions>
-                </DropdownMenuItem>
+                <BranchRow
+                  branch={group.branch}
+                  expanded={expanded}
+                  pinned={groupPinned}
+                  regionId={sessionRegionId(key)}
+                  onToggle={() => toggleSection(key)}
+                  freshest={freshestSession(group.sessions)}
+                  activityDot={<BranchActivityDot sessions={group.sessions} />}
+                  actionItems={
+                    <>
+                      <DropdownMenuItem
+                        title={`New session in this worktree (${group.branch})`}
+                        className={branchActionItemClasses}
+                        // No preventDefault — Radix's default close is exactly
+                        // what the draft-arming "+" gesture wants.
+                        onSelect={() => onNewSessionOnBranch(group.branch)}
+                      >
+                        <Plus className="size-3.5" />
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
+                        className={branchActionItemClasses}
+                        onSelect={(event) => {
+                          // A state flip, not an action — keep the menu open.
+                          event.preventDefault();
+                          togglePinnedBranch(group.branch);
+                        }}
+                      >
+                        {groupPinned ? (
+                          <PinOff className="size-3 text-primary" />
+                        ) : (
+                          <Pin className="size-3 text-primary" />
+                        )}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        title={`Archive sessions (${group.branch})`}
+                        className={branchActionItemClasses}
+                        onSelect={() => onArchiveGroup(group.branch, fullBranchIds(group.branch))}
+                      >
+                        <Archive className="size-3 text-warning" />
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        title={`Delete sessions (${group.branch})`}
+                        className={branchActionItemClasses}
+                        onSelect={() => onDeleteGroup(group.branch, fullBranchIds(group.branch))}
+                      >
+                        <Trash2 className="size-3 text-destructive" />
+                      </DropdownMenuItem>
+                    </>
+                  }
+                />
                 {expanded && (
                   <div id={sessionRegionId(key)} role="presentation">
                     {group.sessions.map((s) => renderSessionItem(s, { indented: true }))}

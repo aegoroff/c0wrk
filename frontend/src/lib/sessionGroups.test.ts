@@ -6,6 +6,7 @@ import {
   buildSessionGroups,
   branchGroupKey,
   compareByActivity,
+  freshestSession,
   lastActiveTime,
   MANAGED_SECTION_KEY,
   LOCAL_SECTION_KEY,
@@ -446,5 +447,28 @@ describe('buildSessionGroups — purity', () => {
     for (const group of groups.archivedWorktrees) {
       expect(group.sessions).not.toBe(sessions)
     }
+  })
+})
+
+describe('freshestSession', () => {
+  it('returns null for an empty group', () => {
+    expect(freshestSession([])).toBeNull()
+  })
+
+  it('picks the most recently active member', () => {
+    const sessions = [
+      managedSession('s1', 'feat/a', '2026-01-01T10:00:00Z'),
+      managedSession('s2', 'feat/a', '2026-01-02T10:00:00Z'),
+      managedSession('s3', 'feat/a', '2026-01-01T18:00:00Z'),
+    ]
+    expect(freshestSession(sessions)?.id).toBe('s2')
+  })
+
+  it('falls back to created_at when a session was never activated', () => {
+    const sessions = [
+      makeSession({ id: 's1', created_at: '2026-01-05T10:00:00Z', last_active_at: '' }),
+      managedSession('s2', 'feat/a', '2026-01-02T10:00:00Z'),
+    ]
+    expect(freshestSession(sessions)?.id).toBe('s1')
   })
 })

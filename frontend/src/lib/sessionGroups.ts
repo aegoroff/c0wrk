@@ -94,14 +94,22 @@ export function compareByActivity(a: SessionInfo, b: SessionInfo): number {
   return lastActiveTime(b) - lastActiveTime(a)
 }
 
+/**
+ * The group's most recently active member — the branch-row clock (the same
+ * freshness the group ORDER keys on). Empty input returns null.
+ */
+export function freshestSession(sessions: readonly SessionInfo[]): SessionInfo | null {
+  let best: SessionInfo | null = null
+  for (const session of sessions) {
+    if (best === null || lastActiveTime(session) > lastActiveTime(best)) best = session
+  }
+  return best
+}
+
 /** Freshness of the most recently active member — the group-order key. */
 function freshestActivity(sessions: readonly SessionInfo[]): number {
-  let max = Number.NEGATIVE_INFINITY
-  for (const session of sessions) {
-    const t = lastActiveTime(session)
-    if (t > max) max = t
-  }
-  return max
+  const freshest = freshestSession(sessions)
+  return freshest !== null ? lastActiveTime(freshest) : Number.NEGATIVE_INFINITY
 }
 
 /** Return a **new** array sorted pinned → freshness. Pure: does not mutate

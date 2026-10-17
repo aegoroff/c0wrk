@@ -236,8 +236,10 @@ beforeEach(() => {
   sessionMocks.activeSessionId = null
   // The real (persisted) uiStore — start every test from the shipped default.
   useUIStore.setState({ sessionListGrouped: false })
+  // CODE-mode project for the real projectStore — group pins are keyed by it.
+  useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
   // The pin action toggles the REAL pinned-groups store — start unpinned.
-  usePinnedGroupsStore.setState({ pinnedBranches: [] })
+  usePinnedGroupsStore.setState({ pinsByProject: {} })
 })
 
 afterEach(() => {
@@ -672,6 +674,44 @@ describe('SessionSelector — search in grouped mode', () => {
     makeSession({ id: 'l3', name: 'Checkout three' }),
   ]
 
+  it('group delete during a search targets the FULL branch membership, and the dialog says so', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    // feat-a holds TWO sessions; the search below will leave one visible.
+    sessionMocks.sessions = [
+      makeSession({ id: 'm1', name: 'Alpha work', workspace_binding: managedBinding('feat-a') }),
+      makeSession({ id: 'm2', name: 'Zeta work', workspace_binding: managedBinding('feat-a') }),
+      makeSession({ id: 'l1', name: 'Checkout one' }),
+      makeSession({ id: 'l2', name: 'Checkout two' }),
+      makeSession({ id: 'l3', name: 'Checkout three' }),
+    ]
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // The search narrows feat-a to ONE visible row.
+    await typeInto(menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!, 'Alpha')
+    const narrowed = document.body.querySelector('[role="menu"]') as HTMLElement
+    expect(menuText(narrowed)).toContain('Alpha work')
+    expect(menuText(narrowed)).not.toContain('Zeta work')
+
+    const del = Array.from(
+      branchToggle(narrowed, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => (el.getAttribute('title') ?? '').startsWith('Delete sessions'))
+    await click(del!)
+
+    // The plural confirmation counts the branch's FULL membership — both
+    // sessions — not the single row the search left visible.
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('Branch "feat-a" groups 2 sessions')
+
+    const confirm = Array.from(dialog!.querySelectorAll('button')).find((b) =>
+      (b.textContent ?? '').trim().startsWith('Delete'),
+    )
+    await click(confirm!)
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('m1')
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('m2')
+  })
+
   it('force-expands collapsed groups so matches stay reachable, and hides empty groups', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = searchableFixture()
@@ -947,7 +987,7 @@ describe('SessionSelector — archived section (branch groups + flat local)', ()
     await click(pin!)
 
     // The GROUP pin flipped in the store; no per-member RPC fired.
-    expect(usePinnedGroupsStore.getState().pinnedBranches).toContain('feat-a')
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toContain('feat-a')
     expect(apiMocks.pinSession).not.toHaveBeenCalled()
 
     // A state flip, not an action — the menu never closed.

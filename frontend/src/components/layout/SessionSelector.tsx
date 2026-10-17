@@ -14,8 +14,6 @@ import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
 import {
   ArchiveRestore,
   ChevronDown,
-  ChevronRight,
-  GitBranch,
   Pin,
   PinOff,
   Plus,
@@ -25,12 +23,12 @@ import { useSessionActions } from "@/hooks/useSessionActions";
 import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
-import { SessionGroupedList, branchActionItemClasses } from "./SessionGroupedList";
-import { ItemActions } from "./ItemAction";
+import { SessionGroupedList } from "./SessionGroupedList";
+import { BranchRow, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
-import { formatRelativeTime } from "@/lib/formatters";
-import { ARCHIVED_SECTION_KEY, buildSessionGroups, lastActiveTime, sessionRegionId } from "@/lib/sessionGroups";
-import { usePinnedGroupsStore } from "@/stores/pinnedGroupsStore";
+import { ARCHIVED_SECTION_KEY, buildSessionGroups, freshestSession, sessionRegionId } from "@/lib/sessionGroups";
+import { useProjectStore } from "@/stores/projectStore";
+import { useGroupPins } from "@/stores/pinnedGroupsStore";
 
 /** Collapse key of an archived branch group — namespaced under `archived:`
  *  so it can never collide with the live `branch:<name>` key of the same
@@ -58,11 +56,12 @@ export function SessionSelector() {
   const setSessionListGrouped = useUIStore((s) => s.setSessionListGrouped);
 
   const actions = useSessionActions();
-  // The GROUP-level pin (persisted in pinnedGroupsStore): a pinned branch
-  // group floats above the unpinned ones — in the Worktrees section AND the
-  // Archived section (the same branch name is the pin key in both).
-  const pinnedBranches = usePinnedGroupsStore((s) => s.pinnedBranches);
-  const togglePinnedBranch = usePinnedGroupsStore((s) => s.togglePinnedBranch);
+  // The GROUP-level pin (persisted in pinnedGroupsStore, keyed by the active
+  // project): a pinned branch group floats above the unpinned ones — in the
+  // Worktrees section AND the Archived section (the same branch name is the
+  // pin key in both).
+  const activeProjectId = useProjectStore((s) => s.activeProjectId);
+  const { pinnedBranches, togglePinnedBranch } = useGroupPins(activeProjectId);
 
   const [search, setSearch] = useState("");
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -81,6 +80,15 @@ export function SessionSelector() {
   const groups = useMemo(
     () => buildSessionGroups(sessions ?? [], { search, pinnedBranches }),
     [sessions, search, pinnedBranches],
+  );
+  // The UNFILTERED grouping (no search) — group actions act on the WHOLE
+  // branch even while a search narrows the visible rows, so the confirmation
+  // dialog counts the branch's full membership.
+  const allGroups = useMemo(() => buildSessionGroups(sessions ?? []), [sessions]);
+  const fullBranchIds = useCallback(
+    (branch: string) =>
+      allGroups.worktrees.find((g) => g.branch === branch)?.sessions.map((s) => s.id) ?? [],
+    [allGroups],
   );
   const searchActive = search.trim() !== "";
   const showSectionHeaders = groups.worktrees.length > 0 && groups.local.length > 0;
@@ -184,6 +192,7 @@ export function SessionSelector() {
                 toggleSection={toggleSection}
                 renderSessionItem={renderSessionItem}
                 onNewSessionOnBranch={newSessionOnBranch}
+                fullBranchIds={fullBranchIds}
                 onArchiveGroup={actions.handleArchiveGroup}
                 onDeleteGroup={actions.handleDeleteGroup}
               />
@@ -207,78 +216,58 @@ export function SessionSelector() {
                     {groups.archivedWorktrees.map((group) => {
                       const key = archivedBranchKey(group.branch);
                       const expanded = isSectionExpanded(key, searchActive);
-                      const ids = group.sessions.map((s) => s.id);
+                      // Full (unfiltered) membership — same rule as the live
+                      // rows: the group acts on the whole branch, and the
+                      // plural confirmation copy counts exactly these ids.
+                      const ids =
+                        allGroups.archivedWorktrees.find((g) => g.branch === group.branch)?.sessions.map(
+                          (s) => s.id,
+                        ) ?? [];
                       const groupPinned = pinnedBranches.includes(group.branch);
-                      // The row's clock is the group's freshest member (the
-                      // same freshness the group ORDER uses).
-                      const freshest = group.sessions.reduce((a, b) =>
-                        lastActiveTime(b) > lastActiveTime(a) ? b : a,
-                      );
                       return (
                         <Fragment key={key}>
-                          {/* Mirrors the live branch rows of SessionGroupedList
-                              (one registered menu item toggling the group) with
-                              a hover overlay of THREE nested registered menu
-                              items — the archived-group actions: Pin/Unpin
-                              (a state flip, keeps the menu open), Unarchive all
-                              (non-destructive, never asks) and Delete all
-                              (always arms the plural confirmation). The overlay
-                              stops click/key bubbles so an action never toggles
-                              the group. */}
-                          <DropdownMenuItem
-                            title={expanded ? "Hide archived branch sessions" : "Show archived branch sessions"}
-                            className="group/item w-full min-w-0 gap-1 rounded-sm px-2 py-1 text-left text-sm hover:bg-muted/50"
-                            aria-expanded={expanded}
-                            aria-controls={sessionRegionId(key)}
-                            onSelect={(event) => {
-                              // Keep the menu open — this item only flips the group.
-                              event.preventDefault();
-                              toggleSection(key);
-                            }}
-                          >
-                            {expanded ? (
-                              <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
-                            )}
-                            <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-                            {groupPinned && <Pin className="size-3 shrink-0 text-primary" />}
-                            <span className="min-w-0 flex-1 truncate">{group.branch}</span>
-                            <span className="text-xs text-muted-foreground">
-                              {formatRelativeTime(freshest.last_active_at || freshest.created_at)}
-                            </span>
-                            <ItemActions>
-                              <DropdownMenuItem
-                                title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
-                                className={branchActionItemClasses}
-                                onSelect={(event) => {
-                                  // A state flip, not an action — keep the menu open.
-                                  event.preventDefault();
-                                  togglePinnedBranch(group.branch);
-                                }}
-                              >
-                                {groupPinned ? (
-                                  <PinOff className="size-3 text-primary" />
-                                ) : (
-                                  <Pin className="size-3 text-primary" />
-                                )}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                title={`Restore sessions (${group.branch})`}
-                                className={branchActionItemClasses}
-                                onSelect={() => void actions.handleUnarchiveGroup(group.branch, ids)}
-                              >
-                                <ArchiveRestore className="size-3 text-warning" />
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                title={`Delete sessions (${group.branch})`}
-                                className={branchActionItemClasses}
-                                onSelect={() => actions.handleDeleteGroup(group.branch, ids)}
-                              >
-                                <Trash2 className="size-3 text-destructive" />
-                              </DropdownMenuItem>
-                            </ItemActions>
-                          </DropdownMenuItem>
+                          <BranchRow
+                            variant="archived"
+                            branch={group.branch}
+                            expanded={expanded}
+                            pinned={groupPinned}
+                            regionId={sessionRegionId(key)}
+                            onToggle={() => toggleSection(key)}
+                            freshest={freshestSession(group.sessions)}
+                            actionItems={
+                              <>
+                                <DropdownMenuItem
+                                  title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
+                                  className={branchActionItemClasses}
+                                  onSelect={(event) => {
+                                    // A state flip, not an action — keep the menu open.
+                                    event.preventDefault();
+                                    togglePinnedBranch(group.branch);
+                                  }}
+                                >
+                                  {groupPinned ? (
+                                    <PinOff className="size-3 text-primary" />
+                                  ) : (
+                                    <Pin className="size-3 text-primary" />
+                                  )}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  title={`Restore sessions (${group.branch})`}
+                                  className={branchActionItemClasses}
+                                  onSelect={() => void actions.handleUnarchiveGroup(group.branch, ids)}
+                                >
+                                  <ArchiveRestore className="size-3 text-warning" />
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  title={`Delete sessions (${group.branch})`}
+                                  className={branchActionItemClasses}
+                                  onSelect={() => actions.handleDeleteGroup(group.branch, ids)}
+                                >
+                                  <Trash2 className="size-3 text-destructive" />
+                                </DropdownMenuItem>
+                              </>
+                            }
+                          />
                           {expanded && (
                             <div id={sessionRegionId(key)} role="presentation">
                               {group.sessions.map((s) => renderSessionItem(s, { indented: true }))}
