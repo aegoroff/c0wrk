@@ -2572,6 +2572,62 @@ export namespace backend {
 	        this.lexical_rank = source["lexical_rank"];
 	    }
 	}
+	export class WebviewGpuAutoFallback {
+	    policy: string;
+	    reason: string;
+	    detected_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WebviewGpuAutoFallback(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.policy = source["policy"];
+	        this.reason = source["reason"];
+	        this.detected_at = source["detected_at"];
+	    }
+	}
+	export class WebviewGpuPolicyInfo {
+	    setting: string;
+	    running: string;
+	    running_source: string;
+	    fallback?: WebviewGpuAutoFallback;
+	    restart_required: boolean;
+	    linux_only: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new WebviewGpuPolicyInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.setting = source["setting"];
+	        this.running = source["running"];
+	        this.running_source = source["running_source"];
+	        this.fallback = this.convertValues(source["fallback"], WebviewGpuAutoFallback);
+	        this.restart_required = source["restart_required"];
+	        this.linux_only = source["linux_only"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 
 }
 
@@ -2754,6 +2810,18 @@ export namespace desktop {
 	
 	    static createFrom(source: any = {}) {
 	        return new wailsLogAdapter(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	
+	    }
+	}
+	export class webviewGpuWatchdog {
+	
+	
+	    static createFrom(source: any = {}) {
+	        return new webviewGpuWatchdog(source);
 	    }
 	
 	    constructor(source: any = {}) {

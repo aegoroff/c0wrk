@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   hasDefaultModel: vi.fn(),
   listVectorIndexGPUs: vi.fn(),
   listFontFamilies: vi.fn(),
+  getWebviewGpuPolicy: vi.fn(),
+  setWebviewGpuPolicy: vi.fn(),
 }))
 
 vi.mock('@/api/config', () => ({
@@ -30,6 +32,14 @@ vi.mock('@/api/vector', () => ({
 // FontSettings (Appearance tab) enumerates the installed families on mount.
 vi.mock('@/api/fonts', () => ({
   listFontFamilies: mocks.listFontFamilies,
+}))
+
+// WebviewGpuPolicySettings (General tab, Linux-only) probes the GPU policy on
+// mount; on this machine's Linux test navigator it would otherwise hit the
+// real Wails runtime boundary.
+vi.mock('@/api/webview', () => ({
+  getWebviewGpuPolicy: mocks.getWebviewGpuPolicy,
+  setWebviewGpuPolicy: mocks.setWebviewGpuPolicy,
 }))
 
 // The Capabilities tab mounts CapabilitiesSettings (Subagents + Skills
@@ -99,6 +109,14 @@ beforeEach(() => {
   mocks.hasDefaultModel.mockResolvedValue(true)
   mocks.listVectorIndexGPUs.mockResolvedValue([])
   mocks.listFontFamilies.mockResolvedValue([])
+  mocks.getWebviewGpuPolicy.mockResolvedValue({
+    setting: 'auto',
+    running: 'on-demand',
+    running_source: 'auto',
+    fallback: null,
+    restart_required: false,
+    linux_only: true,
+  })
   useSettingsStore.setState({ open: false, activeTab: 'general' })
   container = document.createElement('div')
   document.body.appendChild(container)

@@ -1,32 +1,22 @@
 package desktop
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+
+	"github.com/v0lka/c0wrk/backend"
 )
 
-// WebviewGpuPolicyEnvVar overrides the Linux webview hardware-acceleration
-// policy. Accepted values are case-insensitive and whitespace-tolerant:
-//
-//	always     hardware acceleration always on
-//	on-demand  hardware acceleration as requested by web contents
-//	           ("ondemand" is accepted as an alias)
-//	never      hardware acceleration always off
-//
-// Unset or invalid values keep the default "never" policy — the same policy
-// Wails applies as its workaround for https://github.com/wailsapp/wails/issues/2977
-// when an application passes no Linux options at all. The variable has no
-// effect on macOS and Windows (nil Linux options there).
-const WebviewGpuPolicyEnvVar = "C0WRK_WEBVIEW_GPU_POLICY"
-
 // webviewGpuPolicy is the effective hardware-acceleration policy for the
-// Linux webview, deliberately decoupled from Wails' enum ordering (see
-// wailsWebviewGpuPolicy for why the conversion is not the identity).
+// Linux webview — the value WebKit ultimately receives — deliberately
+// decoupled from Wails' enum ordering (see wailsWebviewGpuPolicy for why the
+// conversion is not the identity). The canonical string alphabet (env var,
+// persisted setting, Settings UI, RPCs) lives in backend/webview_gpu.go; this
+// enum is the Wails-bound leaf of that pipeline.
 type webviewGpuPolicy int
 
 const (
@@ -35,29 +25,29 @@ const (
 	gpuPolicyOnDemand
 )
 
-// String returns the canonical WebviewGpuPolicyEnvVar spelling of the policy.
+// String returns the canonical spelling of the policy (backend's canonical
+// alphabet).
 func (p webviewGpuPolicy) String() string {
 	switch p {
 	case gpuPolicyAlways:
-		return "always"
+		return backend.WebviewGpuPolicyAlways
 	case gpuPolicyOnDemand:
-		return "on-demand"
+		return backend.WebviewGpuPolicyOnDemand
 	default:
-		return "never"
+		return backend.WebviewGpuPolicyNever
 	}
 }
 
-// parseWebviewGpuPolicy parses a WebviewGpuPolicyEnvVar value.
-func parseWebviewGpuPolicy(raw string) (webviewGpuPolicy, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "always":
-		return gpuPolicyAlways, nil
-	case "on-demand", "ondemand":
-		return gpuPolicyOnDemand, nil
-	case "never":
-		return gpuPolicyNever, nil
+// webviewGpuPolicyFromCanonical maps a canonical policy spelling (validated
+// by backend's resolvers) onto the enum.
+func webviewGpuPolicyFromCanonical(canonical string) webviewGpuPolicy {
+	switch canonical {
+	case backend.WebviewGpuPolicyAlways:
+		return gpuPolicyAlways
+	case backend.WebviewGpuPolicyOnDemand:
+		return gpuPolicyOnDemand
 	default:
-		return gpuPolicyNever, fmt.Errorf("unknown webview GPU policy %q: want always, on-demand, or never", raw)
+		return gpuPolicyNever
 	}
 }
 
@@ -92,40 +82,47 @@ func (p webviewGpuPolicy) wailsWebviewGpuPolicy() linux.WebviewGpuPolicy {
 }
 
 // WebviewGpuPolicyOptions returns the Linux-specific Wails options carrying
-// the hardware-acceleration policy requested through WebviewGpuPolicyEnvVar.
-// It returns nil on non-Linux platforms — the option only feeds the
-// WebKitGTK frontend, so macOS and Windows keep behaving exactly as before.
-// With the variable unset it pins WebviewGpuPolicyNever explicitly: the same
-// policy Wails applies via its nil-options workaround, made deliberate here
-// so a future Wails default change cannot silently alter rendering.
-func WebviewGpuPolicyOptions(logger *slog.Logger) *linux.Options {
-	return webviewGpuPolicyOptions(runtime.GOOS, os.Getenv(WebviewGpuPolicyEnvVar), logger)
+// the hardware-acceleration policy for this launch. It returns nil on
+// non-Linux platforms — the option only feeds the WebKitGTK frontend, so
+// macOS and Windows keep behaving exactly as before. stderrObserved reports
+// whether this launch has a usable stderr capture (see DeriveWebviewGpuRun):
+// without one a fresh-auto launch is demoted to never, because the failure
+// watchdog could never detect the resulting grey window.
+func WebviewGpuPolicyOptions(agentDir string, stderrObserved bool, logger *slog.Logger) *linux.Options {
+	return webviewGpuPolicyOptions(runtime.GOOS, agentDir, stderrObserved, logger)
 }
 
-func webviewGpuPolicyOptions(goos, raw string, logger *slog.Logger) *linux.Options {
+func webviewGpuPolicyOptions(goos, agentDir string, stderrObserved bool, logger *slog.Logger) *linux.Options {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if goos != "linux" {
-		if strings.TrimSpace(raw) != "" {
+		if raw := os.Getenv(backend.WebviewGpuPolicyEnvVar); strings.TrimSpace(raw) != "" {
 			logger.Debug("webview GPU policy override ignored: Linux-only option",
-				"env", WebviewGpuPolicyEnvVar, "value", raw, "goos", goos)
+				"env", backend.WebviewGpuPolicyEnvVar, "value", raw, "goos", goos)
 		}
 		return nil
 	}
-	if strings.TrimSpace(raw) == "" {
-		logger.Debug("webview GPU policy default",
-			"env", WebviewGpuPolicyEnvVar, "policy", gpuPolicyNever.String())
-		return &linux.Options{WebviewGpuPolicy: linux.WebviewGpuPolicyNever}
+	// Single launch-time read of the state file: the consumed setting rides
+	// along in the result, so the Debug record below needs no second load
+	// (a second read could also observe a state file the first did not).
+	run := backend.DeriveWebviewGpuRun(goos, agentDir, stderrObserved, logger)
+	resolved := webviewGpuPolicyFromCanonical(run.Policy)
+	switch run.Source {
+	case backend.WebviewGpuSourceEnv:
+		logger.Info("webview GPU policy override",
+			"env", backend.WebviewGpuPolicyEnvVar, "value", run.Policy)
+	case backend.WebviewGpuSourceAutoUnobserved:
+		// Explicit diagnostic for the demotion (review finding #155.2): a
+		// silent accelerated default without any failure detection would
+		// leave a broken grey window as the first symptom. The user keeps an
+		// explicit override (env or setting) to force acceleration anyway.
+		logger.Warn("webview GPU policy pinned to never: fresh auto without a usable stderr capture "+
+			"(the DMABUF watchdog cannot observe this run; set C0WRK_WEBVIEW_GPU_POLICY or the Settings choice to override)",
+			"policy", run.Policy, "setting", run.Setting)
+	default:
+		logger.Debug("webview GPU policy resolved",
+			"policy", run.Policy, "source", run.Source, "setting", run.Setting)
 	}
-	policy, err := parseWebviewGpuPolicy(raw)
-	if err != nil {
-		logger.Warn("invalid webview GPU policy override; using default",
-			"env", WebviewGpuPolicyEnvVar, "value", raw,
-			"policy", gpuPolicyNever.String(), "error", err)
-		return &linux.Options{WebviewGpuPolicy: linux.WebviewGpuPolicyNever}
-	}
-	logger.Info("webview GPU policy override",
-		"env", WebviewGpuPolicyEnvVar, "value", policy.String())
-	return &linux.Options{WebviewGpuPolicy: policy.wailsWebviewGpuPolicy()}
+	return &linux.Options{WebviewGpuPolicy: resolved.wailsWebviewGpuPolicy()}
 }

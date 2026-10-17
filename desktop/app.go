@@ -71,6 +71,12 @@ type App struct {
 	// messages are also duplicated to the session log.
 	wailsLogger *wailsLogAdapter
 
+	// webviewGpuWatchdog is the (Linux-only, possibly nil) DMABUF-failure
+	// watchdog armed in main before wails.Run and started from DomReady.
+	// Set strictly before the Wails UI loop begins, so a plain field is
+	// safely published (same ordering contract as wailsLogger).
+	webviewGpuWatchdog *webviewGpuWatchdog
+
 	db *sql.DB // shared SQLite connection; opened in Startup, closed in Shutdown. Guarded by stateMu.
 
 	// sessionLogger is stored so Shutdown can close it on early Startup exits
@@ -122,11 +128,12 @@ type App struct {
 	//
 	// Invariant: the flag is armed only immediately before an imminent quit
 	// (ConfirmExit stores it and calls wailsRuntime.Quit in the same
-	// breath), and the platform quit paths that follow cannot be cancelled
-	// by the user — so an armed flag never outlives the process it was armed
-	// for, and a later guard bypass with newly active sessions is
-	// impossible. Any change that makes quit cancellable after arming must
-	// reset this flag on cancellation.
+	// breath; the webview-GPU watchdog's post-relaunch quit does the same
+	// through gpuFallbackQuit), and the platform quit paths that follow
+	// cannot be cancelled by the user — so an armed flag never outlives the
+	// process it was armed for, and a later guard bypass with newly active
+	// sessions is impossible. Any change that makes quit cancellable after
+	// arming must reset this flag on cancellation.
 	exitConfirmed atomic.Bool
 
 	// updateQuitAt records when the updater-driven quit (ApplyUpdate →
@@ -159,6 +166,15 @@ type App struct {
 	// and exits, so a stuck goroutine can never keep the app alive on quit.
 	// Guarded by stateMu — see the block comment above.
 	shutdownHardDeadline time.Duration
+
+	// launchStderrObserved records whether this launch has a usable stderr
+	// capture (main.go, from the crashlog.Install outcome). Startup hands it
+	// to the FrontendAPI init so the Settings RPC's running-policy snapshot is
+	// derived from the same fact the wails.Run options consumed (a fresh-auto
+	// launch without observation runs never — see backend.DeriveWebviewGpuRun).
+	// Zero value = unobserved: the safe direction, and the honest report for a
+	// Startup that never ran. Guarded by stateMu — see the block comment above.
+	launchStderrObserved bool
 
 	// shutdownExitFn, when non-nil, replaces the forced-exit call in the
 	// shutdown watchdog's expiry path. Lets tests observe the forced exit
@@ -273,6 +289,67 @@ func NewApp() *App {
 // can be wired as a delegate once it is initialized in Startup.
 func (a *App) SetWailsLogger(wl *wailsLogAdapter) {
 	a.wailsLogger = wl
+}
+
+// SetWebviewGpuWatchdog stores the (possibly nil) DMABUF-failure watchdog
+// armed in main before wails.Run. Nil off Linux and whenever detection does
+// not apply (explicit choice, active fallback, safe resolution).
+func (a *App) SetWebviewGpuWatchdog(w *webviewGpuWatchdog) {
+	a.webviewGpuWatchdog = w
+}
+
+// SetWebviewGpuStderrObserved records whether this launch's stderr capture is
+// usable (main.go, from the crashlog.Install outcome, before wails.Run).
+// Startup hands the fact to the FrontendAPI init so the running-policy
+// snapshot is derived from the same input as the wails.Run options — an
+// unobserved fresh-auto launch runs never, and the Settings report must say
+// so. Exported deliberately: internal startup plumbing rides the Wails
+// binding surface by the same precedent as SetWebviewGpuWatchdog; the value
+// is a boolean main computes, so a renderer-supplied call could only flip an
+// already-consumed report flag, never re-resolve the running webview.
+func (a *App) SetWebviewGpuStderrObserved(observed bool) {
+	a.setLaunchStderrObserved(observed)
+}
+
+// startWebviewGpuWatchdog launches the bounded startup scan from DomReady —
+// the DMABUF failure prints at the webview's first paint, so from here on
+// this run's stderr capture contains everything the scan needs. The quit
+// path is wired to the live Wails context here, where it exists.
+func (a *App) startWebviewGpuWatchdog() {
+	w := a.webviewGpuWatchdog
+	if w == nil {
+		return
+	}
+	if w.quitFn == nil {
+		if a.wailsCtx() != nil {
+			w.quitFn = a.gpuFallbackQuit
+		}
+	}
+	w.start()
+}
+
+// gpuFallbackQuit is the webview-GPU watchdog's post-relaunch quit. It arms
+// the close-guard bypass in the same breath as the quit, mirroring
+// ConfirmExit: the confirmation modal lives in the very webview this
+// relaunch is replacing (a grey window cannot answer it), so an intercepted
+// fallback quit would leave the dying instance alive with an unanswerable
+// dialog — and the sessions the guard protects are auto-resumed in the
+// relaunched instance anyway.
+func (a *App) gpuFallbackQuit() {
+	if a.wailsCtx() == nil {
+		// No live runtime: nothing to quit through, and arming the bypass
+		// now would leave a stale armed flag with no quit behind it (see
+		// the exitConfirmed invariant).
+		a.log().Error("webview GPU fallback: no Wails context; cannot quit for the relaunch")
+		return
+	}
+	a.exitConfirmed.Store(true)
+	a.log().Info("webview GPU fallback: quitting for the relaunched instance (close-guard bypass armed)")
+	if a.quitFn != nil {
+		a.quitFn(a.wailsCtx())
+		return
+	}
+	wailsRuntime.Quit(a.wailsCtx())
 }
 
 // PickDirectory opens a native directory picker dialog. The dialog reopens at
@@ -451,6 +528,22 @@ func (a *App) shutdownDeadline() time.Duration {
 		return a.shutdownHardDeadline
 	}
 	return defaultShutdownHardDeadline
+}
+
+// setLaunchStderrObserved records whether this launch's stderr is observable
+// (main.go, before wails.Run).
+func (a *App) setLaunchStderrObserved(observed bool) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.launchStderrObserved = observed
+}
+
+// stderrObserved reports the launch's stderr-observation fact for the
+// FrontendAPI init (zero value = unobserved, the safe direction).
+func (a *App) stderrObserved() bool {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.launchStderrObserved
 }
 
 // setLogger records the active logger (Startup only).

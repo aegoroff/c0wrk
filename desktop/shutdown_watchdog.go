@@ -45,6 +45,18 @@ const cumulativeTeardownCeiling = embeddedLLMStopCeiling + sessionManagerStopBud
 
 var defaultShutdownHardDeadline = max(cumulativeTeardownCeiling, 60*time.Second)
 
+// EffectiveShutdownDeadline maps the configured shutdown.hardDeadline
+// (seconds; 0 = unset) onto the effective teardown deadline — the value the
+// shutdown watchdog enforces and the GPU-relaunch handover budget derives
+// from. Single source for both, so the handover budget can never be sized
+// against a deadline the predecessor is not actually bounded by.
+func EffectiveShutdownDeadline(configuredSeconds int) time.Duration {
+	if configuredSeconds > 0 {
+		return time.Duration(configuredSeconds) * time.Second
+	}
+	return defaultShutdownHardDeadline
+}
+
 // shutdownWatchdog enforces one hard deadline over the entire application
 // teardown. Every step of Shutdown is already bounded individually (task
 // goroutine joins, manager background-goroutine joins, blackboard persistence
