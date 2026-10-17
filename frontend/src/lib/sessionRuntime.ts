@@ -213,10 +213,29 @@ export function applyRuntimeTaskFlags(sessionId: string, status: SessionRuntimeS
  * (taskActive/paused/pausing, prompt resolution, resume banner) still comes
  * from the snapshot, which stays authoritative for them.
  *
+ * `flagsSnapshotReadAt` is the read time the TASK-FLAG freshness guard uses,
+ * defaulting to `snapshotReadAt`. It exists for callers whose snapshot is
+ * taken long after their loading window began (ChatArea's post-history-load
+ * reconcile reads the status AFTER the history RPC resolves): a flag
+ * transition that lands during the load — above all the OPTIMISTIC SEND
+ * ACTIVATION (setTaskActive(true) in useMessageSender, stamped
+ * taskFlagsEventAt before the SendMessage RPC is even issued) — is fresher
+ * than any snapshot whose read merely postdates it, because the backend may
+ * not have activated the session yet when the status RPC is handled. Guarding
+ * the flags against the LOAD START instead makes any live transition during
+ * the load beat the snapshot; the activation race that intermittently killed
+ * the flag mid-run (settling the live work block to `interrupted` while the
+ * loop kept streaming) is closed at this source.
+ *
  * Returns the messages that were resolved as stale (so the caller can persist
  * the resolution to the backend). Messages already resolved are skipped.
  */
-export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntimeStatus, snapshotReadAt?: number): ChatMessageUI[] {
+export function reconcileRuntimeStatus(
+  sessionId: string,
+  status: SessionRuntimeStatus,
+  snapshotReadAt?: number,
+  flagsSnapshotReadAt?: number,
+): ChatMessageUI[] {
   const store = useChatStore.getState()
 
   // Stale-snapshot guard: runtimeEventAt is stamped by the streaming/activity
@@ -234,9 +253,15 @@ export function reconcileRuntimeStatus(sessionId: string, status: SessionRuntime
   // activity events (chunks) stamp runtimeEventAt without owning the flags,
   // so a background-started run still gets its flags restored from the
   // snapshot — while a live pause/resume/terminal transition (which stamps
-  // the flags map) must never be reverted by an older snapshot.
+  // the flags map) must never be reverted by an older snapshot. The guard's
+  // read time is `flagsSnapshotReadAt` (falling back to snapshotReadAt): a
+  // caller whose snapshot postdates a long loading window (ChatArea's
+  // post-history reconcile) passes its LOAD START there, so a flag transition
+  // landing during the load — above all the optimistic send activation — is
+  // never reverted by a snapshot that cannot yet see the run on the backend.
   const hasFresherTaskFlags =
-    snapshotReadAt !== undefined && (useChatStore.getState().taskFlagsEventAt[sessionId] ?? 0) > snapshotReadAt
+    snapshotReadAt !== undefined &&
+    (useChatStore.getState().taskFlagsEventAt[sessionId] ?? 0) > (flagsSnapshotReadAt ?? snapshotReadAt)
 
   // Re-seed the SINGLE live unfinished-task overlay (chatStore.unfinishedTaskStatus)
   // every status surface reads. After a reload chatStore's map is empty, so the

@@ -44,10 +44,35 @@ export function useLifecycleEvents(sessionId: string | null): void {
     // the backend no longer ships them in paged history. A row per step would
     // otherwise bloat the store and the grouping pass of a long run without
     // ever rendering.
+    //
+    // A step_start is also LIVE PROOF that the session's task is running, and
+    // the invariant covers every real emitter: the main ReAct loop (sp4rk
+    // agent/executor.go, one per executor step), the E2S loop (core/e2s/
+    // loop.go, one per E2S turn), and the plan-scoped emitter copies carrying
+    // plan-step/subagent work (WithPlanStepID) — each of them runs only while
+    // the session's task is active, and after a terminal or pause transition
+    // none of them is running to emit one. Re-assert the task-active flag when
+    // it is not set — a runtime-status snapshot can revert an optimistic send
+    // activation mid-run (the snapshot's read predates the backend's
+    // activation, so its stale-snapshot guard passes it through), which
+    // settles the live turn's work block to `interrupted` while the loop keeps
+    // emitting events. The re-assertion stamps taskFlagsEventAt (via
+    // setTaskActive), so a later snapshot can never fight it back, and a
+    // truthful snapshot also reports active=true, making this a no-op for
+    // every genuinely-running task. The write is one-directional (TRUE only):
+    // pause/terminal events own the false direction, and even a hypothetical
+    // out-of-contract step_start would at worst re-open the block until the
+    // next true terminal event or status reconcile. Background sessions never
+    // run this handler (the watcher subscribes only
+    // terminal/pause/resume/HITL/goal events).
     cleanups.push(
       onSessionEvent(sessionId, 'step_start', (data) => {
         if (!isStepData(data)) { reportDroppedEvent('step_start', data); return }
-        useChatStore.getState().setActivityStatus(sessionId, 'Thinking...')
+        const store = useChatStore.getState()
+        if (store.taskActive[sessionId] !== true) {
+          store.setTaskActive(sessionId, true)
+        }
+        store.setActivityStatus(sessionId, 'Thinking...')
       }),
     )
 

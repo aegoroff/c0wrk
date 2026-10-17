@@ -320,15 +320,28 @@ export function ChatScrollManager({
     scrollToBottom()
   }, [taskActive, sessionId, scrollToBottom])
 
-  // Content-growth stickiness. The auto-scroll effect above only re-runs when
-  // messages/streamingText change, but the content height can keep growing
-  // AFTER that commit: images decoding, async markdown/highlight layout.
-  // Observing the transcript content wrapper (the viewport's first element
-  // child — ChatHoverRegion, whose height tracks the content) catches those:
-  // when the content grew while the user was following the tail
-  // (isAtBottomRef), re-pin to the bottom; when they had scrolled up, do
-  // nothing (no jerk). This is also what keeps a restored/pinned initial
-  // position glued to the TRUE bottom as late async layout settles.
+  // Content-height stickiness. The auto-scroll effect above only re-runs when
+  // messages/streamingText change, but the content height can keep changing
+  // AFTER that commit: images decoding, async markdown/highlight layout, and —
+  // the largest single jump — the auto-settle COLLAPSE of the live turn's
+  // work block (Radix unmounts the collapsed CollapsibleContent). Observing
+  // the transcript content wrapper (the viewport's first element child —
+  // ChatHoverRegion, whose height tracks the content) catches those:
+  //
+  //  - GROWTH while the user was following the tail (isAtBottomRef): re-pin to
+  //    the bottom; when they had scrolled up, do nothing (no jerk). This is
+  //    also what keeps a restored/pinned initial position glued to the TRUE
+  //    bottom as late async layout settles.
+  //  - SHRINK while the user was following the tail: re-pin to the (new)
+  //    bottom explicitly instead of trusting the browser's scrollTop clamp.
+  //    CollapsibleBlock's collapse-reposition gate deliberately skips its
+  //    header anchor for an at-bottom viewport and leaves the landing to this
+  //    writer; a clamp that fails to hold (or a clamp that fired before
+  //    another same-frame height change) parks the viewport past the
+  //    shortened content end — an empty chat area the user must scroll out of
+  //    by hand. The write is a no-op whenever the clamp already did the job
+  //    (the position it targets IS the bottom); the shrink-while-scrolled-up
+  //    case does nothing, mirroring the growth branch.
   useEffect(() => {
     const viewport = viewportRef.current
     const content = viewport?.firstElementChild
@@ -336,7 +349,7 @@ export function ChatScrollManager({
     let lastHeight = viewport.scrollHeight
     const observer = new ResizeObserver(() => {
       const height = viewport.scrollHeight
-      if (height > lastHeight && isAtBottomRef.current) {
+      if (isAtBottomRef.current && height !== lastHeight) {
         viewport.scrollTop = viewport.scrollHeight
         lastWriteTopRef.current = viewport.scrollTop
       }
