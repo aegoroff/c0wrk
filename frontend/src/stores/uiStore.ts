@@ -94,6 +94,13 @@ interface UIState {
    */
   showSessionStats: boolean
   /**
+   * Whether the sidebar session list renders grouped (grouped-by-<criterion>
+   * sections) instead of as one flat list. Display-only preference: the
+   * session data is unchanged; this toggle only switches the list's render
+   * mode. Off by default. Persisted.
+   */
+  sessionListGrouped: boolean
+  /**
    * Whether the workspace TAB BAR renders (the multi-tab layer from
    * stores/tabStore). The tab layer itself exists unconditionally — with the
    * flag off it is simply its "exactly one tab" special case (the UI offers no
@@ -117,6 +124,8 @@ interface UIActions {
   setShowSessionStats: (show: boolean) => void
   /** Show/hide the workspace tab bar (see tabStore — the layer itself is always live). */
   setTabsEnabled: (enabled: boolean) => void
+  /** Switch the session list between grouped sections and the flat list. */
+  setSessionListGrouped: (grouped: boolean) => void
 }
 
 /** Default workspace tab when a project has no remembered tab yet. */
@@ -173,6 +182,7 @@ export function mergeUIStore(
     sidebarWidth?: unknown
     chatSessionListRatio?: unknown
     showSessionStats?: unknown
+    sessionListGrouped?: unknown
     tabsEnabled?: unknown
     workspaceTabByProject?: unknown
     researchSegmentByProject?: unknown
@@ -215,6 +225,10 @@ export function mergeUIStore(
         : current.chatSessionListRatio,
     showSessionStats:
       typeof p.showSessionStats === 'boolean' ? p.showSessionStats : current.showSessionStats,
+    sessionListGrouped:
+      typeof p.sessionListGrouped === 'boolean'
+        ? p.sessionListGrouped
+        : current.sessionListGrouped,
     tabsEnabled: typeof p.tabsEnabled === 'boolean' ? p.tabsEnabled : current.tabsEnabled,
     workspaceTabByProject,
     researchSegmentByProject,
@@ -230,6 +244,7 @@ export const useUIStore = create<UIState & UIActions>()(
       sidebarWidth: getDefaultSidebarWidth(),
       chatSessionListRatio: 0.5,
       showSessionStats: false,
+      sessionListGrouped: false,
       tabsEnabled: false,
 
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
@@ -275,13 +290,15 @@ export const useUIStore = create<UIState & UIActions>()(
 
       setShowSessionStats: (show) => set({ showSessionStats: show }),
 
+      setSessionListGrouped: (grouped) => set({ sessionListGrouped: grouped }),
+
       setTabsEnabled: (enabled) => set((s) => (
         s.tabsEnabled === enabled ? s : { tabsEnabled: enabled }
       )),
     }),
     {
       name: 'c0wrk-sidebar-collapsed',
-      version: 7,
+      version: 8,
       // Bump version and implement migration when adding/removing/renaming persisted fields.
       migrate: (persistedState, _version) => {
         const prev = (persistedState ?? {}) as {
@@ -289,6 +306,7 @@ export const useUIStore = create<UIState & UIActions>()(
           chatSessionListRatio?: number
           sidebarWidth?: number
           showSessionStats?: boolean
+          sessionListGrouped?: boolean
           tabsEnabled?: boolean
           workspaceTabByProject?: WorkspaceTabByProject
           researchSegmentByProject?: ResearchSegmentByProject
@@ -299,7 +317,9 @@ export const useUIStore = create<UIState & UIActions>()(
         // per-project workspaceTabByProject map; v5→v6 added the per-project
         // researchSegmentByProject map (Research panel: dashboard | papers);
         // v6→v7 added tabsEnabled (default off — the tab bar is opt-in; the
-        // tab layer itself lives in stores/tabStore and needs no migration).
+        // tab layer itself lives in stores/tabStore and needs no migration);
+        // v7→v8 added sessionListGrouped (default off — the grouped session
+        // list is opt-in; display-only, no data migration needed).
         // On every migration (and fresh
         // installs) missing fields take their creator default; persist's
         // shallow merge already covers fresh installs, but explicit defaults
@@ -335,6 +355,7 @@ export const useUIStore = create<UIState & UIActions>()(
           chatSessionListRatio: prev.chatSessionListRatio ?? 0.5,
           sidebarWidth: prev.sidebarWidth ?? getDefaultSidebarWidth(),
           showSessionStats: prev.showSessionStats ?? false,
+          sessionListGrouped: prev.sessionListGrouped ?? false,
           tabsEnabled: prev.tabsEnabled ?? false,
           workspaceTabByProject,
           researchSegmentByProject,
@@ -347,6 +368,7 @@ export const useUIStore = create<UIState & UIActions>()(
         sidebarWidth: state.sidebarWidth,
         chatSessionListRatio: state.chatSessionListRatio,
         showSessionStats: state.showSessionStats,
+        sessionListGrouped: state.sessionListGrouped,
         tabsEnabled: state.tabsEnabled,
         workspaceTabByProject: state.workspaceTabByProject,
         researchSegmentByProject: state.researchSegmentByProject,

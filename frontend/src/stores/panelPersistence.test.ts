@@ -201,7 +201,7 @@ describe('per-project workspace tab persistence', () => {
   })
 
   it('persist version matches the current schema', () => {
-    expect(useUIStore.persist.getOptions().version).toBe(7)
+    expect(useUIStore.persist.getOptions().version).toBe(8)
   })
 
   it('same-version corrupt tab values are dropped on rehydrate (merge, not migrate)', async () => {

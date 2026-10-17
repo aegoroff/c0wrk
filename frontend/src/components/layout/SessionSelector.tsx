@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useUIStore } from "@/stores/uiStore";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -7,112 +8,112 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import {
-  ChevronDown,
-  ChevronRight,
-  Plus,
-} from "lucide-react";
+import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
+import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
+import { ChevronDown, Plus } from "lucide-react";
 import { useSessionActions } from "@/hooks/useSessionActions";
+import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
+import { SessionGroupedList } from "./SessionGroupedList";
+import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
+import { ARCHIVED_SECTION_KEY, buildSessionGroups, sessionRegionId } from "@/lib/sessionGroups";
 
 /**
  * Dropdown session selector — used in CODE mode (a real project is active).
  *
  * In CHAT (No Project) mode the sidebar renders the flat {@link SessionList}
- * instead, so this component only mounts when `isChatMode` is false.
+ * instead, so this component only mounts when `isChatMode` is false. Grouped
+ * mode delegates to {@link SessionGroupedList}; the Archived section renders
+ * in both modes.
  */
 export function SessionSelector() {
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const selectSession = useSessionStore((s) => s.selectSession);
+  // Grouped-by-branch display mode (persisted display-only flag in uiStore).
+  const sessionListGrouped = useUIStore((s) => s.sessionListGrouped);
+  const setSessionListGrouped = useUIStore((s) => s.setSessionListGrouped);
 
-  const {
-    createError,
-    clearCreateError,
-    renamingId,
-    renameValue,
-    setRenameValue,
-    renameRef,
-    startRename,
-    commitRename,
-    cancelRename,
-    handleNewSession,
-    handleDelete,
-    handleArchive,
-    handlePin,
-    handleFork,
-    pendingAction,
-    confirmPendingAction,
-    cancelPendingAction,
-  } = useSessionActions();
+  const actions = useSessionActions();
 
   const [search, setSearch] = useState("");
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  // Archived sessions are collapsed by default; the header shows the count and
-  // expands on click.
-  const [archivedCollapsed, setArchivedCollapsed] = useState(true);
+  // Ephemeral collapse state for the sections and branch groups; keys are the
+  // stable collapse keys from lib/sessionGroups (`archived` — and in grouped
+  // mode `managed` / `local` / `branch:<name>` — archived starts collapsed).
+  const { toggleSection, isSectionExpanded } = useCollapsibleSections([ARCHIVED_SECTION_KEY]);
 
   const activeSessionsList = useMemo(() => (sessions ?? []).filter((s) => !s.archived), [sessions]);
   const archivedList = useMemo(() => (sessions ?? []).filter((s) => s.archived), [sessions]);
 
-  const totalCount = activeSessionsList.length + archivedList.length;
-  const showSearch = totalCount >= 5;
+  // Grouping model (grouped mode only, but cheap enough to always compute):
+  // classification + ordering live entirely in lib/sessionGroups; the search
+  // filter there hides groups left without members.
+  const groups = useMemo(() => buildSessionGroups(sessions ?? [], { search }), [sessions, search]);
+  const searchActive = search.trim() !== "";
+  const showSectionHeaders = groups.managed.length > 0 && groups.local.length > 0;
 
+  // Trimmed to match `buildSessionGroups` (and the branch combo's own
+  // filterFn): a whitespace-only search is "no filter", so the grouped
+  // sections, the flat list and the Archived section can never disagree.
   const filterFn = useCallback(
     (name: string) => {
-      if (!search) return true;
-      return name.toLowerCase().includes(search.toLowerCase());
+      const q = search.trim().toLowerCase();
+      if (!q) return true;
+      return name.toLowerCase().includes(q);
     },
     [search],
   );
 
-  const activeSession = sessions?.find((s) => s.id === activeSessionId);
-
-  if (renamingId) {
-    return (
-      <div className="px-2 py-1">
-        <Input
-          ref={renameRef}
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            if (e.key === "Escape") cancelRename();
-          }}
-          onBlur={commitRename}
-          className="h-7 text-sm"
-        />
-      </div>
-    );
-  }
-
-  const renderSessionItem = (session: SessionItemSummary) => (
-    <SessionItem
-      key={session.id}
-      session={session}
-      isActive={session.id === activeSessionId}
-      onSelect={() => {
-        selectSession(session.id, session.project_id);
-        setDropdownOpen(false);
-      }}
-      onRename={() => startRename(session.id, session.name)}
-      onArchive={() => handleArchive(session.id, session.archived)}
-      onPin={() => handlePin(session.id, session.pinned)}
-      onFork={() => handleFork(session.id)}
-      onDelete={() => handleDelete(session.id)}
-    />
-  );
+  const totalCount = activeSessionsList.length + archivedList.length;
+  const showSearch = totalCount >= 5;
 
   const visibleActive = activeSessionsList.filter((s) => filterFn(s.name));
   const visibleArchived = archivedList.filter((s) => filterFn(s.name));
 
+  const activeSession = sessions?.find((s) => s.id === activeSessionId);
+
+  if (actions.renamingId) {
+    // The dropdown replaces itself with the rename editor (mirrors the branch
+    // combo); commit/cancel come from the hook's rename state.
+    return (
+      <div className="px-2 py-1">
+        <InlineRenameInput inputRef={actions.renameRef} value={actions.renameValue} onChange={actions.setRenameValue} onCommit={actions.commitRename} onCancel={actions.cancelRename} />
+      </div>
+    );
+  }
+
+  const renderSessionItem = (session: SessionItemSummary, opts?: { indented?: boolean }) => (
+    <SessionItem
+      key={session.id}
+      session={session}
+      isActive={session.id === activeSessionId}
+      indented={opts?.indented}
+      onSelect={() => {
+        selectSession(session.id, session.project_id);
+        setDropdownOpen(false);
+      }}
+      onRename={() => actions.startRename(session.id, session.name)}
+      onArchive={() => actions.handleArchive(session.id, session.archived)}
+      onPin={() => actions.handlePin(session.id, session.pinned)}
+      onFork={() => actions.handleFork(session.id)}
+      onDelete={() => actions.handleDelete(session.id)}
+    />
+  );
+
+  /** Branch-row "+": arm the branch draft, clear the search and close the menu. */
+  const newSessionOnBranch = (branch: string) => {
+    actions.handleNewSessionOnBranch(branch);
+    setSearch("");
+    setDropdownOpen(false);
+  };
+
   return (
     <div className="border-b border-border px-2 py-1">
-      {createError && (
-        <div className="mb-1 rounded px-2 py-1 text-xs text-destructive bg-destructive/10">{createError}</div>
+      {actions.createError && (
+        <div className="mb-1 rounded px-2 py-1 text-xs text-destructive bg-destructive/10">{actions.createError}</div>
       )}
       <div className="flex items-center gap-1">
         <DropdownMenu
@@ -120,7 +121,7 @@ export function SessionSelector() {
           onOpenChange={(o) => {
             setDropdownOpen(o);
             if (!o) setSearch("");
-            if (o) clearCreateError();
+            if (o) actions.clearCreateError();
           }}
         >
           <DropdownMenuTrigger asChild>
@@ -129,56 +130,65 @@ export function SessionSelector() {
               <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-96">
-            {showSearch && (
-              <>
-                <div className="px-2 py-1">
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search sessions..."
-                    className="h-7 text-sm"
-                    autoFocus
-                  />
-                </div>
-                <DropdownMenuSeparator />
-              </>
-            )}
+          <DropdownMenuContent align="start" className="w-[28rem]">
+            <SessionSelectorToolbar
+              grouped={sessionListGrouped}
+              onToggleGrouped={() => setSessionListGrouped(!sessionListGrouped)}
+              showSearch={showSearch}
+              search={search}
+              onSearchChange={setSearch}
+            />
+            {showSearch && <DropdownMenuSeparator />}
 
-            {visibleActive.map(renderSessionItem)}
+            {sessionListGrouped ? (
+              <SessionGroupedList
+                groups={groups}
+                searchActive={searchActive}
+                showSectionHeaders={showSectionHeaders}
+                isSectionExpanded={isSectionExpanded}
+                toggleSection={toggleSection}
+                renderSessionItem={renderSessionItem}
+                onNewSessionOnBranch={newSessionOnBranch}
+              />
+            ) : (
+              visibleActive.map((s) => renderSessionItem(s))
+            )}
 
             {visibleArchived.length > 0 && (
               <>
                 <DropdownMenuSeparator />
-                <button
-                  type="button"
-                  title={archivedCollapsed ? 'Show archived' : 'Hide archived'}
-                  className="flex w-full items-center gap-1 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted/50"
-                  onClick={() => setArchivedCollapsed((c) => !c)}
-                >
-                  {archivedCollapsed ? (
-                    <ChevronRight className="size-3" />
-                  ) : (
-                    <ChevronDown className="size-3" />
-                  )}
-                  Archived ({visibleArchived.length})
-                </button>
-                {!archivedCollapsed && visibleArchived.map(renderSessionItem)}
+                <CollapsibleSectionHeader
+                  label="Archived"
+                  noun="sessions"
+                  count={visibleArchived.length}
+                  expanded={isSectionExpanded(ARCHIVED_SECTION_KEY, searchActive)}
+                  onToggle={() => toggleSection(ARCHIVED_SECTION_KEY)}
+                  controlsId={sessionRegionId(ARCHIVED_SECTION_KEY)}
+                />
+                {isSectionExpanded(ARCHIVED_SECTION_KEY, searchActive) && (
+                  <div id={sessionRegionId(ARCHIVED_SECTION_KEY)} role="presentation">
+                    {visibleArchived.map((s) => renderSessionItem(s))}
+                  </div>
+                )}
               </>
             )}
 
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={handleNewSession}>
+            <DropdownMenuItem onClick={actions.handleNewSession}>
               <Plus className="size-3.5" />
               New Session...
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <button type="button" title="New Session..." className="rounded p-0.5 hover:bg-muted/50 active:bg-muted/30" onClick={handleNewSession}>
+        <button type="button" title="New Session..." className="rounded p-0.5 hover:bg-muted/50 active:bg-muted/30" onClick={actions.handleNewSession}>
           <Plus className="size-3.5" />
         </button>
       </div>
-      <SessionActionConfirmDialog pending={pendingAction} onConfirm={confirmPendingAction} onCancel={cancelPendingAction} />
+      <SessionActionConfirmDialog
+        pending={actions.pendingAction}
+        onConfirm={actions.confirmPendingAction}
+        onCancel={actions.cancelPendingAction}
+      />
     </div>
   );
 }

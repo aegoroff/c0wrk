@@ -7,10 +7,13 @@ import {
   DropdownMenuContent,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
+import { MenuSearchInput } from "@/components/ui/MenuSearchInput";
 import { Button } from "@/components/ui/button";
+import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
+import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
 import { useBranchActions } from "@/hooks/useBranchActions";
 import type { BranchActionKind } from "@/hooks/useBranchActions";
+import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { useWorktreeActions } from "@/hooks/useWorktreeActions";
 import { focusWorktree } from "@/lib/gitFocus";
 import { LocalBranchRow } from "./LocalBranchRow";
@@ -18,6 +21,12 @@ import { RemoteBranchRow } from "./RemoteBranchRow";
 import { BranchDeleteConfirmDialog } from "./BranchDeleteConfirmDialog";
 import { WorktreeDeleteConfirmDialog } from "./WorktreeDeleteConfirmDialog";
 import { WorktreesSection } from "./WorktreesSection";
+
+/** DOM id of a section's content region — the header's `aria-controls`
+ *  target. The region div renders only while the section is expanded. */
+function branchRegionId(key: string): string {
+  return `branch-region-${key}`;
+}
 
 /**
  * Inline branch dropdown — the git panel's branch field.
@@ -31,7 +40,9 @@ import { WorktreesSection } from "./WorktreesSection";
  * every worktree of the project (local checkout, managed session trees,
  * external trees) — a focus switch, never a checkout — and exposes a hover
  * delete on the linked trees (managed + external; never the checkout) that
- * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. Branch
+ * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. All three
+ * section headers are collapsible (ephemeral state; an active search
+ * force-expands them). Branch
  * creation/management lives in the `BranchPicker` modal, opened from the git
  * panel's toolbar button — the dropdown does not duplicate those entries.
  * Branch data comes from `gitPanelStore.branches`.
@@ -46,6 +57,9 @@ export function BranchDropdown() {
 
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
+  // Collapsible sections (Local / Remote / Worktrees). Ephemeral — lives only
+  // for this component's lifetime; the keys mirror the section labels.
+  const { isSectionExpanded, toggleSection } = useCollapsibleSections();
 
   const localBranches = useMemo(
     () => (branches ?? []).filter((b) => b.kind === "local"),
@@ -70,22 +84,34 @@ export function BranchDropdown() {
   const visibleLocal = localBranches.filter((b) => filterFn(b.name));
   const visibleRemote = remoteBranches.filter((b) => filterFn(b.name));
 
+  /**
+   * Collapsible section header — the exact styling the session selector's
+   * Managed/Local/Archived sections mirror. An active search force-expands
+   * every section so matches inside a collapsed one stay reachable.
+   */
+  const searchActive = search.trim() !== "";
+  const renderSectionHeader = (key: string, label: string) => (
+    <CollapsibleSectionHeader
+      label={label}
+      noun="branches"
+      expanded={isSectionExpanded(key, searchActive)}
+      onToggle={() => toggleSection(key)}
+      controlsId={branchRegionId(key)}
+    />
+  );
+
   // While renaming, the inline input replaces the whole field (mirrors
   // SessionSelector). The dropdown is closed so it doesn't pop back open
   // after the rename commits.
   if (actions.renamingBranch) {
     return (
       <div className="px-2 py-1">
-        <Input
-          ref={actions.renameRef}
+        <InlineRenameInput
+          inputRef={actions.renameRef}
           value={actions.renameValue}
-          onChange={(e) => actions.setRenameValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") actions.commitRename();
-            if (e.key === "Escape") actions.cancelRename();
-          }}
-          onBlur={actions.commitRename}
-          className="h-7 text-sm"
+          onChange={actions.setRenameValue}
+          onCommit={actions.commitRename}
+          onCancel={actions.cancelRename}
           autoFocus
         />
       </div>
@@ -132,7 +158,7 @@ export function BranchDropdown() {
           {showSearch && (
             <>
               <div className="px-2 py-1">
-                <Input
+                <MenuSearchInput
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search branches..."
@@ -146,51 +172,55 @@ export function BranchDropdown() {
 
           {visibleLocal.length > 0 && (
             <>
-              <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Local
-              </div>
-              {visibleLocal.map((b) => (
-                <LocalBranchRow
-                  key={b.name}
-                  branch={b}
-                  inFlight={inFlightFor(b.name)}
-                  disabled={disabledFor(b.name)}
-                  onCheckout={(name) => {
-                    actions.checkout(name);
-                    close();
-                  }}
-                  onRename={(name) => {
-                    close();
-                    actions.startRename(name);
-                  }}
-                  onMerge={actions.mergeBranch}
-                  onRebase={actions.rebaseBranch}
-                  onPush={actions.push}
-                  onDelete={actions.requestDeleteLocal}
-                />
-              ))}
+              {renderSectionHeader("local", "Local")}
+              {isSectionExpanded("local", searchActive) && (
+                <div id={branchRegionId("local")} role="presentation">
+                  {visibleLocal.map((b) => (
+                    <LocalBranchRow
+                      key={b.name}
+                      branch={b}
+                      inFlight={inFlightFor(b.name)}
+                      disabled={disabledFor(b.name)}
+                      onCheckout={(name) => {
+                        actions.checkout(name);
+                        close();
+                      }}
+                      onRename={(name) => {
+                        close();
+                        actions.startRename(name);
+                      }}
+                      onMerge={actions.mergeBranch}
+                      onRebase={actions.rebaseBranch}
+                      onPush={actions.push}
+                      onDelete={actions.requestDeleteLocal}
+                    />
+                  ))}
+                </div>
+              )}
             </>
           )}
 
           {visibleRemote.length > 0 && (
             <>
               <DropdownMenuSeparator />
-              <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Remote
-              </div>
-              {visibleRemote.map((b) => (
-                <RemoteBranchRow
-                  key={b.name}
-                  branch={b}
-                  inFlight={inFlightFor(b.name)}
-                  disabled={disabledFor(b.name)}
-                  onCheckoutRemote={(remoteBranch) => {
-                    actions.checkoutRemote(remoteBranch);
-                    close();
-                  }}
-                  onDeleteRemote={actions.requestDeleteRemote}
-                />
-              ))}
+              {renderSectionHeader("remote", "Remote")}
+              {isSectionExpanded("remote", searchActive) && (
+                <div id={branchRegionId("remote")} role="presentation">
+                  {visibleRemote.map((b) => (
+                    <RemoteBranchRow
+                      key={b.name}
+                      branch={b}
+                      inFlight={inFlightFor(b.name)}
+                      disabled={disabledFor(b.name)}
+                      onCheckoutRemote={(remoteBranch) => {
+                        actions.checkoutRemote(remoteBranch);
+                        close();
+                      }}
+                      onDeleteRemote={actions.requestDeleteRemote}
+                    />
+                  ))}
+                </div>
+              )}
             </>
           )}
 
@@ -203,19 +233,21 @@ export function BranchDropdown() {
           {worktrees.length > 0 && (
             <>
               <DropdownMenuSeparator />
-              <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Worktrees
-              </div>
-              <WorktreesSection
-                variant="menu"
-                worktrees={worktrees}
-                onSelect={(w) => {
-                  void focusWorktree(w.path);
-                  close();
-                }}
-                onDelete={worktreeActions.requestDelete}
-                deleteBusyPath={worktreeActions.busyPath}
-              />
+              {renderSectionHeader("worktrees", "Worktrees")}
+              {isSectionExpanded("worktrees", searchActive) && (
+                <div id={branchRegionId("worktrees")} role="presentation">
+                  <WorktreesSection
+                    variant="menu"
+                    worktrees={worktrees}
+                    onSelect={(w) => {
+                      void focusWorktree(w.path);
+                      close();
+                    }}
+                    onDelete={worktreeActions.requestDelete}
+                    deleteBusyPath={worktreeActions.busyPath}
+                  />
+                </div>
+              )}
             </>
           )}
         </DropdownMenuContent>

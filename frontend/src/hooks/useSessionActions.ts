@@ -59,6 +59,12 @@ export interface SessionActions {
   commitRename: () => Promise<void>
   cancelRename: () => void
   handleNewSession: () => Promise<void>
+  /**
+   * Arm a New-Session draft pinned to an existing managed branch (the
+   * session selector's grouped view offers this per branch row). No-op
+   * outside CODE projects.
+   */
+  handleNewSessionOnBranch: (branch: string) => void
   handleDelete: (id: string) => Promise<void>
   handleArchive: (id: string, isArchived: boolean) => Promise<void>
   handlePin: (id: string, isPinned: boolean) => Promise<void>
@@ -114,6 +120,34 @@ export function useSessionActions(): SessionActions {
       setCreateError(message)
     }
   }, [addSession, selectSession])
+
+  /**
+   * Arm a New-Session draft pinned to an existing managed branch (the session
+   * selector's grouped view offers this per branch row). The same CODE draft
+   * flow as {@link handleNewSession}, with the drafted workspace preset to
+   * the branch: the session row is born on the first real action, and
+   * `CreateManagedSession` then ADOPTS the branch's existing managed worktree
+   * (ADR-082 shared trees) — the new session executes in that same tree, no
+   * second checkout is made. Outside a CODE project the gesture has no
+   * meaning (no worktrees) and is a deliberate no-op.
+   */
+  const handleNewSessionOnBranch = useCallback(
+    (branch: string) => {
+      setCreateError(null)
+      const projectState = useProjectStore.getState()
+      const projectId = projectState.activeProjectId
+      if (projectId === null || selectIsNoProject(projectState)) return
+      useSessionDraftStore.getState().startDraft(projectId)
+      useSessionDraftStore
+        .getState()
+        .setDraftWorkspace({ kind: 'branch', branch, createBranch: false, startPoint: '' })
+      // Same in-memory-only selection clear as handleNewSession: the draft
+      // and a selected session are mutually exclusive states (selecting a
+      // session retires a draft; a draft clears the visible selection).
+      selectSession(null)
+    },
+    [selectSession],
+  )
 
   const performDelete = useCallback(
     async (id: string) => {
@@ -263,6 +297,7 @@ export function useSessionActions(): SessionActions {
     commitRename,
     cancelRename,
     handleNewSession,
+    handleNewSessionOnBranch,
     handleDelete,
     handleArchive,
     handlePin,

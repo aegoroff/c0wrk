@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { withVirtualTimers } from '@/test/virtualTime'
 
 // --- Mock the git API wrappers so tests never touch the Wails backend ---
 const { gitMocks } = vi.hoisted(() => ({
@@ -212,6 +213,32 @@ describe('BranchDropdown', () => {
     expect(body().textContent).toContain('feature/auth')
     expect(body().textContent).toContain('feature/api')
     expect(body().textContent).not.toContain('bugfix/1')
+  })
+
+  it('keeps the search input focused when a keystroke matches a branch row', async () => {
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feature/auth' }),
+      makeBranch({ name: 'feature/api' }),
+      makeBranch({ name: 'bugfix/1' }),
+      makeBranch({ name: 'bugfix/2' }),
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const input = body().querySelector('input[placeholder="Search branches..."]') as HTMLInputElement
+    // The dispatch sits INSIDE the virtual-time window: Radix's typeahead
+    // focuses its match from a setTimeout(0), which must land on the fake
+    // clock and fire deterministically during the advance.
+    await withVirtualTimers(() => {
+      input.focus()
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))
+    })
+
+    // Branch rows are plain role=button divs (the menu holds no Radix items
+    // today), so the typeahead has nothing to steal with — but the input is a
+    // MenuSearchInput so this holds even if menu items are ever added.
+    expect(document.activeElement).toBe(input)
   })
 
   it('checks out a local branch on click and closes the dropdown', async () => {
@@ -589,5 +616,178 @@ describe('BranchDropdown — worktree focus switcher', () => {
     })
     expect(body().textContent).not.toContain('Delete worktree?')
     expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('BranchDropdown — collapsible sections', () => {
+  /** Section header item — a registered menu item, found by its exact label. */
+  function sectionHeader(label: string): HTMLElement {
+    const item = Array.from(body().querySelectorAll('[role="menuitem"]')).find(
+      (el) => (el.textContent ?? '').trim() === label,
+    )
+    expect(item, `section header "${label}"`).toBeTruthy()
+    return item as HTMLElement
+  }
+
+  /**
+   * A real bubbling keydown (the dispatch path Radix's React handlers listen
+   * on). Roving-focus moves apply from a setTimeout, so the dispatch sits
+   * inside the virtual-time window.
+   */
+  function pressKey(el: Element, key: string): Promise<void> {
+    return withVirtualTimers(() => {
+      el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    }, 10)
+  }
+
+  function clickHeader(label: string) {
+    act(() => {
+      sectionHeader(label).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    return flush()
+  }
+
+  // Local and remote names must not be substrings of each other — the
+  // section tests assert on absence via textContent.
+  const localAndRemote = () =>
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feature/x' }),
+      makeBranch({ name: 'origin/feature/y', kind: 'remote' }),
+    ])
+
+  it('renders section headers in the combo style with a chevron and hover affordance', async () => {
+    localAndRemote()
+    renderDropdown()
+    await openDropdown()
+
+    for (const label of ['Local', 'Remote']) {
+      const btn = sectionHeader(label)
+      expect(btn.className).toContain('uppercase')
+      expect(btn.className).toContain('font-semibold')
+      expect(btn.className).toContain('text-xs')
+      expect(btn.className).toContain('hover:bg-muted')
+      expect(btn.querySelector('svg.lucide-chevron-down')).not.toBeNull()
+    }
+  })
+
+  it('section headers expose aria-expanded and name their live content region', async () => {
+    localAndRemote()
+    renderDropdown()
+    await openDropdown()
+
+    const local = sectionHeader('Local')
+    expect(local.getAttribute('aria-expanded')).toBe('true')
+    const regionId = local.getAttribute('aria-controls')!
+    expect(regionId).toBeTruthy()
+    expect(document.getElementById(regionId)?.textContent).toContain('feature/x')
+
+    // Collapsing flips the state and unmounts the region it named.
+    await clickHeader('Local')
+    expect(sectionHeader('Local').getAttribute('aria-expanded')).toBe('false')
+    expect(document.getElementById(regionId)).toBeNull()
+  })
+
+  it('collapses the Local section without closing the menu; the Remote section is untouched', async () => {
+    localAndRemote()
+    renderDropdown()
+    await openDropdown()
+
+    await clickHeader('Local')
+    expect(isMenuOpen()).toBe(true)
+    expect(body().textContent).not.toContain('feature/x')
+    expect(body().textContent).toContain('origin/feature/y')
+    // The collapsed section keeps its header so it can be re-expanded.
+    expect(body().textContent).toContain('Local')
+
+    await clickHeader('Local')
+    expect(body().textContent).toContain('feature/x')
+  })
+
+  it('collapses the Remote section and re-expands it', async () => {
+    localAndRemote()
+    renderDropdown()
+    await openDropdown()
+
+    await clickHeader('Remote')
+    expect(isMenuOpen()).toBe(true)
+    expect(body().textContent).not.toContain('origin/feature/y')
+    expect(body().textContent).toContain('feature/x')
+
+    await clickHeader('Remote')
+    expect(body().textContent).toContain('origin/feature/y')
+  })
+
+  it('collapses the Worktrees section and re-expands it', async () => {
+    localAndRemote()
+    useGitPanelStore.getState().setWorktrees([
+      { path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a', managed: false, pinned: false, is_focus: true },
+      {
+        path: '/repo/.worktrees/s-abc', name: 's-abc', kind: 'managed',
+        branch: 'sess/s-abc', head: 'b', managed: true, pinned: false, is_focus: false,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    expect(body().querySelector('[data-testid="worktree-row"]')).not.toBeNull()
+
+    await clickHeader('Worktrees')
+    expect(isMenuOpen()).toBe(true)
+    expect(body().querySelector('[data-testid="worktree-row"]')).toBeNull()
+    expect(body().textContent).toContain('Worktrees')
+
+    await clickHeader('Worktrees')
+    expect(body().querySelector('[data-testid="worktree-row"]')).not.toBeNull()
+  })
+
+  it('an active search force-expands a collapsed section; clearing restores it', async () => {
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feature/x' }),
+      makeBranch({ name: 'feature/api' }),
+      makeBranch({ name: 'bugfix/1' }),
+      makeBranch({ name: 'bugfix/2' }),
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    await clickHeader('Local')
+    expect(body().textContent).not.toContain('feature/x')
+
+    const input = body().querySelector('input[placeholder="Search branches..."]') as HTMLInputElement
+    act(() => setInputValue(input, 'feature'))
+    await flush()
+    expect(body().textContent).toContain('feature/x')
+    expect(body().textContent).not.toContain('bugfix/1')
+
+    act(() => setInputValue(input, ''))
+    await flush()
+    expect(body().textContent).not.toContain('feature/x')
+  })
+
+  it('section headers are arrow-reachable and Enter toggles them without closing the menu', async () => {
+    localAndRemote()
+    renderDropdown()
+    await openDropdown()
+
+    // Pointer-open leaves focus on the menu content; the FIRST item of the
+    // roving collection is the Local header (no search box below the
+    // 5-branch threshold). As a plain button it was invisible to the arrows
+    // — and Tab is prevented inside the menu, so it was unreachable.
+    const menu = body().querySelector('[data-slot="dropdown-menu-content"]') as HTMLElement
+    await pressKey(menu, 'ArrowDown')
+    expect(document.activeElement).toBe(sectionHeader('Local'))
+
+    // Enter collapses the section — the menu stays open.
+    await pressKey(document.activeElement!, 'Enter')
+    expect(isMenuOpen()).toBe(true)
+    expect(sectionHeader('Local').getAttribute('aria-expanded')).toBe('false')
+    expect(body().textContent).not.toContain('feature/x')
+
+    // Enter again re-expands (focus persisted through the header re-render).
+    await pressKey(document.activeElement!, 'Enter')
+    expect(sectionHeader('Local').getAttribute('aria-expanded')).toBe('true')
+    expect(body().textContent).toContain('feature/x')
   })
 })
