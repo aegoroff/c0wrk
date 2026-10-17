@@ -200,6 +200,8 @@ export function GetProjectSwitchState(arg1:string):Promise<backend.ProjectUIStat
 
 export function GetProjectUIState(arg1:string):Promise<backend.ProjectUIStateResponse>;
 
+export function GetPromptSuggestions(arg1:string,arg2:string):Promise<backend.PromptSuggestionsResponse>;
+
 export function GetProviderTLSCertificate(arg1:backend.GetProviderTLSCertificateRequest):Promise<backend.TLSCertificateResponse>;
 
 export function GetRebaseMergeState():Promise<workspace.MergeRebaseState>;
@@ -399,6 +401,8 @@ export function SetModelProfilesEnabled(arg1:boolean):Promise<void>;
 export function SetNotificationBannerTimeout(arg1:number):Promise<void>;
 
 export function SetPaperPinned(arg1:string,arg2:string,arg3:boolean):Promise<void>;
+
+export function SetPromptSuggestionsEnabled(arg1:boolean):Promise<void>;
 
 export function SetResearchPinned(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 

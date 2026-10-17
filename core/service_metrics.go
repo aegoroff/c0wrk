@@ -26,6 +26,10 @@ const (
 	// classifier (core/goal_suggest.go): a fresh non-goal task's message is
 	// judged for obvious goal-mode fit before the Conductor run starts.
 	ServiceKindGoalSuggest ServiceKind = "goal_suggest"
+	// ServiceKindPromptSuggest is the chat-input prompt-suggestions generator
+	// (core/prompt_suggest.go): after a task finishes full/partial, follow-up
+	// prompts are generated from the recent-history windows (ADR-088).
+	ServiceKindPromptSuggest ServiceKind = "prompt_suggest"
 )
 
 // ServiceOutcome classifies the terminal result of a service call.

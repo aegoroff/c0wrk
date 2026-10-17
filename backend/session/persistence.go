@@ -141,6 +141,12 @@ type SessionStore interface {
 	DeleteBookmark(ctx context.Context, sessionID, id string) error
 	RenameBookmark(ctx context.Context, sessionID, id, title string) error
 
+	// Prompt suggestions (ADR-088: generated follow-up prompts offered in the
+	// chat input; one active set per (session, kind))
+	SavePromptSuggestions(ctx context.Context, suggs []PromptSuggestion) ([]PromptSuggestion, error)
+	ListPromptSuggestions(ctx context.Context, sessionID string) ([]PromptSuggestion, error)
+	SetPromptSuggestionStatus(ctx context.Context, id, status string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -353,6 +359,28 @@ func (s *SQLiteSessionStore) createTables() error {
 		SELECT id FROM session_bookmarks GROUP BY session_id, event_key
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_session_bookmarks_session_event ON session_bookmarks(session_id, event_key);
+
+	-- prompt_suggestions holds the generated follow-up prompts (ADR-088) the
+	-- chat input offers after a task finishes with outcome full or partial.
+	-- One row per suggestion; SavePromptSuggestions replaces the active set of
+	-- one (session, kind) atomically (previous active rows → stale, new rows
+	-- in), so at most one active set per (session, kind) exists. The CREATE
+	-- TABLE IF NOT EXISTS is the additive migration for databases created
+	-- before prompt suggestions existed — it adds the table on the next open
+	-- without touching any existing row. Session deletion cascades via the FK;
+	-- a fork does not copy the rows.
+	CREATE TABLE IF NOT EXISTS prompt_suggestions (
+		id         TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		task_id    TEXT NOT NULL DEFAULT '',
+		kind       TEXT NOT NULL CHECK (kind IN ('next_task','goal_advance')),
+		text       TEXT NOT NULL,
+		status     TEXT NOT NULL DEFAULT 'active'
+		           CHECK (status IN ('active','accepted','dismissed','stale')),
+		created_at TIMESTAMP NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_prompt_suggestions_session
+		ON prompt_suggestions(session_id, status);
 
 	`
 	_, err := s.db.ExecContext(context.Background(), schema)
@@ -1323,6 +1351,205 @@ func (s *SQLiteSessionStore) RenameBookmark(ctx context.Context, sessionID, id, 
 		`UPDATE session_bookmarks SET title = ? WHERE id = ? AND session_id = ?`, title, id, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to rename bookmark: %w", err)
+	}
+	return nil
+}
+
+// PromptSuggestion represents one generated follow-up prompt (ADR-088) the
+// chat input can offer after a task finishes with outcome full or partial.
+// Rows hang off their session: deleting the session deletes its suggestions
+// (ON DELETE CASCADE) and a fork does not copy them.
+type PromptSuggestion struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	TaskID    string `json:"task_id"` // triggering task; "" for session-level rows
+	Kind      string `json:"kind"`    // SuggestionKindNextTask or SuggestionKindGoalAdvance
+	Text      string `json:"text"`
+	Status    string `json:"status"`     // SuggestionStatus* value
+	CreatedAt string `json:"created_at"` // RFC 3339 formatted timestamp
+}
+
+// Suggestion kinds of a prompt suggestion row (ADR-088 D1): next_task offers
+// follow-up prompts after a completed task, goal_advance offers prompts for
+// advancing an active goal.
+const (
+	SuggestionKindNextTask    = "next_task"
+	SuggestionKindGoalAdvance = "goal_advance"
+)
+
+// Lifecycle statuses of a prompt suggestion row (ADR-088 D7). active rows are
+// the set the chat input offers; accepted/dismissed are terminal per-row
+// outcomes reported by the frontend; stale marks a set replaced by a fresher
+// generation pass — dead weight removed by the next replace and by the
+// session-delete cascade.
+const (
+	SuggestionStatusActive    = "active"
+	SuggestionStatusAccepted  = "accepted"
+	SuggestionStatusDismissed = "dismissed"
+	SuggestionStatusStale     = "stale"
+)
+
+// isValidSuggestionKind reports whether kind is one of the two suggestion
+// kinds (ADR-088 D1).
+func isValidSuggestionKind(kind string) bool {
+	return kind == SuggestionKindNextTask || kind == SuggestionKindGoalAdvance
+}
+
+// SavePromptSuggestions atomically replaces the active suggestion set of one
+// (session, kind) with suggs (ADR-088 D7). Inside a single transaction the
+// stale generation left by the previous replace is deleted, the previous
+// active rows are marked stale and the new rows are inserted as active — so
+// at most one active set per (session, kind) exists at any time and row
+// growth stays bounded at the current plus the previous generation (stale
+// rows are dead weight no reader queries). Terminal accepted/dismissed rows
+// are never touched by a replace.
+//
+// suggs is one generation pass, so every row must carry the same non-empty
+// SessionID and the same valid Kind (SuggestionKindNextTask or
+// SuggestionKindGoalAdvance) and a non-empty Text; an empty set is rejected —
+// a pass that yields nothing simply does not call the store. The per-pass
+// size cap (D7, maxSuggestionsPerPass) is the caller's contract, not the
+// store's. Row IDs are always regenerated and Status forced to active;
+// CreatedAt is normalized to one timestamp for the whole pass — the first
+// row's non-empty value, else now (UTC, RFC 3339) — keeping the
+// ListPromptSuggestions order deterministic.
+//
+// The returned slice holds the rows as persisted (fresh IDs, the pass
+// timestamp, active status), in the given order.
+func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []PromptSuggestion) ([]PromptSuggestion, error) {
+	if len(suggs) == 0 {
+		return nil, errors.New("prompt suggestion set is empty")
+	}
+	sessionID := suggs[0].SessionID
+	if sessionID == "" {
+		return nil, errors.New("session identity is required")
+	}
+	kind := suggs[0].Kind
+	if !isValidSuggestionKind(kind) {
+		return nil, fmt.Errorf("invalid prompt suggestion kind %q", kind)
+	}
+	createdAt := suggs[0].CreatedAt
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	for i := range suggs {
+		if suggs[i].SessionID != sessionID {
+			return nil, fmt.Errorf("prompt suggestion set spans sessions: %q vs %q", sessionID, suggs[i].SessionID)
+		}
+		if suggs[i].Kind != kind {
+			return nil, fmt.Errorf("prompt suggestion set spans kinds: %q vs %q", kind, suggs[i].Kind)
+		}
+		if strings.TrimSpace(suggs[i].Text) == "" {
+			return nil, fmt.Errorf("prompt suggestion %d has empty text", i)
+		}
+	}
+
+	persisted := make([]PromptSuggestion, 0, len(suggs))
+	for i := range suggs {
+		persisted = append(persisted, PromptSuggestion{
+			ID:        uuid.NewString(),
+			SessionID: sessionID,
+			TaskID:    suggs[i].TaskID,
+			Kind:      kind,
+			Text:      suggs[i].Text,
+			Status:    SuggestionStatusActive,
+			CreatedAt: createdAt,
+		})
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin prompt-suggestion transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Drop the dead stale generation left by the previous replace BEFORE
+	// staling the current active set, so exactly one stale generation — the
+	// one this replace creates — exists per (session, kind).
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM prompt_suggestions
+		WHERE session_id = ? AND kind = ? AND status = ?`,
+		sessionID, kind, SuggestionStatusStale,
+	); err != nil {
+		return nil, fmt.Errorf("failed to prune stale prompt suggestions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE prompt_suggestions SET status = ?
+		WHERE session_id = ? AND kind = ? AND status = ?`,
+		SuggestionStatusStale, sessionID, kind, SuggestionStatusActive,
+	); err != nil {
+		return nil, fmt.Errorf("failed to stale previous prompt suggestions: %w", err)
+	}
+	for i := range persisted {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO prompt_suggestions (id, session_id, task_id, kind, text, status, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			persisted[i].ID, persisted[i].SessionID, persisted[i].TaskID, persisted[i].Kind, persisted[i].Text, persisted[i].Status, persisted[i].CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to insert prompt suggestion: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit prompt suggestions: %w", err)
+	}
+	return persisted, nil
+}
+
+// ListPromptSuggestions returns the session's active suggestion set — both
+// kinds, ADR-088 D7 — newest generation first and in insertion order within a
+// generation, the order the chat input's cycle keys assume. Accepted,
+// dismissed and stale rows are never returned. Returns an empty (non-nil)
+// slice when the session has no active suggestions.
+func (s *SQLiteSessionStore) ListPromptSuggestions(ctx context.Context, sessionID string) ([]PromptSuggestion, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, task_id, kind, text, status, created_at
+		FROM prompt_suggestions
+		WHERE session_id = ? AND status = ?
+		ORDER BY created_at DESC, rowid ASC`, sessionID, SuggestionStatusActive)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list prompt suggestions: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			s.log().Warn("failed to close database rows", "error", err)
+		}
+	}()
+
+	var suggestions []PromptSuggestion
+	for rows.Next() {
+		var sg PromptSuggestion
+		if err := rows.Scan(&sg.ID, &sg.SessionID, &sg.TaskID, &sg.Kind, &sg.Text, &sg.Status, &sg.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan prompt suggestion: %w", err)
+		}
+		suggestions = append(suggestions, sg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating prompt suggestions: %w", err)
+	}
+	if suggestions == nil {
+		suggestions = []PromptSuggestion{}
+	}
+	return suggestions, nil
+}
+
+// SetPromptSuggestionStatus persists a terminal per-row outcome reported by
+// the frontend (ADR-088 D7/D8): accepted (the suggestion was inserted into
+// the input as a draft) or dismissed (Esc). The update is guarded on the row
+// still being active, so a report racing a fresher generation pass — or
+// naming an unknown id — is a silent no-op with a nil error, per the
+// fail-open contract (D9). active/stale are generation-owned states and
+// rejected here.
+func (s *SQLiteSessionStore) SetPromptSuggestionStatus(ctx context.Context, id, status string) error {
+	if status != SuggestionStatusAccepted && status != SuggestionStatusDismissed {
+		return fmt.Errorf("invalid prompt suggestion status %q: only accepted or dismissed can be reported", status)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE prompt_suggestions SET status = ?
+		WHERE id = ? AND status = ?`,
+		status, id, SuggestionStatusActive,
+	); err != nil {
+		return fmt.Errorf("failed to update prompt suggestion status: %w", err)
 	}
 	return nil
 }

@@ -21,7 +21,8 @@ func serviceOutputTokenBudget(maxTokens int, effort string) int {
 
 // The oneshot service-call policy: the fixed per-kind contract for c0wrk's
 // auxiliary LLM calls (title, commit message, prompt-optimizer
-// extract/rewrite, compaction summarization). Every call in this class goes
+// extract/rewrite, compaction summarization, goal-mode suitability,
+// prompt-suggestion generation). Every call in this class goes
 // through the sp4rk oneshot client, and its sampling and reasoning come from
 // THIS policy — not from the Model Profiles reasoningEffort seed and not from
 // ad-hoc per-site values.
@@ -45,6 +46,10 @@ var (
 	oneshotTempExtract     = 0.3
 	oneshotTempRewrite     = 0.5
 	oneshotTempGoalSuggest = 0.2
+	// oneshotTempPromptSuggest — creative composition (three diverse follow-up
+	// prompts), not classification: a warmer pin trades determinism for
+	// suggestion variety, which the feature wants.
+	oneshotTempPromptSuggest = 0.7
 )
 
 // Reasoning tiers of the oneshot service policy, resolved per active model
@@ -56,6 +61,8 @@ var (
 //     effort; the rewrite benefits from a sliver of deliberation.
 //   - compaction summarization (both sites): minimal.
 //   - goal-mode suitability: minimal — same rationale as the optimizer.
+//   - prompt-suggestion generation: minimal — same rationale; the call runs
+//     async off the send path, so its latency is not user-visible.
 const (
 	oneshotTierTitle      = llm.ReasoningTierOff
 	oneshotTierCommit     = llm.ReasoningTierOff
@@ -65,6 +72,11 @@ const (
 	// of deliberation (mirroring the optimizer tiers); the call sits in the
 	// send path, so anything stronger would tax every candidate message.
 	oneshotTierGoalSuggest = llm.ReasoningTierMinimal
+	// oneshotTierPromptSuggest — same rationale as the optimizer: the
+	// generation quality of three short follow-up prompts benefits from a
+	// sliver of deliberation, while the call runs async off the send path
+	// (ADR-088 D9), so latency is not user-visible anyway.
+	oneshotTierPromptSuggest = llm.ReasoningTierMinimal
 )
 
 // serviceReasoningEffort resolves an oneshot service-call reasoning tier into

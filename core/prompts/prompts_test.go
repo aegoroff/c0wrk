@@ -23,6 +23,8 @@ func TestEmbeddedPrompts_NonEmpty(t *testing.T) {
 		{"GoalReDerivation", GoalReDerivation},
 		{"GoalReDerivationLite", GoalReDerivationLite},
 		{"GoalSuggest", GoalSuggest},
+		{"PromptSuggestContinuation", PromptSuggestContinuation},
+		{"PromptSuggestNewSession", PromptSuggestNewSession},
 		{"ReflectorSystem", ReflectorSystem},
 		{"RouterSystem", RouterSystem},
 		{"VerificationMandate", VerificationMandate},

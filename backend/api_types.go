@@ -20,7 +20,19 @@ type ConfigResponse struct {
 	Proxy         ProxySettingsResponse         `json:"proxy"`
 	Experimental  ExperimentalSettingsResponse  `json:"experimental"`
 	ModelProfiles ModelProfilesSettingsResponse `json:"model_profiles"`
-	VectorIndex   VectorIndexSettingsResponse   `json:"vector_index"`
+	// PromptSuggestions mirrors the prompt_suggestions.enabled gate
+	// (ADR-088) through SuggestionsEnabled() — nil config = on. False when
+	// the config is not loaded.
+	PromptSuggestions PromptSuggestionsSettingsResponse `json:"prompt_suggestions"`
+	VectorIndex       VectorIndexSettingsResponse       `json:"vector_index"`
+}
+
+// PromptSuggestionsSettingsResponse exposes the prompt_suggestions.enabled
+// gate (ADR-088) to the settings UI: the effective feature switch, mirrored
+// through PromptSuggestionsConfig.SuggestionsEnabled() (nil config = on).
+// False when the config is not loaded.
+type PromptSuggestionsSettingsResponse struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ExperimentalSettingsResponse exposes the master experimental-features switch

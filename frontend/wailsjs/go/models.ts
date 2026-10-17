@@ -511,6 +511,18 @@ export namespace backend {
 	        this.device_id = source["device_id"];
 	    }
 	}
+	export class PromptSuggestionsSettingsResponse {
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptSuggestionsSettingsResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	    }
+	}
 	export class ModelProfilesSettingsResponse {
 	    enabled: boolean;
 	    essential_tools_enabled: boolean;
@@ -584,6 +596,7 @@ export namespace backend {
 	    proxy: ProxySettingsResponse;
 	    experimental: ExperimentalSettingsResponse;
 	    model_profiles: ModelProfilesSettingsResponse;
+	    prompt_suggestions: PromptSuggestionsSettingsResponse;
 	    vector_index: VectorIndexSettingsResponse;
 	
 	    static createFrom(source: any = {}) {
@@ -600,6 +613,7 @@ export namespace backend {
 	        this.proxy = this.convertValues(source["proxy"], ProxySettingsResponse);
 	        this.experimental = this.convertValues(source["experimental"], ExperimentalSettingsResponse);
 	        this.model_profiles = this.convertValues(source["model_profiles"], ModelProfilesSettingsResponse);
+	        this.prompt_suggestions = this.convertValues(source["prompt_suggestions"], PromptSuggestionsSettingsResponse);
 	        this.vector_index = this.convertValues(source["vector_index"], VectorIndexSettingsResponse);
 	    }
 	
@@ -1968,6 +1982,43 @@ export namespace backend {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class PromptSuggestionsResponse {
+	    session_id: string;
+	    project_id?: string;
+	    source: string;
+	    suggestions: session.PromptSuggestion[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptSuggestionsResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.session_id = source["session_id"];
+	        this.project_id = source["project_id"];
+	        this.source = source["source"];
+	        this.suggestions = this.convertValues(source["suggestions"], session.PromptSuggestion);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	
 	export class ProxySettingsRequest {
 	    enabled: boolean;
@@ -3483,6 +3534,30 @@ export namespace session {
 		    }
 		    return a;
 		}
+	}
+	export class PromptSuggestion {
+	    id: string;
+	    session_id: string;
+	    task_id: string;
+	    kind: string;
+	    text: string;
+	    status: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptSuggestion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.session_id = source["session_id"];
+	        this.task_id = source["task_id"];
+	        this.kind = source["kind"];
+	        this.text = source["text"];
+	        this.status = source["status"];
+	        this.created_at = source["created_at"];
+	    }
 	}
 	export class SessionBookmark {
 	    id: string;

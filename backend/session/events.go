@@ -95,6 +95,14 @@ type TaskCancelledData struct {
 	SessionID string `json:"session_id"`
 }
 
+// PromptSuggestionsData is the payload for the session-scoped
+// "prompt_suggestions" event (ADR-088): the session's FULL active suggestion
+// set (both kinds) as persisted — the frontend replaces its set outright.
+type PromptSuggestionsData struct {
+	SessionID   string             `json:"session_id"`
+	Suggestions []PromptSuggestion `json:"suggestions"`
+}
+
 // TaskFailedResumableData is the payload for "task_failed_resumable" events.
 // Emitted when plan execution fails but the task can be resumed.
 // TaskID lets the persisted message be matched and resolved when the user
