@@ -498,10 +498,11 @@ func (f *FrontendAPI) vectorIndexStatusFromManager(vm *vectorindex.Manager) Vect
 	svc := vm.Service()
 	indices := make([]string, 0, 2)
 	if svc != nil {
-		if svc.GetCollection() != nil {
+		vector, lexical := svc.IndexAvailability()
+		if vector {
 			indices = append(indices, "vector")
 		}
-		if svc.GetLexical() != nil {
+		if lexical {
 			indices = append(indices, "lexical")
 		}
 	}
