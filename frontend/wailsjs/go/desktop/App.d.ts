@@ -410,6 +410,8 @@ export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
 
 export function SetWebviewGpuPolicy(arg1:string):Promise<backend.WebviewGpuPolicyInfo>;
 
+export function SetWebviewGpuStderrObserved(arg1:boolean):Promise<void>;
+
 export function SetWebviewGpuWatchdog(arg1:desktop.webviewGpuWatchdog):Promise<void>;
 
 export function ShowTestNotification():Promise<void>;

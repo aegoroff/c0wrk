@@ -2656,6 +2656,20 @@ export namespace core {
 
 export namespace desktop {
 	
+	export class PendingGoalSuggestion {
+	    request_id: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PendingGoalSuggestion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.request_id = source["request_id"];
+	        this.reason = source["reason"];
+	    }
+	}
 	export class PendingGoalProposal {
 	    request_id: string;
 	    condition: string;
@@ -2768,6 +2782,7 @@ export namespace desktop {
 	    plan_approvals: PendingPlanApproval[];
 	    ask_user: PendingAskUser[];
 	    goal_proposals: PendingGoalProposal[];
+	    goal_suggestions: PendingGoalSuggestion[];
 	
 	    static createFrom(source: any = {}) {
 	        return new PendingActionsResponse(source);
@@ -2780,6 +2795,7 @@ export namespace desktop {
 	        this.plan_approvals = this.convertValues(source["plan_approvals"], PendingPlanApproval);
 	        this.ask_user = this.convertValues(source["ask_user"], PendingAskUser);
 	        this.goal_proposals = this.convertValues(source["goal_proposals"], PendingGoalProposal);
+	        this.goal_suggestions = this.convertValues(source["goal_suggestions"], PendingGoalSuggestion);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2800,6 +2816,7 @@ export namespace desktop {
 		    return a;
 		}
 	}
+	
 	
 	
 	

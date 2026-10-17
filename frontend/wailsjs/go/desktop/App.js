@@ -806,6 +806,10 @@ export function SetWebviewGpuPolicy(arg1) {
   return window['go']['desktop']['App']['SetWebviewGpuPolicy'](arg1);
 }
 
+export function SetWebviewGpuStderrObserved(arg1) {
+  return window['go']['desktop']['App']['SetWebviewGpuStderrObserved'](arg1);
+}
+
 export function SetWebviewGpuWatchdog(arg1) {
   return window['go']['desktop']['App']['SetWebviewGpuWatchdog'](arg1);
 }
