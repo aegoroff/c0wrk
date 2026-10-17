@@ -15,10 +15,13 @@ interface RemoteBranchRowProps {
   /** Called with the short branch name + remote (e.g. `feature/x`, `origin`). */
   onDeleteRemote: (name: string, remote: string) => void
   /**
-   * Name of the branch currently checked out in the working tree. Only
+   * Precomputed draft-blocking reason for this row's LOCAL twin (the short
+   * branch name), or null when the twin is a valid draft target. Computed by
+   * BranchPicker with the same predicate as the local rows — the main
+   * checkout's branch — so both sections block (and word) identically. Only
    * consulted in session-draft mode (see {@link RemoteBranchRowProps.draftSelect}).
    */
-  currentBranch?: string
+  draftBlockedReason?: string | null
   /**
    * Session-draft mode (ADR-080): when set, clicking SELECTS the remote
    * branch for the new session's managed worktree instead of checking it
@@ -55,7 +58,7 @@ export function RemoteBranchRow({
   disabled,
   onCheckoutRemote,
   onDeleteRemote,
-  currentBranch,
+  draftBlockedReason,
   draftSelect,
 }: RemoteBranchRowProps) {
   const slash = branch.name.indexOf('/')
@@ -64,13 +67,14 @@ export function RemoteBranchRow({
 
   const blocked = disabled || inFlight !== null
   const selected = draftSelect?.selected ?? false
-  // Draft mode: a remote ref whose LOCAL twin (the short name) is the
-  // working tree's own branch cannot back a managed worktree — commit-time
-  // DWIM would reuse that branch and the shared checkout would serve the
-  // session instead (mirrors LocalBranchRow's current-branch guard). An
-  // unknown current branch (empty) blocks nothing.
-  const draftBlocked =
-    draftSelect !== undefined && currentBranch !== undefined && currentBranch !== '' && shortName === currentBranch
+  // Draft mode: a remote ref whose LOCAL twin (the short name) cannot back a
+  // managed worktree — commit-time DWIM would reuse that branch and the main
+  // checkout would serve the session instead. The BLOCKING REASON is computed
+  // by BranchPicker with the same predicate as the local rows (the main
+  // checkout's branch — focus-independent) and handed down verbatim, so a
+  // branch is blocked (and worded) identically in both sections. A null
+  // reason (unknown main checkout, or a free branch) blocks nothing.
+  const draftBlocked = draftSelect !== undefined && !!draftBlockedReason
 
   const handleCheckout = () => {
     if (blocked) return
@@ -95,7 +99,7 @@ export function RemoteBranchRow({
       aria-current={selected ? 'true' : undefined}
       title={
         draftBlocked
-          ? `Local ${shortName} is checked out in the working tree — pick another branch or use local`
+          ? (draftBlockedReason ?? undefined)
           : undefined
       }
       onClick={handleCheckout}

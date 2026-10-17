@@ -19,14 +19,23 @@ interface LocalBranchRowProps {
   /**
    * Session-draft mode (ADR-080): when set, clicking SELECTS the branch for
    * the new session's managed worktree instead of checking it out — no git
-   * operation runs, and the per-branch hover actions are hidden. The branch
-   * currently checked out in the working tree is disabled: a managed
-   * worktree needs a free branch (one branch, one worktree).
+   * operation runs, and the per-branch hover actions are hidden.
    */
   draftSelect?: {
     selected: boolean
     onSelect: (name: string) => void
   }
+  /**
+   * Draft-mode block reason: when set (together with `draftSelect`), the
+   * branch cannot back the new session's worktree and a click is a no-op;
+   * the text doubles as the row tooltip. The picker passes it ONLY for the
+   * branch checked out in the MAIN checkout — git allows a branch in at
+   * most one worktree. Branches held by existing managed worktrees stay
+   * selectable (the draft commit adopts the existing tree, ADR-082) even
+   * when they are `is_current` — that flag follows the Git panel's focus
+   * (GetBranches runs in the focused tree), not the main checkout.
+   */
+  draftBlockedReason?: string | null
 }
 
 /**
@@ -50,20 +59,24 @@ export function LocalBranchRow({
   onPush,
   onDelete,
   draftSelect,
+  draftBlockedReason,
 }: LocalBranchRowProps) {
   const isCurrent = branch.is_current
   // A row is blocked when any operation is running on it OR elsewhere.
   const blocked = disabled || inFlight !== null
-  // Draft mode: the working tree's own branch cannot back a managed
-  // worktree — git enforces one worktree per branch.
-  const draftBlocked = draftSelect !== undefined && isCurrent
+  // Draft mode: blocked only when the picker says so — the MAIN checkout's
+  // branch (git enforces one worktree per branch). `is_current` deliberately
+  // does not block here: it follows the Git panel's focus, and a branch held
+  // by an existing managed worktree is adopted at draft commit (ADR-082).
+  const draftBlocked = draftSelect !== undefined && !!draftBlockedReason
 
   const handleCheckout = () => {
-    if (isCurrent || blocked) return
     if (draftSelect) {
-      if (!draftBlocked) draftSelect.onSelect(branch.name)
+      if (blocked || draftBlocked) return
+      draftSelect.onSelect(branch.name)
       return
     }
+    if (isCurrent || blocked) return
     onCheckout(branch.name)
   }
 
@@ -79,9 +92,9 @@ export function LocalBranchRow({
   return (
     <div
       role="button"
-      tabIndex={isCurrent || blocked || draftBlocked ? -1 : 0}
+      tabIndex={(draftSelect ? blocked || draftBlocked : isCurrent || blocked) ? -1 : 0}
       aria-current={isCurrent || selected ? 'true' : undefined}
-      title={draftBlocked ? 'Checked out in the working tree — pick another branch or use local' : undefined}
+      title={draftBlocked ? (draftBlockedReason ?? undefined) : undefined}
       onClick={handleCheckout}
       onKeyDown={handleKeyDown}
       data-testid={draftSelect ? 'draft-branch-row' : undefined}
@@ -89,7 +102,7 @@ export function LocalBranchRow({
         'group/item relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
         isCurrent || selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
         (disabled || draftBlocked) && 'cursor-not-allowed opacity-50',
-        !disabled && !isCurrent && !draftBlocked && 'cursor-pointer',
+        (draftSelect ? !blocked && !draftBlocked : !disabled && !isCurrent) && 'cursor-pointer',
       )}
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />

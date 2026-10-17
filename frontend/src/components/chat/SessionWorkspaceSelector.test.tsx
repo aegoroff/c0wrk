@@ -201,6 +201,8 @@ describe('SessionWorkspaceSelector', () => {
     renderSelector()
 
     expect(trigger()!.textContent).toContain('feat/x')
+    // The tooltip names the drafted managed-worktree branch too.
+    expect(trigger()!.getAttribute('title')).toContain('feat/x')
   })
 
   it('picking branch… arms the draft when missing and opens the picker in draft mode', async () => {

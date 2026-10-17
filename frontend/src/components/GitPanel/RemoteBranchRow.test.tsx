@@ -136,13 +136,17 @@ describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
     vi.clearAllMocks()
   })
 
-  function renderDraft(overrides: Partial<Branch> = {}, selected = false, currentBranch?: string) {
+  function renderDraft(
+    overrides: Partial<Branch> = {},
+    selected = false,
+    draftBlockedReason?: string | null,
+  ) {
     return render(
       <RemoteBranchRow
         branch={makeBranch(overrides)}
         inFlight={null}
         disabled={false}
-        currentBranch={currentBranch}
+        draftBlockedReason={draftBlockedReason}
         {...defaultCallbacks}
         draftSelect={{ selected, onSelect }}
       />,
@@ -177,16 +181,19 @@ describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
     expect(row(container).getAttribute('aria-current')).toBeNull()
   })
 
-  it('blocks the row whose LOCAL twin is the working tree\'s current branch, like a local row', () => {
-    const { container } = renderDraft({}, false, 'feature/x')
+  // The reason is handed down precomputed by BranchPicker (same predicate as
+  // the local rows) — the row renders it verbatim, so a distinctive string
+  // here proves the pass-through without coupling to the picker's wording.
+  const reason = 'Held by the main checkout — unit-test reason'
+
+  it('blocks the row when the picker hands down a draftBlockedReason, like a local row', () => {
+    const { container } = renderDraft({}, false, reason)
 
     const r = row(container)
     expect(r.getAttribute('tabindex')).toBe('-1')
     expect(r.className).toContain('cursor-not-allowed')
-    // The tooltip names the blocking reason (the local twin, not the ref).
-    expect(r.getAttribute('title')).toBe(
-      'Local feature/x is checked out in the working tree — pick another branch or use local',
-    )
+    // The tooltip is the handed-down reason, verbatim.
+    expect(r.getAttribute('title')).toBe(reason)
 
     act(() => {
       r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
@@ -196,7 +203,7 @@ describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
   })
 
   it('blocks via the keyboard path too', () => {
-    const { container } = renderDraft({}, false, 'feature/x')
+    const { container } = renderDraft({}, false, reason)
     const r = row(container)
     act(() => {
       r.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
@@ -204,8 +211,8 @@ describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('keeps a remote row selectable when its local twin differs from the current branch', () => {
-    const { container } = renderDraft({}, false, 'main')
+  it('stays selectable when the picker hands down no blocking reason (null)', () => {
+    const { container } = renderDraft({}, false, null)
 
     const r = row(container)
     expect(r.getAttribute('tabindex')).toBe('0')
@@ -218,25 +225,13 @@ describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
     expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
   })
 
-  it('blocks nothing when the current branch is unknown (empty)', () => {
-    const { container } = renderDraft({}, false, '')
-
-    const r = row(container)
-    expect(r.getAttribute('tabindex')).toBe('0')
-
-    act(() => {
-      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    })
-    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
-  })
-
-  it('ignores the current branch outside draft mode — checkout-remote still runs', () => {
+  it('a handed-down reason blocks nothing outside draft mode — checkout-remote still runs', () => {
     const { container } = render(
       <RemoteBranchRow
         branch={makeBranch()}
         inFlight={null}
         disabled={false}
-        currentBranch="feature/x"
+        draftBlockedReason={reason}
         {...defaultCallbacks}
       />,
     )
