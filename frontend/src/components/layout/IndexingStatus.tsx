@@ -62,6 +62,26 @@ export function IndexingStatus() {
     )
   }
 
+  if (status.state === 'unavailable') {
+    // A failed DB open or init failure left no queryable collection. Render it
+    // honestly — idle dots and a distinct label, never the "Indexing…" 0% bar
+    // this state used to fall through to (the same dishonesty ADR-064 removed
+    // for `loading`). Recovery is a branch change or project switch, which
+    // retriggers the open.
+    return (
+      <div
+        className="flex shrink-0 items-center gap-1.5 text-xs text-warning"
+        title={tooltip}
+      >
+        <div className="flex items-center gap-1">
+          <Dot state={derived.vectorDot} label={vectorLabel} />
+          <Dot state={derived.lexicalDot} label={lexicalLabel} />
+        </div>
+        <span>Index unavailable</span>
+      </div>
+    )
+  }
+
   if (status.state === 'loading') {
     // ADR-064: the branch-scoped persistent DB is being opened. Show an honest
     // "Preparing index…" — no progress bar and no n/m, never the "Indexing" /

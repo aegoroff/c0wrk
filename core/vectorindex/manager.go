@@ -981,6 +981,17 @@ func (m *Manager) runIncrementalGuarded() {
 	if idx == nil || ws == "" {
 		return
 	}
+	// A failed branch open (or init failure) left no collection to validate or
+	// update: the pass would fail at ValidateCollection/AddDocuments and its
+	// deferred terminal emission would only re-publish the "unavailable" state
+	// the failed open already announced. Skip the doomed pass — no tree walk,
+	// no MarkNotReady churn. The next successful SwitchBranch (branch change
+	// or project switch) reinstates the collection, reconciles the whole
+	// workspace, and resumes the passes.
+	if m.service.GetCollection() == nil {
+		m.logger.Info("incremental indexing skipped: no collection (index unavailable)")
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1260,8 +1271,19 @@ func (m *Manager) Reindex(ctx context.Context) error {
 	go func() {
 		defer m.indexingWG.Done()
 		col := m.service.GetCollection()
+		if col == nil {
+			// A failed branch open (or init failure) left nothing to build
+			// into: IndexFull would fail at AddDocuments and only re-publish
+			// the "unavailable" state the failed open already announced. The
+			// UI keeps this action disabled in that state; a programmatic
+			// caller gets a successful no-op with this log line — there is
+			// nothing to refuse work FOR, and the next successful
+			// SwitchBranch rebuilds the collection.
+			m.logger.Info("reindex skipped: no collection (index unavailable)")
+			return
+		}
 		var idxErr error
-		if col == nil || col.Count() == 0 {
+		if col.Count() == 0 {
 			m.logger.Info("empty collection, running full index")
 			idxErr = idx.IndexFull(indexCtx, workspacePath)
 			// Same rationale as the initProject pass above (including the
