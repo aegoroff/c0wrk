@@ -237,6 +237,45 @@ describe('NewBranchSection — draft mode (ADR-080)', () => {
     // draft commit — no worktree flag is needed at pick time.
     expect(onDraftCreate).toHaveBeenCalledWith('feat/draft2', '')
   })
+
+  it('refuses a submit naming an existing local branch instead of recording a DWIM-reuse draft', async () => {
+    const onDraftCreate = vi.fn()
+    const onCreated = vi.fn()
+    const onError = vi.fn()
+    renderSection(makeProps({ onDraftCreate, onCreated, onError, existingLocalBranches: ['feat/x', 'main'] }))
+
+    await typeAndSubmit('feat/x')
+
+    // The refusal surfaces in the picker's shared error banner; no draft is
+    // recorded (commit-time DWIM would silently reuse the branch and ignore
+    // the chosen base), the success path does not run, and the typed name
+    // stays in the field for renaming.
+    expect(onError).toHaveBeenCalledWith(
+      'A branch named "feat/x" already exists — pick it from the list or choose another name',
+    )
+    expect(onDraftCreate).not.toHaveBeenCalled()
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+    expect(nameInput().value).toBe('feat/x')
+  })
+
+  it('refuses the current branch\'s name in the create form too (it already exists)', async () => {
+    const onDraftCreate = vi.fn()
+    renderSection(makeProps({ onDraftCreate, existingLocalBranches: ['main'] }))
+
+    await typeAndSubmit('main')
+
+    expect(onDraftCreate).not.toHaveBeenCalled()
+  })
+
+  it('records the draft for a fresh name even when the existing-branches list is set', async () => {
+    const onDraftCreate = vi.fn()
+    renderSection(makeProps({ onDraftCreate, existingLocalBranches: ['feat/x', 'main'] }))
+
+    await typeAndSubmit('feat/fresh')
+
+    expect(onDraftCreate).toHaveBeenCalledWith('feat/fresh', '')
+  })
 })
 
 describe('NewBranchSection — failures', () => {

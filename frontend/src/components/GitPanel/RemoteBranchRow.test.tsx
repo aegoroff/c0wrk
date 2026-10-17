@@ -128,3 +128,122 @@ describe('RemoteBranchRow', () => {
     expect(container.querySelector('svg.animate-spin')).not.toBeNull()
   })
 })
+
+describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
+  const onSelect = vi.fn()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function renderDraft(overrides: Partial<Branch> = {}, selected = false, currentBranch?: string) {
+    return render(
+      <RemoteBranchRow
+        branch={makeBranch(overrides)}
+        inFlight={null}
+        disabled={false}
+        currentBranch={currentBranch}
+        {...defaultCallbacks}
+        draftSelect={{ selected, onSelect }}
+      />,
+    )
+  }
+
+  it('selects instead of checking out: click records the pick with the full ref, no git runs', () => {
+    const { container } = renderDraft()
+    act(() => {
+      row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+    expect(defaultCallbacks.onDeleteRemote).not.toHaveBeenCalled()
+  })
+
+  it('hides the management hover actions — the row is a selection target', () => {
+    const { container } = renderDraft()
+    expect(buttons(container)).toHaveLength(0)
+  })
+
+  it('marks the already-picked remote branch with aria-current and a check', () => {
+    const { container } = renderDraft({}, true)
+    const r = row(container)
+    expect(r.getAttribute('aria-current')).toBe('true')
+    expect(r.querySelector('svg')).not.toBeNull()
+    expect(r.className).toContain('bg-primary/10')
+  })
+
+  it('leaves an unpicked draft row unmarked', () => {
+    const { container } = renderDraft({}, false)
+    expect(row(container).getAttribute('aria-current')).toBeNull()
+  })
+
+  it('blocks the row whose LOCAL twin is the working tree\'s current branch, like a local row', () => {
+    const { container } = renderDraft({}, false, 'feature/x')
+
+    const r = row(container)
+    expect(r.getAttribute('tabindex')).toBe('-1')
+    expect(r.className).toContain('cursor-not-allowed')
+    // The tooltip names the blocking reason (the local twin, not the ref).
+    expect(r.getAttribute('title')).toBe(
+      'Local feature/x is checked out in the working tree — pick another branch or use local',
+    )
+
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+  })
+
+  it('blocks via the keyboard path too', () => {
+    const { container } = renderDraft({}, false, 'feature/x')
+    const r = row(container)
+    act(() => {
+      r.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('keeps a remote row selectable when its local twin differs from the current branch', () => {
+    const { container } = renderDraft({}, false, 'main')
+
+    const r = row(container)
+    expect(r.getAttribute('tabindex')).toBe('0')
+    expect(r.className).toContain('cursor-pointer')
+    expect(r.getAttribute('title')).toBeNull()
+
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+  })
+
+  it('blocks nothing when the current branch is unknown (empty)', () => {
+    const { container } = renderDraft({}, false, '')
+
+    const r = row(container)
+    expect(r.getAttribute('tabindex')).toBe('0')
+
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+  })
+
+  it('ignores the current branch outside draft mode — checkout-remote still runs', () => {
+    const { container } = render(
+      <RemoteBranchRow
+        branch={makeBranch()}
+        inFlight={null}
+        disabled={false}
+        currentBranch="feature/x"
+        {...defaultCallbacks}
+      />,
+    )
+    act(() => {
+      row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(defaultCallbacks.onCheckoutRemote).toHaveBeenCalledWith('origin/feature/x')
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+})
