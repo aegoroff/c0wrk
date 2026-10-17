@@ -466,12 +466,16 @@ func TestHandleBranchSwitch_AnnouncesRetryAfterFailedOpen(t *testing.T) {
 // `ready`.
 func TestFailedPassWithoutCollectionAnnouncesUnavailable(t *testing.T) {
 	ctx := context.Background()
+	// The persistence root is created before the close cleanup is registered:
+	// t.Cleanup runs LIFO, so Close releases root.bolt before the TempDir
+	// RemoveAll — an open handle fails that removal on Windows (EBUSY).
+	persistDir := t.TempDir()
 	svc, err := NewService(ServiceConfig{EmbeddingFunc: fakeEmbeddingFunc()})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	t.Cleanup(func() { _ = svc.Close() })
-	if err := svc.SetProject("p", t.TempDir()); err != nil {
+	if err := svc.SetProject("p", persistDir); err != nil {
 		t.Fatalf("SetProject: %v", err)
 	}
 	// No SwitchBranch: no collection exists — the exact shape a failed open
