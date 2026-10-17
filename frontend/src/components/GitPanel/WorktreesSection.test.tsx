@@ -15,6 +15,8 @@ function renderSection(
   busyPath: string | null = null,
   onDelete: ((w: GitWorktree) => void) | undefined = undefined,
   deleteBusyPath: string | null = null,
+  draftSelect = false,
+  draftBlockedReason?: (w: GitWorktree) => string | null,
 ): void {
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -28,6 +30,8 @@ function renderSection(
         busyPath={busyPath}
         onDelete={onDelete}
         deleteBusyPath={deleteBusyPath}
+        draftSelect={draftSelect}
+        draftBlockedReason={draftBlockedReason}
       />,
     )
   })
@@ -212,5 +216,95 @@ describe('WorktreesSection — delete action (list variant)', () => {
       action.click()
     })
     expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('WorktreesSection — draft-mode selection (list variant)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('labels unblocked rows as run targets: the checkout, and managed trees with the sharing disclosure', () => {
+    const main = makeWorktree({
+      path: '/repo', name: 'repo', kind: 'main', branch: 'main',
+      managed: false, pinned: false,
+    })
+    const managed = makeWorktree()
+    renderSection([main, managed], vi.fn(), null, undefined, null, true)
+
+    const rows = Array.from(container!.querySelectorAll('[data-testid="worktree-row"]'))
+    expect(rows[0]!.getAttribute('title')).toBe('Run the new session in the local checkout')
+    // The managed tree's tooltip discloses that the session joins the
+    // existing worktree instead of getting a fresh one (ADR-082).
+    expect(rows[1]!.getAttribute('title')).toBe(
+      'Run the new session in worktree s-abc12345 on sess/s-abc12345 — joins the existing worktree',
+    )
+    expect(rows[0]!.getAttribute('aria-disabled')).toBeNull()
+    expect(rows[1]!.getAttribute('aria-disabled')).toBeNull()
+  })
+
+  it('renders gated rows inert with the reason as tooltip, never raising onSelect — delete stays available', () => {
+    const onSelect = vi.fn()
+    const onDelete = vi.fn()
+    const external = makeWorktree({
+      path: '/elsewhere/ext', name: 'ext', kind: 'external', branch: 'ext/branch',
+      managed: false, pinned: false,
+    })
+    renderSection(
+      [external],
+      onSelect,
+      null,
+      onDelete,
+      null,
+      true,
+      (w) =>
+        w.kind !== 'managed' && w.branch
+          ? `Branch ${w.branch} is held by a worktree created outside c0wrk`
+          : null,
+    )
+
+    const row = container!.querySelector<HTMLElement>('[data-testid="worktree-row"]')!
+    expect(row.getAttribute('aria-disabled')).toBe('true')
+    expect(row.getAttribute('tabindex')).toBe('-1')
+    expect(row.getAttribute('title')).toContain('outside c0wrk')
+    expect(row.className).toContain('cursor-not-allowed')
+
+    act(() => {
+      row.click()
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+
+    // Keyboard activation is gated the same way.
+    act(() => {
+      row.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      )
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+
+    // The delete action stays available on the gated row and never doubles
+    // as a selection.
+    const action = row.querySelector('button')!
+    expect(action.disabled).toBe(false)
+    act(() => {
+      action.click()
+    })
+    expect(onDelete).toHaveBeenCalledTimes(1)
+    expect(onDelete).toHaveBeenCalledWith(external)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('keeps the focus wording when draftSelect is off, regardless of the gate', () => {
+    const onSelect = vi.fn()
+    const tree = makeWorktree()
+    renderSection([tree], onSelect, null, undefined, null, false, () => 'blocked')
+
+    const row = container!.querySelector<HTMLElement>('[data-testid="worktree-row"]')!
+    expect(row.getAttribute('title')).toBe('Focus worktree s-abc12345 (sess/s-abc12345)')
+    expect(row.getAttribute('aria-disabled')).toBeNull()
+    act(() => {
+      row.click()
+    })
+    expect(onSelect).toHaveBeenCalledTimes(1)
   })
 })

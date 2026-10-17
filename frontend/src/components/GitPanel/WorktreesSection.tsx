@@ -15,9 +15,12 @@ import type { GitWorktree } from '@/types/models'
  *
  * With `draftSelect` (the chat-side session draft, ADR-080) the rows are
  * pure selection targets instead: the consumer's onSelect records the
- * drafted workspace (the local checkout row → a local session; a linked
- * tree → a session on its branch, adopted at draft commit per ADR-082) and
- * the tooltips say so — the focus never moves.
+ * drafted workspace (the local checkout row → a local session; a managed
+ * tree with a branch → a session on its branch, adopted at draft commit
+ * per ADR-082) and the tooltips say so — the focus never moves. Rows the
+ * consumer gates via `draftBlockedReason` (external trees, detached trees)
+ * render inert instead: not selection targets, the returned reason is the
+ * tooltip, and the delete action stays available.
  *
  * Linked trees (managed + external) expose a hover DELETE action (the
  * ItemActions overlay pattern from LocalBranchRow); the local checkout is
@@ -37,6 +40,7 @@ export function WorktreesSection({
   busyPath = null,
   variant = 'list',
   draftSelect = false,
+  draftBlockedReason,
   onDelete,
   deleteBusyPath = null,
 }: {
@@ -51,6 +55,15 @@ export function WorktreesSection({
    * instead of a focus switch.
    */
   draftSelect?: boolean
+  /**
+   * Draft-mode block gate: for a row whose returned reason is non-null the
+   * row is not a draft selection target — it renders inert (dimmed, no
+   * click, no keyboard activation) with the reason as its tooltip, and the
+   * consumer's onSelect is never raised for it. The delete action stays
+   * available on blocked linked trees. Only consulted when `draftSelect`
+   * is set; the menu variant ignores it (draft selection is list-only).
+   */
+  draftBlockedReason?: (worktree: GitWorktree) => string | null
   /**
    * When set, linked trees (managed + external) expose a hover delete
    * action; the local checkout never does. The consumer owns the
@@ -69,6 +82,11 @@ export function WorktreesSection({
         const deleting = deleteBusyPath === w.path
         const rowBusy = busy || deleting
         const deletable = onDelete !== undefined && w.kind !== 'main'
+        // Draft-mode block gate: a gated row is not a selection target —
+        // inert like a busy row, but its delete action stays available.
+        const draftBlocked =
+          draftSelect && draftBlockedReason ? (draftBlockedReason(w) ?? null) : null
+        const rowInert = rowBusy || draftBlocked !== null
         const content = (
           <>
             <WorktreeKindIcon worktree={w} />
@@ -137,30 +155,34 @@ export function WorktreesSection({
           <div
             key={w.path}
             role="button"
-            tabIndex={rowBusy ? -1 : 0}
+            tabIndex={rowInert ? -1 : 0}
             data-testid="worktree-row"
             data-path={w.path}
-            aria-disabled={rowBusy || undefined}
+            aria-disabled={rowInert || undefined}
             onClick={() => {
-              if (rowBusy) return
+              if (rowInert) return
               onSelect(w)
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
-                if (!rowBusy) onSelect(w)
+                if (!rowInert) onSelect(w)
               }
             }}
             title={
-              draftSelect
-                ? w.kind === 'main'
-                  ? 'Run the new session in the local checkout'
-                  : `Run the new session in worktree ${w.name}${w.branch ? ` on ${w.branch}` : ''}`
-                : `Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`
+              draftBlocked
+                ? draftBlocked
+                : draftSelect
+                  ? w.kind === 'main'
+                    ? 'Run the new session in the local checkout'
+                    : w.kind === 'managed' && w.branch
+                      ? `Run the new session in worktree ${w.name} on ${w.branch} — joins the existing worktree`
+                      : `Run the new session in worktree ${w.name}${w.branch ? ` on ${w.branch}` : ''}`
+                  : `Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`
             }
             className={cn(
               'group/item relative flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              rowBusy ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+              rowInert ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
             )}
           >
             {content}
