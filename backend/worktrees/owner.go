@@ -1,24 +1,4 @@
-// Package worktrees is the backend ownership coordinator for
-// session-managed git worktrees (ADR-080). It is the single backend seam
-// that provisions, restores, releases and lists the session-owned trees
-// under <repoRoot>/.worktrees, on top of the hardened primitives in
-// core/workspace (config-scanned git spawns, per-repo serialization,
-// explicit failure taxonomy).
-//
-// Ownership rules enforced here:
-//
-//   - Paths are derived, never accepted: every operation resolves its
-//     target through config.ManagedWorktreePath, the only constructor of
-//     .worktrees paths (portable single-component names, no traversal, no
-//     symlinked container/tree, containment inside the repository). A
-//     caller cannot point the coordinator at an external or foreign
-//     directory.
-//   - External linked worktrees (created by the user or other tooling
-//     outside the container) are visible in listings but can never be
-//     provisioned, recreated or released through this coordinator.
-//   - Releasing a session's tree never deletes its branch: branch
-//     lifetime belongs to git and the user. Session deletion therefore
-//     cannot destroy unmerged work.
+// Package worktrees coordinates managed worktree ownership over hardened git primitives.
 package worktrees
 
 import (
@@ -28,148 +8,196 @@ import (
 	"log/slog"
 
 	"github.com/v0lka/c0wrk/backend/config"
+	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/workspace"
+	"github.com/v0lka/sp4rk/pathutil"
 )
 
-// Owner coordinates managed-worktree lifecycle for the backend. It holds
-// no mutable state of its own: the serialized, fail-closed primitives in
-// core/workspace carry the safety properties, and this type adds the
-// ownership policy (derived paths, managed-only mutations, structured
-// listings, logging) on top. Safe for concurrent use.
+// Owner uses container only for NEW trees. Existing trees resolve from the live
+// repository list or a validated persisted path, never from current config.
 type Owner struct {
-	log *slog.Logger
+	log       *slog.Logger
+	container string
 }
 
-// NewOwner returns an Owner logging through logger (nil-safe).
-func NewOwner(logger *slog.Logger) *Owner {
+// NewOwner creates a coordinator. An omitted container preserves the legacy
+// primitive/test entry point; production supplies its project-scoped container.
+func NewOwner(logger *slog.Logger, container ...string) *Owner {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Owner{log: logger}
+	o := &Owner{log: logger}
+	if len(container) > 0 {
+		o.container = container[0]
+	}
+	return o
 }
 
-// ProvisionNewBranch creates the managed tree <repoRoot>/.worktrees/<name>
-// with a NEW branch created at startPoint (empty startPoint = HEAD). Use
-// for session creation and managed forks (which derive a fresh branch).
+// NewPath validates and derives a path for a new tree without creating it.
+func (o *Owner) NewPath(repoRoot, name string) (string, error) {
+	if o.container == "" {
+		return config.ManagedWorktreePath(repoRoot, name)
+	}
+	path, err := config.WorktreePathInContainer(o.container, name)
+	if err != nil {
+		return "", err
+	}
+	for _, pair := range [][2]string{{repoRoot, o.container}, {o.container, repoRoot}} {
+		within, err := pathutil.IsWithinPath(pair[0], pair[1])
+		if err != nil {
+			return "", err
+		}
+		if within {
+			return "", errors.New("new managed worktree container must be outside the repository")
+		}
+	}
+	return path, nil
+}
+
+func (o *Owner) provision(ctx context.Context, repoRoot, name string, opts workspace.AddWorktreeOptions) (workspace.WorktreeInfo, error) {
+	path, err := o.NewPath(repoRoot, name)
+	if err != nil {
+		return workspace.WorktreeInfo{}, err
+	}
+	trees, err := o.List(ctx, repoRoot)
+	if err != nil {
+		return workspace.WorktreeInfo{}, err
+	}
+	// Names also key vector storage and shared ownership counts. Do not reuse a
+	// live name in another container after a configuration change.
+	for _, tree := range trees {
+		if tree.Kind == workspace.WorktreeManaged && tree.Name == name {
+			return workspace.WorktreeInfo{}, fmt.Errorf("%w: managed name %s already exists", workspace.ErrWorktreeExists, name)
+		}
+	}
+	if o.container != "" {
+		if err := core.MarkWorktreeContainer(repoRoot, o.container); err != nil {
+			return workspace.WorktreeInfo{}, fmt.Errorf("mark managed container: %w", err)
+		}
+	}
+	info, err := workspace.AddWorktree(ctx, repoRoot, path, opts)
+	if err != nil {
+		return workspace.WorktreeInfo{}, fmt.Errorf("provisioning managed worktree %q: %w", name, err)
+	}
+	o.log.Info("provisioned managed worktree", "repo", repoRoot, "name", name, "path", info.Path)
+	return info, nil
+}
+
+// ProvisionNewBranch creates a fresh tree and branch at startPoint (empty = HEAD).
 func (o *Owner) ProvisionNewBranch(ctx context.Context, repoRoot, name, branch, startPoint string) (workspace.WorktreeInfo, error) {
-	path, err := config.ManagedWorktreePath(repoRoot, name)
-	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("managed worktree %q: %w", name, err)
-	}
-	info, err := workspace.AddWorktree(ctx, repoRoot, path, workspace.AddWorktreeOptions{
-		Branch:       branch,
-		CreateBranch: true,
-		StartPoint:   startPoint,
-	})
-	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("provisioning managed worktree %q on new branch %q: %w", name, branch, err)
-	}
-	o.log.Info("provisioned managed worktree", "repo", repoRoot, "name", name, "branch", branch, "path", info.Path)
-	return info, nil
+	return o.provision(ctx, repoRoot, name, workspace.AddWorktreeOptions{Branch: branch, CreateBranch: true, StartPoint: startPoint})
 }
 
-// ProvisionBranch creates the managed tree <repoRoot>/.worktrees/<name>
-// checking out an EXISTING branch. The branch must not be checked out
-// anywhere else (core primitives enforce one-branch-one-worktree).
+// ProvisionBranch checks out an existing branch in a fresh tree.
 func (o *Owner) ProvisionBranch(ctx context.Context, repoRoot, name, branch string) (workspace.WorktreeInfo, error) {
-	path, err := config.ManagedWorktreePath(repoRoot, name)
-	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("managed worktree %q: %w", name, err)
-	}
-	info, err := workspace.AddWorktree(ctx, repoRoot, path, workspace.AddWorktreeOptions{Branch: branch})
-	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("provisioning managed worktree %q on branch %q: %w", name, branch, err)
-	}
-	o.log.Info("provisioned managed worktree", "repo", repoRoot, "name", name, "branch", branch, "path", info.Path)
-	return info, nil
+	return o.provision(ctx, repoRoot, name, workspace.AddWorktreeOptions{Branch: branch})
 }
 
-// Recreate guarantees the managed tree for a restored session exists on
-// its pinned branch (no-op when already present; stale metadata pruned and
-// the tree re-created from the existing branch when the directory was
-// lost; explicit failure when the branch is gone — restore never creates
-// branches). See workspace.RecreateWorktree for the full case table.
-func (o *Owner) Recreate(ctx context.Context, repoRoot, name, branch string) (workspace.WorktreeInfo, error) {
-	path, err := config.ManagedWorktreePath(repoRoot, name)
-	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("managed worktree %q: %w", name, err)
+// Path resolves existing identity independently of the configured creation root.
+// A supplied persisted path is validated even when the tree no longer exists.
+func (o *Owner) Path(ctx context.Context, repoRoot, name string, persisted ...string) (string, error) {
+	if len(persisted) > 0 && persisted[0] != "" {
+		got, err := config.ManagedWorktreeNameFromPath(repoRoot, persisted[0])
+		if err != nil {
+			return "", err
+		}
+		if got != name {
+			return "", errors.New("managed worktree name/path mismatch")
+		}
+		return persisted[0], nil
 	}
+	// Validate the portable identity before listing. The legacy
+	// checkout-local container's on-disk state must NOT gate resolution: a
+	// healthy tree may live in a different (app-data / marked) container, and
+	// stray junk at the legacy path would otherwise fail a legitimate
+	// release/fork/adoption of that tree. The legacy container is consulted,
+	// and validated, only by the terminal fallback below.
+	if err := config.ValidateManagedWorktreeName(name); err != nil {
+		return "", err
+	}
+	trees, err := o.List(ctx, repoRoot)
+	if err != nil {
+		return "", err
+	}
+	path := ""
+	for _, tree := range trees {
+		if tree.Kind != workspace.WorktreeManaged || tree.Name != name {
+			continue
+		}
+		if path != "" {
+			return "", errors.New("ambiguous managed worktree name")
+		}
+		path = tree.Path
+	}
+	if path != "" {
+		return path, nil
+	}
+	// Only pathless legacy identities use this fallback, never a new config root.
+	return config.ManagedWorktreePath(repoRoot, name)
+}
+
+// Recreate ensures the pinned branch at its durable path; branches are never created.
+func (o *Owner) Recreate(ctx context.Context, repoRoot, name, branch string, persisted ...string) (workspace.WorktreeInfo, error) {
+	path, err := o.Path(ctx, repoRoot, name, persisted...)
+	if err != nil {
+		return workspace.WorktreeInfo{}, err
+	}
+	return o.RecreateAt(ctx, repoRoot, name, branch, path)
+}
+
+// RecreateAt ensures the pinned branch at an ALREADY-RESOLVED durable path.
+// Unlike Recreate it does not re-resolve or re-recognize the path: the caller
+// has validated it (a normalized binding) and it is used exactly as recorded,
+// so a missing repository marker or legacy-container state can never block
+// recreation of a recorded tree. The primitives still enforce structural
+// validation (absolute/clean, outside the checkout, real directories).
+func (o *Owner) RecreateAt(ctx context.Context, repoRoot, name, branch, path string) (workspace.WorktreeInfo, error) {
 	info, err := workspace.RecreateWorktree(ctx, repoRoot, path, branch)
 	if err != nil {
-		return workspace.WorktreeInfo{}, fmt.Errorf("recreating managed worktree %q on branch %q: %w", name, branch, err)
+		return workspace.WorktreeInfo{}, fmt.Errorf("recreating managed worktree %q: %w", name, err)
 	}
-	o.log.Info("ensured managed worktree", "repo", repoRoot, "name", name, "branch", branch, "path", info.Path)
 	return info, nil
 }
 
-// Release removes the managed tree <repoRoot>/.worktrees/<name>. opts
-// carries the caller's explicit decisions only: Force confirms the loss of
-// uncommitted changes, Unlock authorizes removing a locked tree. The
-// branch is NEVER deleted — neither here nor in any primitive below — so
-// deleting a session can never destroy its unmerged work.
+// Release removes only a linked managed tree, never its branch.
 func (o *Owner) Release(ctx context.Context, repoRoot, name string, opts workspace.RemoveWorktreeOptions) error {
-	path, err := config.ManagedWorktreePath(repoRoot, name)
+	entry, err := o.Inspect(ctx, repoRoot, name)
 	if err != nil {
-		return fmt.Errorf("managed worktree %q: %w", name, err)
-	}
-	// Ownership gate: the coordinator mutates only trees inside the managed
-	// container. A tree that exists but is classified external is not ours
-	// (unreachable in practice because the derived path is inside the
-	// container; the check keeps the policy explicit against future
-	// refactors).
-	trees, err := workspace.ListWorktrees(ctx, repoRoot)
-	if err != nil {
-		return fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
-	}
-	entry := workspace.FindWorktree(trees, path)
-	if entry == nil {
-		return fmt.Errorf("managed worktree %q: %w", name, workspace.ErrWorktreeNotLinked)
+		return err
 	}
 	if entry.Kind != workspace.WorktreeManaged {
-		return fmt.Errorf("managed worktree %q is classified %q: %w",
-			name, entry.Kind, workspace.ErrWorktreeNotLinked)
+		return workspace.ErrWorktreeNotLinked
 	}
-	if err := workspace.RemoveWorktree(ctx, repoRoot, path, opts); err != nil {
+	if err := workspace.RemoveWorktree(ctx, repoRoot, entry.Path, opts); err != nil {
 		return fmt.Errorf("releasing managed worktree %q: %w", name, err)
 	}
-	o.log.Info("released managed worktree", "repo", repoRoot, "name", name, "path", path,
-		"force", opts.Force, "unlock", opts.Unlock)
+	o.log.Info("released managed worktree", "repo", repoRoot, "name", name, "path", entry.Path)
 	return nil
 }
 
-// List returns the structured worktree list of the repository: the main
-// checkout (local), the app-managed session trees, and external linked
-// worktrees created outside the container.
+// List includes main, managed (legacy or marked), and external worktrees.
 func (o *Owner) List(ctx context.Context, repoRoot string) ([]workspace.WorktreeInfo, error) {
-	trees, err := workspace.ListWorktrees(ctx, repoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
-	}
-	return trees, nil
+	return workspace.ListWorktrees(ctx, repoRoot)
 }
 
-// Inspect returns the entry of one managed tree by name, or an error
-// matching workspace.ErrWorktreeNotLinked when no such tree exists.
+// Inspect returns one linked managed tree by name; ambiguous names fail closed.
 func (o *Owner) Inspect(ctx context.Context, repoRoot, name string) (*workspace.WorktreeInfo, error) {
-	path, err := config.ManagedWorktreePath(repoRoot, name)
+	path, err := o.Path(ctx, repoRoot, name)
 	if err != nil {
-		return nil, fmt.Errorf("managed worktree %q: %w", name, err)
+		return nil, err
 	}
-	trees, err := workspace.ListWorktrees(ctx, repoRoot)
+	trees, err := o.List(ctx, repoRoot)
 	if err != nil {
-		return nil, fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
+		return nil, err
 	}
 	entry := workspace.FindWorktree(trees, path)
-	if entry == nil {
+	if entry == nil || entry.Kind != workspace.WorktreeManaged {
 		return nil, fmt.Errorf("managed worktree %q: %w", name, workspace.ErrWorktreeNotLinked)
 	}
 	return entry, nil
 }
 
-// IsExplicitFailure reports whether err is one of the coordinator's
-// expected, caller-decidable failures (busy/locked/dirty/prunable/
-// exists/mismatch) rather than an infrastructure error. Convenience for
-// the RPC layer mapping failures onto user choices.
+// IsExplicitFailure reports expected caller-decidable worktree failures.
 func IsExplicitFailure(err error) bool {
 	return errors.Is(err, workspace.ErrBranchBusy) ||
 		errors.Is(err, workspace.ErrBranchExists) ||

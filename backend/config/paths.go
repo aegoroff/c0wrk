@@ -18,8 +18,8 @@ import (
 // graph lean — config is a low-level package consumed by most backend packages).
 const noProjectID = "__no_project__"
 
-// ManagedWorktreesDir returns the app-managed worktree container in a CODE repository.
-// The segment literal is the shared core.WorktreesRelativePath constant.
+// ManagedWorktreesDir returns the LEGACY checkout-local container.
+// New provisioning uses NewManagedWorktreesDir instead.
 func ManagedWorktreesDir(repoRoot string) string {
 	return filepath.Join(repoRoot, core.WorktreesRelativePath)
 }
@@ -30,21 +30,8 @@ func ManagedWorktreePath(repoRoot, name string) (string, error) {
 	if !filepath.IsAbs(repoRoot) || filepath.Clean(repoRoot) != repoRoot {
 		return "", errors.New("worktree repository root must be an absolute clean path")
 	}
-	if name == "" || len(name) > 120 || name[0] == '.' || name[0] == '-' || strings.HasSuffix(name, ".") {
-		return "", errors.New("invalid managed worktree name")
-	}
-	for _, c := range name {
-		isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-		if !isAlnum && c != '-' && c != '_' && c != '.' {
-			return "", errors.New("invalid managed worktree name")
-		}
-	}
-	// Windows device names are invalid even on a Unix creator: persisted
-	// identities must remain portable across supported desktop platforms.
-	stem := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
-	if stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" ||
-		(len(stem) == 4 && (strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT")) && stem[3] >= '1' && stem[3] <= '9') {
-		return "", errors.New("reserved managed worktree name")
+	if err := ValidateManagedWorktreeName(name); err != nil {
+		return "", err
 	}
 	container := ManagedWorktreesDir(repoRoot)
 	path := filepath.Join(container, name)
@@ -67,10 +54,31 @@ func ManagedWorktreePath(repoRoot, name string) (string, error) {
 	return path, nil
 }
 
-// validateManagedWorktreeName enforces the portable single-component identity
+// ManagedWorktreeLegacyPath derives a managed tree's historical checkout-local
+// path (<repo>/.worktrees/<name>) from the portable name alone, WITHOUT
+// inspecting the container on disk. Validating a proposed or pre-durable
+// binding needs only the lexical identity: on-disk container hardening
+// (symlink/non-directory refusal) belongs in ManagedWorktreePath, applied where
+// the derived path is actually used to operate on the filesystem. A stray
+// object at the legacy container must never make a proposed or legacy-persisted
+// binding invalid.
+func ManagedWorktreeLegacyPath(repoRoot, name string) (string, error) {
+	if !filepath.IsAbs(repoRoot) || filepath.Clean(repoRoot) != repoRoot {
+		return "", errors.New("worktree repository root must be an absolute clean path")
+	}
+	if err := ValidateManagedWorktreeName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(ManagedWorktreesDir(repoRoot), name), nil
+}
+
+// ValidateManagedWorktreeName enforces the portable single-component identity
 // rules shared by every place a worktree name is derived from or joined into
-// a path.
-func validateManagedWorktreeName(name string) error {
+// a path. It validates the name ALONE — no filesystem or container state — so a
+// caller that resolves identity against a live source (e.g. the repository's
+// worktree list) can reject a malformed name up front without having its
+// resolution gated by an unrelated container's on-disk state.
+func ValidateManagedWorktreeName(name string) error {
 	if name == "" || len(name) > 120 || name[0] == '.' || name[0] == '-' || strings.HasSuffix(name, ".") {
 		return errors.New("invalid managed worktree name")
 	}
@@ -90,39 +98,129 @@ func validateManagedWorktreeName(name string) error {
 	return nil
 }
 
-// ManagedWorktreeNameFromPath validates that ws is a managed worktree of
-// repoRoot — exactly <repoRoot>/.worktrees/<name>, one component inside the
-// container — and returns the name. Containment goes through IsWithinPath and
-// the name re-derives through ManagedWorktreePath, so a returned identity
-// always round-trips; the tree itself is NOT required to exist on disk (the
-// restore path may not have recreated it yet).
+// NewManagedWorktreesDir resolves the container for newly created trees only.
+// The override replaces the projects base, not project identity or tree names.
+func NewManagedWorktreesDir(agentDir, projectID, override string) (string, error) {
+	if err := ValidateManagedWorktreeName(projectID); err != nil {
+		return "", fmt.Errorf("invalid worktree project id: %w", err)
+	}
+	base := override
+	if base == "" {
+		base = ProjectsDir(agentDir)
+	}
+	if !filepath.IsAbs(base) || filepath.Clean(base) != base {
+		return "", errors.New("git.worktrees_root must be an absolute clean path")
+	}
+	// Resolve existing operator/system prefixes once. Every descendant is
+	// subsequently validated against this concrete container.
+	base = pathutil.ResolveExistingPrefix(base)
+	container := filepath.Join(base, projectID, core.ProjectWorktreesSegment)
+	if err := core.ValidateWorktreeContainerPath(container, filepath.Join(container, "probe")); err != nil {
+		return "", err
+	}
+	return container, nil
+}
+
+// CheckProjectWorktreesReleased prevents recursive project-data cleanup from
+// bypassing the explicit worktree removal/dirty-loss confirmation protocol.
+func CheckProjectWorktreesReleased(agentDir, projectID string) error {
+	container, err := NewManagedWorktreesDir(agentDir, projectID, "")
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(container)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect project worktrees before deletion: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != core.WorktreeRepositoryMarker {
+			return errors.New("project still contains managed worktrees; remove them explicitly before deleting the project")
+		}
+	}
+	return nil
+}
+
+// WorktreePathInContainer constructs a portable tree identity within a container.
+func WorktreePathInContainer(container, name string) (string, error) {
+	if err := ValidateManagedWorktreeName(name); err != nil {
+		return "", err
+	}
+	path := filepath.Join(container, name)
+	if err := core.ValidateWorktreeContainerPath(container, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ManagedWorktreeNameFromPath recognizes legacy and repository-marked containers,
+// independently of current configuration. A missing tree remains recognizable.
 func ManagedWorktreeNameFromPath(repoRoot, ws string) (string, error) {
 	if !filepath.IsAbs(repoRoot) || filepath.Clean(repoRoot) != repoRoot {
 		return "", errors.New("worktree repository root must be an absolute clean path")
 	}
-	if !filepath.IsAbs(ws) {
-		return "", errors.New("worktree path must be absolute")
-	}
-	ws = filepath.Clean(ws)
-	container := ManagedWorktreesDir(repoRoot)
-	within, err := IsWithinPath(container, ws)
-	if err != nil {
-		return "", fmt.Errorf("validate managed worktree containment: %w", err)
-	}
-	if !within {
-		return "", errors.New("path is not inside the managed worktrees container")
-	}
-	rel, err := filepath.Rel(container, ws)
-	if err != nil {
-		return "", fmt.Errorf("derive managed worktree name: %w", err)
-	}
-	if rel == "." || rel != filepath.Base(rel) {
-		return "", errors.New("path is not a single managed worktree directory")
-	}
-	if _, err := ManagedWorktreePath(repoRoot, rel); err != nil {
+	name := filepath.Base(ws)
+	if err := ValidateManagedWorktreeName(name); err != nil {
 		return "", err
 	}
-	return rel, nil
+	if !core.IsManagedWorktreePath(repoRoot, ws) {
+		return "", errors.New("path is not in a managed worktree container of this repository")
+	}
+	return name, nil
+}
+
+// ManagedWorktreeNameFromPathProject recognizes a durable managed tree of the
+// given project, independently of the on-disk repository marker and of current
+// configuration. It accepts a legacy checkout-local tree, a repository-marked
+// container, or the project-scoped "<base>/<projectID>/worktrees/<name>"
+// layout: a durable binding records its own container, so the project-id path
+// segment anchors ownership when the ".c0wrk-worktree-repository" marker or the
+// app-data container has been removed. A recorded identity that the app itself
+// wrote must stay decodable and restorable — recognition therefore does not
+// depend on a mutable marker file. Arbitrary and foreign paths are still
+// refused (containment and symlink-safety are enforced by the underlying
+// checks).
+func ManagedWorktreeNameFromPathProject(repoRoot, projectID, ws string) (string, error) {
+	if !filepath.IsAbs(repoRoot) || filepath.Clean(repoRoot) != repoRoot {
+		return "", errors.New("worktree repository root must be an absolute clean path")
+	}
+	name := filepath.Base(ws)
+	if err := ValidateManagedWorktreeName(name); err != nil {
+		return "", err
+	}
+	if core.IsManagedWorktreePath(repoRoot, ws) {
+		return name, nil
+	}
+	if ValidateManagedWorktreeName(projectID) == nil && core.IsProjectScopedWorktreePath(projectID, ws) {
+		// A new-container tree is always outside the checkout (provisioning
+		// enforces it); a recorded path that lands inside the repository is
+		// inconsistent with every legitimate binding and is refused.
+		if within, err := IsWithinPath(repoRoot, ws); err == nil && within {
+			return "", errors.New("managed worktree path must be outside the repository")
+		}
+		return name, nil
+	}
+	return "", errors.New("path is not in a managed worktree container of this repository")
+}
+
+// ManagedWorktreeRootForPath finds a managed ancestor and validates the entire
+// descendant path with symlink-aware containment. It admits no foreign roots.
+func ManagedWorktreeRootForPath(repoRoot, path string) (string, bool) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", false
+	}
+	for candidate := path; ; candidate = filepath.Dir(candidate) {
+		if _, err := ManagedWorktreeNameFromPath(repoRoot, candidate); err == nil {
+			within, err := IsWithinPath(candidate, path)
+			return candidate, err == nil && within
+		}
+		if filepath.Dir(candidate) == candidate {
+			break
+		}
+	}
+	return "", false
 }
 
 // WorktreeVectorIndexPath returns the vector-index storage root for a managed
@@ -139,7 +237,7 @@ func WorktreeVectorIndexPath(agentDir, projectID, name string) (string, error) {
 	if projectID == "" {
 		return "", errors.New("project id is required for a worktree vector index path")
 	}
-	if err := validateManagedWorktreeName(name); err != nil {
+	if err := ValidateManagedWorktreeName(name); err != nil {
 		return "", err
 	}
 	return filepath.Join(ProjectVectorIndexPath(agentDir, projectID), "worktrees", name), nil
@@ -178,7 +276,7 @@ func WorktreeEmbeddingCachePath(agentDir, projectID, name string) (string, error
 	if projectID == "" {
 		return "", errors.New("project id is required for a worktree embedding cache path")
 	}
-	if err := validateManagedWorktreeName(name); err != nil {
+	if err := ValidateManagedWorktreeName(name); err != nil {
 		return "", err
 	}
 	storage, err := WorktreeVectorIndexPath(agentDir, projectID, name)
@@ -201,7 +299,7 @@ func LegacyWorktreeEmbeddingCachePath(agentDir, projectID, name string) (string,
 	if projectID == "" {
 		return "", errors.New("project id is required for a worktree embedding cache path")
 	}
-	if err := validateManagedWorktreeName(name); err != nil {
+	if err := ValidateManagedWorktreeName(name); err != nil {
 		return "", err
 	}
 	return filepath.Join(

@@ -35,7 +35,6 @@ import (
 	"github.com/v0lka/c0wrk/backend/session"
 	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/workspace"
-	"github.com/v0lka/sp4rk/pathutil"
 )
 
 // ErrPinnedWorktreeBranch is returned when a branch-switching RPC targets a
@@ -393,7 +392,7 @@ func (f *FrontendAPI) DeleteWorktree(worktreePath string, force, unlock bool) er
 	}
 	switch entry.Kind {
 	case workspace.WorktreeManaged:
-		f.deleteWorktreeVectorIndex(repoRoot, projectID, entry.Name)
+		f.deleteWorktreeVectorIndex(repoRoot, projectID, entry.Name, entry.Path)
 	case workspace.WorktreeExternal:
 		// An external tree may have been the panel's focus and picked up a
 		// live manager; release it. c0wrk never provisioned one, so no
@@ -445,15 +444,10 @@ func (f *FrontendAPI) projectSessions(projectID string) []session.SessionInfo {
 	return sessions
 }
 
-// isManagedTreePath reports whether target lies inside the app-managed
-// worktree container <checkout>/.worktrees — the same classification
-// core/workspace's classifyWorktrees applies, evaluated without spawning
-// git so the pinned-branch guard stays cheap and fail-closed: a path inside
-// the container is managed by construction (the container is app-owned).
+// isManagedTreePath applies the same legacy/marked-container ownership
+// classification as core/workspace, without a git spawn or current config.
 func isManagedTreePath(checkout, target string) bool {
-	container := filepath.Join(checkout, core.WorktreesRelativePath)
-	within, err := pathutil.IsWithinPath(container, target)
-	return err == nil && within
+	return core.IsManagedWorktreePath(checkout, target)
 }
 
 // gitFocusRoots returns the active project's checkout path together with the
