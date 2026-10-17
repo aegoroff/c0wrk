@@ -127,6 +127,10 @@ func (f *FrontendAPI) GetPromptSuggestions(sessionID, projectID string) PromptSu
 			"project", projectID, "error", err)
 		return resp
 	}
+	// Pure recency, not the sidebar's pinned-first order: a long-idle
+	// pinned session must not win the "freshest active set" claim over a
+	// just-finished unpinned one (ADR-088 D3).
+	infos = session.PromptSuggestSessionsNewestFirst(infos)
 	if len(infos) > promptSuggestionsProjectScan {
 		infos = infos[:promptSuggestionsProjectScan]
 	}

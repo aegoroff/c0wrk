@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -285,12 +286,43 @@ func suggestionRowKind(kind core.SuggestionKind) string {
 	}
 }
 
+// PromptSuggestSessionsNewestFirst re-orders a project's session list into
+// pure effective-activity order — the sessionListOrderSQL order WITHOUT its
+// pinned DESC term (ADR-088 D3 recency). ListSessionsByProject serves the
+// sidebar, where pinned sessions belong on top; the prompt-suggestion
+// consumers need pure recency — a long-idle pinned session must neither
+// displace recent sessions from the D3 generation window nor win the
+// "freshest active set" scan in GetPromptSuggestions. Ordering mirrors the
+// SQL tie-break chain: LastActiveAt (the computed effective activity) DESC,
+// CreatedAt DESC, ID ASC — RFC 3339 stamps from this store compare
+// lexicographically, exactly as sessionListOrderSQL relies on in SQLite.
+// The input slice is not modified.
+func PromptSuggestSessionsNewestFirst(infos []SessionInfo) []SessionInfo {
+	out := make([]SessionInfo, len(infos))
+	copy(out, infos)
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.LastActiveAt != b.LastActiveAt {
+			return a.LastActiveAt > b.LastActiveAt
+		}
+		if a.CreatedAt != b.CreatedAt {
+			return a.CreatedAt > b.CreatedAt
+		}
+		return a.ID < b.ID
+	})
+	return out
+}
+
 // promptSuggestProjectWindow assembles the next_task generation window: the
 // last promptSuggestWindowSessions sessions of the project (D3) in
 // chronological order — the triggering session last — each carrying its
-// transcript. ListSessionsByProject returns newest-first, so the window is
-// the head of that list reversed. A session whose transcript cannot be read
-// is skipped (fail-open); a fully unreadable window surfaces its last error.
+// transcript. ListSessionsByProject serves the sidebar and orders pinned
+// sessions first, which would let a long-idle pinned session displace recent
+// ones from the window and win the "newest" claim;
+// PromptSuggestSessionsNewestFirst re-orders the list into pure activity
+// order before the head is taken and reversed. A session whose transcript
+// cannot be read is skipped (fail-open); a fully unreadable window surfaces
+// its last error.
 func promptSuggestProjectWindow(
 	ctx context.Context,
 	store SessionStore,
@@ -301,6 +333,7 @@ func promptSuggestProjectWindow(
 	if err != nil {
 		return nil, err
 	}
+	infos = PromptSuggestSessionsNewestFirst(infos)
 	if len(infos) > promptSuggestWindowSessions {
 		infos = infos[:promptSuggestWindowSessions]
 	}
@@ -353,6 +386,7 @@ func promptSuggestMessagesFromHistory(history []ChatMessage, finalAnswer string)
 	if answer == "" {
 		return msgs
 	}
+	supplemented := false
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != "assistant" {
 			continue
@@ -363,7 +397,16 @@ func promptSuggestMessagesFromHistory(history []ChatMessage, finalAnswer string)
 		if strings.TrimSpace(msgs[i].Content) != answer {
 			msgs = append(msgs, core.PromptSuggestMessage{Role: "assistant", Content: answer})
 		}
+		supplemented = true
 		break
+	}
+	if !supplemented {
+		// No assistant row at all — the first finished task of a fresh
+		// session whose final write is still in flight. The answer must
+		// still land, or the transcript's only prompt→answer pair is lost
+		// to the persister race. A dangling assistant tail is harmless
+		// downstream: core drops an answer with no open prompt.
+		msgs = append(msgs, core.PromptSuggestMessage{Role: "assistant", Content: answer})
 	}
 	return msgs
 }

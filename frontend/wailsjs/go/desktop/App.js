@@ -386,6 +386,10 @@ export function GetProjectUIState(arg1) {
   return window['go']['desktop']['App']['GetProjectUIState'](arg1);
 }
 
+export function GetPromptSuggestions(arg1, arg2) {
+  return window['go']['desktop']['App']['GetPromptSuggestions'](arg1, arg2);
+}
+
 export function GetProviderTLSCertificate(arg1) {
   return window['go']['desktop']['App']['GetProviderTLSCertificate'](arg1);
 }
@@ -784,6 +788,10 @@ export function SetNotificationBannerTimeout(arg1) {
 
 export function SetPaperPinned(arg1, arg2, arg3) {
   return window['go']['desktop']['App']['SetPaperPinned'](arg1, arg2, arg3);
+}
+
+export function SetPromptSuggestionsEnabled(arg1) {
+  return window['go']['desktop']['App']['SetPromptSuggestionsEnabled'](arg1);
 }
 
 export function SetResearchPinned(arg1, arg2, arg3) {

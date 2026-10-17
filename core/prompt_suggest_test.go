@@ -330,7 +330,7 @@ func promptSuggestSession(id string, n int) PromptSuggestSession {
 // TestPromptSuggestUserContent_WindowCaps covers the window enforcement in
 // the input assembly: at most the kind's session count is read (keeping the
 // most recent ones), the per-session and global budgets trim latest-first,
-// the context block renders, and an empty window is an error (D9).
+// and an empty window is an error (D9).
 func TestPromptSuggestUserContent_WindowCaps(t *testing.T) {
 	t.Run("next_task keeps the last 10 of 12 sessions", func(t *testing.T) {
 		sessions := make([]PromptSuggestSession, 0, 12)
@@ -352,7 +352,7 @@ func TestPromptSuggestUserContent_WindowCaps(t *testing.T) {
 		}
 	})
 
-	t.Run("goal_advance keeps the last 5 of 7 sessions", func(t *testing.T) {
+	t.Run("goal_advance keeps only the triggering session", func(t *testing.T) {
 		sessions := make([]PromptSuggestSession, 0, 7)
 		for i := 0; i < 7; i++ {
 			sessions = append(sessions, promptSuggestSession("s"+string(rune('A'+i)), 1))
@@ -361,24 +361,14 @@ func TestPromptSuggestUserContent_WindowCaps(t *testing.T) {
 		if err != nil {
 			t.Fatalf("promptSuggestUserContent() error = %v", err)
 		}
-		if n := strings.Count(got, "[Session "); n != goalWindowSessions {
-			t.Fatalf("rendered %d sessions, want %d", n, goalWindowSessions)
+		if n := strings.Count(got, "[Session "); n != 1 {
+			t.Fatalf("rendered %d sessions, want 1 (the triggering session only in v1)", n)
 		}
 		if !strings.Contains(got, "sG prompt") {
-			t.Errorf("the most recent session is missing from the transcript")
+			t.Errorf("the triggering (most recent) session is missing from the transcript")
 		}
-	})
-
-	t.Run("context block renders", func(t *testing.T) {
-		got, err := promptSuggestUserContent(SuggestionKindNextTask, PromptSuggestInput{
-			Context:  "Goal: make the test suite green",
-			Sessions: []PromptSuggestSession{promptSuggestSession("s", 1)},
-		})
-		if err != nil {
-			t.Fatalf("promptSuggestUserContent() error = %v", err)
-		}
-		if !strings.Contains(got, "<context>\nGoal: make the test suite green\n</context>") {
-			t.Errorf("context block missing: %q", got)
+		if strings.Contains(got, "sA prompt") {
+			t.Errorf("older sessions must be dropped by the goal_advance cap")
 		}
 	})
 
@@ -415,7 +405,6 @@ func TestSuggestPromptsWithCaller_RequestShape(t *testing.T) {
 		resp: promptSuggestResp("Продолжи рефакторинг клиента\nДобавь тесты на retry\nОбнови README"),
 	}
 	in := PromptSuggestInput{
-		Context:  "Task just finished: added retry support",
 		Sessions: []PromptSuggestSession{promptSuggestSession("s", 2)},
 	}
 	got, err := suggestPromptsWithCaller(
@@ -438,8 +427,7 @@ func TestSuggestPromptsWithCaller_RequestShape(t *testing.T) {
 	if req.Messages[0].Content != prompts.PromptSuggestNewSession {
 		t.Errorf("next_task must ride the new-session prompt")
 	}
-	if !strings.Contains(req.Messages[1].Content, "Task just finished") ||
-		!strings.Contains(req.Messages[1].Content, "s prompt 1") {
+	if !strings.Contains(req.Messages[1].Content, "s prompt 1") {
 		t.Errorf("user message does not carry the assembled input: %q", req.Messages[1].Content)
 	}
 	if req.CallPurpose != llm.CallPurposeSummarization {

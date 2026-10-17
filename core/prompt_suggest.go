@@ -46,17 +46,11 @@ const (
 	// nextTaskWindowSessions is the next_task window: the last 10 sessions of
 	// the project (D3).
 	nextTaskWindowSessions = 10
-	// goalWindowSessions is the goal_advance window: the last 5 sessions on
-	// the same goal (D4).
-	goalWindowSessions = 5
 	// maxSuggestionsPerPass caps one generation pass (D7).
 	maxSuggestionsPerPass = 3
 	// promptSuggestMaxMessageChars caps one transcript message's rendered
 	// content, in runes (never splits a multi-byte character).
 	promptSuggestMaxMessageChars = 2000
-	// promptSuggestMaxContextChars caps the optional context block (task
-	// summary / goal condition), in runes.
-	promptSuggestMaxContextChars = 2000
 	// promptSuggestSessionBudget is the per-session transcript budget, in
 	// bytes of rendered text.
 	promptSuggestSessionBudget = 4000
@@ -103,15 +97,12 @@ type PromptSuggestSession struct {
 
 // PromptSuggestInput is the assembled generation input for one pass.
 type PromptSuggestInput struct {
-	// Context is the optional leading block — the triggering task's
-	// trajectory summary (next_task) or the goal's success condition
-	// (goal_advance). Empty means no context block.
-	Context string
 	// Sessions is the recency window in CHRONOLOGICAL order (oldest first,
 	// the most recent session LAST — the caller passes the triggering
 	// session last). The window cap is enforced here: at most
-	// nextTaskWindowSessions (next_task) or goalWindowSessions
-	// (goal_advance) sessions are read.
+	// nextTaskWindowSessions (next_task) sessions are read; goal_advance
+	// reads exactly one — the triggering session (the ADR-088 D4
+	// multi-session goal window is a deferred extension point).
 	Sessions []PromptSuggestSession
 }
 
@@ -217,12 +208,15 @@ type promptSuggestSessionBlock struct {
 	body string
 }
 
-// promptSuggestWindow is the kind's session-window cap (D3/D4).
+// promptSuggestWindow is the kind's session-window cap (D3/D4): next_task
+// reads the project window (10 sessions); goal_advance reads exactly the
+// triggering session in v1 — the D4 multi-session goal window is a recorded
+// extension point.
 func promptSuggestWindow(kind SuggestionKind) int {
 	if kind == SuggestionKindNextTask {
 		return nextTaskWindowSessions
 	}
-	return goalWindowSessions
+	return 1
 }
 
 // promptSuggestSystemPrompt maps the kind onto its embedded prompt.
@@ -238,10 +232,10 @@ func promptSuggestSystemPrompt(kind SuggestionKind) (string, error) {
 }
 
 // promptSuggestUserContent renders the user turn for one generation pass:
-// the optional context block, then the window's session transcripts — window
-// cap enforced (keeping the most recent sessions), is_nudge filtered (D5),
-// per-session and global budgets applied latest-first (D3). An error means
-// the window yielded no complete pair (D9: no suggestions, fail open).
+// the window's session transcripts — window cap enforced (keeping the most
+// recent sessions), is_nudge filtered (D5), per-session and global budgets
+// applied latest-first (D3). An error means the window yielded no complete
+// pair (D9: no suggestions, fail open).
 func promptSuggestUserContent(kind SuggestionKind, in PromptSuggestInput) (string, error) {
 	sessions := in.Sessions
 	if window := promptSuggestWindow(kind); len(sessions) > window {
@@ -280,11 +274,6 @@ func promptSuggestUserContent(kind SuggestionKind, in PromptSuggestInput) (strin
 	}
 
 	var b strings.Builder
-	if ctxText := strings.TrimSpace(in.Context); ctxText != "" {
-		b.WriteString("<context>\n")
-		b.WriteString(promptSuggestTruncate(ctxText, promptSuggestMaxContextChars))
-		b.WriteString("\n</context>\n\n")
-	}
 	n := len(blocks)
 	for i, blk := range blocks {
 		fmt.Fprintf(&b, "[Session %d of %d]\n", i+1, n)

@@ -327,16 +327,64 @@ func TestPromptSuggestionsFinalAnswerAlreadyPersisted(t *testing.T) {
 	}
 }
 
+// TestPromptSuggestionsFinalAnswerWithoutAssistantRow covers the race half on
+// a transcript with NO assistant row yet — the first finished task of a fresh
+// session whose final write is still in flight: the answer must still be
+// appended, or the transcript's only prompt→answer pair is lost and the pass
+// yields nothing.
+func TestPromptSuggestionsFinalAnswerWithoutAssistantRow(t *testing.T) {
+	store := newSuggestionTestStore()
+	store.history["sess-1"] = []ChatMessage{
+		{Role: "user", Content: "Fix the parser bug"},
+	}
+	caller := newRecordingSuggestCaller()
+	mgr, _ := newPromptSuggestManager(t, store, caller)
+	suggestTestSession(mgr, "sess-1", project.NoProjectID)
+
+	mgr.emitTaskComplete("sess-1", &core.HandleResult{
+		Output: "the final answer",
+		Status: orchestration.ExecutionStatusSuccess,
+	}, nil)
+	mgr.Shutdown()
+
+	_, _, inputs := caller.snapshot()
+	want := []core.PromptSuggestMessage{
+		{Role: "user", Content: "Fix the parser bug"},
+		{Role: "assistant", Content: "the final answer"},
+	}
+	if !reflect.DeepEqual(inputs[0].Sessions[0].Messages, want) {
+		t.Errorf("messages = %+v, want %+v", inputs[0].Sessions[0].Messages, want)
+	}
+}
+
+// suggestionTs renders the i-th deterministic hour stamp (2025-06-01T00:00:00Z
+// plus i hours): distinct, ordered RFC3339 values so recency ordering in
+// tests is stable without sleeping.
+func suggestionTs(i int) string {
+	return fmt.Sprintf("2025-06-%02dT%02d:00:00Z", 1+i/24, i%24)
+}
+
 // TestPromptSuggestionsProjectWindowCapsAtTen pins the next_task window (D3):
 // exactly the 10 most recent project sessions, chronological (triggering
 // session last), each transcript is_nudge-free, and the triggering session's
-// transcript carries the race-supplemented final answer.
+// transcript carries the race-supplemented final answer. The store list
+// arrives in its pinned-first order — a long-idle pinned session on top — and
+// must be read in pure recency: the pinned session neither enters the window
+// nor displaces a recent one.
 func TestPromptSuggestionsProjectWindowCapsAtTen(t *testing.T) {
 	store := newSuggestionTestStore()
-	// Twelve sessions, newest-first (the store's own ordering).
+	// The store's pinned-first activity order: the pinned, long-idle session
+	// sorts on top, the recent sessions follow newest-first.
+	store.byProject["proj-1"] = append(store.byProject["proj-1"], SessionInfo{
+		ID: "s-pinned", ProjectID: "proj-1", Pinned: true,
+		LastActiveAt: suggestionTs(0), CreatedAt: suggestionTs(0),
+	})
+	// Twelve recent sessions, newest-first.
 	for i := 12; i >= 1; i-- {
 		id := fmt.Sprintf("s-%02d", i)
-		store.byProject["proj-1"] = append(store.byProject["proj-1"], SessionInfo{ID: id, ProjectID: "proj-1"})
+		store.byProject["proj-1"] = append(store.byProject["proj-1"], SessionInfo{
+			ID: id, ProjectID: "proj-1", LastActiveAt: suggestionTs(i), CreatedAt: suggestionTs(i),
+		})
 		store.history[id] = []ChatMessage{
 			{Role: "user", Content: "ask " + id},
 			// a nudge that must never reach the window (D5)
@@ -367,6 +415,14 @@ func TestPromptSuggestionsProjectWindowCapsAtTen(t *testing.T) {
 	}
 	if window[0].ID != "s-03" || window[len(window)-1].ID != "s-12" {
 		t.Errorf("window ends = %q..%q, want s-03..s-12 (chronological, triggering last)", window[0].ID, window[len(window)-1].ID)
+	}
+	for _, s := range window {
+		if s.ID == "s-pinned" {
+			t.Errorf("the long-idle pinned session must not enter the recency window")
+		}
+		if s.ID == "s-01" || s.ID == "s-02" {
+			t.Errorf("session %s is older than the window and must be dropped", s.ID)
+		}
 	}
 	// s-04 stands in for the window's per-session shape: nudge-free pairs.
 	want := []core.PromptSuggestMessage{

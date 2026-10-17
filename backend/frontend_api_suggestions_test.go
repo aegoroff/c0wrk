@@ -209,7 +209,9 @@ func TestGetPromptSuggestions_EmptySessionGetsProjectNextTask(t *testing.T) {
 
 // TestGetPromptSuggestions_NewestActiveSetWins pins the scan order: when
 // several project sessions carry active next_task sets, the NEWEST session's
-// set is served.
+// set is served — in pure recency, not the store's pinned-first order (a
+// pinned older session sorts on top of ListSessionsByProject but must not win
+// the "freshest set" claim).
 func TestGetPromptSuggestions_NewestActiveSetWins(t *testing.T) {
 	h := newSuggestionsAPIHarness(t)
 	projID := h.mustProject(t, "Newest")
@@ -218,6 +220,11 @@ func TestGetPromptSuggestions_NewestActiveSetWins(t *testing.T) {
 	h.mustSession(t, "s-b", projID, 1)
 	h.mustSuggestionPass(t, "s-b", session.SuggestionKindNextTask, "свежий набор")
 	h.mustSession(t, "s-new", projID, 2)
+	// Pin the OLDEST carrier: ListSessionsByProject now returns s-a first,
+	// and only a recency-ordered scan serves the genuinely newest set.
+	if err := h.store.PinSession(context.Background(), "s-a", true); err != nil {
+		t.Fatalf("PinSession(s-a): %v", err)
+	}
 
 	resp := h.f.GetPromptSuggestions("s-new", projID)
 	if resp.Source != promptSuggestionsSourceNewSession {

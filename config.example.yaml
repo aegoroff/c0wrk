@@ -1296,7 +1296,7 @@ orchestration:
 # set of suggested next prompts and the input field offers them, navigated
 # with ↑/↓ and inserted with →. Two kinds — task follow-ups (next_task, a
 # window of the last 10 project sessions) and goal-advance prompts
-# (goal_advance, a window of the last 5 sessions on the same goal). The whole
+# (goal_advance, the just-finished session's transcript in v1). The whole
 # subsystem is fail-open: it can never delay, block, or break the chat path,
 # and a disabled feature costs zero LLM calls.
 #
