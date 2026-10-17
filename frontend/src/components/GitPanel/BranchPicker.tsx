@@ -45,12 +45,15 @@ import { WorktreesSection } from './WorktreesSection'
  * - A "Worktrees" section switches the Git panel's FOCUS between every
  *   worktree of the project (local checkout, managed session trees with their
  *   owning session, external trees) — a focus switch via SetGitPanelFocus,
- *   never a checkout, so it never touches the operation console. The linked
- *   trees (managed + external) also expose a hover delete that runs through
- *   the mandatory {@link WorktreeDeleteConfirmDialog}; the section is shown
- *   in draft mode too, so an existing worktree can be deleted without
- *   leaving the chat-side draft picker (the deletion never touches the
- *   draft).
+ *   never a checkout, so it never touches the operation console. In the
+ *   session-draft mode the same rows instead SELECT the drafted workspace:
+ *   the "Local checkout" row drafts a local session, a linked tree drafts a
+ *   session on its branch (adopted at draft commit, ADR-082) — the focus
+ *   never moves. The linked trees (managed + external) also expose a hover
+ *   delete that runs through the mandatory {@link WorktreeDeleteConfirmDialog};
+ *   the section is shown in draft mode too, so an existing worktree can be
+ *   deleted without leaving the chat-side draft picker (the deletion never
+ *   touches the draft).
  */
 export function BranchPicker() {
   const isOpen = useGitPanelStore((s) => s.isBranchPickerOpen)
@@ -162,6 +165,26 @@ export function BranchPicker() {
   // happens at draft commit via CreateManagedSession.
   const isDraftMode = pickerMode === 'draft'
   const draft = useSessionDraftStore((s) => s.draft)
+
+  // In draft mode a branch can back the new session's managed worktree
+  // unless the MAIN checkout holds it — git allows a branch in at most one
+  // worktree. Branches held by existing managed worktrees stay selectable:
+  // the draft commit ADOPTS the existing tree instead of provisioning a new
+  // one (ADR-082). `is_current` is deliberately not consulted — it follows
+  // the Git panel's focus (GetBranches runs in the focused tree), so the
+  // main checkout's branch stays blocked (and managed branches selectable)
+  // regardless of where the focus sits.
+  const mainCheckoutBranch = useMemo(
+    () => worktrees.find((w) => w.kind === 'main')?.branch ?? null,
+    [worktrees],
+  )
+  const draftBlockedReason = useCallback(
+    (name: string) =>
+      name === mainCheckoutBranch
+        ? 'Checked out in the main checkout — pick another branch or use local'
+        : null,
+    [mainCheckoutBranch],
+  )
 
   const handleDraftSelect = useCallback(
     (name: string) => {
@@ -287,6 +310,7 @@ export function BranchPicker() {
                         ? { selected: draftSelectedBranch === b.name, onSelect: handleDraftSelect }
                         : undefined
                     }
+                    draftBlockedReason={isDraftMode ? draftBlockedReason(b.name) : undefined}
                   />
                 </li>
               ))}
@@ -315,10 +339,13 @@ export function BranchPicker() {
             the project (local checkout, managed session trees, external
             trees) and expose deletion of the linked trees. Selecting one
             closes the picker: the focus switch is not a checkout, so there
-            is no operation console outcome to read. Shown in draft mode too:
-            the draft picks a BRANCH, but the user must still be able to
-            delete an existing worktree (e.g. a stale managed tree) from the
-            same dialog — the deletion never touches the draft. */}
+            is no operation console outcome to read. In DRAFT mode the same
+            rows SELECT the drafted workspace instead: the local checkout
+            drafts a local session, a linked tree drafts a session on ITS
+            branch — CreateManagedSession then adopts the existing tree
+            (ADR-082) — and the focus never moves. Linked trees also expose
+            deletion (e.g. a stale managed tree); the deletion never touches
+            the draft. */}
         {worktrees.length > 0 && (
           <div className="shrink-0 border-t border-border px-2 pb-2 pt-1">
             <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -326,8 +353,23 @@ export function BranchPicker() {
             </div>
             <WorktreesSection
               worktrees={worktrees}
+              draftSelect={isDraftMode}
               onSelect={(w) => {
-                void focusWorktree(w.path)
+                if (isDraftMode && w.kind === 'main') {
+                  // "Local checkout" row: the drafted session runs in the
+                  // project working tree.
+                  useSessionDraftStore.getState().setDraftWorkspace({ kind: 'local' })
+                } else if (isDraftMode && w.branch) {
+                  // A linked tree (managed or external) drafts a session on
+                  // ITS branch; adoption/creation is decided at draft commit.
+                  useSessionDraftStore
+                    .getState()
+                    .setDraftWorkspace({ kind: 'branch', branch: w.branch, createBranch: false, startPoint: '' })
+                } else {
+                  // Switch mode, or a detached linked tree in draft mode (no
+                  // branch to bind — keep the focus fallback).
+                  void focusWorktree(w.path)
+                }
                 closeBranchPicker()
               }}
               onDelete={worktreeActions.requestDelete}

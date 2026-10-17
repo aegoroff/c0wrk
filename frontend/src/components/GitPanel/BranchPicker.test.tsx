@@ -591,11 +591,79 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
   })
 
-  it('disables the working tree\'s own branch — a managed worktree needs a free branch', async () => {
-    await openDraftPicker()
+  it('draft mode: selects a worktree\'s branch even when it is_current — the existing managed tree is adopted', async () => {
+    // The Git panel is focused on the managed tree holding feat/a, so
+    // GetBranches (which runs in the focused tree) marks feat/a is_current.
+    // The pick must still record the draft — at draft commit
+    // CreateManagedSession ADOPTS the existing tree (ADR-082) — and close
+    // the picker; nothing is checked out here.
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: false, kind: 'local', upstream: '' },
+      { name: 'feat/a', is_current: true, kind: 'local', upstream: '' },
+    ])
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-live1234', name: 's-live1234', kind: 'managed',
+        branch: 'feat/a', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 'sess-1', session_name: 'Live loop',
+      },
+    ])
+    useGitPanelStore.getState().openBranchPicker('draft')
+    renderPicker()
+    await flush()
+
+    const row = branchRow('feat/a')!
+    expect(row).toBeDefined()
+    expect(row.className).not.toContain('cursor-not-allowed')
+    await act(async () => {
+      row.click()
+    })
+    await flush()
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'feat/a',
+      createBranch: false,
+      startPoint: '',
+    })
+    expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
+    expect(focusWorktree).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
+  })
+
+  it('draft mode: blocks only the main checkout\'s worktree branch, regardless of Git-panel focus', async () => {
+    // The Git panel is focused on the MANAGED tree, so `main` is NOT
+    // is_current (GetBranches runs in the focused tree) — yet the checkout
+    // holds `main` and stays blocked: git allows a branch in at most one
+    // worktree. The rule is focus-independent.
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: false, kind: 'local', upstream: '' },
+      { name: 'feat/a', is_current: true, kind: 'local', upstream: '' },
+    ])
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-live1234', name: 's-live1234', kind: 'managed',
+        branch: 'feat/a', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 'sess-1', session_name: 'Live loop',
+      },
+    ])
+    useGitPanelStore.getState().openBranchPicker('draft')
+    renderPicker()
+    await flush()
 
     const row = branchRow('main')!
     expect(row.className).toContain('cursor-not-allowed')
+    // The tooltip names the MAIN checkout — not "the working tree" (the
+    // block follows the checkout, not the focus).
+    expect(row.getAttribute('title')).toContain('main checkout')
     await act(async () => {
       row.click()
     })
@@ -684,6 +752,97 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     expect(rows).toHaveLength(2)
     expect(body().textContent).toContain('Worktrees')
     expect(body().textContent).toContain('Refactor loop')
+  })
+
+  it('draft mode: clicking a managed worktree row records the worktree\'s branch in the draft', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: true,
+      },
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: true,
+        is_focus: false, session_id: 'sess-1', session_name: 'Refactor loop',
+      },
+    ])
+    await openDraftPicker()
+
+    const rows = Array.from(body().querySelectorAll<HTMLElement>('[data-testid="worktree-row"]'))
+    await act(async () => {
+      rows[1]!.click()
+    })
+    await flush()
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'sess/s-abc12345',
+      createBranch: false,
+      startPoint: '',
+    })
+    // Draft selection never moves the Git panel's focus.
+    expect(focusWorktree).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
+  })
+
+  it('draft mode: clicking an external worktree row records the worktree\'s branch in the draft', async () => {
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: true,
+      },
+      {
+        path: '/elsewhere/ext-tree', name: 'ext-tree', kind: 'external',
+        branch: 'ext/branch', head: 'c', managed: false, pinned: false,
+        is_focus: false,
+      },
+    ])
+    await openDraftPicker()
+
+    const rows = Array.from(body().querySelectorAll<HTMLElement>('[data-testid="worktree-row"]'))
+    await act(async () => {
+      rows[1]!.click()
+    })
+    await flush()
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'ext/branch',
+      createBranch: false,
+      startPoint: '',
+    })
+    expect(focusWorktree).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
+  })
+
+  it('draft mode: clicking the local checkout worktree row records the local workspace in the draft', async () => {
+    // Start from an armed branch draft: the "Local checkout" row must reset
+    // the drafted workspace to the project working tree.
+    useSessionDraftStore
+      .getState()
+      .setDraftWorkspace({ kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' })
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: true,
+      },
+      {
+        path: '/repo/.worktrees/s-abc12345', name: 's-abc12345', kind: 'managed',
+        branch: 'sess/s-abc12345', head: 'b', managed: true, pinned: true,
+        is_focus: false, session_id: 'sess-1', session_name: 'Refactor loop',
+      },
+    ])
+    await openDraftPicker()
+
+    const rows = Array.from(body().querySelectorAll<HTMLElement>('[data-testid="worktree-row"]'))
+    await act(async () => {
+      rows[0]!.click()
+    })
+    await flush()
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(focusWorktree).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
   })
 
   it('deleting a worktree from the draft picker runs the confirmed removal without touching the draft', async () => {

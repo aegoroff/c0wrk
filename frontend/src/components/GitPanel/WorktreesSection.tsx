@@ -13,6 +13,12 @@ import type { GitWorktree } from '@/types/models'
  * panel's FOCUS to that tree (SetGitPanelFocus) — it never checks anything
  * out, never retargets a session's execution workspace.
  *
+ * With `draftSelect` (the chat-side session draft, ADR-080) the rows are
+ * pure selection targets instead: the consumer's onSelect records the
+ * drafted workspace (the local checkout row → a local session; a linked
+ * tree → a session on its branch, adopted at draft commit per ADR-082) and
+ * the tooltips say so — the focus never moves.
+ *
  * Linked trees (managed + external) expose a hover DELETE action (the
  * ItemActions overlay pattern from LocalBranchRow); the local checkout is
  * the project's registration root and never offers one. The delete goes
@@ -30,6 +36,7 @@ export function WorktreesSection({
   onSelect,
   busyPath = null,
   variant = 'list',
+  draftSelect = false,
   onDelete,
   deleteBusyPath = null,
 }: {
@@ -38,6 +45,12 @@ export function WorktreesSection({
   /** Path of a worktree whose focus switch is in flight (spinner row). */
   busyPath?: string | null
   variant?: 'menu' | 'list'
+  /**
+   * Draft-mode selection: rows select the drafted session workspace (the
+   * consumer owns the recording) and the row tooltips describe the choice
+   * instead of a focus switch.
+   */
+  draftSelect?: boolean
   /**
    * When set, linked trees (managed + external) expose a hover delete
    * action; the local checkout never does. The consumer owns the
@@ -138,7 +151,13 @@ export function WorktreesSection({
                 if (!rowBusy) onSelect(w)
               }
             }}
-            title={`Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`}
+            title={
+              draftSelect
+                ? w.kind === 'main'
+                  ? 'Run the new session in the local checkout'
+                  : `Run the new session in worktree ${w.name}${w.branch ? ` on ${w.branch}` : ''}`
+                : `Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`
+            }
             className={cn(
               'group/item relative flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
               rowBusy ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
