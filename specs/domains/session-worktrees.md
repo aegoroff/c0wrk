@@ -77,6 +77,16 @@ terminal open commits it via `lib/sessionDraft.createSessionFromDraft()`,
 which calls `CreateManagedSession` for a branch draft and `CreateSession`
 otherwise.
 
+The picker's draft mode keeps every offered target provisionable: the
+working tree's own branch row is disabled (a worktree needs a free branch),
+and a remote-tracking row whose LOCAL twin (the ref's short name) is that
+branch is disabled the same way — its pick would DWIM-reuse the checkout's
+branch and land the session in the shared checkout instead of a worktree.
+The create form refuses a submit naming an existing local branch (the DWIM
+reuse would silently ignore the explicitly chosen base); the non-draft
+Manage-Branches form needs no such guard — the backend refuses with its own
+explicit "branch already exists" error.
+
 While the managed creation RPC is pending, the chat toolbar renders a small
 spinner beside the workspace selector, without a visible label. Its accessible
 name and hover/focus tooltip are `Preparing worktree…`; the accessible name is

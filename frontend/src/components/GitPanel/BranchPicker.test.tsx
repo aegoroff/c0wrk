@@ -733,6 +733,58 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
   })
 
+  it('disables the remote twin of the working tree\'s branch — its pick would land a local session', async () => {
+    // `origin/main` is the remote twin of the checkout's own branch (`main`):
+    // commit-time DWIM would reuse local main, and the holder dispatch would
+    // serve the session from the shared checkout instead of a worktree —
+    // the same reason the local `main` row is disabled.
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: true, kind: 'local', upstream: '' },
+      { name: 'origin/main', is_current: false, kind: 'remote', upstream: '' },
+    ])
+    useGitPanelStore.getState().openBranchPicker('draft')
+    renderPicker()
+    await flush()
+
+    const row = branchRow('origin/main')!
+    expect(row.className).toContain('cursor-not-allowed')
+    expect(row.getAttribute('title')).toBe(
+      'Local main is checked out in the working tree — pick another branch or use local',
+    )
+    await act(async () => {
+      row.click()
+    })
+    await flush()
+
+    // The draft stays local and the picker stays open (no selection made) —
+    // and no in-place checkout-remote ran either.
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+  })
+
+  it('create-new intent: refuses an existing local name with the error banner, records nothing', async () => {
+    await openDraftPicker()
+
+    const input = Array.from(body().querySelectorAll<HTMLInputElement>('input')).find((i) => i.placeholder === 'branch-name')!
+    act(() => {
+      setInputValue(input, 'feat/a')
+    })
+    const newButton = allButtons().find((b) => b.textContent?.trim() === 'New')!
+    await act(async () => {
+      newButton.click()
+    })
+    await flush()
+
+    // The refusal is visible in the dialog's error banner…
+    expect(body().textContent).toContain('A branch named "feat/a" already exists')
+    // …the draft stays local (no silent DWIM reuse ignoring the base)…
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    // …and the picker stays open with the name intact for renaming.
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+    expect(input.value).toBe('feat/a')
+  })
+
   it('switch mode keeps the in-place checkout on remote rows', async () => {
     // Open as the Git panel's Manage-Branches dialog (switch intent).
     useGitPanelStore.getState().openBranchPicker()

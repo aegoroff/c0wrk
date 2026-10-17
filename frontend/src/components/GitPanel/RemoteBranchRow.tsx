@@ -15,6 +15,11 @@ interface RemoteBranchRowProps {
   /** Called with the short branch name + remote (e.g. `feature/x`, `origin`). */
   onDeleteRemote: (name: string, remote: string) => void
   /**
+   * Name of the branch currently checked out in the working tree. Only
+   * consulted in session-draft mode (see {@link RemoteBranchRowProps.draftSelect}).
+   */
+  currentBranch?: string
+  /**
    * Session-draft mode (ADR-080): when set, clicking SELECTS the remote
    * branch for the new session's managed worktree instead of checking it
    * out — no git operation runs at pick time. The draft records a
@@ -23,7 +28,10 @@ interface RemoteBranchRowProps {
    * existing local branch of that name is reused, a missing one is created
    * from the remote ref (see CreateManagedSession). The per-row hover
    * actions are hidden — the row is a selection target, not a management
-   * one.
+   * one. A row whose LOCAL twin (the short name) is the working tree's own
+   * branch is disabled, mirroring {@link LocalBranchRow}'s current-branch
+   * guard: the DWIM reuse would silently land the session in the shared
+   * checkout instead of a managed worktree.
    */
   draftSelect?: {
     selected: boolean
@@ -47,6 +55,7 @@ export function RemoteBranchRow({
   disabled,
   onCheckoutRemote,
   onDeleteRemote,
+  currentBranch,
   draftSelect,
 }: RemoteBranchRowProps) {
   const slash = branch.name.indexOf('/')
@@ -55,11 +64,18 @@ export function RemoteBranchRow({
 
   const blocked = disabled || inFlight !== null
   const selected = draftSelect?.selected ?? false
+  // Draft mode: a remote ref whose LOCAL twin (the short name) is the
+  // working tree's own branch cannot back a managed worktree — commit-time
+  // DWIM would reuse that branch and the shared checkout would serve the
+  // session instead (mirrors LocalBranchRow's current-branch guard). An
+  // unknown current branch (empty) blocks nothing.
+  const draftBlocked =
+    draftSelect !== undefined && currentBranch !== undefined && currentBranch !== '' && shortName === currentBranch
 
   const handleCheckout = () => {
     if (blocked) return
     if (draftSelect) {
-      draftSelect.onSelect(branch.name)
+      if (!draftBlocked) draftSelect.onSelect(branch.name)
       return
     }
     onCheckoutRemote(branch.name)
@@ -75,16 +91,21 @@ export function RemoteBranchRow({
   return (
     <div
       role="button"
-      tabIndex={blocked ? -1 : 0}
+      tabIndex={blocked || draftBlocked ? -1 : 0}
       aria-current={selected ? 'true' : undefined}
+      title={
+        draftBlocked
+          ? `Local ${shortName} is checked out in the working tree — pick another branch or use local`
+          : undefined
+      }
       onClick={handleCheckout}
       onKeyDown={handleKeyDown}
       data-testid={draftSelect ? 'draft-remote-branch-row' : undefined}
       className={cn(
         'group/item relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
         selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
-        disabled && 'cursor-not-allowed opacity-50',
-        !disabled && 'cursor-pointer',
+        (disabled || draftBlocked) && 'cursor-not-allowed opacity-50',
+        !disabled && !draftBlocked && 'cursor-pointer',
       )}
     >
       <Server className="size-4 shrink-0 text-muted-foreground" />

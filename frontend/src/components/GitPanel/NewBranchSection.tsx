@@ -39,6 +39,15 @@ interface NewBranchSectionProps {
    * tree is never touched here.
    */
   onDraftCreate?: (name: string, startPoint: string) => void
+  /**
+   * Local branch names that already exist (draft mode only). A draft submit
+   * naming one of them is refused with the picker's error banner instead of
+   * being recorded: commit-time provisioning follows git DWIM semantics, so
+   * an existing branch would be silently reused and the explicitly chosen
+   * base ignored. The non-draft path needs no guard — the backend refuses
+   * with its own explicit "branch already exists" error.
+   */
+  existingLocalBranches?: string[]
 }
 
 /**
@@ -63,6 +72,7 @@ export function NewBranchSection({
   onCreated,
   pendingBase,
   onDraftCreate,
+  existingLocalBranches,
 }: NewBranchSectionProps) {
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
@@ -109,8 +119,16 @@ export function NewBranchSection({
     const trimmed = name.trim()
     if (!trimmed || creating || disabled) return
     if (onDraftCreate) {
-      // Draft mode: record the choice — the branch itself is created at
-      // draft commit inside the session's managed worktree provisioning.
+      // Draft mode: the branch itself is created at draft commit inside the
+      // session's managed worktree provisioning — where commit-time DWIM
+      // would silently REUSE an already existing local branch and ignore the
+      // explicitly chosen base. Refuse the submit up front instead of
+      // recording a draft that cannot do what it promises; the input stays
+      // intact so the user can rename or pick the existing branch above.
+      if (existingLocalBranches?.includes(trimmed)) {
+        onError(`A branch named "${trimmed}" already exists — pick it from the list or choose another name`)
+        return
+      }
       onDraftCreate(trimmed, chooseBase ? selectedBase : '')
       setName('')
       onCreated()
@@ -140,7 +158,7 @@ export function NewBranchSection({
     } finally {
       setCreating(false)
     }
-  }, [name, creating, disabled, inWorktree, chooseBase, selectedBase, onCreated, onError, onDraftCreate])
+  }, [name, creating, disabled, inWorktree, chooseBase, selectedBase, onCreated, onError, onDraftCreate, existingLocalBranches])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && name.trim()) {

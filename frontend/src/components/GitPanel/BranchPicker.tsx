@@ -38,7 +38,10 @@ import { WorktreesSection } from './WorktreesSection'
  * - In draft mode (below) remote-tracking rows are selectable pick targets
  *   like local ones — a remote pick records a create-branch draft (local
  *   branch from the remote-tracking start point), never an in-place
- *   checkout; the Manage-Branches mode keeps checkout-remote on remote rows.
+ *   checkout; a remote row whose local twin is the working tree's own
+ *   branch is disabled like that local row (the DWIM reuse would land the
+ *   session in the shared checkout); the Manage-Branches mode keeps
+ *   checkout-remote on remote rows.
  * - Provides a filter input to narrow the list by name.
  * - Provides a "New Branch" field + button (with optional base selector) that
  *   calls CreateBranch and checks out the new branch immediately.
@@ -124,6 +127,8 @@ export function BranchPicker() {
     () => branches.filter((b) => b.kind === 'remote'),
     [branches],
   )
+  // Names only, for NewBranchSection's draft-mode duplicate-name guard.
+  const localBranchNames = useMemo(() => localBranches.map((b) => b.name), [localBranches])
 
   const filterFn = useCallback(
     (name: string) => {
@@ -197,7 +202,10 @@ export function BranchPicker() {
   // CreateManagedSession follows git DWIM semantics at commit — an
   // existing local branch of that name is reused (never re-created or
   // reset), a missing one is created from the remote-tracking start point.
-  // Nothing is checked out at pick time.
+  // Nothing is checked out at pick time. The row itself refuses the pick
+  // when that local twin is the working tree's own branch (same guard as
+  // the local rows) — the DWIM reuse would silently serve the session from
+  // the shared checkout instead of a managed worktree.
   const handleDraftRemoteSelect = useCallback(
     (remoteRef: string) => {
       const slash = remoteRef.indexOf('/')
@@ -342,6 +350,7 @@ export function BranchPicker() {
                     branch={b}
                     inFlight={inFlightFor(b.name)}
                     disabled={disabledFor(b.name)}
+                    currentBranch={currentBranch.name}
                     onCheckoutRemote={handleCheckoutRemote}
                     onDeleteRemote={actions.requestDeleteRemote}
                     draftSelect={
@@ -384,7 +393,9 @@ export function BranchPicker() {
         {/* New branch — key on isOpen so the field resets when reopened. In
             draft mode the submit records the drafted branch (created at
             draft commit in the session's managed worktree) instead of
-            running CreateBranch + in-place checkout. */}
+            running CreateBranch + in-place checkout; an existing local name
+            is refused up front — commit-time DWIM would silently reuse that
+            branch and ignore the chosen base. */}
         <NewBranchSection
           key={isOpen ? 'open' : 'closed'}
           disabled={actions.isBusy}
@@ -394,6 +405,7 @@ export function BranchPicker() {
           onError={handleError}
           onCreated={closeBranchPicker}
           onDraftCreate={isDraftMode ? handleDraftCreate : undefined}
+          existingLocalBranches={isDraftMode ? localBranchNames : undefined}
         />
 
         {/* Local error (branch-list load / create-branch failures) */}
