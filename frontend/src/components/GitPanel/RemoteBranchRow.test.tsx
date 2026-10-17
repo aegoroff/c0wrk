@@ -128,3 +128,117 @@ describe('RemoteBranchRow', () => {
     expect(container.querySelector('svg.animate-spin')).not.toBeNull()
   })
 })
+
+describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
+  const onSelect = vi.fn()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function renderDraft(
+    overrides: Partial<Branch> = {},
+    selected = false,
+    draftBlockedReason?: string | null,
+  ) {
+    return render(
+      <RemoteBranchRow
+        branch={makeBranch(overrides)}
+        inFlight={null}
+        disabled={false}
+        draftBlockedReason={draftBlockedReason}
+        {...defaultCallbacks}
+        draftSelect={{ selected, onSelect }}
+      />,
+    )
+  }
+
+  it('selects instead of checking out: click records the pick with the full ref, no git runs', () => {
+    const { container } = renderDraft()
+    act(() => {
+      row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+    expect(defaultCallbacks.onDeleteRemote).not.toHaveBeenCalled()
+  })
+
+  it('hides the management hover actions — the row is a selection target', () => {
+    const { container } = renderDraft()
+    expect(buttons(container)).toHaveLength(0)
+  })
+
+  it('marks the already-picked remote branch with aria-current and a check', () => {
+    const { container } = renderDraft({}, true)
+    const r = row(container)
+    expect(r.getAttribute('aria-current')).toBe('true')
+    expect(r.querySelector('svg')).not.toBeNull()
+    expect(r.className).toContain('bg-primary/10')
+  })
+
+  it('leaves an unpicked draft row unmarked', () => {
+    const { container } = renderDraft({}, false)
+    expect(row(container).getAttribute('aria-current')).toBeNull()
+  })
+
+  // The reason is handed down precomputed by BranchPicker (same predicate as
+  // the local rows) — the row renders it verbatim, so a distinctive string
+  // here proves the pass-through without coupling to the picker's wording.
+  const reason = 'Held by the main checkout — unit-test reason'
+
+  it('blocks the row when the picker hands down a draftBlockedReason, like a local row', () => {
+    const { container } = renderDraft({}, false, reason)
+
+    const r = row(container)
+    expect(r.getAttribute('tabindex')).toBe('-1')
+    expect(r.className).toContain('cursor-not-allowed')
+    // The tooltip is the handed-down reason, verbatim.
+    expect(r.getAttribute('title')).toBe(reason)
+
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+  })
+
+  it('blocks via the keyboard path too', () => {
+    const { container } = renderDraft({}, false, reason)
+    const r = row(container)
+    act(() => {
+      r.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('stays selectable when the picker hands down no blocking reason (null)', () => {
+    const { container } = renderDraft({}, false, null)
+
+    const r = row(container)
+    expect(r.getAttribute('tabindex')).toBe('0')
+    expect(r.className).toContain('cursor-pointer')
+    expect(r.getAttribute('title')).toBeNull()
+
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+  })
+
+  it('a handed-down reason blocks nothing outside draft mode — checkout-remote still runs', () => {
+    const { container } = render(
+      <RemoteBranchRow
+        branch={makeBranch()}
+        inFlight={null}
+        disabled={false}
+        draftBlockedReason={reason}
+        {...defaultCallbacks}
+      />,
+    )
+    act(() => {
+      row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(defaultCallbacks.onCheckoutRemote).toHaveBeenCalledWith('origin/feature/x')
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+})

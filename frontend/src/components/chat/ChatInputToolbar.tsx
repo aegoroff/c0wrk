@@ -195,10 +195,10 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
                 computation above): unlike model/reasoning they do not unlock
                 on a cooperative pause or a lingering failed task, because a
                 mode-armed send would abandon the unfinished task. */}
-            <GoalToggle disabled={modeTogglesLocked} lockReason={modeToggleLockTitle} blocked={goalBlocked} />
             {/* E2S renders itself only while the experimental gate is on
                 (see E2SToggle) — no extra gating here. */}
             <E2SToggle disabled={modeTogglesLocked} lockReason={modeToggleLockTitle} />
+            <GoalToggle disabled={modeTogglesLocked} lockReason={modeToggleLockTitle} blocked={goalBlocked} />
             {goalEnabled && <BudgetCombobox disabled={modeTogglesLocked} />}
           </div>
         </>

@@ -374,6 +374,138 @@ func TestCreateManagedSession_ExistingBranchCheckout(t *testing.T) {
 	}
 }
 
+// commitRemoteTip adds one commit on a throwaway branch, publishes ONLY its
+// commit as the remote-tracking ref refs/remotes/origin/<branch>, and
+// returns to the checkout's original branch. The returned SHA is then
+// observable as "created from": it differs from the checkout's HEAD, so a
+// provisioned tree sitting on it can only come from the remote start point.
+func commitRemoteTip(t *testing.T, repoRoot, branch string) string {
+	t.Helper()
+	startBranch := strings.TrimSpace(wtGit(t, repoRoot, "rev-parse", "--abbrev-ref", "HEAD"))
+	wtGit(t, repoRoot, "checkout", "-q", "-b", "tmp-remote-src")
+	if err := os.WriteFile(filepath.Join(repoRoot, "file.txt"), []byte("remote tip\n"), 0o644); err != nil {
+		t.Fatalf("write remote-tip file: %v", err)
+	}
+	wtGit(t, repoRoot, "add", ".")
+	wtGit(t, repoRoot, "commit", "-q", "-m", "remote tip")
+	sha := wtGit(t, repoRoot, "rev-parse", "HEAD")
+	wtGit(t, repoRoot, "update-ref", "refs/remotes/origin/"+branch, sha)
+	wtGit(t, repoRoot, "checkout", "-q", startBranch)
+	wtGit(t, repoRoot, "branch", "-D", "tmp-remote-src")
+	return sha
+}
+
+func TestCreateManagedSession_RemoteStartPointCreatesLocalBranch(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	// No local feature/topic exists — only the remote-tracking ref. The
+	// remote pick must provision the tree on a NEW local branch created
+	// FROM that ref (its tip, not the checkout's HEAD).
+	remoteSha := commitRemoteTip(t, h.repoRoot, "feature/topic")
+
+	info, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
+	if err != nil {
+		t.Fatalf("CreateManagedSession(remote start point): %v", err)
+	}
+	if b := info.WorkspaceBinding; b == nil || b.Kind != session.WorkspaceManagedWorktree || b.Branch != "feature/topic" {
+		t.Fatalf("expected a managed binding on feature/topic, got %+v", b)
+	}
+	if !branchExists(t, h.repoRoot, "feature/topic") {
+		t.Fatal("the local branch was not created from the remote-tracking start point")
+	}
+	entry := treeEntry(t, h.project.WorkspacePath, info.WorkspaceBinding.WorkspacePath)
+	if entry == nil || entry.Kind != workspace.WorktreeManaged || entry.Branch != "feature/topic" {
+		t.Fatalf("managed tree missing or wrong identity: %+v", entry)
+	}
+	// The tree's tip IS the remote-tracking ref's commit — proof the branch
+	// was created from origin/feature/topic, not from HEAD.
+	if got := wtGit(t, entry.Path, "rev-parse", "HEAD"); got != remoteSha {
+		t.Fatalf("tree HEAD %q != remote-tracking tip %q", got, remoteSha)
+	}
+	persisted := managedBindingOf(t, h.store, info.ID)
+	if persisted == nil || persisted.Branch != "feature/topic" {
+		t.Fatalf("persisted binding mismatch: %+v", persisted)
+	}
+}
+
+func TestCreateManagedSession_CreateBranchDWIMReusesExistingFreeBranch(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	// A local feature/topic ALREADY exists (at the initial commit), free of
+	// any worktree; the remote-tracking ref points at a NEWER commit. Git
+	// DWIM semantics: the create request must check the EXISTING branch out
+	// — never re-create (or reset) it at the remote start point.
+	wtGit(t, h.repoRoot, "branch", "feature/topic")
+	localSha := wtGit(t, h.repoRoot, "rev-parse", "refs/heads/feature/topic")
+	_ = commitRemoteTip(t, h.repoRoot, "feature/topic")
+
+	info, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
+	if err != nil {
+		t.Fatalf("CreateManagedSession over an existing free branch: %v", err)
+	}
+	entry := treeEntry(t, h.project.WorkspacePath, info.WorkspaceBinding.WorkspacePath)
+	if entry == nil || entry.Branch != "feature/topic" {
+		t.Fatalf("tree not on the existing feature/topic: %+v", entry)
+	}
+	// The tree sits on the LOCAL branch's tip — reuse, not a re-create from
+	// the remote ref (that would move the tip to the newer remote commit).
+	if got := wtGit(t, entry.Path, "rev-parse", "HEAD"); got != localSha {
+		t.Fatalf("tree HEAD %q != pre-existing local tip %q (branch was re-created, not reused)", got, localSha)
+	}
+}
+
+func TestCreateManagedSession_CreateBranchDWIMRefusesBusyExternalHolder(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	wtGit(t, h.repoRoot, "branch", "feature/ext")
+	external := filepath.Join(t.TempDir(), "external-tree")
+	wtGit(t, h.repoRoot, "worktree", "add", external, "feature/ext")
+	_ = commitRemoteTip(t, h.repoRoot, "feature/ext")
+
+	// The create-variant over an EXISTING branch occupied by an external
+	// tree refuses with the same typed branch-busy error as the
+	// existing-branch pick — it must never force or share the holder.
+	_, err := h.api.CreateManagedSession("feature/ext", true, "origin/feature/ext")
+	if err == nil {
+		t.Fatal("expected refusal for an external worktree holding the branch")
+	}
+	if !errors.Is(err, workspace.ErrBranchBusy) || !strings.Contains(err.Error(), "external worktree") {
+		t.Fatalf("refusal must be a typed branch-busy error naming the external tree: %v", err)
+	}
+	if got := len(h.manager.ListSessions()); got != 0 {
+		t.Fatalf("no session may exist after refusal, got %d", got)
+	}
+	// No managed tree may have been provisioned by the refused request.
+	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
+	if err != nil {
+		t.Fatalf("list worktrees: %v", err)
+	}
+	for _, tr := range trees {
+		if tr.Kind == workspace.WorktreeManaged {
+			t.Fatalf("refused creation provisioned a managed tree %q", tr.Path)
+		}
+	}
+}
+
+func TestCreateManagedSession_CreateBranchDWIMSharesManagedHolder(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	wtGit(t, h.repoRoot, "branch", "feature/topic")
+	_ = commitRemoteTip(t, h.repoRoot, "feature/topic")
+
+	// The branch is already held by a managed tree: the create-variant over
+	// the existing branch must SHARE that tree (the shared-tree revision of
+	// ADR-080), exactly like picking the existing branch directly.
+	first, err := h.api.CreateManagedSession("feature/topic", false, "")
+	if err != nil {
+		t.Fatalf("first CreateManagedSession: %v", err)
+	}
+	second, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
+	if err != nil {
+		t.Fatalf("second CreateManagedSession (create variant over the held branch): %v", err)
+	}
+	if first.WorkspaceBinding.WorkspacePath != second.WorkspaceBinding.WorkspacePath ||
+		first.WorkspaceBinding.WorktreeName != second.WorkspaceBinding.WorktreeName {
+		t.Fatalf("create variant must share the holding tree: %+v vs %+v", first.WorkspaceBinding, second.WorkspaceBinding)
+	}
+}
+
 func TestCreateManagedSession_CheckoutHeldBranchFallsBackToLocal(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	// main is checked out by the main worktree: a managed tree can never

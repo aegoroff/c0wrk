@@ -749,7 +749,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
   })
 
-  it('hides remote branches but shows the worktrees section in draft mode', async () => {
+  it('lists remote rows selectable like local ones and keeps the worktrees section in draft mode', async () => {
     const worktrees: GitWorktree[] = [
       {
         path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
@@ -765,9 +765,10 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     useGitPanelStore.getState().setWorktrees(worktrees)
     await openDraftPicker()
 
-    // Remote branches stay hidden — the draft never checks anything out.
-    expect(branchRow('origin/feat/remote')).toBeUndefined()
-    expect(body().textContent).not.toContain('Remote')
+    // Remote rows are listed and selectable in draft mode (no git operation
+    // runs at pick time — provisioning happens at draft commit).
+    expect(body().textContent).toContain('Remote')
+    expect(branchRow('origin/feat/remote')).toBeDefined()
 
     // The worktrees section is shown so an existing tree can be deleted
     // from the same dialog (the deletion never touches the draft).
@@ -961,6 +962,142 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
     expect(focusWorktree).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
+  })
+
+  it('select-remote intent: records a create-branch draft from the remote start point, never checks out', async () => {
+    await openDraftPicker()
+
+    const row = branchRow('origin/feat/remote')!
+    expect(row).toBeDefined()
+    await act(async () => {
+      row.click()
+    })
+    await flush()
+
+    // The draft records the REMOTE-based intent: provision the managed
+    // worktree on the local short name, created from the remote-tracking
+    // start point (git DWIM at commit — an existing local branch of that
+    // name is reused, a missing one is created from the remote ref).
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'feat/remote',
+      createBranch: true,
+      startPoint: 'origin/feat/remote',
+    })
+    // NO in-place checkout side effect at pick time: no git mutation ran —
+    // provisioning happens at draft commit via CreateManagedSession.
+    expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
+    expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+    expect(focusWorktree).not.toHaveBeenCalled()
+    // Selection closes the picker.
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
+  })
+
+  it('marks the already-picked remote branch without marking local rows', async () => {
+    useSessionDraftStore
+      .getState()
+      .setDraftWorkspace({ kind: 'branch', branch: 'feat/remote', createBranch: true, startPoint: 'origin/feat/remote' })
+    await openDraftPicker()
+
+    const remoteRow = branchRow('origin/feat/remote')!
+    expect(remoteRow.getAttribute('aria-current')).toBe('true')
+    expect(remoteRow.getAttribute('tabindex')).toBe('0')
+    // The selected remote row shows a check icon (lucide renders an <svg>).
+    expect(remoteRow.querySelector('svg')).not.toBeNull()
+    // Local rows are not marked by a remote-based pick.
+    expect(branchRow('feat/a')!.getAttribute('aria-current')).toBeNull()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+  })
+
+  it('disables the remote twin of the main checkout\'s branch — its pick would land a local session', async () => {
+    // `origin/main` is the remote twin of the MAIN checkout's branch (`main`):
+    // commit-time DWIM would reuse local main, and the holder dispatch would
+    // serve the session from the shared checkout instead of a worktree. The
+    // gate reads the main checkout from the refreshed worktrees list — the
+    // same predicate as the local rows, focus-independent.
+    const worktrees: GitWorktree[] = [
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: true,
+      },
+    ]
+    gitMocks.listProjectWorktrees.mockResolvedValue(worktrees)
+    useGitPanelStore.getState().setWorktrees(worktrees)
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: true, kind: 'local', upstream: '' },
+      { name: 'origin/main', is_current: false, kind: 'remote', upstream: '' },
+    ])
+    useGitPanelStore.getState().openBranchPicker('draft')
+    renderPicker()
+    await flush()
+
+    const row = branchRow('origin/main')!
+    expect(row.className).toContain('cursor-not-allowed')
+    // Same reason — and wording — as the local `main` row: the two sections
+    // block identically.
+    expect(row.getAttribute('title')).toBe(
+      'Checked out in the main checkout — pick another branch or use local',
+    )
+    expect(branchRow('main')!.getAttribute('title')).toBe(
+      'Checked out in the main checkout — pick another branch or use local',
+    )
+    await act(async () => {
+      row.click()
+    })
+    await flush()
+
+    // The draft stays local and the picker stays open (no selection made) —
+    // and no in-place checkout-remote ran either.
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+  })
+
+  it('create-new intent: refuses an existing local name with the error banner, records nothing', async () => {
+    await openDraftPicker()
+
+    const input = Array.from(body().querySelectorAll<HTMLInputElement>('input')).find((i) => i.placeholder === 'branch-name')!
+    act(() => {
+      setInputValue(input, 'feat/a')
+    })
+    const newButton = allButtons().find((b) => b.textContent?.trim() === 'New')!
+    await act(async () => {
+      newButton.click()
+    })
+    await flush()
+
+    // The refusal is visible in the dialog's error banner…
+    expect(body().textContent).toContain('A branch named "feat/a" already exists')
+    // …the draft stays local (no silent DWIM reuse ignoring the base)…
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    // …and the picker stays open with the name intact for renaming.
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+    expect(input.value).toBe('feat/a')
+  })
+
+  it('switch mode keeps the in-place checkout on remote rows', async () => {
+    // Open as the Git panel's Manage-Branches dialog (switch intent).
+    useGitPanelStore.getState().openBranchPicker()
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: true, kind: 'local', upstream: '' },
+      { name: 'origin/feat/remote', is_current: false, kind: 'remote', upstream: '' },
+    ])
+    gitMocks.checkoutRemoteBranch.mockResolvedValue(undefined)
+    renderPicker()
+    await flush()
+
+    const row = branchRow('origin/feat/remote')!
+    await act(async () => {
+      row.click()
+    })
+    await flush()
+
+    // Remote-row click stays checkout-remote in switch mode — the armed
+    // draft is untouched (still the default local workspace) and no
+    // branch selection was recorded.
+    expect(gitMocks.checkoutRemoteBranch).toHaveBeenCalledWith('origin/feat/remote')
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
   })
 
   it('deleting a worktree from the draft picker runs the confirmed removal without touching the draft', async () => {
