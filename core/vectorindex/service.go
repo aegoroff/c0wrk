@@ -1220,8 +1220,14 @@ func (s *Service) GetDB() *chromem.DB {
 }
 
 // GetCollection returns the current collection (for use by Indexer). Like
-// GetDB it is intentionally lock-free (the Indexer calls it while holding the
-// service lock); s.current is never nil after NewService, but the pointer is
+// GetDB it is intentionally lock-free: indexing paths hold the service write
+// lock around the passes that consume it, while the status-honesty callers
+// (the HandleBranchSwitch guard, the Reindex goroutine, and the deferred
+// terminal emissions of IndexFull/IndexIncremental) read it WITHOUT the lock
+// and treat the result as a best-effort snapshot — a concurrently switched
+// branch at worst shifts which of two adjacent states gets announced, the
+// same "one extra or one missing announcement" tolerance HandleBranchSwitch
+// documents. s.current is never nil after NewService, but the pointer is
 // read once and nil-checked defensively.
 func (s *Service) GetCollection() *chromem.Collection {
 	ps := s.current

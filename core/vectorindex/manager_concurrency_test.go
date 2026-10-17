@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -693,5 +694,91 @@ func TestManagerShutdownReleasesParked(t *testing.T) {
 	defer svc.mu.RUnlock()
 	if svc.parked != nil {
 		t.Errorf("parked not cleared by Shutdown: %d states remain", len(svc.parked))
+	}
+}
+
+// TestRunIncrementalGuarded_SkipsPassWithoutCollection pins the missing-
+// collection gate in runIncrementalGuarded. After a failed branch open the
+// project is still active (indexer and workspace in place), but every pass
+// would die at ValidateCollection and its deferred terminal emission would
+// re-publish state over the honest `unavailable` the failed open announced.
+// The debounced pass must be skipped outright — no embeddings, no status
+// churn — until a successful switch reinstates the collection, after which the
+// same call must run and terminate with `ready`.
+func TestRunIncrementalGuarded_SkipsPassWithoutCollection(t *testing.T) {
+	ctx := context.Background()
+	persistDir, ws := t.TempDir(), createTestWorkspace(t)
+
+	var embeds atomic.Int32
+	embed := func(_ context.Context, _ string) ([]float32, error) {
+		embeds.Add(1)
+		return []float32{0.01, 0.02}, nil
+	}
+	mgr, err := NewManager(ManagerConfig{EmbeddingFunc: embed})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(mgr.Shutdown)
+
+	var mu sync.Mutex
+	var states []IndexState
+	snapshot := func() []IndexState {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(states)
+	}
+	cbs := ProjectCallbacks{
+		OnProgress: func(_ IndexPhase, state IndexState, _, _ int, _ string) {
+			mu.Lock()
+			states = append(states, state)
+			mu.Unlock()
+		},
+	}
+	storage := filepath.Join(persistDir, "project-x")
+	if err := mgr.SwitchProject("project-x", ws, storage, cbs); err != nil {
+		t.Fatalf("SwitchProject: %v", err)
+	}
+	waitForBackgroundPasses(t, mgr, mgr.Service())
+
+	// Force the failed-open shape: block the target branch's root so the
+	// switch fails inside openBranchDBLocked, leaving NO collection behind.
+	if err := os.WriteFile(branchRootPath(storage, "blocked"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+	if err := mgr.Service().SwitchBranch(ctx, "blocked"); err == nil {
+		t.Fatal("SwitchBranch to a blocked branch root must fail")
+	}
+	if mgr.Service().GetCollection() != nil {
+		t.Fatal("collection survived a failed open")
+	}
+
+	// A file change while unavailable: the guarded pass must be skipped —
+	// no embeddings, no status churn.
+	mu.Lock()
+	states = nil
+	mu.Unlock()
+	before := embeds.Load()
+	if err := os.WriteFile(filepath.Join(ws, "added.go"), []byte("package main\nfunc added() {}\n"), 0o644); err != nil {
+		t.Fatalf("write added.go: %v", err)
+	}
+	mgr.runIncrementalGuarded()
+	if got := embeds.Load(); got != before {
+		t.Errorf("pass over a missing collection embedded %d file(s); it must be skipped", got-before)
+	}
+	if got := snapshot(); len(got) != 0 {
+		t.Errorf("skipped pass emitted %v; it must leave the announced state untouched", got)
+	}
+
+	// Recovery: a successful switch reinstates the collection; the same
+	// guarded call picks up the change again and terminates with `ready`.
+	if err := mgr.Service().SwitchBranch(ctx, "main"); err != nil {
+		t.Fatalf("SwitchBranch main: %v", err)
+	}
+	mgr.runIncrementalGuarded()
+	if got := embeds.Load(); got <= before {
+		t.Error("the guarded pass did not run after the collection was reinstated")
+	}
+	if got := snapshot(); len(got) == 0 || got[len(got)-1] != IndexStateReady {
+		t.Errorf("recovered pass emissions = %v, want terminal %q", got, IndexStateReady)
 	}
 }
