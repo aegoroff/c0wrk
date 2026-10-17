@@ -314,9 +314,23 @@ type E2SSettings = BuilderE2SConfig
 
 // GoalLoopSettings mirrors the config-layer GoalLoopConfig for the
 // orchestrator's runtime config field. Verification is "independent"
-// (default) or "off".
+// (default) or "off". Suggest configures the post-routing goal-mode
+// suitability gate (core/goal_suggest.go).
 type GoalLoopSettings struct {
 	Verification string
+	Suggest      GoalSuggestSettings
+}
+
+// GoalSuggestSettings is the runtime mirror of the config-layer
+// GoalSuggestConfig: the goal-mode suggestion feature (offer goal-mode
+// activation when a fresh task's message is obviously goal-suited).
+type GoalSuggestSettings struct {
+	// Enabled gates the whole feature; false suppresses the suggestion gate
+	// entirely (goal mode stays available via the explicit toggle / /goal).
+	Enabled bool
+	// MinComplexity is the cheap complexity floor below which the classifier
+	// is never consulted (saves an LLM call on obvious non-candidates).
+	MinComplexity int
 }
 
 // ModelProfilesSettings is the runtime mirror of BuilderModelProfilesConfig, carrying
@@ -590,6 +604,25 @@ type Orchestrator struct {
 	// product (the verifier reads it via read_final_result / step outputs to
 	// inspect the claimed artifacts).
 	goalVerifier func(ctx context.Context, gs *goal.GoalState, verdict *goal.Verdict, message string, lastTurnOutput string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, deps conductorDeps) (*tools.VerificationOutcome, error)
+
+	// goalSuggester is the goal-mode suitability classifier seam
+	// (Orchestrator.SuggestGoalMode). Nil resolves to the production
+	// implementation, which rides the session's LLM caller through the shared
+	// serviceCall pipeline; tests install a stub to make the verdict
+	// deterministic. See core/goal_suggest.go.
+	goalSuggester GoalSuggester
+
+	// goalSuggestionProposer is the desktop-side pending-card bridge for the
+	// post-routing goal-mode suggestion (see GoalSuggestionProposer). Nil
+	// disables the suggestion gate entirely.
+	goalSuggestionProposer GoalSuggestionProposer
+
+	// goalSuggestionDeclined is the session-scoped suppression flag: the user
+	// declined a goal-mode suggestion once, so the gate stays silent for the
+	// rest of the session. The Orchestrator instance is per-session, so the
+	// flag's lifetime IS the session's (it dies with the session — a fresh
+	// session, or an app restart, re-arms the gate).
+	goalSuggestionDeclined atomic.Bool
 
 	// activePause is the universal pause signal for the currently-running
 	// conductor (any mode), if any. PauseSession loads the pointer and sets the
@@ -1106,6 +1139,16 @@ func (o *Orchestrator) SetGoalProposer(proposer tools.GoalProposer) {
 
 // compile-time assertion that *Orchestrator satisfies GoalProposerSetter.
 var _ GoalProposerSetter = (*Orchestrator)(nil)
+
+// SetGoalSuggestionProposer injects the goal-mode suggestion proposer (the
+// desktop pending-card flow the post-routing gate blocks on) after
+// construction, mirroring SetGoalProposer. A nil proposer (never wired —
+// e.g. direct-constructed orchestrators in tests) disables the suggestion
+// gate entirely: the plain Conductor path runs without consulting the
+// classifier.
+func (o *Orchestrator) SetGoalSuggestionProposer(proposer GoalSuggestionProposer) {
+	o.goalSuggestionProposer = proposer
+}
 
 // logInfo logs an INFO level message if logger is not nil.
 func (o *Orchestrator) logInfo(msg string, args ...any) {
@@ -3392,6 +3435,10 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	// offers them when goal mode is off. The goal path above receives the unstripped
 	// list: the independent verifier's verifierToolFilter/verifierReDerivationToolFilter
 	// build their read-only toolset (which must include declare_verification) from it.
+	// The unstripped list is captured first for the goal-mode SUGGESTION entry
+	// below: an accepted suggestion enters runGoalLoopRouted after routing (so
+	// the loop needs the goal tools back), without re-running the router.
+	goalAvailableTools := availableTools
 	availableTools = tools.StripGoalModeTools(availableTools)
 
 	// 3. Route and activate skills.
@@ -3407,6 +3454,32 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		// keeps its prior terminal status (reactivation happens only below),
 		// so the manager's fresh-workflow fallback cannot orphan it.
 		return nil, err
+	}
+
+	// GOAL-MODE SUGGESTION GATE: on a fresh plain task whose routing just ran,
+	// judge whether goal mode is obviously the better fit and, when it is,
+	// offer the user to activate it BEFORE any execution starts. An accepted
+	// offer enters the goal loop with THIS routing decision (one routing per
+	// goal task, no second router call); a decline suppresses suggestions for
+	// the rest of the session; every failure fails OPEN to the plain path.
+	// The gate sits before the continuation commit point — on the fresh tasks
+	// it targets, that commit is a no-op.
+	if o.goalSuggestionApplicable(opts) && o.goalSuggestRoutingEligible(routing) {
+		switch o.runGoalSuggestionGate(ctx, sessionID, message, routing) {
+		case gateAccepted:
+			opts.Goal = true
+			result, deriveFailed, err := o.runGoalLoopRouted(ctx, taskMessage, opts, bb, goalAvailableTools, opts.SessionPlansDir, routing, true)
+			if !deriveFailed {
+				return result, err
+			}
+			// Derivation failed after acceptance — fall through to the plain
+			// Conductor path so the accepted task still gets done.
+			o.logInfo("goal suggest: derivation failed after acceptance — continuing as a plain task")
+		case gateDeclined:
+			// Plain path continues; suppression already recorded.
+		case gateNoSuggestion:
+			// Plain path continues.
+		}
 	}
 
 	// Commit point for the continuation: routing succeeded, execution is

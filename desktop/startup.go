@@ -72,6 +72,15 @@ type pendingGoalProposalEntry struct {
 	payload   session.GoalProposalPayload
 }
 
+// pendingGoalSuggestionEntry wraps the goal-suggestion response channel with
+// the session ID and payload, mirroring pendingGoalProposalEntry for the
+// post-routing goal-mode suggestion card.
+type pendingGoalSuggestionEntry struct {
+	ch        chan goalSuggestionResponse
+	sessionID string
+	payload   session.GoalSuggestionPayload
+}
+
 // wakeReloadDelay is how long deferredWakeReload waits between detecting a
 // power-state wake and re-navigating the frontend. The reload cannot run
 // inline inside the NSWorkspaceDidWake observer block: on macOS 26 the
@@ -362,6 +371,7 @@ func (a *App) Startup(ctx context.Context) {
 	askUserFunc := a.buildAskUserCallback(uiEmitFunc)
 	planApprovalFunc := a.buildPlanApprovalCallback(uiEmitFunc)
 	goalProposer := a.buildGoalProposalCallback(uiEmitFunc)
+	goalSuggestionProposer := a.buildGoalSuggestionCallback(uiEmitFunc)
 	confirmFunc := a.buildConfirmCallback(uiEmitFunc)
 	hitlHandler := a.buildStepLimitCallback(uiEmitFunc)
 
@@ -430,6 +440,15 @@ func (a *App) Startup(ctx context.Context) {
 	// funnel through a single resolution on the desktop pending map.
 	application.Manager().SetGoalProposalResolver(func(requestID, decision, condition, verify, verificationMode string) bool {
 		return a.resolveGoalProposal(requestID, decision, condition, verify, verificationMode)
+	})
+	application.SetGoalSuggestionProposer(goalSuggestionProposer)
+
+	// Register the goal-suggestion resolver so the RPC-based path
+	// (FrontendAPI.AcceptGoalSuggestion/DeclineGoalSuggestion) and the
+	// event-based path both funnel through a single resolution on the desktop
+	// pending map.
+	application.Manager().SetGoalSuggestionResolver(func(requestID, decision string) bool {
+		return a.resolveGoalSuggestion(requestID, decision)
 	})
 
 	a.buildFrontendAPI(application, backend.FrontendAPIConfig{
@@ -708,6 +727,20 @@ func (a *App) Shutdown(ctx context.Context) {
 		a.pendingGoalProposals.Delete(key)
 		return true
 	})
+	// Shutdown resolves a pending goal-suggestion as a decline: the gate
+	// fails open (no suppression — the app quit is not a user decline), the
+	// plain Conductor path would have continued, and the task ends here
+	// anyway.
+	a.pendingGoalSuggestions.Range(func(key, value any) bool {
+		if e, ok := value.(*pendingGoalSuggestionEntry); ok {
+			select {
+			case e.ch <- goalSuggestionResponse{Decision: "decline"}:
+			default:
+			}
+		}
+		a.pendingGoalSuggestions.Delete(key)
+		return true
+	})
 	shutdownStep("pendingActionDrains")
 
 	// Close-path reads go through the locked accessors: Shutdown runs on the
@@ -796,6 +829,14 @@ func (a *App) wireWailsEventListeners(log *slog.Logger, uiEmitFunc func(session.
 			return
 		}
 		a.handleGoalProposalResponse(payload, log)
+	})
+
+	wailsRuntime.EventsOn(a.wailsCtx(), backend.EventGoalSuggestionResponse, func(data ...any) {
+		payload, ok := extractPayload("goal_suggestion response", data, log)
+		if !ok {
+			return
+		}
+		a.handleGoalSuggestionResponse(payload, log)
 	})
 }
 

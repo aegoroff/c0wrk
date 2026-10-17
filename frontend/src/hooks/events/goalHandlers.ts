@@ -9,7 +9,7 @@
 import { useGoalStore } from '@/stores/goalStore'
 import { useChatStore } from '@/stores/chatStore'
 import type { GoalProgress } from '@/stores/goalStore'
-import type { GoalProposalData, GoalStatusData, GoalProgressData } from '@/types/events'
+import type { GoalProposalData, GoalStatusData, GoalProgressData, GoalSuggestionData } from '@/types/events'
 import { buildGoalTransitionNotice, goalStatusToActiveGoal } from '@/lib/goalTransition'
 
 /** Record a pending goal proposal for a session (active or background).
@@ -81,4 +81,28 @@ export function handleGoalProgressEvent(sessionId: string, data: GoalProgressDat
     condition: data.condition,
   }
   useGoalStore.getState().setGoalProgress(sessionId, progress)
+}
+
+/** Record a pending goal-mode suggestion for a session (active or background).
+ *
+ *  Writes BOTH the goal store entry (usePendingGoalSuggestion) AND a chat
+ *  message of type `goal_suggestion` (so the offer card renders inline in the
+ *  chat stream, mirroring goal_proposal). The message id is deterministic
+ *  (`goal-suggestion-${request_id}`) so the live card and the reloaded history
+ *  row share an id (see buildHistoryId's goal_suggestion case). */
+export function handleGoalSuggestionEvent(sessionId: string, data: GoalSuggestionData): void {
+  useGoalStore.getState().setPendingSuggestion(sessionId, data)
+  useChatStore.getState().addMessage(sessionId, {
+    id: `goal-suggestion-${data.request_id}`,
+    sessionId,
+    type: 'goal_suggestion',
+    content: data.reason,
+    metadata: {
+      request_id: data.request_id,
+      reason: data.reason,
+      resolved: false,
+    } as Record<string, unknown>,
+    timestamp: Date.now(),
+  })
+  useChatStore.getState().setActivityStatus(sessionId, 'Goal mode suggested — awaiting your answer...')
 }

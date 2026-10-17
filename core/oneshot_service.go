@@ -40,10 +40,11 @@ func serviceOutputTokenBudget(maxTokens int, effort string) int {
 // router's deterministic profile instead (CallPurposeCompaction, no explicit
 // temperature) — the same posture as before this policy existed.
 var (
-	oneshotTempTitle   = 0.3
-	oneshotTempCommit  = 0.3
-	oneshotTempExtract = 0.3
-	oneshotTempRewrite = 0.5
+	oneshotTempTitle       = 0.3
+	oneshotTempCommit      = 0.3
+	oneshotTempExtract     = 0.3
+	oneshotTempRewrite     = 0.5
+	oneshotTempGoalSuggest = 0.2
 )
 
 // Reasoning tiers of the oneshot service policy, resolved per active model
@@ -54,11 +55,16 @@ var (
 //   - prompt-optimizer extract/rewrite: minimal — the cheapest non-disabled
 //     effort; the rewrite benefits from a sliver of deliberation.
 //   - compaction summarization (both sites): minimal.
+//   - goal-mode suitability: minimal — same rationale as the optimizer.
 const (
 	oneshotTierTitle      = llm.ReasoningTierOff
 	oneshotTierCommit     = llm.ReasoningTierOff
 	oneshotTierOptimize   = llm.ReasoningTierMinimal
 	oneshotTierCompaction = llm.ReasoningTierMinimal
+	// oneshotTierGoalSuggest — the suitability judgment benefits from a sliver
+	// of deliberation (mirroring the optimizer tiers); the call sits in the
+	// send path, so anything stronger would tax every candidate message.
+	oneshotTierGoalSuggest = llm.ReasoningTierMinimal
 )
 
 // serviceReasoningEffort resolves an oneshot service-call reasoning tier into

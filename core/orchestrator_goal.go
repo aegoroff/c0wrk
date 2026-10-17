@@ -305,6 +305,34 @@ func (o *Orchestrator) runGoalLoop(
 		return nil, err
 	}
 
+	result, _, err := o.runGoalLoopRouted(ctx, message, opts, bb, availableTools, plansDir, routing, false)
+	return result, err
+}
+
+// runGoalLoopRouted is runGoalLoop's post-routing body, split out so the
+// goal-mode SUGGESTION entry (HandleMessage's post-routing gate) can enter the
+// loop with the routing decision the normal path already established — the
+// one-routing-decision-per-goal-task invariant, and no second router LLM call
+// on acceptance. The explicit goal branch keeps entering through runGoalLoop.
+//
+// fallbackOnDeriveFailure changes ONLY the derivation-failure branch: when
+// false (explicit entry) a failed derivation exits cleanly with the conductor
+// message as the output — the historical behavior. When true (suggested entry)
+// it returns deriveFailed=true with a nil result and NO side effects beyond
+// the routing persistence (which the plain path re-applies idempotently), so
+// HandleMessage can fall back to the plain Conductor run instead of ending the
+// just-accepted task with no work. The third return is meaningful only when
+// err == nil && result == nil.
+func (o *Orchestrator) runGoalLoopRouted(
+	ctx context.Context,
+	message string,
+	opts HandleOptions,
+	bb orchestration.Blackboard,
+	availableTools []sdktools.ToolDescriptor,
+	plansDir string,
+	routing *router.RoutingDecision,
+	fallbackOnDeriveFailure bool,
+) (result *HandleResult, deriveFailed bool, err error) {
 	// Enrich context with domain/complexity/user-skills (mirrors HandleMessage).
 	// routeAndActivateSkills already set WithActiveSkills internally; this ctx
 	// now flows into deriveGoal AND every goal turn.
@@ -347,13 +375,20 @@ func (o *Orchestrator) runGoalLoop(
 	if derr != nil {
 		o.logInfo("goal_loop: derivation failed, exiting", "error", derr)
 		if errors.Is(derr, context.Canceled) || errors.Is(derr, context.DeadlineExceeded) {
-			return nil, derr
+			return nil, false, derr
+		}
+		if fallbackOnDeriveFailure {
+			// Suggested entry: leave the result unbuilt (no task-outcome
+			// persist) so HandleMessage can fall back to the plain Conductor
+			// path — the user accepted the suggestion expecting the work to
+			// happen; a failed goal framing must not end the task.
+			return nil, true, nil
 		}
 		// A user cancel of the proposal is a clean exit, not an error to bubble.
 		// Pass the computed routing (not nil) so finalizeResult does not clobber
 		// the routing decision persisted above — the other two goalLoopResult
 		// call sites (end of runGoalLoop / resumeGoalLoop) pass the real value.
-		return o.goalLoopResult(conductorMessage, bb, routing, goal.StatusActive, "", false, nil), nil
+		return o.goalLoopResult(conductorMessage, bb, routing, goal.StatusActive, "", false, nil), false, nil
 	}
 
 	// Resolve the budget: the per-message override sets MaxTurns when present;
@@ -401,7 +436,7 @@ func (o *Orchestrator) runGoalLoop(
 	if gs.LastVerdict != nil && gs.LastVerdict.Reason != "" {
 		out = gs.LastVerdict.Reason
 	}
-	return o.goalLoopResult(out, bb, routing, gs.Status, gs.Condition, paused, gs.LastErrorTyped), nil
+	return o.goalLoopResult(out, bb, routing, gs.Status, gs.Condition, paused, gs.LastErrorTyped), false, nil
 }
 
 // resumeGoalLoop re-enters the goal loop from a persisted, non-terminal

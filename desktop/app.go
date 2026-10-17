@@ -79,11 +79,12 @@ type App struct {
 	sessionLogger *logger.SessionLogger
 
 	// Wails event-listener infrastructure (used only in startup.go listeners)
-	pendingConfirmations sync.Map
-	pendingAskUser       sync.Map
-	pendingStepLimit     sync.Map
-	pendingPlanApprovals sync.Map
-	pendingGoalProposals sync.Map
+	pendingConfirmations   sync.Map
+	pendingAskUser         sync.Map
+	pendingStepLimit       sync.Map
+	pendingPlanApprovals   sync.Map
+	pendingGoalProposals   sync.Map
+	pendingGoalSuggestions sync.Map
 
 	// judgeWG tracks in-flight runJudgeEvaluation goroutines so Shutdown can
 	// wait for them before tearing down the backend application.

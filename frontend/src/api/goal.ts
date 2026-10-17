@@ -34,3 +34,30 @@ export async function cancelGoal(sessionId: string, requestId: string): Promise<
     throw err
   }
 }
+
+/** Accept a pending goal-mode suggestion: the blocked suggestion gate unblocks
+ *  and the task enters the goal loop (with the routing decision already
+ *  established) before any work starts. Mirrors
+ *  backend/frontend_api_goal.go AcceptGoalSuggestion(sessionID, requestID). */
+export async function acceptGoalSuggestion(sessionId: string, requestId: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.AcceptGoalSuggestion(sessionId, requestId)
+  } catch (err) {
+    logger.error('Failed to accept goal suggestion:', err)
+    throw err
+  }
+}
+
+/** Decline a pending goal-mode suggestion: the task continues as a plain run
+ *  and the session suppresses further suggestions. Mirrors
+ *  backend/frontend_api_goal.go DeclineGoalSuggestion(sessionID, requestID). */
+export async function declineGoalSuggestion(sessionId: string, requestId: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.DeclineGoalSuggestion(sessionId, requestId)
+  } catch (err) {
+    logger.error('Failed to decline goal suggestion:', err)
+    throw err
+  }
+}

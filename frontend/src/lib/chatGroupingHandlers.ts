@@ -11,7 +11,7 @@ export type ToolLike = DisplayItem & { kind: 'tool' }
 export type PlanStep = DisplayItem & { kind: 'plan_step' }
 export type SubAgentItem = DisplayItem & { kind: 'subagent' }
 export type StepLikeItem = PlanStep | SubAgentItem
-export type ActionDisplayItem = Extract<DisplayItem, { kind: 'tool_confirm' | 'ask_user' | 'step_limit' | 'plan_review' | 'resume_action' | 'goal_proposal' }>
+export type ActionDisplayItem = Extract<DisplayItem, { kind: 'tool_confirm' | 'ask_user' | 'step_limit' | 'plan_review' | 'resume_action' | 'goal_proposal' | 'goal_suggestion' }>
 
 /**
  * Narrow one persisted-metadata field to a string.
@@ -408,6 +408,12 @@ export function handleActionMessage(
         condition: (meta?.condition as string) ?? '',
         verify: (meta?.verify as string) ?? '',
         verification_mode: (meta?.verification_mode as string) ?? '',
+      }; break
+    case 'goal_suggestion':
+      item = {
+        kind: 'goal_suggestion',
+        message: msg,
+        reason: (meta?.reason as string) ?? '',
       }; break
     default: return
   }

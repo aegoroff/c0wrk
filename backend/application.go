@@ -106,6 +106,11 @@ type Application struct {
 	// construction (desktop wires it once its pending-confirmation map is ready).
 	goalProposer coretools.GoalProposer
 
+	// goalSuggestionProposer is the desktop goal-mode suggestion card flow
+	// injected onto every per-session orchestrator by the factory. Set via
+	// SetGoalSuggestionProposer after construction (mirrors goalProposer).
+	goalSuggestionProposer core.GoalSuggestionProposer
+
 	// hitlHandler is captured for the orchestrator factory closure.
 	hitlHandler agent.HITLHandler
 
@@ -364,6 +369,12 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 		if app.goalProposer != nil {
 			orch.SetGoalProposer(app.goalProposer)
 		}
+		// Inject the goal-suggestion proposer so the post-routing suggestion
+		// gate can reach the desktop pending card. Nil is valid — the gate
+		// stays disabled (plain Conductor path, classifier never consulted).
+		if app.goalSuggestionProposer != nil {
+			orch.SetGoalSuggestionProposer(app.goalSuggestionProposer)
+		}
 		return orch, nil
 	}
 
@@ -441,6 +452,15 @@ func (a *Application) Builder() *core.OrchestratorBuilder {
 // proposer is in place before any session's orchestrator is built.
 func (a *Application) SetGoalProposer(proposer coretools.GoalProposer) {
 	a.goalProposer = proposer
+}
+
+// SetGoalSuggestionProposer sets the goal-mode suggestion proposer hook that
+// the orchestrator factory injects onto every per-session orchestrator.
+// Desktop calls this after construction, once its pending-suggestion map +
+// emitter are ready, so the proposer is in place before any session's
+// orchestrator is built.
+func (a *Application) SetGoalSuggestionProposer(proposer core.GoalSuggestionProposer) {
+	a.goalSuggestionProposer = proposer
 }
 
 // TitleGenerator returns the session title generator.

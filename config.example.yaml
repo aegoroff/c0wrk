@@ -1268,8 +1268,25 @@ orchestration:
 #   off                    — the verifier is disabled; the loop relies solely
 #                            on the agent's own declare_goal_status verdict.
 #
+# The suggest section controls the goal-mode suggestion gate: when a FRESH
+# task's first message is routed, a one-shot classifier judges whether goal
+# mode is obviously the better fit for the request and, when it is, offers to
+# activate it before the task starts. Declining suppresses further suggestions
+# for the rest of the session. Goal mode itself remains always available via
+# the explicit toggle or a leading /goal.
+#
+#   enabled        (default true)  — master gate for the suggestion feature.
+#   min_complexity (default 2)     — routing-complexity floor below which the
+#                                    classifier is never consulted (0 = use
+#                                    the default; complexity-1 messages such
+#                                    as greetings or factual questions can
+#                                    never be goals).
+#
 # goal_loop:
 #   verification: independent
+#   suggest:
+#     enabled: true
+#     min_complexity: 2
 
 # ---------------------------------------------------------------------------
 # Workspace Ignore Files (.gitignore / .aiignore)

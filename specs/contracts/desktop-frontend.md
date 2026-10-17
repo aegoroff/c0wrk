@@ -320,6 +320,8 @@ System-introspection RPCs that share one house rule: "the probe does not exist h
 | --------------- | --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `ConfirmGoal`   | sessionID, requestID, condition, verify, verificationMode | error   | Approve a proposed goal (optionally with edits). `verificationMode` (`executable`/`re_derivation`) overrides the derivation-chosen mode. Resolves the pending `goal_proposal` action          |
 | `CancelGoal`    | sessionID, requestID                    | error   | Cancel a proposed goal                                                                               |
+| `AcceptGoalSuggestion` | sessionID, requestID             | error   | Accept a goal-mode suggestion: the blocked gate unblocks and the task enters the goal loop (routing already established) before any work starts. Resolves the pending `goal_suggestion` action |
+| `DeclineGoalSuggestion` | sessionID, requestID            | error   | Decline a goal-mode suggestion: the plain run continues and the session suppresses further suggestions. Resolves the pending `goal_suggestion` action |
 
 > Pause/resume is a **session-level** control (not goal-specific): see the Session table below for `PauseSession`/`ResumeSession`.
 
