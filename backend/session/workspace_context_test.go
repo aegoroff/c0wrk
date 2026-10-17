@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -78,5 +79,24 @@ func TestSessionContextsSeparateGitFocus(t *testing.T) {
 	}
 	if binding.WorkspacePath == root {
 		t.Fatal("focus changed execution binding")
+	}
+}
+
+// TestSessionContextsAcceptsManagedTarget pins that a Git-panel target naming a
+// NEW-container managed tree is accepted: recognition is project-scoped, so it
+// is not gated on the legacy container. Before the fix the target was derived
+// through ManagedWorktreePath and any new-container target was rejected.
+func TestSessionContextsAcceptsManagedTarget(t *testing.T) {
+	root := t.TempDir()
+	binding := managedTestBinding(t, root, "managed", "topic")
+	info := SessionInfo{ProjectID: testProjectID, WorkspaceBinding: binding}
+	managed := filepath.Join(t.TempDir(), testProjectID, "worktrees", "other")
+	target := GitPanelTarget{ProjectID: testProjectID, WorkspacePath: managed}
+	contexts, err := ResolveSessionContexts(info, root, "", &target)
+	if err != nil {
+		t.Fatalf("ResolveSessionContexts(managed target) = %v, want success", err)
+	}
+	if contexts.GitPanel.WorkspacePath != managed {
+		t.Fatalf("git panel target = %q, want %q", contexts.GitPanel.WorkspacePath, managed)
 	}
 }

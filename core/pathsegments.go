@@ -44,6 +44,19 @@ const EmbeddedModelRelativePath = "models/bonsai-2-27b"
 // agree on one literal — mirroring SkillsRelativePath.
 const WorktreesRelativePath = ".worktrees"
 
+// ProjectWorktreesSegment is the directory name of a project-scoped managed
+// worktree container: <base>/<projectID>/ProjectWorktreesSegment/<name>, where
+// <base> is the app-data projects directory (or its configured override).
+// backend/config.NewManagedWorktreesDir constructs it. It is deliberately
+// distinct from the legacy checkout-local WorktreesRelativePath (".worktrees"):
+// the project-id path segment anchors ownership of a DURABLE recorded path
+// independently of the mutable ".c0wrk-worktree-repository" marker file, so a
+// binding stays recognizable after the marker or the app-data container is
+// removed. Shared between core's ownership recognition and backend/config's
+// container constructor so the two layers agree on one literal — mirroring
+// SkillsRelativePath.
+const ProjectWorktreesSegment = "worktrees"
+
 // GitSafeHooksRelativePath is the relative path, within the c0wrk default
 // agent directory, of the empty directory every git invocation points at via
 // "-c core.hooksPath=<dir>" (see internal/sysproc.GitCmd). Hooks from the

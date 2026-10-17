@@ -186,8 +186,11 @@ Every session carries a persisted, immutable workspace binding
 
 - `local` — the project checkout; execution path follows the project's
   current registered root.
-- `managed_worktree` — a managed git worktree under
-  `<repo>/.worktrees/<name>` with the branch pinned at selection; since
+- `managed_worktree` — a managed git worktree at its durable persisted path
+  (new default: `~/.c0wrk/projects/<project-id>/worktrees/<name>`;
+  `git.worktrees_root` overrides the projects base only for fresh trees;
+  legacy `<repo>/.worktrees/<name>` paths remain unchanged), with the branch
+  pinned at selection; since
   ADR-082 several sessions may share one tree (the release refcount is keyed
   by the globally unique tree name, across project rows).
 - `nil` — CHAT (No Project) sessions keep their per-session workspace under

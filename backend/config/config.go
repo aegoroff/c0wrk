@@ -201,6 +201,9 @@ type NotificationsConfig struct {
 }
 
 type GitConfig struct {
+	// WorktreesRoot is a config-only base directory for NEW managed trees.
+	// Empty selects <agentDir>/projects; each project uses <base>/<id>/worktrees.
+	WorktreesRoot string `yaml:"worktrees_root,omitempty"`
 	// AutoFetch is the master gate for ALL automatic fetch triggers: app
 	// startup, project switch, window focus, and the periodic ticker. It is
 	// a pointer-bool so callers can distinguish "unset" (defaults to true)
@@ -3140,6 +3143,9 @@ func Save(cfg *Config, path string) error {
 
 // validate checks that the configuration is valid.
 func validate(cfg *Config) error {
+	if cfg.Git.WorktreesRoot != "" && (!filepath.IsAbs(cfg.Git.WorktreesRoot) || filepath.Clean(cfg.Git.WorktreesRoot) != cfg.Git.WorktreesRoot) {
+		return errors.New("git.worktrees_root must be an absolute clean path")
+	}
 	// Validate default_model
 	if cfg.LLM.DefaultModel == "" {
 		return errors.New("llm.default_model is not set")

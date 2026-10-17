@@ -123,15 +123,33 @@ func NormalizeWorkspaceBinding(projectID, repoRoot string, binding *WorkspaceBin
 		}
 		b.WorkspacePath = repoRoot
 	case WorkspaceManagedWorktree:
-		// The execution path is derived from the project root and the tree
-		// name (containment enforced by ManagedWorktreePath), never trusted
-		// from the stored copy: the tree is recreated at the derived location
-		// on restore, so a stale or tampered stored path must not redirect it.
-		expected, err := config.ManagedWorktreePath(repoRoot, b.WorktreeName)
+		// A managed path is durable identity, not a view of current config.
+		// An EMPTY path is a pre-durable row (or a not-yet-provisioned
+		// proposal): derive the historical checkout-local location from the
+		// name alone. Identity validation is lexical on purpose — inspecting
+		// the legacy container here would let a stray object at
+		// <repo>/.worktrees/<name> invalidate a healthy tree that actually
+		// lives in a different (app-data / marked) container.
+		//
+		// A RECORDED path is validated against the owning project: it must be
+		// this repository's legacy or marked container, or the project-scoped
+		// "<base>/<projectID>/worktrees" layout — independent of the creation
+		// root and of the repository marker's presence, so a durable binding
+		// stays decodable after the marker or the app-data container is
+		// removed.
+		var err error
+		if b.WorkspacePath != "" {
+			var name string
+			name, err = config.ManagedWorktreeNameFromPathProject(repoRoot, projectID, b.WorkspacePath)
+			if err == nil && name != b.WorktreeName {
+				err = errors.New("managed worktree path does not match its name")
+			}
+		} else {
+			b.WorkspacePath, err = config.ManagedWorktreeLegacyPath(repoRoot, b.WorktreeName)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("invalid worktree identity: %w", err)
 		}
-		b.WorkspacePath = expected
 		if err := validatePinnedBranch(b.Branch); err != nil {
 			return nil, err
 		}

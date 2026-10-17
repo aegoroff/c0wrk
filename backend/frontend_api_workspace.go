@@ -82,6 +82,11 @@ func (f *FrontendAPI) resolveWorkspacePath(filePath string) (absPath, absRoot st
 	}
 	ok, err := config.IsWithinPath(absRoot, absPath)
 	if err != nil || !ok {
+		if projectID != project.NoProjectID {
+			if tree, managed := config.ManagedWorktreeRootForPath(absRoot, absPath); managed {
+				return absPath, tree, nil
+			}
+		}
 		// Path is outside the project workspace — check if it falls within
 		// session infrastructure directories (plans/, temp/) under the
 		// project's data directory (~/.c0wrk/projects/<projectID>/).
@@ -273,7 +278,8 @@ func (f *FrontendAPI) GetGitStatus(dirPath string) (map[string]GitStatusEntry, e
 				focusOK = false
 			}
 		}
-		if !focusOK {
+		_, managed := config.ManagedWorktreeRootForPath(absRoot, absDir)
+		if !focusOK && !managed {
 			return nil, errors.New("path outside project workspace")
 		}
 	}
@@ -489,7 +495,11 @@ func (f *FrontendAPI) GetFileDiff(filePath string) (string, error) {
 		return "", fmt.Errorf("failed to check path containment: %w", err)
 	}
 	if !ok {
-		return "", nil
+		if tree, managed := config.ManagedWorktreeRootForPath(absRoot, absPath); managed {
+			absRoot = tree
+		} else {
+			return "", nil
+		}
 	}
 
 	// Diff in the repository that OWNS the file, not the project checkout:
@@ -563,7 +573,11 @@ func (f *FrontendAPI) ListDirectory(dirPath string, recursive bool) ([]FileNode,
 	}
 	ok, err := config.IsWithinPath(absRoot, absDir)
 	if err != nil || !ok {
-		return nil, errors.New("path outside project workspace")
+		if tree, managed := config.ManagedWorktreeRootForPath(absRoot, absDir); projectID != project.NoProjectID && managed {
+			absRoot = tree
+		} else {
+			return nil, errors.New("path outside project workspace")
+		}
 	}
 
 	// No Project: enforce that session paths follow the

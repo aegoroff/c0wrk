@@ -1721,6 +1721,19 @@ orchestration:
 #   # (startup, switch, focus) stay on. An unparseable value falls back to
 #   # the default.
 #   auto_fetch_interval: "2m"
+#   # Config-only base for NEW managed worktrees (no settings UI).
+#   # Empty/unset: ~/.c0wrk/projects/<project-id>/worktrees/<name>.
+#   # Override: <worktrees_root>/<project-id>/worktrees/<name>.
+#   # Use an absolute clean path, e.g. /Volumes/Fast/c0wrk-projects
+#   # (Windows: 'D:\c0wrk-projects'). No ~ or ${VAR} expansion.
+#   # Existing operator/system symlink prefixes are resolved at provisioning;
+#   # the project/container/tree descendants must be real directories.
+#   # The resolved container must be outside (and not contain) the checkout.
+#   # Restart after editing. Applies ONLY to fresh trees, including forks and
+#   # Git-panel branch-in-worktree creation. Existing trees are never moved;
+#   # adoption/restore/recreation/release keep their original paths, including
+#   # legacy <repo>/.worktrees/<name>. No migration or directory scan/move.
+#   worktrees_root: ""
 
 # ---------------------------------------------------------------------------
 # Model Profiles (model_profiles)

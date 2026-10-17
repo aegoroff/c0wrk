@@ -2,7 +2,6 @@ package session
 
 import (
 	"errors"
-	"path/filepath"
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
@@ -33,11 +32,10 @@ func ResolveSessionContexts(info SessionInfo, repositoryPath, chatWorkspace stri
 		return nil, errors.New("git panel target belongs to another project")
 	}
 	if target.WorkspacePath != repositoryPath {
-		derived, err := config.ManagedWorktreePath(repositoryPath, filepath.Base(target.WorkspacePath))
-		if err != nil {
-			return nil, err
-		}
-		if derived != target.WorkspacePath {
+		// A target is the project checkout or one of the project's managed
+		// trees. Recognition is project-scoped so a new-container tree is
+		// accepted whether or not its repository marker is present.
+		if _, err := config.ManagedWorktreeNameFromPathProject(repositoryPath, info.ProjectID, target.WorkspacePath); err != nil {
 			return nil, errors.New("git panel target is not a project checkout or managed tree")
 		}
 	}
