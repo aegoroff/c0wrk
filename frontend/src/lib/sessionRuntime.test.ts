@@ -488,6 +488,70 @@ describe('reconcileRuntimeStatus', () => {
     expect(useChatStore.getState().activityStatus[SESSION]).toBeUndefined()
     expect(useChatStore.getState().streamingText[SESSION]).toBeUndefined()
   })
+
+  it('flagsSnapshotReadAt: an activation landing during the load is never reverted by the snapshot', () => {
+    fixedRuntimeClock()
+    // The load effect started at 999_000; the user sent a message while the
+    // history RPC was in flight — the optimistic activation stamped
+    // taskFlagsEventAt at 1_000_000. The status RPC was READ at 1_000_500
+    // (after the send) but the backend had not activated the session yet when
+    // it was handled, so the snapshot still claims active=false. Guarding the
+    // flags against the LOAD START (not the late read) must skip the flag
+    // application: reverting here would settle the live turn's work block to
+    // `interrupted` while the loop keeps streaming.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: false, has_unfinished_task: false, paused: false },
+      1_000_500,
+      999_000,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(true)
+    // The rest of the snapshot still applies: the flag guard is scoped to the
+    // flags only (no live activity event intervened, so the label comes from
+    // the snapshot).
+    expect(useChatStore.getState().activityStatus[SESSION]).toBeUndefined()
+  })
+
+  it('flagsSnapshotReadAt: a live terminal clear during the load still beats an active snapshot', () => {
+    fixedRuntimeClock()
+    // Mirror direction: the task settled live during the load (the terminal
+    // event cleared the flag at 1_000_000); a snapshot read at 1_000_500 that
+    // still says active=true must not resurrect it.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+    useChatStore.getState().setTaskActive(SESSION, false)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: true, has_unfinished_task: false, paused: false },
+      1_000_500,
+      999_000,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
+
+  it('without flagsSnapshotReadAt the flag guard defaults to the snapshot read (behavior unchanged)', () => {
+    fixedRuntimeClock()
+    // The legacy contract: only a flag write NEWER than the snapshot read
+    // wins. A stamp older than the read is the snapshot's business — this is
+    // what makes the plain switch-time reconcile authoritative for flags when
+    // no live transition intervened.
+    useChatStore.setState({ taskFlagsEventAt: {} })
+    useChatStore.getState().setTaskActive(SESSION, true)
+
+    reconcileRuntimeStatus(
+      SESSION,
+      { active: false, has_unfinished_task: false, paused: false },
+      1_000_500,
+    )
+
+    expect(useChatStore.getState().taskActive[SESSION]).toBe(false)
+  })
 })
 
 describe('reconcileRuntimeStatus → live unfinished-task overlay', () => {

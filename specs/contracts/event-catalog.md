@@ -166,7 +166,7 @@ See [../domains/goal-mode.md](../domains/goal-mode.md).
 
 | Event Type      | Payload                     | Handler Hook       | Description              |
 | --------------- | --------------------------- | ------------------ | ------------------------ |
-| `step_start`    | `{step_num}`                | useLifecycleEvents | ReAct loop step started  |
+| `step_start`    | `{step_num}`                | useLifecycleEvents | A step started — emitted by every real executor loop: the main ReAct loop (one per executor step), E2S turns (one per `core/e2s/loop.go` turn), and plan-scoped emitter copies carrying plan-step/subagent work (`WithPlanStepID`); all of them run only while the session's task is active, and after a terminal/pause transition none is running to emit one. Also re-asserts `chatStore.taskActive` when it is not set (stamping `taskFlagsEventAt`): a step start is live proof the session's task runs, so a stale-false flag — a runtime-status snapshot that reverted an optimistic send activation mid-run — heals at the next step instead of settling the live turn's work block to `interrupted` while the loop keeps streaming. One-directional: pause/terminal events own the false direction (a stopped loop emits no `step_start`), and background sessions never run this handler (the watcher subscribes only terminal/pause/resume/HITL/goal events) |
 | `step_complete` | `{step_num, duration (ms)}` | useLifecycleEvents | ReAct loop step finished |
 | `finishing`     | `{step_num, summary}`       | useLifecycleEvents | Agent called finish tool |
 

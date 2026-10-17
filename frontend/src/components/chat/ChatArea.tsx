@@ -176,7 +176,7 @@ export function ChatArea() {
       // persisted (otherwise they reappear on the next reload).
       const staleResolved: ChatMessageUI[] = []
       if (status) {
-        for (const msg of reconcileRuntimeStatus(activeSessionId, status, statusReadAt)) staleResolved.push(msg)
+        for (const msg of reconcileRuntimeStatus(activeSessionId, status, statusReadAt, loadStartedAt)) staleResolved.push(msg)
         // Align paused/interrupted delegate & plan-step blocks with the durable
         // work-unit snapshot (rendered via groupMessages). Runs AFTER the
         // history merge so the blocks exist to be corrected. statusReadAt
