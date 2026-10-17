@@ -272,6 +272,11 @@ type Service struct {
 	// instant — exactly as the pre-park code observed the old fields.
 	current *projectState
 
+	// indexAvailability is a metadata-only snapshot for UI status. Reading it
+	// must never wait for mu: indexing holds that lock across embedding and
+	// persistence, while project/session focus changes need status immediately.
+	indexAvailability atomic.Uint32
+
 	// parked is the LRU list of recently-parked project states, oldest
 	// first (parked[0] is the eviction victim). Guarded by mu. Bounded by
 	// parkCapacity; when parkCapacity <= 0 parking is disabled and this stays
@@ -424,6 +429,10 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	// current starts as an empty in-memory state so every accessor (including
 	// the lock-free GetCollection/GetDB) is safe before the first SetProject.
 	s.current = &projectState{}
+	// Publish the initial (empty) snapshot explicitly: every later mutation of
+	// s.current's index handles publishes, and the lock-free UI status reader
+	// must not rely on the zero value happening to match the empty state.
+	s.publishIndexAvailabilityLocked()
 	s.openCond = sync.NewCond(&s.mu)
 	if cfg.MaxFileSize > 0 {
 		s.maxFileSize = cfg.MaxFileSize
@@ -499,6 +508,7 @@ func (s *Service) SetProject(projectID, fullPath string, embeddingCachePaths ...
 	// LIFO: the gen-scoped applier runs first (lock still held), then the
 	// pending count is settled, then the lock is released.
 	defer s.mu.Unlock()
+	defer s.publishIndexAvailabilityLocked()
 	defer s.finishOpenLocked()
 	defer s.applyPendingNoProjectResetForGenLocked(gen)
 
@@ -744,6 +754,10 @@ func (s *Service) resetForNoProjectLocked(projectID string) {
 	ps := &projectState{projectID: projectID}
 	ps.db = chromem.NewDB()
 	s.current = ps
+	// Publish the freshly installed empty state explicitly. This path is also
+	// reached from the background No Project applier (applyPendingNoProjectReset
+	// -Locked), which has no SetProject defer to publish for it.
+	s.publishIndexAvailabilityLocked()
 	s.logger.Info("project set for vector index", "projectID", projectID)
 }
 
@@ -772,6 +786,7 @@ func (s *Service) parkCurrentLocked() {
 	// SetProject assigns the incoming state. Never leave s.current nil: the
 	// lock-free accessors do not take mu and would fault.
 	s.current = &projectState{}
+	s.publishIndexAvailabilityLocked()
 	if ps == nil {
 		return
 	}
@@ -904,6 +919,9 @@ func (s *Service) closeStateLocked(ps *projectState) {
 	}
 	ps.contentlessCh = nil
 	ps.currentBranch = ""
+	if ps == s.current {
+		s.publishIndexAvailabilityLocked()
+	}
 }
 
 // releaseBranchResidentsLocked drops only the ACTIVE BRANCH's in-memory
@@ -932,6 +950,7 @@ func (s *Service) releaseBranchResidentsLocked() {
 	}
 	s.current.db = nil
 	s.current.collection = nil
+	s.publishIndexAvailabilityLocked()
 }
 
 // evictLocked drops a parked state to make room in the LRU: it flushes the
@@ -1212,6 +1231,31 @@ func (s *Service) GetCollection() *chromem.Collection {
 	return ps.collection
 }
 
+// IndexAvailability returns the last published (vector, lexical) availability
+// snapshot without acquiring the service lock or exposing live index handles.
+// It is UI metadata only, not a readiness or authorization check for searches.
+func (s *Service) IndexAvailability() (hasVector, hasLexical bool) {
+	flags := s.indexAvailability.Load()
+	return flags&1 != 0, flags&2 != 0
+}
+
+// publishIndexAvailabilityLocked publishes both flags atomically. Caller holds
+// s.mu; the sole exception is NewService, which calls it while the service is
+// still unshared (no other goroutine can observe the field yet). Only lifecycle
+// transitions change availability, not document writes.
+func (s *Service) publishIndexAvailabilityLocked() {
+	var flags uint32
+	if s.current != nil {
+		if s.current.collection != nil {
+			flags |= 1
+		}
+		if s.current.lexical != nil {
+			flags |= 2
+		}
+	}
+	s.indexAvailability.Store(flags)
+}
+
 // GetLexical returns the current lexical index (may be nil for in-memory
 // mode or before a branch is opened).
 func (s *Service) GetLexical() lexical.Index {
@@ -1289,6 +1333,11 @@ func (s *Service) DeleteProjectData(fullPath string) error {
 		// directory that no longer exists. The empty placeholder mirrors
 		// parkCurrentLocked's reset state and is never parked or restorable.
 		s.current = &projectState{}
+		// Publish the now-empty snapshot explicitly. closeStateLocked already
+		// published (it nil'd the handles), but this reset is the state the
+		// lock-free UI reader must observe, so make it explicit rather than
+		// leaning on the two flags coinciding.
+		s.publishIndexAvailabilityLocked()
 	}
 	if len(s.parked) > 0 {
 		kept := s.parked[:0]
