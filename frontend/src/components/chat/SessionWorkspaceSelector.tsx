@@ -170,6 +170,7 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
 
   return (
     <div className="flex items-center gap-1">
+      {preparingWorktree && <WorktreePreparingIndicator />}
       <DropdownMenu>
         <DropdownMenuTrigger asChild disabled={locked}>
           <button
@@ -219,7 +220,6 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
           )}
         </DropdownMenuContent>
       </DropdownMenu>
-      {preparingWorktree && <WorktreePreparingIndicator />}
     </div>
   )
 }
