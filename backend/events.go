@@ -238,3 +238,7 @@ const EventPlanApprovalResponse = "plan_approval_response"
 // confirms (optionally with edits), asks for clarification, or cancels a
 // proposed goal awaiting sign-off.
 const EventGoalProposalResponse = "goal_proposal_response"
+
+// EventGoalSuggestionResponse is received from the frontend when the user
+// answers a pending goal-mode suggestion card ("accept" or "decline").
+const EventGoalSuggestionResponse = "goal_suggestion_response"

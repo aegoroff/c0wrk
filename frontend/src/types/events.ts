@@ -378,6 +378,18 @@ export interface GoalProposalData {
   readonly verification_mode?: string
 }
 
+/** Payload of the `goal_suggestion` session event, emitted when the
+ *  post-routing goal-mode suggestion gate judged a fresh task's message
+ *  obviously goal-suited and is offering to activate goal mode before the task
+ *  starts. Mirrors backend/session/events.go GoalSuggestionPayload. */
+export interface GoalSuggestionData {
+  readonly request_id: string
+  readonly session_id: string
+  /** The classifier's short user-facing explanation (in the user's language)
+   *  of WHY the request fits goal mode. */
+  readonly reason: string
+}
+
 /**
  * A single piece of evidence supporting a verdict. Mirrors the backend
  * `goal.GoalEvidence` struct. Evidence is what makes a verdict trustworthy
@@ -609,6 +621,9 @@ export interface SessionEventMap {
   readonly goal_proposal: GoalProposalData
   readonly goal_status: GoalStatusData
   readonly goal_progress: GoalProgressData
+  /** Goal-mode suggestion offer: the post-routing gate judged the fresh task
+   *  obviously goal-suited and blocks until the user answers. */
+  readonly goal_suggestion: GoalSuggestionData
   /** E2S execution-state snapshot (Σₜ): emitted per step/turn transition; the
    *  Execution State panel replaces the plan view for E2S sessions. */
   readonly e2s_state: E2SStateData
@@ -1430,6 +1445,14 @@ export function isGoalProposalData(d: unknown): d is GoalProposalData {
     && typeof d.session_id === 'string'
     && typeof d.condition === 'string'
     && typeof d.verify === 'string'
+}
+
+/** Guard for a goal_suggestion payload (distinct session event). */
+export function isGoalSuggestionData(d: unknown): d is GoalSuggestionData {
+  return isObj(d)
+    && typeof d.request_id === 'string'
+    && typeof d.session_id === 'string'
+    && typeof d.reason === 'string'
 }
 
 /** Element guard for one goal-evidence entry ({type, ref, summary}): all

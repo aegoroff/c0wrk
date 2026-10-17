@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { GoalProposalData, GoalEvidence } from '@/types/events'
+import type { GoalProposalData, GoalEvidence, GoalSuggestionData } from '@/types/events'
 
 // --- Per-session goal state shapes ---
 
@@ -67,6 +67,9 @@ interface GoalState {
   goalStatus: Record<string, string>
   /** sessionId -> a pending proposal awaiting user sign-off. */
   pendingProposal: Record<string, GoalProposalData>
+  /** sessionId -> a pending goal-mode suggestion awaiting the user's
+   *  accept/decline (the post-routing gate blocks the task until answered). */
+  pendingSuggestion: Record<string, GoalSuggestionData>
   /** sessionId -> latest mid-loop progress telemetry. */
   goalProgress: Record<string, GoalProgress>
 }
@@ -77,6 +80,8 @@ interface GoalActions {
   setGoalProgress: (sessionId: string, progress: GoalProgress) => void
   setPendingProposal: (sessionId: string, proposal: GoalProposalData) => void
   clearPendingProposal: (sessionId: string) => void
+  setPendingSuggestion: (sessionId: string, suggestion: GoalSuggestionData) => void
+  clearPendingSuggestion: (sessionId: string) => void
   /** Clear all goal state for a session (called on ClearGoal RPC). */
   clearGoal: (sessionId: string) => void
   /** Clear every session's goal state. */
@@ -105,6 +110,10 @@ export function usePendingGoalProposal(sessionId: string | null): GoalProposalDa
   return useGoalStore((s) => (sessionId ? s.pendingProposal[sessionId] : undefined))
 }
 
+export function usePendingGoalSuggestion(sessionId: string | null): GoalSuggestionData | undefined {
+  return useGoalStore((s) => (sessionId ? s.pendingSuggestion[sessionId] : undefined))
+}
+
 export function useGoalProgress(sessionId: string | null): GoalProgress | undefined {
   return useGoalStore((s) => (sessionId ? s.goalProgress[sessionId] : undefined))
 }
@@ -115,6 +124,7 @@ export const useGoalStore = create<GoalState & GoalActions>((set) => ({
   activeGoal: {},
   goalStatus: {},
   pendingProposal: {},
+  pendingSuggestion: {},
   goalProgress: {},
 
   setActiveGoal: (sessionId, goal) =>
@@ -162,19 +172,34 @@ export const useGoalStore = create<GoalState & GoalActions>((set) => ({
       return { pendingProposal: next }
     }),
 
+  setPendingSuggestion: (sessionId, suggestion) =>
+    set((s) => ({
+      pendingSuggestion: { ...s.pendingSuggestion, [sessionId]: suggestion },
+    })),
+
+  clearPendingSuggestion: (sessionId) =>
+    set((s) => {
+      if (!(sessionId in s.pendingSuggestion)) return s
+      const next = { ...s.pendingSuggestion }
+      delete next[sessionId]
+      return { pendingSuggestion: next }
+    }),
+
   clearGoal: (sessionId) =>
     set((s) => {
       const activeGoal = { ...s.activeGoal }
       const goalStatus = { ...s.goalStatus }
       const pendingProposal = { ...s.pendingProposal }
+      const pendingSuggestion = { ...s.pendingSuggestion }
       const goalProgress = { ...s.goalProgress }
       delete activeGoal[sessionId]
       delete goalStatus[sessionId]
       delete pendingProposal[sessionId]
+      delete pendingSuggestion[sessionId]
       delete goalProgress[sessionId]
-      return { activeGoal, goalStatus, pendingProposal, goalProgress }
+      return { activeGoal, goalStatus, pendingProposal, pendingSuggestion, goalProgress }
     }),
 
   clearAll: () =>
-    set({ activeGoal: {}, goalStatus: {}, pendingProposal: {}, goalProgress: {} }),
+    set({ activeGoal: {}, goalStatus: {}, pendingProposal: {}, pendingSuggestion: {}, goalProgress: {} }),
 }))

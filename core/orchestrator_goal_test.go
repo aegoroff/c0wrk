@@ -150,6 +150,12 @@ func TestBuildGoalState_CancelReturnsError(t *testing.T) {
 	if gs != nil {
 		t.Errorf("expected nil GoalState on cancel, got %+v", gs)
 	}
+	// The cancel error must be the typed sentinel: callers classify the
+	// outcome with errors.Is (a cancel is a CONTROLLED clean exit, never a
+	// derivation failure that could ride a plain-path fallback).
+	if !errors.Is(err, errGoalDerivationCancelled) {
+		t.Errorf("buildGoalState(cancel) error = %v, want errGoalDerivationCancelled (errors.Is)", err)
+	}
 }
 
 func TestBuildGoalState_UnknownDecisionReturnsError(t *testing.T) {

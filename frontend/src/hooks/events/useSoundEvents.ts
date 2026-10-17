@@ -55,6 +55,7 @@ export function classifySessionEvent(event: SessionEventKey, data: unknown): Sou
     case 'plan_review_ready':
     case 'task_failed_resumable':
     case 'goal_proposal':
+    case 'goal_suggestion':
       return 'attention'
 
     // --- error ---
@@ -117,7 +118,7 @@ export function isSessionNotificationRedundant(sessionId: string): boolean {
  * Send the system notification for a cued session event, if any.
  *
  * The notification counterpart of the sound path above: the same defensive
- * mapping (`classifyNotificationContent`), the same nine events. APPENDS the
+ * mapping (`classifyNotificationContent`), the same event set. APPENDS the
  * session name after the event title (`Event — Session name`, the app name
  * when unresolvable) so a background banner leads with WHAT happened — the
  * scannable part — and still identifies which session raised it; threads the
@@ -155,6 +156,7 @@ export const CUED_SESSION_EVENTS: readonly SessionEventKey[] = [
   'plan_review_ready',
   'task_failed_resumable',
   'goal_proposal',
+  'goal_suggestion',
 ]
 
 export function useSoundEvents(sessionId: string | null): void {

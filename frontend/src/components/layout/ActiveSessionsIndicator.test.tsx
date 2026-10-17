@@ -373,6 +373,7 @@ function pendingToolConfirm(): PendingActionsResponse {
     plan_approvals: [],
     ask_user: [],
     goal_proposals: [],
+    goal_suggestions: [],
   }
 }
 

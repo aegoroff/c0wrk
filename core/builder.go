@@ -738,6 +738,9 @@ func (b *OrchestratorBuilder) Build(
 		AgentsMDSearchPaths:     cfg.Security.AgentsMDSearchPaths,
 		GoalLoop: GoalLoopSettings{
 			Verification: cfg.GoalLoop.Verification,
+			// Suggest arrives from the config layer with Enabled already
+			// resolved from the pointer-bool (nil = on) — see ToBuilderConfig.
+			Suggest: cfg.GoalLoop.Suggest,
 		},
 		E2S: E2SSettings{
 			Enabled:                 cfg.E2S.Enabled,

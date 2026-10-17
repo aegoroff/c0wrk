@@ -388,6 +388,13 @@ export function buildHistoryId(
       const requestId = meta.request_id as string | undefined
       return requestId ? `goal-proposal-${requestId}` : `history-${dbId}`
     }
+    case 'goal_suggestion': {
+      // Mirrors the goal_proposal case: the live card
+      // (handleGoalSuggestionEvent) uses `goal-suggestion-${request_id}` so
+      // the reloaded row dedupes against it instead of rendering twice.
+      const requestId = meta.request_id as string | undefined
+      return requestId ? `goal-suggestion-${requestId}` : `history-${dbId}`
+    }
     case 'goal_status': {
       // The live handler (handleGoalStatusEvent) emits the turn-transition
       // notice with the deterministic id `goal-status-${run}-${turn}-${status}`

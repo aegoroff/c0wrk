@@ -19,6 +19,7 @@ import { AutonomyDecisionBlock } from './AutonomyDecisionBlock'
 import { ReflectionBlock } from './ReflectionBlock'
 import { PlanApprovalPanel } from './PlanApprovalPanel'
 import { GoalProposalPanel } from './GoalProposalPanel'
+import { GoalSuggestionPanel } from './GoalSuggestionPanel'
 import { ThoughtGroupBlock } from './ThoughtGroupBlock'
 import { ChecklistCard } from './ChecklistCard'
 import { BookmarkStar } from './BookmarkStar'
@@ -81,6 +82,7 @@ const renderers: Record<DisplayItemKind, ItemRenderer> = {
   memory_read: MemoryReadBlock as ItemRenderer,
   plan_review: PlanApprovalPanel as ItemRenderer,
   goal_proposal: GoalProposalPanel as ItemRenderer,
+  goal_suggestion: GoalSuggestionPanel as ItemRenderer,
   checklist: ChecklistCard as ItemRenderer,
 }
 

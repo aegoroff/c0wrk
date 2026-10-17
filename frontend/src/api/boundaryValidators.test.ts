@@ -126,6 +126,11 @@ describe('#32 getPendingActions per-element validation', () => {
       plan_approvals: [{ request_id: 'r2', plan_path: 'p', plan_content: 'c' }],
       ask_user: [{ request_id: 'r3', questions: [{ id: 'q', question: 'Q?', options: [{ label: 'A', value: 'a' }] }] }],
       goal_proposals: [{ request_id: 'r4', condition: 'c', verify: 'v' }],
+      goal_suggestions: [
+        { request_id: 'r5', reason: 'goal-shaped' },
+        { request_id: 9, reason: 'malformed entry must be dropped' },
+        null,
+      ],
     }))
     const pending = await getPendingActions('s1')
     expect(pending).not.toBeNull()
@@ -133,6 +138,7 @@ describe('#32 getPendingActions per-element validation', () => {
     expect(pending!.step_limits).toHaveLength(1)
     expect(pending!.ask_user).toHaveLength(1)
     expect(pending!.goal_proposals).toHaveLength(1)
+    expect(pending!.goal_suggestions).toEqual([{ request_id: 'r5', reason: 'goal-shaped' }])
   })
 
   it('normalizes null kinds to [] (Go nil slice) and drops malformed ask_user questions', async () => {
@@ -142,6 +148,7 @@ describe('#32 getPendingActions per-element validation', () => {
       plan_approvals: null,
       ask_user: [{ request_id: 'r3', questions: null }],
       goal_proposals: null,
+      goal_suggestions: null,
     }))
     const pending = await getPendingActions('s1')
     expect(pending).toEqual({
@@ -150,6 +157,7 @@ describe('#32 getPendingActions per-element validation', () => {
       plan_approvals: [],
       ask_user: [],
       goal_proposals: [],
+      goal_suggestions: [],
     })
   })
 })

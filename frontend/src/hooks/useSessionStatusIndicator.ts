@@ -15,7 +15,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import type { ChatMessageUI } from '@/types/messages'
 import { hasUnresolvedHITL } from '@/lib/hitlTypes'
-import { deriveSessionStatus, type SessionDisplayStatus } from '@/lib/activeSessions'
+import { deriveSessionStatus, resolveUnfinishedStatus, type SessionDisplayStatus } from '@/lib/activeSessions'
 
 // Re-exported for existing importers; the implementation lives in
 // lib/hitlTypes.ts so lib/activeSessions.ts can share it without a
@@ -94,7 +94,7 @@ export function useSessionStatusIndicator(sessionId: string | null, dbStatus = '
         if (m) messages.push(m)
       }
     }
-    return deriveSessionIndicatorStatus(isRunning, isPaused, messages, liveStatus ?? dbStatus, archived, hasPendingOverride)
+    return deriveSessionIndicatorStatus(isRunning, isPaused, messages, resolveUnfinishedStatus(liveStatus, dbStatus), archived, hasPendingOverride)
   }, [messageOrder, messageIndex, isRunning, isPaused, liveStatus, dbStatus, archived, hasPendingOverride])
 }
 
@@ -134,7 +134,7 @@ export function isSessionBusy(sessionId: string): boolean {
     hasPendingHITL: hasUnresolvedHITL(messages),
     taskActive: isRunning,
     paused: isPaused,
-    unfinishedStatus: chat.unfinishedTaskStatus[sessionId] ?? session?.unfinished_task_status ?? '',
+    unfinishedStatus: resolveUnfinishedStatus(chat.unfinishedTaskStatus[sessionId], session?.unfinished_task_status),
   })
   return status !== 'idle'
 }

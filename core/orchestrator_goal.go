@@ -126,6 +126,54 @@ func (o *Orchestrator) deriveGoal(
 	return gs, nil
 }
 
+// errGoalDerivationCancelled is returned by buildGoalState when the user
+// cancels the propose_goal card (and by the shutdown drain, which resolves a
+// pending card as "cancel" for the same "no work should continue" reason).
+// It is a CONTROLLED outcome, not a derivation failure: match it with
+// errors.Is and end the task cleanly — never fall back to executing the task
+// by other means (the user just declined the offered framing).
+var errGoalDerivationCancelled = errors.New("goal derivation cancelled by user")
+
+// derivationFailureOutcome classifies how the goal loop must treat a
+// derivation error. Pure and table-testable — this is the exact fork the
+// suggested-entry (goal-suggestion) path introduced, kept out of
+// runGoalLoopRouted so both entry modes stay honest about one behavior:
+// a USER CANCEL is always a clean exit, in BOTH entry modes — cancelling the
+// goal card after accepting a suggestion must mean the same thing as
+// cancelling one raised by an explicit goal run, never a silent plain run of
+// the whole task.
+type derivationFailureOutcome int
+
+const (
+	// derivationBubble — the wait itself was interrupted (context cancelled
+	// or deadline exceeded); the error bubbles to the caller.
+	derivationBubble derivationFailureOutcome = iota
+	// derivationCleanExit — end the task with the request acknowledged as the
+	// output (user cancel, or a genuine failure on the explicit entry, whose
+	// historical behavior this preserves).
+	derivationCleanExit
+	// derivationFallbackPlain — suggested entry + a genuine derivation
+	// failure: leave the result unbuilt so HandleMessage can fall back to the
+	// plain Conductor path (the accepted task must still get done).
+	derivationFallbackPlain
+)
+
+// classifyDerivationFailure maps a derivation error onto the outcome. The
+// user-cancel sentinel is checked BEFORE the suggested-entry fallback so a
+// cancel can never ride the fallback into a plain execution.
+func classifyDerivationFailure(derr error, fallbackOnDeriveFailure bool) derivationFailureOutcome {
+	switch {
+	case errors.Is(derr, context.Canceled) || errors.Is(derr, context.DeadlineExceeded):
+		return derivationBubble
+	case errors.Is(derr, errGoalDerivationCancelled):
+		return derivationCleanExit
+	case fallbackOnDeriveFailure:
+		return derivationFallbackPlain
+	default:
+		return derivationCleanExit
+	}
+}
+
 // capturingProposer wraps a GoalProposer and records the agent's proposal and
 // the user's response so deriveGoal can reconstruct the approved goal after the
 // Conductor run ends. It is concurrency-safe: the propose_goal tool may be
@@ -167,8 +215,10 @@ func (c *capturingProposer) outcome() (tools.GoalProposal, tools.GoalProposalRes
 // buildGoalState maps an approved goal proposal + the user's response into a
 // GoalState. On "approve" the returned GoalState prefers the user's edited
 // condition/verify over the agent's original wording (edits arrive populated
-// in the response; unedited fields fall back to the proposal). On "cancel" or
-// any non-approve decision it returns an error.
+// in the response; unedited fields fall back to the proposal). On "cancel" it
+// returns errGoalDerivationCancelled — a CONTROLLED outcome the caller matches
+// with errors.Is (a user cancel ends the task cleanly, it is not a derivation
+// failure); on any other non-approve decision it returns an untyped error.
 //
 // The budget is left unlimited here; the turn cap from config is applied when
 // the goal is activated (turn 1), not at derivation time — derivation only
@@ -210,7 +260,7 @@ func buildGoalState(proposal tools.GoalProposal, resp tools.GoalProposalResponse
 			CreatedAt:        now,
 		}, nil
 	case "cancel":
-		return nil, errors.New("goal derivation cancelled by user")
+		return nil, errGoalDerivationCancelled
 	default:
 		return nil, fmt.Errorf("goal derivation: unknown proposer decision %q", resp.Decision)
 	}
@@ -305,6 +355,35 @@ func (o *Orchestrator) runGoalLoop(
 		return nil, err
 	}
 
+	result, _, err := o.runGoalLoopRouted(ctx, message, opts, bb, availableTools, plansDir, routing, false)
+	return result, err
+}
+
+// runGoalLoopRouted is runGoalLoop's post-routing body, split out so the
+// goal-mode SUGGESTION entry (HandleMessage's post-routing gate) can enter the
+// loop with the routing decision the normal path already established — the
+// one-routing-decision-per-goal-task invariant, and no second router LLM call
+// on acceptance. The explicit goal branch keeps entering through runGoalLoop.
+//
+// fallbackOnDeriveFailure changes ONLY the genuine-derivation-failure branch
+// (a user cancel is classified BEFORE this flag and stays a clean exit in
+// both entry modes): when false (explicit entry) a failed derivation exits
+// cleanly with the conductor message as the output — the historical behavior.
+// When true (suggested entry) it returns deriveFailed=true with a nil result
+// and NO side effects beyond the routing persistence (which the plain path
+// re-applies idempotently), so HandleMessage can fall back to the plain
+// Conductor run instead of ending the just-accepted task with no work. The
+// third return is meaningful only when err == nil && result == nil.
+func (o *Orchestrator) runGoalLoopRouted(
+	ctx context.Context,
+	message string,
+	opts HandleOptions,
+	bb orchestration.Blackboard,
+	availableTools []sdktools.ToolDescriptor,
+	plansDir string,
+	routing *router.RoutingDecision,
+	fallbackOnDeriveFailure bool,
+) (result *HandleResult, deriveFailed bool, err error) {
 	// Enrich context with domain/complexity/user-skills (mirrors HandleMessage).
 	// routeAndActivateSkills already set WithActiveSkills internally; this ctx
 	// now flows into deriveGoal AND every goal turn.
@@ -346,14 +425,26 @@ func (o *Orchestrator) runGoalLoop(
 	gs, derr := o.deriveGoal(ctx, conductorMessage, bb, availableTools, deriveDeps)
 	if derr != nil {
 		o.logInfo("goal_loop: derivation failed, exiting", "error", derr)
-		if errors.Is(derr, context.Canceled) || errors.Is(derr, context.DeadlineExceeded) {
-			return nil, derr
+		switch classifyDerivationFailure(derr, fallbackOnDeriveFailure) {
+		case derivationBubble:
+			return nil, false, derr
+		case derivationFallbackPlain:
+			// Suggested entry, GENUINE failure: leave the result unbuilt (no
+			// task-outcome persist) so HandleMessage can fall back to the
+			// plain Conductor path — the user accepted the suggestion
+			// expecting the work to happen; a failed goal framing must not
+			// end the task. A user cancel never reaches this branch (the
+			// classifier routes it to a clean exit first).
+			return nil, true, nil
+		default:
+			// A user cancel of the proposal is a clean exit, not an error to
+			// bubble — in BOTH entry modes (see classifyDerivationFailure).
+			// Pass the computed routing (not nil) so finalizeResult does not
+			// clobber the routing decision persisted above — the other two
+			// goalLoopResult call sites (end of runGoalLoop /
+			// resumeGoalLoop) pass the real value.
+			return o.goalLoopResult(conductorMessage, bb, routing, goal.StatusActive, "", false, nil), false, nil
 		}
-		// A user cancel of the proposal is a clean exit, not an error to bubble.
-		// Pass the computed routing (not nil) so finalizeResult does not clobber
-		// the routing decision persisted above — the other two goalLoopResult
-		// call sites (end of runGoalLoop / resumeGoalLoop) pass the real value.
-		return o.goalLoopResult(conductorMessage, bb, routing, goal.StatusActive, "", false, nil), nil
 	}
 
 	// Resolve the budget: the per-message override sets MaxTurns when present;
@@ -401,7 +492,7 @@ func (o *Orchestrator) runGoalLoop(
 	if gs.LastVerdict != nil && gs.LastVerdict.Reason != "" {
 		out = gs.LastVerdict.Reason
 	}
-	return o.goalLoopResult(out, bb, routing, gs.Status, gs.Condition, paused, gs.LastErrorTyped), nil
+	return o.goalLoopResult(out, bb, routing, gs.Status, gs.Condition, paused, gs.LastErrorTyped), false, nil
 }
 
 // resumeGoalLoop re-enters the goal loop from a persisted, non-terminal

@@ -201,6 +201,9 @@ type NotificationsConfig struct {
 }
 
 type GitConfig struct {
+	// WorktreesRoot is a config-only base directory for NEW managed trees.
+	// Empty selects <agentDir>/projects; each project uses <base>/<id>/worktrees.
+	WorktreesRoot string `yaml:"worktrees_root,omitempty"`
 	// AutoFetch is the master gate for ALL automatic fetch triggers: app
 	// startup, project switch, window focus, and the periodic ticker. It is
 	// a pointer-bool so callers can distinguish "unset" (defaults to true)
@@ -2404,8 +2407,29 @@ type OrchestrationConfig struct {
 //     to confirm task completion before declaring success.
 //   - "off": the verifier is disabled; the loop relies solely on the agent's
 //     own declare_goal_status verdict.
+//
+// Suggest controls the goal-mode suggestion gate: after routing a FRESH
+// non-goal task's message, a one-shot classifier judges whether goal mode is
+// obviously the better fit and, when it is, the user is offered to activate it
+// before the task starts.
 type GoalLoopConfig struct {
-	Verification string `yaml:"verification"` // "independent" | "off"; default "independent"
+	Verification string            `yaml:"verification"` // "independent" | "off"; default "independent"
+	Suggest      GoalSuggestConfig `yaml:"suggest"`
+}
+
+// GoalSuggestConfig holds the goal-mode suggestion gate settings.
+type GoalSuggestConfig struct {
+	// Enabled gates the whole feature. Pointer-bool: nil (unset) defaults to
+	// true; an explicit false opts out of the suggestion gate entirely.
+	Enabled *bool `yaml:"enabled"`
+	// MinComplexity is the routing-complexity floor below which the
+	// suitability classifier is never consulted. Default 2.
+	MinComplexity int `yaml:"min_complexity"`
+}
+
+// SuggestEnabled resolves the effective feature gate: unset (nil) means on.
+func (c GoalSuggestConfig) SuggestEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // SkillsConfig holds Agent Skills discovery configuration.
@@ -3140,6 +3164,9 @@ func Save(cfg *Config, path string) error {
 
 // validate checks that the configuration is valid.
 func validate(cfg *Config) error {
+	if cfg.Git.WorktreesRoot != "" && (!filepath.IsAbs(cfg.Git.WorktreesRoot) || filepath.Clean(cfg.Git.WorktreesRoot) != cfg.Git.WorktreesRoot) {
+		return errors.New("git.worktrees_root must be an absolute clean path")
+	}
 	// Validate default_model
 	if cfg.LLM.DefaultModel == "" {
 		return errors.New("llm.default_model is not set")
@@ -3400,6 +3427,16 @@ func validate(cfg *Config) error {
 		return fmt.Errorf(
 			"goal_loop.verification %q is not valid; must be one of: independent, off",
 			cfg.GoalLoop.Verification,
+		)
+	}
+
+	// Validate goal_loop.suggest bounds. The classifier consult floor is a
+	// complexity band value ([1,5]); negative or absurd values are config
+	// mistakes, not "never suggest".
+	if cfg.GoalLoop.Suggest.MinComplexity < 0 || cfg.GoalLoop.Suggest.MinComplexity > 5 {
+		return fmt.Errorf(
+			"goal_loop.suggest.min_complexity %d is not valid; must be within [0, 5] (0 = use the default)",
+			cfg.GoalLoop.Suggest.MinComplexity,
 		)
 	}
 

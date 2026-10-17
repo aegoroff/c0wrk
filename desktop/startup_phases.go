@@ -21,6 +21,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/review"
 	"github.com/v0lka/c0wrk/backend/session"
+	core "github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/terminal"
 	"github.com/v0lka/c0wrk/core/toolmanager"
 	coretools "github.com/v0lka/c0wrk/core/tools"
@@ -514,6 +515,91 @@ type goalProposalResponse struct {
 // (event- or RPC-based). Mirrors buildPlanApprovalCallback.
 func (a *App) buildGoalProposalCallback(uiEmit func(session.Event)) coretools.GoalProposer {
 	return &goalProposerAdapter{ctx: a.wailsCtx(), app: a, uiEmit: uiEmit}
+}
+
+// goalSuggestionResponse is the user's answer to a pending goal-mode
+// suggestion card. decision is "accept" or "decline".
+type goalSuggestionResponse struct {
+	Decision string
+	// Shutdown marks the teardown drain's resolution: the app is quitting and
+	// no user answer exists. The adapter surfaces it as
+	// errGoalSuggestionShutdown so the core gate fails OPEN — an app quit is
+	// not a user decline, so session-scoped suppression must not engage.
+	Shutdown bool
+}
+
+// errGoalSuggestionShutdown is returned by the adapter when a pending
+// goal-suggestion wait was resolved by the shutdown drain instead of a user
+// answer. The core gate treats every error as fail-open (plain path, no
+// suppression); the sentinel exists so the drain can produce that outcome
+// explicitly instead of masquerading as a (false, nil) user decline.
+var errGoalSuggestionShutdown = errors.New("goal suggestion wait aborted by app shutdown")
+
+// buildGoalSuggestionCallback returns the closure that turns the orchestrator
+// gate's suggestion offer into a Wails event and waits for the frontend
+// response (event- or RPC-based). Mirrors buildGoalProposalCallback.
+func (a *App) buildGoalSuggestionCallback(uiEmit func(session.Event)) core.GoalSuggestionProposer {
+	return &goalSuggestionAdapter{ctx: a.wailsCtx(), app: a, uiEmit: uiEmit}
+}
+
+// goalSuggestionAdapter implements core.GoalSuggestionProposer, bridging the
+// orchestrator's post-routing suggestion gate to the desktop pending-action
+// flow. The call BLOCKS until the user answers — an accepted suggestion must
+// turn goal mode on before the task starts, so the gate cannot continue
+// speculatively.
+type goalSuggestionAdapter struct {
+	ctx    context.Context
+	app    *App
+	uiEmit func(session.Event)
+}
+
+func (g *goalSuggestionAdapter) ProposeGoalSuggestion(ctx context.Context, sessionID string, suggestion core.GoalSuggestion) (bool, error) {
+	if g.ctx == nil {
+		return false, errors.New("goal suggestion not available: no UI context")
+	}
+	if sessionID == "" {
+		return false, errors.New("goal suggestion not available: no session context")
+	}
+
+	requestID := uuid.New().String()
+	ch := make(chan goalSuggestionResponse, 1)
+	payload := session.GoalSuggestionPayload{
+		RequestID: requestID,
+		SessionID: sessionID,
+		Reason:    suggestion.Reason,
+	}
+	g.app.pendingGoalSuggestions.Store(requestID, &pendingGoalSuggestionEntry{
+		ch:        ch,
+		sessionID: sessionID,
+		payload:   payload,
+	})
+	// Emit through the Application's combined UI + persistence path so the
+	// goal_suggestion event survives app restarts. Fall back to the raw UI
+	// emitter when the Application is not yet initialized.
+	evt := session.Event{SessionID: sessionID, Type: "goal_suggestion", Data: payload}
+	if g.app.app != nil {
+		g.app.app.EmitSessionEvent(evt)
+	} else {
+		g.uiEmit(evt)
+	}
+
+	select {
+	case resp := <-ch:
+		if resp.Shutdown {
+			// The teardown drain resolved the card — NOT a user decline.
+			// Surface the sentinel so the gate fails open without engaging
+			// session suppression (the drain has already removed the entry,
+			// mirroring resolveGoalSuggestion for the normal branch).
+			return false, errGoalSuggestionShutdown
+		}
+		return resp.Decision == "accept", nil
+	case <-ctx.Done():
+		g.app.pendingGoalSuggestions.Delete(requestID)
+		return false, ctx.Err()
+	case <-g.ctx.Done():
+		g.app.pendingGoalSuggestions.Delete(requestID)
+		return false, g.ctx.Err()
+	}
 }
 
 // goalProposerAdapter implements tools.GoalProposer, bridging the core

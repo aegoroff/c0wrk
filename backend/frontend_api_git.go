@@ -826,7 +826,19 @@ func worktreeSlug(branch string) string {
 // or when the candidate fails the portable-identity validation (e.g. a
 // branch whose slug is a reserved Windows device name — the suffix moves it
 // off the reserved stem). Bounded: 100 candidates.
-func freeManagedTreeName(repoRoot, branch string) (string, error) {
+func freeManagedTreeName(repoRoot, branch string, container ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	trees, err := workspace.ListWorktrees(ctx, repoRoot)
+	if err != nil {
+		return "", err
+	}
+	occupied := make(map[string]bool)
+	for _, tree := range trees {
+		if tree.Kind == workspace.WorktreeManaged {
+			occupied[tree.Name] = true
+		}
+	}
 	base := worktreeSlug(branch)
 	var lastErr error
 	for n := 0; n < 100; n++ {
@@ -834,7 +846,13 @@ func freeManagedTreeName(repoRoot, branch string) (string, error) {
 		if n > 0 {
 			candidate = base + "-" + strconv.Itoa(n+1)
 		}
+		if occupied[candidate] {
+			continue
+		}
 		path, err := config.ManagedWorktreePath(repoRoot, candidate)
+		if len(container) > 0 {
+			path, err = config.WorktreePathInContainer(container[0], candidate)
+		}
 		if err != nil {
 			lastErr = fmt.Errorf("managed worktree name %q: %w", candidate, err)
 			continue
@@ -915,14 +933,22 @@ func (f *FrontendAPI) CreateBranchInWorktree(name, base string) error {
 		}
 	}
 
-	treeName, err := freeManagedTreeName(repoRoot, branchName)
+	owner, err := f.newWorktreeOwner(projectID)
+	if err != nil {
+		return err
+	}
+	probe, err := owner.NewPath(repoRoot, "probe")
+	if err != nil {
+		return err
+	}
+	treeName, err := freeManagedTreeName(repoRoot, branchName, filepath.Dir(probe))
 	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
 	defer cancel()
-	if _, err := f.worktreeOwner().ProvisionNewBranch(ctx, repoRoot, treeName, branchName, baseRef); err != nil {
+	if _, err := owner.ProvisionNewBranch(ctx, repoRoot, treeName, branchName, baseRef); err != nil {
 		return err
 	}
 

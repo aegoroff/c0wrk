@@ -43,6 +43,8 @@ interface SessionDraftState {
   draft: SessionDraft | null
   /** True while the draft's creation RPC is in flight (guards double-commit). */
   committing: boolean
+  /** Draft captured when the RPC starts; survives navigation/draft retirement. */
+  committingDraft: SessionDraft | null
   /**
    * Arm a fresh draft for a CODE project (the New Session gesture). Resets
    * any previous workspace choice — every New Session starts `local`.
@@ -64,6 +66,7 @@ interface SessionDraftState {
 export const useSessionDraftStore = create<SessionDraftState>((set) => ({
   draft: null,
   committing: false,
+  committingDraft: null,
 
   startDraft: (projectId) =>
     set({ draft: { projectId, workspace: { kind: 'local' } } }),
@@ -75,5 +78,8 @@ export const useSessionDraftStore = create<SessionDraftState>((set) => ({
 
   clearDraft: () => set({ draft: null }),
 
-  setCommitting: (committing) => set({ committing }),
+  setCommitting: (committing) => set((s) => ({
+    committing,
+    committingDraft: committing ? s.draft : null,
+  })),
 }))

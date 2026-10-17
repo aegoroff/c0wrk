@@ -26,3 +26,27 @@ func (m *Manager) ResolveGoalProposal(requestID, decision, condition, verify, ve
 	}
 	return fn(requestID, decision, condition, verify, verificationMode)
 }
+
+// SetGoalSuggestionResolver installs the callback that delivers a user
+// decision to a blocked goal-suggestion channel. Desktop wires this after its
+// pending-suggestion map is ready. Without it, ResolveGoalSuggestion is a
+// no-op (and the event-based path is the only resolution route).
+func (m *Manager) SetGoalSuggestionResolver(fn func(requestID, decision string) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.goalSuggestionResolver = fn
+}
+
+// ResolveGoalSuggestion delivers a user decision on a pending goal-mode
+// suggestion. decision is "accept" or "decline". Returns true when a pending
+// suggestion was found and resolved, false otherwise (including when no
+// resolver is wired).
+func (m *Manager) ResolveGoalSuggestion(requestID, decision string) bool {
+	m.mu.RLock()
+	fn := m.goalSuggestionResolver
+	m.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	return fn(requestID, decision)
+}

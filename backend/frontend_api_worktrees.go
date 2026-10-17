@@ -11,9 +11,9 @@
 //     the just-committed session back when the last owner's deletion removed
 //     the tree in between.
 //   - ensureManagedWorkspace (installed as the manager's WorkspaceEnsurer):
-//     lazy restore validates the stored Git identity and recreates a missing
-//     tree from the pinned branch, surfacing the data-loss warning; it never
-//     falls back to the project checkout.
+//     lazy restore recreates a missing tree from the pinned branch at the
+//     binding's recorded durable path, surfacing the data-loss warning; it
+//     never falls back to the project checkout.
 //   - ForkSession (managed source): a new tree on <branch>-fork-<short-id>
 //     created at the source's COMMITTED HEAD — uncommitted changes are
 //     explicitly not carried into the fork.
@@ -37,6 +37,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/session"
 	"github.com/v0lka/c0wrk/backend/worktrees"
+	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/workspace"
 )
 
@@ -101,6 +102,21 @@ func (f *FrontendAPI) worktreeOwner() *worktrees.Owner {
 	return worktrees.NewOwner(f.log())
 }
 
+// newWorktreeOwner samples config only for provisioning a fresh tree.
+func (f *FrontendAPI) newWorktreeOwner(projectID string) (*worktrees.Owner, error) {
+	f.configMu.RLock()
+	override := ""
+	if f.config != nil {
+		override = f.config.Git.WorktreesRoot
+	}
+	f.configMu.RUnlock()
+	container, err := config.NewManagedWorktreesDir(f.agentDir, projectID, override)
+	if err != nil {
+		return nil, err
+	}
+	return worktrees.NewOwner(f.log(), container), nil
+}
+
 // shortIdentity derives the short identity suffix (first 8 chars) used for
 // derived tree and branch names. Session ids are UUIDs, so the prefix is
 // always hex and never empty for a well-formed id.
@@ -140,12 +156,14 @@ func (f *FrontendAPI) installWorkspaceEnsurer() {
 }
 
 // ensureManagedWorkspace is the WorkspaceEnsurer installed on the session
-// manager. It validates the stored Git identity against the repository and
-// guarantees the tree exists on the pinned branch before the orchestrator is
-// built. It reports recreated=true exactly when the tree (or its stale
-// metadata) was absent and had to be recreated from the branch — uncommitted
-// data that lived only in the missing tree is unrecoverable, which the
-// manager surfaces as an explicit warning.
+// manager. The stored Git identity is already validated — the manager runs
+// NormalizeWorkspaceBinding before invoking this hook — so it guarantees the
+// tree exists on the pinned branch before the orchestrator is built, using the
+// binding's recorded durable path (or the live/historical resolution for a
+// pre-durable empty path). It reports recreated=true exactly when the tree (or
+// its stale metadata) was absent and had to be recreated from the branch —
+// uncommitted data that lived only in the missing tree is unrecoverable, which
+// the manager surfaces as an explicit warning.
 func (f *FrontendAPI) ensureManagedWorkspace(ctx context.Context, repoRoot string, binding *session.WorkspaceBinding) (bool, error) {
 	// Canonicalize the root the resolver handed back (fail-soft — see
 	// canonicalWorktreeRoot): legacy rows registered before the manager
@@ -156,26 +174,45 @@ func (f *FrontendAPI) ensureManagedWorkspace(ctx context.Context, repoRoot strin
 	if err != nil {
 		return false, fmt.Errorf("list worktrees of %s: %w", repoRoot, err)
 	}
-	// Probe with the same derived target Recreate uses: the binding's
-	// WorkspacePath was normalized by the caller against the RAW stored
-	// root, which for legacy rows differs from the canonical form git
-	// lists — FindWorktree compares lexically, so probing with the binding
-	// path would misreport an intact legacy tree as missing.
-	probePath, perr := config.ManagedWorktreePath(repoRoot, binding.WorktreeName)
-	if perr != nil {
-		return false, fmt.Errorf("derive managed worktree path for %s: %w", binding.WorktreeName, perr)
+	// The binding is already normalized (the manager runs
+	// NormalizeWorkspaceBinding before installing this ensurer), so a durable
+	// managed path is used exactly as recorded. Re-recognizing it here would
+	// re-gate restore on the container marker/legacy layout and make a healthy
+	// tree un-restorable after the marker or the app-data container is removed.
+	// Only a pre-durable row (empty path) resolves from the live list or the
+	// historical container, independent of the creation root.
+	target := canonicalWorktreeRoot(binding.WorkspacePath)
+	if target == "" {
+		target, err = owner.Path(ctx, repoRoot, binding.WorktreeName)
+		if err != nil {
+			return false, err
+		}
 	}
-	entry := workspace.FindWorktree(trees, probePath)
+	// Probe the durable path in canonical form, matching Git's listing even
+	// for legacy registrations containing an operator/system symlink.
+	entry := workspace.FindWorktree(trees, target)
 	missing := entry == nil || !entry.IsLinked() || entry.Prunable
-	if _, err := owner.Recreate(ctx, repoRoot, binding.WorktreeName, binding.Branch); err != nil {
+	if _, err := owner.RecreateAt(ctx, repoRoot, binding.WorktreeName, binding.Branch, target); err != nil {
 		return false, err
+	}
+	// Re-establish the container's ownership marker when it is absent (e.g. the
+	// app-data container was cleaned and the tree recreated here):
+	// classification keys on that marker, so a tree c0wrk has just ensured must
+	// stay recognizable as managed. Best-effort — a failure never fails the
+	// restore. The legacy checkout-local container is marker-less by design and
+	// is never marked.
+	if container := filepath.Dir(target); filepath.Base(container) == core.ProjectWorktreesSegment {
+		if err := core.MarkWorktreeContainer(repoRoot, container); err != nil {
+			f.log().Warn("could not re-establish the managed worktree container marker",
+				"repo", repoRoot, "container", container, "error", err)
+		}
 	}
 	return missing, nil
 }
 
 // CreateManagedSession creates a new CODE session bound to a managed
-// worktree under <repo>/.worktrees before any orchestrator, logger, or
-// persisted row exists (ADR-080).
+// worktree in the configured project container before any orchestrator,
+// logger, or persisted row exists (ADR-080).
 //
 // branch names the git branch the tree checks out. When createBranch is
 // true, the branch is CREATED at startPoint (empty startPoint = the
@@ -270,14 +307,21 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 		}
 	}
 
-	draft.WorkspaceBinding = binding
-	if createBranch {
-		if _, err := owner.ProvisionNewBranch(ctx, repoRoot, treeName, branch, startPoint); err != nil {
-			return nil, err
-		}
-	} else if _, err := owner.ProvisionBranch(ctx, repoRoot, treeName, branch); err != nil {
+	owner, err := f.newWorktreeOwner(projectID)
+	if err != nil {
 		return nil, err
 	}
+	draft.WorkspaceBinding = binding
+	var provisioned workspace.WorktreeInfo
+	if createBranch {
+		provisioned, err = owner.ProvisionNewBranch(ctx, repoRoot, treeName, branch, startPoint)
+	} else {
+		provisioned, err = owner.ProvisionBranch(ctx, repoRoot, treeName, branch)
+	}
+	if err != nil {
+		return nil, err
+	}
+	binding.WorkspacePath = provisioned.Path
 	info, err := f.commitManagedDraft(ctx, draft, repoRoot, treeName)
 	if err != nil {
 		return nil, err
@@ -314,13 +358,14 @@ func branchHolder(trees []workspace.WorktreeInfo, branch string) *workspace.Work
 // until restart. Nothing is compensated: the tree pre-existed with its own
 // sessions and is never touched by this creation's failures.
 func (f *FrontendAPI) adoptManagedTree(ctx context.Context, owner *worktrees.Owner, repoRoot, projectID, branch string, holder *workspace.WorktreeInfo) (*session.SessionInfo, error) {
-	if _, err := owner.Recreate(ctx, repoRoot, holder.Name, branch); err != nil {
+	if _, err := owner.Recreate(ctx, repoRoot, holder.Name, branch, holder.Path); err != nil {
 		return nil, err
 	}
 	draft := session.NewSessionDraft(projectID, &session.WorkspaceBinding{
-		Kind:         session.WorkspaceManagedWorktree,
-		WorktreeName: holder.Name,
-		Branch:       branch,
+		Kind:          session.WorkspaceManagedWorktree,
+		WorkspacePath: holder.Path,
+		WorktreeName:  holder.Name,
+		Branch:        branch,
 	})
 	info, err := f.bindAdoptedSession(ctx, owner, repoRoot, draft, holder.Name)
 	if err != nil {
@@ -481,7 +526,12 @@ func (f *FrontendAPI) forkManagedSession(ctx context.Context, src *session.Sessi
 	draft := session.NewSessionDraft(src.ProjectID, nil)
 	treeName := managedTreeName(draft.ID)
 	branch := forkBranchName(binding.Branch, draft.ID)
-	if _, err := owner.ProvisionNewBranch(provisionCtx, repoRoot, treeName, branch, sourceHead); err != nil {
+	owner, err = f.newWorktreeOwner(src.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	provisioned, err := owner.ProvisionNewBranch(provisionCtx, repoRoot, treeName, branch, sourceHead)
+	if err != nil {
 		return nil, err
 	}
 
@@ -490,9 +540,10 @@ func (f *FrontendAPI) forkManagedSession(ctx context.Context, src *session.Sessi
 		commit = f.store.ForkSessionWithBinding
 	}
 	info, err := commit(ctx, src.ID, draft.ID, &session.WorkspaceBinding{
-		Kind:         session.WorkspaceManagedWorktree,
-		WorktreeName: treeName,
-		Branch:       branch,
+		Kind:          session.WorkspaceManagedWorktree,
+		WorkspacePath: provisioned.Path,
+		WorktreeName:  treeName,
+		Branch:        branch,
 	}, cloneReview)
 	if err != nil {
 		f.compensateProvisionedTree(provisionCtx, repoRoot, treeName, "fork persistence failed")
@@ -644,7 +695,7 @@ func (f *FrontendAPI) prepareManagedTreeDeletion(ctx context.Context, id string,
 		// then discarded — re-indexed on demand). The registry release first
 		// shuts the root's live manager (closing its open chromem handles so
 		// the removal works on Windows too).
-		f.deleteWorktreeVectorIndex(repoRoot, info.ProjectID, binding.WorktreeName)
+		f.deleteWorktreeVectorIndex(repoRoot, info.ProjectID, binding.WorktreeName, binding.WorkspacePath)
 	}
 	return rowGoneProjectID, nil
 }

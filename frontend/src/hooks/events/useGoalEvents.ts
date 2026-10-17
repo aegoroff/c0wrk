@@ -18,8 +18,8 @@
 
 import { useEffect } from 'react'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isGoalProposalData, isGoalStatusData, isGoalProgressData } from '@/types/events'
-import { handleGoalProposalEvent, handleGoalStatusEvent, handleGoalProgressEvent } from './goalHandlers'
+import { isGoalProposalData, isGoalStatusData, isGoalProgressData, isGoalSuggestionData } from '@/types/events'
+import { handleGoalProposalEvent, handleGoalStatusEvent, handleGoalProgressEvent, handleGoalSuggestionEvent } from './goalHandlers'
 
 export function useGoalEvents(sessionId: string | null): void {
   useEffect(() => {
@@ -48,6 +48,14 @@ export function useGoalEvents(sessionId: string | null): void {
       onSessionEvent(sessionId, 'goal_progress', (data) => {
         if (!isGoalProgressData(data)) { reportDroppedEvent('goal_progress', data); return }
         handleGoalProgressEvent(sessionId, data)
+      }),
+    )
+
+    // --- goal_suggestion (dedicated session event) ---
+    cleanups.push(
+      onSessionEvent(sessionId, 'goal_suggestion', (data) => {
+        if (!isGoalSuggestionData(data)) { reportDroppedEvent('goal_suggestion', data); return }
+        handleGoalSuggestionEvent(sessionId, data)
       }),
     )
 

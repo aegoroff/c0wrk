@@ -325,7 +325,7 @@ describe('useBackgroundSessionWatcher', () => {
     expect(subscriptions.has('bg-1:task_complete')).toBe(true)
     expect(subscriptions.has('bg-2:task_complete')).toBe(true)
     // 13 events × 2 sessions = 26 subscriptions
-    expect(subscriptions.size).toBe(26)
+    expect(subscriptions.size).toBe(28)
   })
 
   it('resets taskActive to false on task_complete without touching the active session state', () => {
@@ -441,7 +441,7 @@ describe('useBackgroundSessionWatcher', () => {
     sessionStoreState.activeSessionId = 'active-1'
 
     useRenderWatcher()
-    expect(subscriptions.size).toBe(13)
+    expect(subscriptions.size).toBe(14)
 
     // Session completes via another path.
     chatStoreState.setTaskActive('bg-1', false)
@@ -562,7 +562,7 @@ describe('useBackgroundSessionWatcher', () => {
     useRenderWatcher()
 
     // 13 events × 2 unique sessions = 26 — the shadowed bg-1 is not counted twice.
-    expect(subscriptions.size).toBe(26)
+    expect(subscriptions.size).toBe(28)
   })
 
   // --- Sound parity: a background session gets the same audible cues the

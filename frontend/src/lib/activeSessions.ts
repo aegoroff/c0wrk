@@ -137,9 +137,31 @@ export function deriveSessionStatus(input: SessionStatusInput): SessionDisplaySt
  *  `has_unfinished_task` boolean: the list queries always SELECT both columns
  *  (backend/session/persistence.go), and the string carries strictly more
  *  information. When the string is absent (older/partial payload) an unfinished
- *  session reads idle here, matching the pre-existing contract. */
+ *  session reads idle here, matching the pre-existing contract. Delegates the
+ *  live-overlay-vs-DB resolution to {@link resolveUnfinishedStatus}, the single
+ *  implementation every status surface shares. */
 export function effectiveUnfinishedStatus(session: SessionInfo, live: LiveSessionFlags): string {
-  return live.unfinishedTaskStatus ?? session.unfinished_task_status ?? ''
+  return resolveUnfinishedStatus(live.unfinishedTaskStatus, session.unfinished_task_status)
+}
+
+/** THE single implementation of the "live chatStore overlay ?? DB snapshot"
+ *  rule a status surface colors from: the LIVE overlay wins whenever the key is
+ *  PRESENT — including an explicit `''` ("the task settled"), which overrides a
+ *  stale DB `in_progress`/`paused`/`failed` left over from a list load taken
+ *  mid-task. An ABSENT (`undefined`) live overlay means chatStore holds no live
+ *  knowledge of the session, so the DB snapshot's `unfinished_task_status`
+ *  decides.
+ *
+ *  Shared by EVERY surface that resolves an unfinished-task status —
+ *  {@link effectiveUnfinishedStatus} (the SessionInfo-level wrapper above), the
+ *  sidebar indicator + `isSessionBusy` guard (useSessionStatusIndicator) and the
+ *  chat toolbar's Resume affordance (useChatInputController) — so no two
+ *  surfaces can drift apart. */
+export function resolveUnfinishedStatus(
+  liveOverlay: string | undefined,
+  dbStatus: string | undefined,
+): string {
+  return liveOverlay ?? dbStatus ?? ''
 }
 
 /**
@@ -332,7 +354,8 @@ export function hasPendingActions(response: PendingActionsResponse | null): bool
     response.step_limits.length > 0 ||
     response.plan_approvals.length > 0 ||
     response.ask_user.length > 0 ||
-    response.goal_proposals.length > 0
+    response.goal_proposals.length > 0 ||
+    response.goal_suggestions.length > 0
   )
 }
 

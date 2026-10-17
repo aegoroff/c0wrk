@@ -41,8 +41,8 @@ const (
 	// workspace of a project). Exactly one per repository; a bare
 	// repository reports its gitdir as the main entry with Bare=true.
 	WorktreeMain WorktreeKind = "main"
-	// WorktreeManaged is a linked worktree inside the app-managed container
-	// <repoRoot>/.worktrees (session-owned trees, ADR-080).
+	// WorktreeManaged is a linked worktree in the legacy checkout-local
+	// container or a repository-marked app-data/custom container.
 	WorktreeManaged WorktreeKind = "managed"
 	// WorktreeExternal is a linked worktree outside the managed container —
 	// created by the user or other tooling, never owned by c0wrk.
@@ -337,16 +337,15 @@ func parseWorktreePorcelain(out string) ([]WorktreeInfo, error) {
 }
 
 // classifyWorktrees stamps each entry's Kind against the repository root:
-// the first (primary) entry is the main checkout; linked entries inside
-// <root>/.worktrees are managed; every other linked entry is external.
+// the first (primary) entry is the main checkout; linked entries in legacy
+// or repository-marked containers are managed; all others are external.
 func classifyWorktrees(trees []WorktreeInfo, root string) {
-	container := filepath.Join(root, core.WorktreesRelativePath)
 	for i := range trees {
 		if i == 0 {
 			trees[i].Kind = WorktreeMain
 			continue
 		}
-		if within, err := pathutil.IsWithinPath(container, trees[i].Path); err == nil && within {
+		if core.IsManagedWorktreePath(root, trees[i].Path) {
 			trees[i].Kind = WorktreeManaged
 		} else {
 			trees[i].Kind = WorktreeExternal

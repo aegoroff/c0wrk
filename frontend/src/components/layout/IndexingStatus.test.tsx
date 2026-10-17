@@ -85,4 +85,16 @@ describe('IndexingStatus — progress bar', () => {
     // No progress bar and no n/m while only opening.
     expect(() => fillElement(container)).toThrow()
   })
+
+  it('renders an honest "Index unavailable" for the terminal unavailable state (no fake bar)', () => {
+    // A failed DB open / init failure: nothing is running and nothing can be
+    // repaired by a reindex (there is no collection). The state used to fall
+    // through to the "Indexing…" 0% bar — the exact dishonesty ADR-064
+    // removed for `loading`.
+    state.status = { state: 'unavailable', progress: 0, files_indexed: 0, total_files: 0 }
+    render()
+    expect(container.textContent).toContain('Index unavailable')
+    expect(container.textContent).not.toContain('Indexing')
+    expect(() => fillElement(container)).toThrow()
+  })
 })

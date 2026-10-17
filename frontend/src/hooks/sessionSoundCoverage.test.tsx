@@ -426,6 +426,7 @@ const VALID_HITL_PAYLOADS: Record<string, unknown> = {
   step_limit: { request_id: 'r2', current_step: 25, max_steps: 25 },
   plan_review_ready: { request_id: 'r3', plan_path: '/tmp/p.md', plan_content: '# Plan' },
   goal_proposal: { request_id: 'r4', session_id: A, condition: 'finish', verify: 'tests pass' },
+  goal_suggestion: { request_id: 'r5', session_id: A, reason: 'multi-step build with a verifiable done criterion' },
 }
 
 describe('notification coverage across CHAT↔CODE toggles', () => {
@@ -473,7 +474,7 @@ describe('notification coverage across CHAT↔CODE toggles', () => {
     expect(content.title).toContain('Task completed')
   })
 
-  it('all nine cued events of a background session raise exactly one notification each', async () => {
+  it('all ten cued events of a background session raise exactly one notification each', async () => {
     seedRunning(A)
     seedRunning(B)
     await act(async () => {
@@ -500,7 +501,7 @@ describe('notification coverage across CHAT↔CODE toggles', () => {
       // One event → exactly one notification.
       expect(sendSystemNotificationMock, `event ${event}`).toHaveBeenCalledTimes(1)
     }
-    expect(CUED_SESSION_EVENTS).toHaveLength(9)
+    expect(CUED_SESSION_EVENTS).toHaveLength(10)
   })
 
   it('a background HITL event with a malformed payload sends NO notification (guard first)', async () => {
@@ -547,7 +548,7 @@ describe('notification coverage across CHAT↔CODE toggles', () => {
     expect(sendSystemNotificationMock).toHaveBeenCalledTimes(1)
   })
 
-  it('all nine cued events of the ACTIVE session raise exactly one notification each (hook path)', async () => {
+  it('all ten cued events of the ACTIVE session raise exactly one notification each (hook path)', async () => {
     seedRunning(A)
     await act(async () => {
       useSessionStore.getState().setActiveSessionId(A)

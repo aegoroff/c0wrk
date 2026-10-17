@@ -136,7 +136,7 @@ Pending actions are stored in chatStore and rendered by the PendingActionsBar co
 - Pending actions expire on task completion/cancellation
 - Native file-drop paths originate only from the validated Wails `files:dropped` event; HTML5 drag events control overlay state and suppress navigation
 - Picker and native drop share one attachment-staging/vision-filtering hook
-- The per-session `paused` flag is set by `session_paused` and cleared by `session_resumed`/`task_resumed`/`task_cancelled`; a paused session unlocks the input and shows Resume + Stop (see [rendering.md](rendering.md))
+- The per-session `paused` flag is set by `session_paused` and cleared by `session_resumed`/`task_resumed`/`task_cancelled`; it is also restored from the backend's persisted paused status on session load (the switch-time fast restore in `useTaskFlagRestore` plus ChatArea's `reconcileRuntimeStatus`), so a persisted-paused session shows Resume + Stop right after a switch/reload. The chat toolbar additionally resolves the paused state from the session's EFFECTIVE unfinished-task status (the same DB-snapshot fallback the sidebar dot / radar use), so it agrees with them even before/without the live flag. A paused session unlocks the input and shows Resume + Stop (see [rendering.md](rendering.md))
 
 ## Related Specs
 

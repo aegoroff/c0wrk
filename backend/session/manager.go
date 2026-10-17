@@ -296,6 +296,13 @@ type Manager struct {
 	// Nil (before desktop wiring) makes ResolveGoalProposal a no-op.
 	goalProposalResolver func(requestID, decision, condition, verify, verificationMode string) bool
 
+	// goalSuggestionResolver delivers a user decision to a blocked
+	// goal-suggestion channel held by the desktop layer — the same two-path
+	// funnel as goalProposalResolver (event-based handleGoalSuggestionResponse
+	// and RPC-based AcceptGoalSuggestion/DeclineGoalSuggestion).
+	// Nil (before desktop wiring) makes ResolveGoalSuggestion a no-op.
+	goalSuggestionResolver func(requestID, decision string) bool
+
 	logger *slog.Logger
 
 	// bg tracks manager-owned background goroutines so Shutdown can join them

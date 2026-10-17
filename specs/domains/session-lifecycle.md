@@ -186,8 +186,11 @@ Every session carries a persisted, immutable workspace binding
 
 - `local` — the project checkout; execution path follows the project's
   current registered root.
-- `managed_worktree` — a managed git worktree under
-  `<repo>/.worktrees/<name>` with the branch pinned at selection; since
+- `managed_worktree` — a managed git worktree at its durable persisted path
+  (new default: `~/.c0wrk/projects/<project-id>/worktrees/<name>`;
+  `git.worktrees_root` overrides the projects base only for fresh trees;
+  legacy `<repo>/.worktrees/<name>` paths remain unchanged), with the branch
+  pinned at selection; since
   ADR-082 several sessions may share one tree (the release refcount is keyed
   by the globally unique tree name, across project rows).
 - `nil` — CHAT (No Project) sessions keep their per-session workspace under
@@ -871,7 +874,7 @@ Invariants and edge cases:
 
 **Input-lock matrix (frontend)**: `computeChatInputDisabled` (pure helper, `lib/chatInputLock.ts`): input is disabled iff `compacting || pausing || isNoProject`. A running (`taskActive`) or paused session keeps the input open — running sends interject live; paused sends nudge-resume. While compacting the whole input area (editor, toolbar buttons, selector cluster, send/pause/resume) locks — with one exception: **Stop stays available** (CancelTask carries no compacting guard, and terminating the in-flight request is the one user action that helps the flow's pause-wait land; the Pause/Resume flank is hidden for the window because the flow owns the pause signal). The placeholder advertises the affordance ("your message joins the next request to the model").
 
-**Runtime status after restart / session switch:** `GetSessionRuntimeStatus` reports `Paused: true` when the resumable unfinished task is in the `"paused"` status. The frontend reconciles this on session activation (`reconcileRuntimeStatus`): it sets the `paused` flag and clears `taskActive`, and crucially does **not** inject a `task_failed_resumable` banner — a paused task resumes via the Resume button or a nudge, not a "did not finish" banner.
+**Runtime status after restart / session switch:** `GetSessionRuntimeStatus` reports `Paused: true` when the resumable unfinished task is in the `"paused"` status. The frontend reconciles this on session activation (the switch-time fast restore `useTaskFlagRestore` plus `reconcileRuntimeStatus`, sharing `applyRuntimeTaskFlags`): it sets the `paused` flag and clears `taskActive` — so the chat toolbar shows Resume rather than a plain Send — and crucially does **not** inject a `task_failed_resumable` banner — a paused task resumes via the Resume button or a nudge, not a "did not finish" banner.
 
 ### Manual Context Compaction
 

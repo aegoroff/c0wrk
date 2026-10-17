@@ -273,7 +273,7 @@ Every git RPC in this table resolves its repository root through the **Git-panel
 
 | Method           | Parameters | Returns       | Description |
 | ---------------- | ---------- | ------------- | ----------- |
-| `GetPendingActions` | sessionID  | (*PendingActionsResponse, error) | Unresolved pending actions for a session (tool confirmations, ask-user forms, step-limit/resume prompts, goal proposals) |
+| `GetPendingActions` | sessionID  | (*PendingActionsResponse, error) | Unresolved pending actions for a session (tool confirmations, ask-user forms, step-limit/resume prompts, goal proposals, goal-suggestion offers) |
 | `PickDirectory`  | —          | (string, error) | Native directory picker dialog |
 | `ConfirmExit`    | —          | error           | Close-guard answer: the user confirmed quitting despite active sessions (counterpart to the `app:exit_requested` event, see [event-catalog.md](event-catalog.md)). Arms the exit-confirmed bypass flag and triggers a graceful Wails quit, which re-enters `OnBeforeClose` (allowed through by the flag) and then runs the normal `Shutdown` sequence. Lives in `desktop/exit_guard.go`; must remain on `App` — it requires the Wails context |
 | `PickAttachmentFiles` | —     | ([]string, error) | Native multi-select file picker exposing two filters: "Supported documents" (built from `core/markitdown.SupportedExtensions()`) and "Images" (`*.png;*.jpg;*.jpeg;*.gif;*.webp`). No "All files" filter — a wildcard resolves to a dynamic UTType on macOS that corrupts the panel's content-type filter. Returns `([]string{}, nil)` on cancel. Must remain on `App` — it requires the Wails context like `PickDirectory` |
@@ -320,6 +320,8 @@ System-introspection RPCs that share one house rule: "the probe does not exist h
 | --------------- | --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `ConfirmGoal`   | sessionID, requestID, condition, verify, verificationMode | error   | Approve a proposed goal (optionally with edits). `verificationMode` (`executable`/`re_derivation`) overrides the derivation-chosen mode. Resolves the pending `goal_proposal` action          |
 | `CancelGoal`    | sessionID, requestID                    | error   | Cancel a proposed goal                                                                               |
+| `AcceptGoalSuggestion` | sessionID, requestID             | error   | Accept a goal-mode suggestion: the blocked gate unblocks and the task enters the goal loop (routing already established) before any work starts. Resolves the pending `goal_suggestion` action |
+| `DeclineGoalSuggestion` | sessionID, requestID            | error   | Decline a goal-mode suggestion: the plain run continues and the session suppresses further suggestions. Resolves the pending `goal_suggestion` action |
 
 > Pause/resume is a **session-level** control (not goal-specific): see the Session table below for `PauseSession`/`ResumeSession`.
 

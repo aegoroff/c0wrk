@@ -37,12 +37,16 @@ const (
 	IndexStateReindexing IndexState = "reindexing"
 	// IndexStateReady indicates the index is ready for queries.
 	IndexStateReady IndexState = "ready"
-	// IndexStateUnavailable indicates vector indexing is disabled for the
-	// active project because asynchronous initialization failed (e.g. the
-	// persistent DB could not be opened, or the git branch collection could
-	// not be switched). Search then returns a clean "no collection" error.
-	// It mirrors the state string the frontend already renders as dormant
-	// (see indexPhaseStatus.deriveDotStatus), so no UI changes are needed.
+	// IndexStateUnavailable indicates vector indexing is unavailable for the
+	// active project: asynchronous initialization failed (e.g. the persistent
+	// DB could not be opened, or the git branch collection could not be
+	// switched), or an indexing pass failed while no collection exists to
+	// fall back on. Search then returns a clean "no collection" error. The
+	// frontend renders the state honestly — an "Index unavailable" pill in
+	// IndexingStatus with the reindex action disabled (no busy spinner; a
+	// reindex cannot repair a missing collection) — on top of the dormant
+	// idle dots derived by indexPhaseStatus.deriveDotStatus. A branch change
+	// or project switch re-opens the collection and clears the state.
 	IndexStateUnavailable IndexState = "unavailable"
 	// IndexStateLoading indicates the branch-scoped persistent DB is being
 	// OPENED (ADR-064) and no indexing pass has started yet. It carries no
@@ -208,12 +212,21 @@ func (idx *Indexer) IndexFull(ctx context.Context, workspacePath string) (err er
 	// without SetReady(true), leaving WaitReady callers blocked forever.
 	readyGen := idx.service.MarkNotReady()
 	defer idx.service.RestoreReady(readyGen)
-	// Emit a terminal "ready" progress event on any non-nil return so the UI
-	// does not keep showing stale "indexing N/M" progress after the pass is
-	// cancelled or fails — the previous data is still queryable. On success
-	// the explicit onProgress below handles it and err stays nil.
+	// Emit a terminal progress event on any non-nil return so the UI does not
+	// keep showing stale "indexing N/M" progress after the pass is cancelled
+	// or fails. With a collection present the previous data is still
+	// queryable, so the terminal state is "ready". With NO collection (a
+	// failed branch open or init failure left nothing behind) announcing
+	// "ready" would claim queryable data that does not exist — mirror
+	// notifyInitFailure's terminal "unavailable" instead, so the pill stays
+	// honest and the reindex action stays disabled. On success the explicit
+	// onProgress below handles it and err stays nil.
 	defer func() {
 		if err != nil {
+			if idx.service.GetCollection() == nil {
+				idx.onProgress(PhaseBoth, IndexStateUnavailable, 0, 0, "")
+				return
+			}
 			idx.onProgress(PhaseBoth, IndexStateReady, 0, 0, "")
 		}
 	}()
@@ -258,12 +271,21 @@ func (idx *Indexer) IndexIncremental(ctx context.Context, workspacePath string) 
 	// without SetReady(true), leaving WaitReady callers blocked forever.
 	readyGen := idx.service.MarkNotReady()
 	defer idx.service.RestoreReady(readyGen)
-	// Emit a terminal "ready" progress event on any non-nil return so the UI
-	// does not keep showing stale "reindexing N/M" progress after the pass is
-	// cancelled or fails — the previous data is still queryable. On success
-	// the explicit onProgress below handles it and err stays nil.
+	// Emit a terminal progress event on any non-nil return so the UI does not
+	// keep showing stale "reindexing N/M" progress after the pass is
+	// cancelled or fails. With a collection present the previous data is
+	// still queryable, so the terminal state is "ready". With NO collection
+	// (a failed branch open or init failure left nothing behind) announcing
+	// "ready" would claim queryable data that does not exist — mirror
+	// notifyInitFailure's terminal "unavailable" instead, so the pill stays
+	// honest and the reindex action stays disabled. On success the explicit
+	// onProgress below handles it and err stays nil.
 	defer func() {
 		if err != nil {
+			if idx.service.GetCollection() == nil {
+				idx.onProgress(PhaseBoth, IndexStateUnavailable, 0, 0, "")
+				return
+			}
 			idx.onProgress(PhaseBoth, IndexStateReady, 0, 0, "")
 		}
 	}()
@@ -404,19 +426,23 @@ func (idx *Indexer) HandleBranchSwitch(ctx context.Context, workspacePath, newBr
 	// the worst case is one extra or one missing announcement, and that switch
 	// announces for itself.
 	//
-	// A FAILED open deliberately leaves this state in place rather than emitting
-	// a terminal one. `unavailable` is the documented terminal state for "the
-	// git branch collection could not be switched", but IndexingStatus has no
-	// `unavailable` branch and renders it as a fake "Indexing…" 0% bar — the
-	// exact dishonesty ADR-064 removed — so it is not emitted here. "Preparing
-	// index…" is the truthful non-terminal rendering (idle dots, no fraction),
-	// a reindex cannot repair a failed open anyway (there is no collection to
-	// validate or add to), and the next branch change or project switch retries.
+	// A FAILED open emits the terminal `unavailable` (below), mirroring the
+	// deferred terminal emissions of IndexFull/IndexIncremental. Leaving the
+	// announcement in place instead parked the status bar on "Preparing
+	// index…" until the next branch change or project switch — for a user who
+	// does not switch, the whole session, with the search panel claiming
+	// results will "appear automatically when ready". The historical reason
+	// not to emit `unavailable` (IndexingStatus rendered it as a fake
+	// "Indexing…" 0% bar) is gone: the pill now renders `unavailable` honestly
+	// and the reindex action is disabled under it (a reindex cannot repair a
+	// failed open anyway — there is no collection to validate or add to). The
+	// next branch change or project switch retries.
 	if idx.service.CurrentBranchName() != newBranch || idx.service.GetCollection() == nil {
 		idx.onProgress(PhaseOpen, IndexStateLoading, 0, 0, "")
 	}
 
 	if err := idx.service.SwitchBranch(ctx, newBranch); err != nil {
+		idx.onProgress(PhaseBoth, IndexStateUnavailable, 0, 0, "")
 		return false, fmt.Errorf("switching branch to %q: %w", newBranch, err)
 	}
 

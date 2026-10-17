@@ -12,6 +12,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useExperimentalStore } from '@/stores/experimentalStore'
+import { WorktreePreparingIndicator } from './WorktreePreparingIndicator'
 
 /**
  * The chat toolbar's session-workspace selector (ADR-080 draft UX).
@@ -53,6 +54,7 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
   const isNoProject = useProjectStore(selectIsNoProject)
   const draft = useSessionDraftStore((s) => s.draft)
   const committing = useSessionDraftStore((s) => s.committing)
+  const committingDraft = useSessionDraftStore((s) => s.committingDraft)
   // Paired per the store contract: a stale repo answer from a previously
   // active project must never show the `branch…` entry here.
   const isGitRepo = useGitPanelStore(
@@ -148,6 +150,9 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
     draft !== null && draft.projectId === activeProjectId ? draft.workspace : { kind: 'local' as const }
   const draftLabel = workspace.kind === 'branch' ? workspace.branch : 'local'
   const locked = disabled || committing
+  const preparingWorktree = committing
+    && committingDraft?.projectId === activeProjectId
+    && committingDraft.workspace.kind === 'branch'
 
   const chooseLocal = () => {
     // A bare no-session state already means "next session is local" — only
@@ -164,54 +169,57 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
   }
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={locked}>
-        <button
-          type="button"
-          disabled={locked}
-          aria-label="New session workspace"
-          data-testid="session-workspace-selector"
-          className={cn(
-            'flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-input bg-background',
-            'hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors',
-            'max-w-[200px] truncate disabled:opacity-50 disabled:cursor-not-allowed',
-          )}
-          title={
-            workspace.kind === 'branch'
-              ? `New session on managed worktree branch ${workspace.branch}`
-              : 'New session in the project working tree'
-          }
-        >
-          {workspace.kind === 'branch' ? (
-            <GitBranch className="size-3 shrink-0" />
-          ) : (
-            <FolderTree className="size-3 shrink-0" />
-          )}
-          <span className="truncate">{draftLabel}</span>
-          <svg className="size-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
-      </DropdownMenuTrigger>
+    <div className="flex items-center gap-1">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild disabled={locked}>
+          <button
+            type="button"
+            disabled={locked}
+            aria-label="New session workspace"
+            data-testid="session-workspace-selector"
+            className={cn(
+              'flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-input bg-background',
+              'hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors',
+              'max-w-[200px] truncate disabled:opacity-50 disabled:cursor-not-allowed',
+            )}
+            title={
+              workspace.kind === 'branch'
+                ? `New session on managed worktree branch ${workspace.branch}`
+                : 'New session in the project working tree'
+            }
+          >
+            {workspace.kind === 'branch' ? (
+              <GitBranch className="size-3 shrink-0" />
+            ) : (
+              <FolderTree className="size-3 shrink-0" />
+            )}
+            <span className="truncate">{draftLabel}</span>
+            <svg className="size-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+        </DropdownMenuTrigger>
 
-      <DropdownMenuContent aria-label="New session workspace" align="start" className="min-w-56">
-        <DropdownMenuItem
-          data-testid="workspace-option-local"
-          onSelect={chooseLocal}
-          aria-current={workspace.kind === 'local' ? 'true' : undefined}
-        >
-          <FolderTree className="size-3.5" />
-          <span className="flex-1">local</span>
-          <span className="text-xs text-muted-foreground">project working tree</span>
-        </DropdownMenuItem>
-        {isGitRepo && (
-          <DropdownMenuItem data-testid="workspace-option-branch" onSelect={openDraftBranchPicker}>
-            <GitBranch className="size-3.5" />
-            <span className="flex-1">branch…</span>
-            <span className="text-xs text-muted-foreground">managed worktree</span>
+        <DropdownMenuContent aria-label="New session workspace" align="start" className="min-w-56">
+          <DropdownMenuItem
+            data-testid="workspace-option-local"
+            onSelect={chooseLocal}
+            aria-current={workspace.kind === 'local' ? 'true' : undefined}
+          >
+            <FolderTree className="size-3.5" />
+            <span className="flex-1">local</span>
+            <span className="text-xs text-muted-foreground">project working tree</span>
           </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {isGitRepo && (
+            <DropdownMenuItem data-testid="workspace-option-branch" onSelect={openDraftBranchPicker}>
+              <GitBranch className="size-3.5" />
+              <span className="flex-1">branch…</span>
+              <span className="text-xs text-muted-foreground">managed worktree</span>
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {preparingWorktree && <WorktreePreparingIndicator />}
+    </div>
   )
 }
