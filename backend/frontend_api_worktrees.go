@@ -216,8 +216,12 @@ func (f *FrontendAPI) ensureManagedWorkspace(ctx context.Context, repoRoot strin
 //
 // branch names the git branch the tree checks out. When createBranch is
 // true, the branch is CREATED at startPoint (empty startPoint = the
-// repository's current HEAD) instead of being required to already exist; an
-// empty branch with createBranch derives "session-<short id>".
+// repository's current HEAD) when it does not exist yet — that is how a
+// remote-tracking pick lands: the draft records branch "x" with start
+// point "origin/x", and provisioning creates local x from that remote
+// ref. An ALREADY EXISTING branch is never re-created: the request then
+// behaves exactly like an existing-branch pick (git DWIM semantics), so a
+// colliding create can never reset or fork the branch under the user.
 //
 // A branch can be checked out in at most one worktree, so an existing holder
 // decides what "create a session on this branch" means (the shared-tree
@@ -282,8 +286,24 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
 	defer cancel()
 
+	// DWIM (git switch semantics): a create request naming an ALREADY
+	// EXISTING local branch behaves exactly like an existing-branch pick —
+	// the branch is reused when it is free, shared through its managed
+	// tree, served by the checkout fallback, or refused with the typed
+	// busy error — never re-created. This is what a remote-tracking pick
+	// (branch "x" from start point "origin/x") lands on when a local x is
+	// already present.
+	createExisting := false
+	if createBranch {
+		exists, err := workspace.BranchExists(ctx, repoRoot, branch)
+		if err != nil {
+			return nil, fmt.Errorf("checking branch %s: %w", branch, err)
+		}
+		createExisting = exists
+	}
+
 	owner := f.worktreeOwner()
-	if !createBranch {
+	if !createBranch || createExisting {
 		trees, err := owner.List(ctx, repoRoot)
 		if err != nil {
 			return nil, fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
@@ -313,7 +333,7 @@ func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, sta
 	}
 	draft.WorkspaceBinding = binding
 	var provisioned workspace.WorktreeInfo
-	if createBranch {
+	if createBranch && !createExisting {
 		provisioned, err = owner.ProvisionNewBranch(ctx, repoRoot, treeName, branch, startPoint)
 	} else {
 		provisioned, err = owner.ProvisionBranch(ctx, repoRoot, treeName, branch)

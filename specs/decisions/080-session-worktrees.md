@@ -93,7 +93,12 @@ CHAT (No Project) sessions already have per-session workspaces under
   lifecycle in `backend/frontend_api_worktrees.go` (this ADR originally
   landed only the identity, storage, and context foundation; the lifecycle
   consumption followed): `CreateManagedSession` (draft → provision →
-  commit → persist, compensated on failure), the restore `WorkspaceEnsurer`
+  commit → persist, compensated on failure; `createBranch=true` is an
+  ensure-the-branch request with git DWIM semantics — a MISSING branch is
+  created at the start point (that is how the draft picker's remote-tracking
+  pick lands: local `x` from `origin/x`), an EXISTING one is reused/shared/
+  refused through the same branch-holder dispatch as an existing-branch
+  pick, never re-created), the restore `WorkspaceEnsurer`
   (recreate-from-pinned-branch with the explicit data-loss warning; never a
   silent local fallback), managed fork at the source's committed HEAD, and
   the deletion protocol (join task/terminal → recheck-dirty release with

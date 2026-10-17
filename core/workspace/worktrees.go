@@ -519,6 +519,19 @@ func branchExists(ctx context.Context, scan *gitScanMemo, branch string) (bool, 
 	return strings.TrimSpace(out) != "", nil
 }
 
+// BranchExists reports whether a LOCAL branch (refs/heads/<branch>) exists
+// in the repository at repoRoot. Like the primitives' internal check it
+// verifies the exact ref, never DWIM resolution — a tag or a remote-tracking
+// ref of the same name does not count, so the answer is exactly what
+// "create this branch" vs "check this branch out" deciders need.
+func BranchExists(ctx context.Context, repoRoot, branch string) (bool, error) {
+	root, err := cleanRepoRoot(repoRoot)
+	if err != nil {
+		return false, err
+	}
+	return branchExists(ctx, newGitScanMemo(root), branch)
+}
+
 // classifyAddFailure maps git's raw add refusals onto the taxonomy, so a
 // race lost between validation and git still yields an explicit verdict.
 func classifyAddFailure(err error, target string) error {

@@ -36,7 +36,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout; the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch draft — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
 - `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the draft commit's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside (not inside) the locked workspace trigger
 
 ## Core Types
@@ -70,8 +70,9 @@ The chat-side draft UX feeds this RPC: New Session arms a draft
 BranchPicker's draft mode, and the session selector's grouped view (each
 managed branch row's "+" action arms a `createBranch=false` draft for that
 branch — `useSessionActions.handleNewSessionOnBranch`) record the choice
-(`local` or a branch — selection never checks out); the first send /
-attachment / paste /
+(`local` or a branch — selection never checks out; a REMOTE-tracking pick
+records a create-branch draft: local branch = the remote ref's short name,
+start point = the remote-tracking ref); the first send / attachment / paste /
 terminal open commits it via `lib/sessionDraft.createSessionFromDraft()`,
 which calls `CreateManagedSession` for a branch draft and `CreateSession`
 otherwise.
@@ -100,7 +101,8 @@ no preparation spinner. Existing-session workspace pins remain immutable.
 UI → RPC CreateManagedSession(branch, createBranch, startPoint)
   → NewSessionDraft(projectID, nil)                 // identity reserved, nothing created
   → binding validated (NormalizeWorkspaceBinding)   // BEFORE any git runs
-  → branch-holder lookup (createBranch=false only)  // git allows one worktree per branch
+  → branch-holder lookup (createBranch=false, or a create request whose
+    branch ALREADY exists — the DWIM rule below)    // git allows one worktree per branch
       managed tree holds it  → ADOPT: binding re-pinned to the holder's tree
                                name; Owner.Recreate re-validates (no-op /
                                prune+recreate / explicit mismatch failure);
@@ -117,6 +119,19 @@ UI → RPC CreateManagedSession(branch, createBranch, startPoint)
   → Manager.CreateSessionFromDraft(draft, repoRoot) // validates, then builds orchestrator
   → store.SaveSession(info)                         // persisted binding REQUIRED
 ```
+
+DWIM creation (git switch semantics): `createBranch=true` is an
+ensure-the-branch request, never an unconditional re-create. Before any git
+runs, the LOCAL branch's existence is checked (`workspace.BranchExists`,
+exact `refs/heads/<branch>` — a same-named tag or remote ref never counts).
+A MISSING branch is created at `startPoint` (empty = the checkout's HEAD) —
+this is how a remote-tracking pick lands: branch `x` from start point
+`origin/x` provisions the tree on a NEW local `x` whose tip IS the remote
+ref's commit. An ALREADY EXISTING branch is never re-created or reset: the
+request falls through to the same branch-holder dispatch as an
+existing-branch pick (free → `ProvisionBranch` checks the existing branch
+out in the fresh tree; held → adopt / local fallback / typed busy refusal),
+so a colliding create can never move the branch under the user.
 
 Sharing (ADR-082): a branch held by an existing managed tree is REUSED — the
 new session binds to that tree and several sessions execute in it, exactly
@@ -476,7 +491,7 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 
 ## Extension Points
 
-- Frontend UI for the managed lifecycle: the draft-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…`, and the BranchPicker's draft mode records a picked existing branch or a drafted new branch (+ start point) into `sessionDraftStore`; provisioning runs at draft commit via `CreateManagedSession` with no in-place checkout. Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
+- Frontend UI for the managed lifecycle: the draft-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…`, and the BranchPicker's draft mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch draft from the remote ref) into `sessionDraftStore`; provisioning runs at draft commit via `CreateManagedSession` with no in-place checkout. Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
   (BranchPicker + BranchDropdown), the header focus button, and the

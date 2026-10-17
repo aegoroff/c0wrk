@@ -35,6 +35,10 @@ import { WorktreesSection } from './WorktreesSection'
  *   {@link RemoteBranchRow} components, which expose the full operation set
  *   (checkout / push / merge / rebase / rename / delete for local;
  *   checkout-remote / delete-remote for remote).
+ * - In draft mode (below) remote-tracking rows are selectable pick targets
+ *   like local ones — a remote pick records a create-branch draft (local
+ *   branch from the remote-tracking start point), never an in-place
+ *   checkout; the Manage-Branches mode keeps checkout-remote on remote rows.
  * - Provides a filter input to narrow the list by name.
  * - Provides a "New Branch" field + button (with optional base selector) that
  *   calls CreateBranch and checks out the new branch immediately.
@@ -159,7 +163,11 @@ export function BranchPicker() {
   // SELECT the branch the drafted session's managed worktree will be
   // provisioned on. Nothing is checked out here — the working tree is
   // untouched; provisioning (worktree add + optional branch creation)
-  // happens at draft commit via CreateManagedSession.
+  // happens at draft commit via CreateManagedSession. Remote-tracking
+  // rows participate too: picking `origin/x` records a create-branch
+  // draft (local `x` created from `origin/x` at commit). The Manage
+  // Branches mode keeps its own semantics — a remote-row click there is
+  // an in-place checkout-remote.
   const isDraftMode = pickerMode === 'draft'
   const draft = useSessionDraftStore((s) => s.draft)
 
@@ -183,11 +191,44 @@ export function BranchPicker() {
     [closeBranchPicker],
   )
 
+  // A remote-tracking pick records a create-branch draft: the session's
+  // managed worktree is provisioned on the LOCAL branch named by the
+  // remote ref's short name, created from that ref at draft commit.
+  // CreateManagedSession follows git DWIM semantics at commit — an
+  // existing local branch of that name is reused (never re-created or
+  // reset), a missing one is created from the remote-tracking start point.
+  // Nothing is checked out at pick time.
+  const handleDraftRemoteSelect = useCallback(
+    (remoteRef: string) => {
+      const slash = remoteRef.indexOf('/')
+      const local = slash === -1 ? remoteRef : remoteRef.slice(slash + 1)
+      useSessionDraftStore
+        .getState()
+        .setDraftWorkspace({ kind: 'branch', branch: local, createBranch: true, startPoint: remoteRef })
+      closeBranchPicker()
+    },
+    [closeBranchPicker],
+  )
+
   // The row-level "already picked" marker: an existing-branch selection.
   const draftSelectedBranch =
     draft !== null && draft.workspace.kind === 'branch' && !draft.workspace.createBranch
       ? draft.workspace.branch
       : null
+
+  // The row-level "already picked" marker for a remote-based selection: a
+  // create-branch draft whose start point is a remote-tracking ref naming
+  // exactly the drafted local branch (the remote-pick shape — not a
+  // manually named new branch that merely uses a remote base).
+  const draftSelectedRemote = (() => {
+    if (draft === null || draft.workspace.kind !== 'branch' || !draft.workspace.createBranch) {
+      return null
+    }
+    const startPoint = draft.workspace.startPoint
+    const slash = startPoint.indexOf('/')
+    if (slash === -1) return null
+    return draft.workspace.branch === startPoint.slice(slash + 1) ? startPoint : null
+  })()
 
   const handleClearError = useCallback(() => setError(null), [])
   const handleError = useCallback((msg: string) => setError(msg), [])
@@ -290,23 +331,27 @@ export function BranchPicker() {
                   />
                 </li>
               ))}
-              {!isDraftMode && visibleRemote.length > 0 && (
+              {visibleRemote.length > 0 && (
                 <li className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Remote
                 </li>
               )}
-              {!isDraftMode &&
-                visibleRemote.map((b) => (
-                  <li key={b.name}>
-                    <RemoteBranchRow
-                      branch={b}
-                      inFlight={inFlightFor(b.name)}
-                      disabled={disabledFor(b.name)}
-                      onCheckoutRemote={handleCheckoutRemote}
-                      onDeleteRemote={actions.requestDeleteRemote}
-                    />
-                  </li>
-                ))}
+              {visibleRemote.map((b) => (
+                <li key={b.name}>
+                  <RemoteBranchRow
+                    branch={b}
+                    inFlight={inFlightFor(b.name)}
+                    disabled={disabledFor(b.name)}
+                    onCheckoutRemote={handleCheckoutRemote}
+                    onDeleteRemote={actions.requestDeleteRemote}
+                    draftSelect={
+                      isDraftMode
+                        ? { selected: draftSelectedRemote === b.name, onSelect: handleDraftRemoteSelect }
+                        : undefined
+                    }
+                  />
+                </li>
+              ))}
             </ul>
           )}
         </div>

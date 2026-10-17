@@ -128,3 +128,51 @@ describe('RemoteBranchRow', () => {
     expect(container.querySelector('svg.animate-spin')).not.toBeNull()
   })
 })
+
+describe('RemoteBranchRow — session-draft mode (draftSelect)', () => {
+  const onSelect = vi.fn()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function renderDraft(overrides: Partial<Branch> = {}, selected = false) {
+    return render(
+      <RemoteBranchRow
+        branch={makeBranch(overrides)}
+        inFlight={null}
+        disabled={false}
+        {...defaultCallbacks}
+        draftSelect={{ selected, onSelect }}
+      />,
+    )
+  }
+
+  it('selects instead of checking out: click records the pick with the full ref, no git runs', () => {
+    const { container } = renderDraft()
+    act(() => {
+      row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onSelect).toHaveBeenCalledWith('origin/feature/x')
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+    expect(defaultCallbacks.onDeleteRemote).not.toHaveBeenCalled()
+  })
+
+  it('hides the management hover actions — the row is a selection target', () => {
+    const { container } = renderDraft()
+    expect(buttons(container)).toHaveLength(0)
+  })
+
+  it('marks the already-picked remote branch with aria-current and a check', () => {
+    const { container } = renderDraft({}, true)
+    const r = row(container)
+    expect(r.getAttribute('aria-current')).toBe('true')
+    expect(r.querySelector('svg')).not.toBeNull()
+    expect(r.className).toContain('bg-primary/10')
+  })
+
+  it('leaves an unpicked draft row unmarked', () => {
+    const { container } = renderDraft({}, false)
+    expect(row(container).getAttribute('aria-current')).toBeNull()
+  })
+})
