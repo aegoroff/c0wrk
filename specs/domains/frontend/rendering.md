@@ -205,6 +205,8 @@ A pending `plan_review` card offers Approve, Request Changes, Abandon, and Open 
 
 The chat input toolbar (`ChatInputToolbar`) adapts its controls to the session's execution state, driven from `chatStore.taskActive` + `chatStore.paused`:
 
+The toolbar resolves `paused` the SAME way as the sidebar status dot and the live-sessions radar — from the session's EFFECTIVE unfinished-task status (the live `chatStore.unfinishedTaskStatus`/`paused` overlay when known, otherwise the DB snapshot's `unfinished_task_status`; see `resolveUnfinishedStatus` in [lib/activeSessions.ts](../../../frontend/src/lib/activeSessions.ts)) — so all three surfaces agree by construction and a session persisted as paused shows Resume — not a plain Send button — even when the live flag is absent (e.g. a failed or suppressed session-load status RPC). The live flag is ALSO restored on session load: the switch-time fast restore (`useTaskFlagRestore`) and ChatArea's `reconcileRuntimeStatus` both apply the backend's persisted status through the shared `applyRuntimeTaskFlags` (see [sound-notifications.md](sound-notifications.md)).
+
 | State | Controls | Behavior |
 | ----- | -------- | -------- |
 | **Running** (`taskActive`) | Pause + Stop | Pause → `pauseSession` RPC (sets ONLY the `pausing` in-flight flag; the input locks for the window); Stop → `cancelTask`. The input stays **open** (live-send): a message sent now interjects into the running task's next LLM request |

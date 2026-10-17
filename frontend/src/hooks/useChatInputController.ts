@@ -11,6 +11,7 @@ import { usePasteHandler } from '@/hooks/usePasteHandler'
 import { extractRefs, partitionRefs } from '@/lib/parseReferences'
 import { mentionableNamesInContext } from '@/lib/capabilityModes'
 import { sessionKindForSession } from '@/lib/sessionKind'
+import { resolveUnfinishedStatus } from '@/lib/activeSessions'
 import { optimizePrompt } from '@/api/prompt'
 import { pauseSession, resumeSession } from '@/api/chat'
 import { computeChatInputDisabled, computeChatPlaceholder } from '@/lib/chatInputLock'
@@ -78,7 +79,26 @@ export function useChatInputController(): ChatInputController {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const taskActive = useChatStore((s) => (activeSessionId ? s.taskActive[activeSessionId] ?? false : false))
-  const paused = useChatStore((s) => (activeSessionId ? s.paused[activeSessionId] ?? false : false))
+  // `paused` drives the toolbar's Resume (vs Send) affordance, so it MUST agree
+  // with the sidebar dot / radar — which resolve the effective unfinished-task
+  // status as "the live chatStore overlay when known, else the DB snapshot's
+  // `unfinished_task_status`" (see lib/activeSessions `resolveUnfinishedStatus`
+  // and useSessionStatusIndicator). The toolbar used to read the LIVE `paused`
+  // flag alone: when chatStore held no live knowledge of the session (e.g. the
+  // session-load runtime-status RPC failed or was suppressed), the sidebar still
+  // painted the persisted 'paused' from the DB fallback while the toolbar showed
+  // a plain Send button. Mirror the SAME fallback here: the live boolean OR an
+  // effective status of 'paused' (live overlay if present — a live `''`
+  // correctly overrides a stale DB 'paused' — otherwise the DB snapshot).
+  const livePaused = useChatStore((s) => (activeSessionId ? s.paused[activeSessionId] ?? false : false))
+  const liveUnfinished = useChatStore((s) =>
+    activeSessionId ? s.unfinishedTaskStatus[activeSessionId] : undefined,
+  )
+  const dbUnfinished = useSessionStore((s) => {
+    if (!activeSessionId || !s.sessions) return ''
+    return s.sessions.find((sess) => sess.id === activeSessionId)?.unfinished_task_status ?? ''
+  })
+  const paused = livePaused || resolveUnfinishedStatus(liveUnfinished, dbUnfinished) === 'paused'
   const pausing = useChatStore((s) => (activeSessionId ? s.pausing[activeSessionId] ?? false : false))
   const compacting = useChatStore((s) => (activeSessionId ? s.compacting[activeSessionId] ?? false : false))
   // In-flight attachment uploads for the ACTIVE session lock the send action

@@ -14,6 +14,7 @@ import {
   isLiveSession,
   liveSessionsSignature,
   mergePendingOverride,
+  resolveUnfinishedStatus,
   sessionDisplayStatus,
   sessionNameFromSnapshot,
   sortedLiveRows,
@@ -503,6 +504,22 @@ describe('effectiveUnfinishedStatus — live overlay outranks the DB snapshot', 
     // DB loaded mid-task says in_progress; the live overlay knows it settled.
     const session = makeSession({ unfinished_task_status: 'in_progress' })
     expect(effectiveUnfinishedStatus(session, flags({ unfinishedTaskStatus: '' }))).toBe('')
+  })
+})
+
+describe('resolveUnfinishedStatus — the single live-overlay-??-DB rule', () => {
+  it('falls back to the DB status when the live overlay is absent', () => {
+    expect(resolveUnfinishedStatus(undefined, 'paused')).toBe('paused')
+  })
+
+  it('prefers a PRESENT live overlay, including an explicit "" (settled)', () => {
+    expect(resolveUnfinishedStatus('failed', 'paused')).toBe('failed')
+    expect(resolveUnfinishedStatus('', 'paused')).toBe('')
+  })
+
+  it('returns "" when neither source has a value', () => {
+    expect(resolveUnfinishedStatus(undefined, undefined)).toBe('')
+    expect(resolveUnfinishedStatus(undefined, '')).toBe('')
   })
 })
 
