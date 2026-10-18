@@ -14,6 +14,7 @@ import {
   aggregateBadgeFlags,
   deriveLiveSessionFlags,
   mergePendingOverride,
+  type LiveSessionFlags,
 } from "@/lib/activeSessions";
 import {
   LOCAL_SECTION_KEY,
@@ -48,7 +49,8 @@ interface SessionGroupedListProps {
    * confirmation dialog counts the full membership.
    */
   fullBranchIds: (branch: string) => string[];
-  /** Archive every member of the group (arms confirmation when a member is busy). */
+  /** Archive every member of the group (arms confirmation for any
+   *  multi-member group, or a busy lone member). */
   onArchiveGroup: (branch: string, ids: string[]) => void;
   /** Delete every member of the group (always arms confirmation). */
   onDeleteGroup: (branch: string, ids: string[]) => void;
@@ -65,26 +67,43 @@ const DOT_FLAG_STATUS = {
   paused: "paused",
 } as const;
 
-/** The branch row's radar-style activity dot — ONE dot summarizing the live
- *  status of the group's members, so a COLLAPSED group with a live session
- *  stays visible. It reuses the radar's exact aggregation chain
- *  (lib/activeSessions): chatStore slices + the pending-HITL override fold
- *  into per-member flags, `aggregateBadgeFlags` collapses them into badge
- *  flags, and the most urgent flag picks the shared dot color + wording. A
- *  group whose members are all idle renders nothing. */
-function BranchActivityDot({ sessions }: { sessions: readonly SessionInfo[] }) {
+/** The per-session live flags the branch dots aggregate — derived ONCE per
+ *  list render instead of once per branch row: one set of chatStore slices +
+ *  the pending-HITL override fold into a single flags map (the radar's exact
+ *  chain, lib/activeSessions), which every `BranchActivityDot` below then
+ *  narrows to its own members. A message-level event re-derives the map once
+ *  for the whole list, not B times. */
+function useLiveSessionFlags(): Readonly<Record<string, LiveSessionFlags>> {
   const taskActive = useChatStore((s) => s.taskActive);
   const paused = useChatStore((s) => s.paused);
   const messageOrder = useChatStore((s) => s.messageOrder);
   const messages = useChatStore((s) => s.messages);
   const unfinishedTaskStatus = useChatStore((s) => s.unfinishedTaskStatus);
   const pendingOverride = useActiveSessionsStore((s) => s.pendingOverride);
+  return useMemo(
+    () =>
+      mergePendingOverride(
+        deriveLiveSessionFlags({ taskActive, paused, messageOrder, messages, unfinishedTaskStatus }),
+        pendingOverride,
+      ),
+    [taskActive, paused, messageOrder, messages, unfinishedTaskStatus, pendingOverride],
+  );
+}
 
+/** The branch row's radar-style activity dot — ONE dot summarizing the live
+ *  status of the group's members, so a COLLAPSED group with a live session
+ *  stays visible. Narrows the list-level flags map ({@link useLiveSessionFlags})
+ *  to the group's members via `aggregateBadgeFlags`, and the most urgent flag
+ *  picks the shared dot color + wording. A group whose members are all idle
+ *  renders nothing. */
+function BranchActivityDot({
+  sessions,
+  flags,
+}: {
+  sessions: readonly SessionInfo[];
+  flags: Readonly<Record<string, LiveSessionFlags>>;
+}) {
   const dot = useMemo(() => {
-    const flags = mergePendingOverride(
-      deriveLiveSessionFlags({ taskActive, paused, messageOrder, messages, unfinishedTaskStatus }),
-      pendingOverride,
-    );
     const badge = aggregateBadgeFlags(sessions, flags);
     for (const flag of ["error", "attention", "active", "paused"] as const) {
       if (badge[flag]) {
@@ -93,7 +112,7 @@ function BranchActivityDot({ sessions }: { sessions: readonly SessionInfo[] }) {
       }
     }
     return null;
-  }, [sessions, taskActive, paused, messageOrder, messages, unfinishedTaskStatus, pendingOverride]);
+  }, [sessions, flags]);
 
   if (!dot) return null;
   return <span className={cn("size-1.5 shrink-0 rounded-full", dot.className)} title={dot.title} />;
@@ -125,6 +144,8 @@ export function SessionGroupedList({
   // ordering) — member sessions keep their own per-session pins untouched.
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const { pinnedBranches, togglePinnedBranch } = useGroupPins(activeProjectId);
+  // ONE derivation per list render feeds every branch row's activity dot.
+  const liveFlags = useLiveSessionFlags();
   return (
     <>
       {showSectionHeaders && (
@@ -151,7 +172,7 @@ export function SessionGroupedList({
                   regionId={sessionRegionId(key)}
                   onToggle={() => toggleSection(key)}
                   freshest={freshestSession(group.sessions)}
-                  activityDot={<BranchActivityDot sessions={group.sessions} />}
+                  activityDot={<BranchActivityDot sessions={group.sessions} flags={liveFlags} />}
                   actionItems={
                     <>
                       <DropdownMenuItem

@@ -21,6 +21,15 @@ interface PinnedGroupsState {
 
 interface PinnedGroupsActions {
   togglePinnedBranch: (projectId: string, branch: string) => void
+  /**
+   * Drop the project's pins whose branch no longer holds ANY group — live or
+   * archived (the branch's last session was deleted, so the pin could never
+   * surface again). `liveBranches` must come from the UNFILTERED grouping —
+   * a search-narrowed model hides groups only temporarily, and pruning
+   * against it would silently unpin still-existing branches. A no-op that
+   * returns the SAME state when nothing is stale (no notify, no write).
+   */
+  prunePins: (projectId: string, liveBranches: readonly string[]) => void
 }
 
 export type PinnedGroupsStore = PinnedGroupsState & PinnedGroupsActions
@@ -74,6 +83,26 @@ export const usePinnedGroupsStore = create<PinnedGroupsStore>()(
               ? current.filter((b) => b !== branch)
               : [...current, branch],
           },
+        })
+      },
+
+      prunePins: (projectId, liveBranches) => {
+        const current = get().pinsByProject[projectId]
+        // Nothing pinned for the project — nothing to prune (and `current`
+        // may legitimately be undefined, so bail before touching state).
+        if (!current || current.length === 0) return
+        const live = new Set(liveBranches)
+        const kept = current.filter((branch) => live.has(branch))
+        // Identity-preserving no-op: a stale-free pass must not notify
+        // subscribers (and re-render the selector) or rewrite storage.
+        if (kept.length === current.length) return
+        set((state) => {
+          const pinsByProject = { ...state.pinsByProject }
+          // An emptied list drops the whole per-project entry — the storage
+          // stays bounded instead of accreting empty arrays.
+          if (kept.length === 0) delete pinsByProject[projectId]
+          else pinsByProject[projectId] = kept
+          return { pinsByProject }
         })
       },
     }),

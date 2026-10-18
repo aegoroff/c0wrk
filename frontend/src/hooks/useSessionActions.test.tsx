@@ -242,16 +242,37 @@ describe('handleNewSessionOnBranch — grouped-view per-branch draft', () => {
 })
 
 describe('group actions — branch groups', () => {
-  it('handleArchiveGroup: nobody busy → archives all immediately, no dialog', async () => {
+  it('handleArchiveGroup: a lone, idle member archives immediately, no dialog', async () => {
+    // N=1 group = the per-row guard: confirmation only for a busy member.
+    useSessionStore.setState({ sessions: [makeSession('s-1')] })
+
+    await act(async () => {
+      await captured!.handleArchiveGroup('feat/a', ['s-1'])
+    })
+
+    expect(spies.archiveSession).toHaveBeenCalledTimes(1)
+    expect(captured!.pendingAction).toBeNull()
+    expect(useSessionStore.getState().sessions![0]?.archived).toBe(true)
+  })
+
+  it('handleArchiveGroup: multi-member group arms confirmation even when nobody is busy', async () => {
+    // Blast radius: one click would archive N sessions — confirm regardless
+    // of busy state (the branch-named copy makes no busy claim, see the
+    // dialog tests below).
     useSessionStore.setState({ sessions: [makeSession('s-1'), makeSession('s-2')] })
 
     await act(async () => {
       await captured!.handleArchiveGroup('feat/a', ['s-1', 's-2'])
     })
 
-    expect(spies.archiveSession).toHaveBeenCalledTimes(2)
-    expect(captured!.pendingAction).toBeNull()
-    for (const s of useSessionStore.getState().sessions!) expect(s.archived).toBe(true)
+    expect(spies.archiveSession).not.toHaveBeenCalled()
+    expect(captured!.pendingAction).toEqual({
+      kind: 'archive',
+      sessionId: 's-1',
+      sessionName: 'feat/a',
+      isArchived: false,
+      sessionIds: ['s-1', 's-2'],
+    })
   })
 
   it('handleArchiveGroup: a busy member arms a GROUP confirmation naming the branch', async () => {
@@ -366,6 +387,35 @@ describe('SessionActionConfirmDialog — group copy', () => {
     expect(text).toContain('Archive sessions?')
     expect(text).toContain('Branch "feat/a" groups 3 sessions')
     expect(text).toContain('make the sessions read-only')
+  })
+
+  it('N=1 group delete names the BRANCH, not a session', () => {
+    const text = dialogText({
+      kind: 'delete',
+      sessionId: 's-1',
+      sessionName: 'feat/a',
+      isArchived: false,
+      sessionIds: ['s-1'],
+    })
+    expect(text).toContain('Delete session?')
+    expect(text).toContain('Branch "feat/a" groups 1 session')
+    expect(text).toContain('permanently remove the session and its files')
+  })
+
+  it('N=1 group archive names the BRANCH and makes no busy claim', () => {
+    const text = dialogText({
+      kind: 'archive',
+      sessionId: 's-1',
+      sessionName: 'feat/a',
+      isArchived: false,
+      sessionIds: ['s-1'],
+    })
+    expect(text).toContain('Archive session?')
+    expect(text).toContain('Branch "feat/a" groups 1 session')
+    expect(text).toContain('make the session read-only')
+    // A multi-member group confirms even with nobody busy — the copy must
+    // not assert that a task IS in progress.
+    expect(text).not.toContain('has a task in progress')
   })
 
   it('single-session copy is unchanged', () => {

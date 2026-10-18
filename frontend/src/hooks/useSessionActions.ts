@@ -75,7 +75,11 @@ export interface SessionActions {
   handleArchive: (id: string, isArchived: boolean) => Promise<void>
   handlePin: (id: string, isPinned: boolean) => Promise<void>
   handleFork: (id: string) => Promise<void>
-  /** Archive every member of a branch group; asks first when ANY member is busy. */
+  /**
+   * Archive every member of a branch group; arms confirmation whenever the
+   * group holds more than one member (one click would archive N sessions) or
+   * the lone member is busy.
+   */
   handleArchiveGroup: (branch: string, ids: string[]) => Promise<void>
   /** Restore (unarchive) every member of an ARCHIVED branch group — non-destructive, never asks. */
   handleUnarchiveGroup: (branch: string, ids: string[]) => Promise<void>
@@ -258,9 +262,11 @@ export function useSessionActions(): SessionActions {
     async (branch: string, ids: string[]) => {
       // Branch groups only ever hold non-archived sessions (archived ones land
       // in the separate Archived bucket), so a group action always archives.
-      // Archiving cancels any running/unfinished task per member — ask when
-      // ANY member is busy; the pending action targets the whole group.
-      if (ids.some((id) => isSessionBusy(id))) {
+      // Archiving cancels any running/unfinished task per member — confirm
+      // whenever the blast radius exceeds one session (a multi-member group
+      // archives N sessions in one click, busy or not) and, for a lone
+      // member, when it is busy (the same guard as the per-row action).
+      if (ids.length > 1 || ids.some((id) => isSessionBusy(id))) {
         setPendingAction({ kind: 'archive', sessionId: ids[0] ?? '', sessionName: branch, isArchived: false, sessionIds: ids })
         return
       }

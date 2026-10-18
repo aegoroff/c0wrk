@@ -1000,6 +1000,30 @@ describe('SessionSelector — archived section (branch groups + flat local)', ()
     expect(pinnedRowIcons.some((svg) => !svg.closest('span.opacity-0'))).toBe(true)
   })
 
+  it('stale group pins are pruned against the UNFILTERED model — live or archived membership keeps a pin', async () => {
+    // A pin on a branch whose last session is GONE, next to feat-a (which
+    // holds BOTH live and archived groups in the fixture): only the stale
+    // one may drop — and feat-a must survive even while a search could
+    // temporarily hide it (the prune reads the unfiltered grouping).
+    usePinnedGroupsStore.setState({ pinsByProject: { 'proj-1': ['ghost-branch', 'feat-a'] } })
+    sessionMocks.sessions = archivedFixture()
+
+    await render(<SessionSelector />)
+
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toEqual(['feat-a'])
+  })
+
+  it('a not-yet-loaded list (null) never prunes — the project-switch transient is safe', async () => {
+    usePinnedGroupsStore.setState({ pinsByProject: { 'proj-1': ['ghost-branch'] } })
+    // `null` = the reset/switch transient: an empty model then would wipe
+    // the destination project's pins.
+    sessionMocks.sessions = null as unknown as unknown[]
+
+    await render(<SessionSelector />)
+
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toEqual(['ghost-branch'])
+  })
+
   it('archived group Restore unarchives every member without a confirmation', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = archivedFixture()

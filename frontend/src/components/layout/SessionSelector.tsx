@@ -1,4 +1,4 @@
-import { Fragment, useState, useMemo, useCallback } from "react";
+import { Fragment, useState, useMemo, useCallback, useEffect } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
@@ -28,7 +28,7 @@ import { BranchRow, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
 import { ARCHIVED_SECTION_KEY, buildSessionGroups, freshestSession, sessionRegionId } from "@/lib/sessionGroups";
 import { useProjectStore } from "@/stores/projectStore";
-import { useGroupPins } from "@/stores/pinnedGroupsStore";
+import { useGroupPins, usePinnedGroupsStore } from "@/stores/pinnedGroupsStore";
 
 /** Collapse key of an archived branch group — namespaced under `archived:`
  *  so it can never collide with the live `branch:<name>` key of the same
@@ -90,6 +90,22 @@ export function SessionSelector() {
       allGroups.worktrees.find((g) => g.branch === branch)?.sessions.map((s) => s.id) ?? [],
     [allGroups],
   );
+
+  // Stale-pin hygiene (pinnedGroupsStore): a branch whose last session was
+  // deleted keeps its group pin forever otherwise — drop pins with no live or
+  // archived group in the UNFILTERED model (a search only hides groups
+  // temporarily). Gated on a LOADED list: `sessions === null` means the
+  // switch/reset transient, and pruning against an empty model then would
+  // wipe the destination project's pins.
+  const prunePins = usePinnedGroupsStore((s) => s.prunePins);
+  const livePinBranches = useMemo(
+    () => [...allGroups.worktrees, ...allGroups.archivedWorktrees].map((g) => g.branch),
+    [allGroups],
+  );
+  useEffect(() => {
+    if (sessions !== null && activeProjectId !== null) prunePins(activeProjectId, livePinBranches);
+  }, [sessions, activeProjectId, livePinBranches, prunePins]);
+
   const searchActive = search.trim() !== "";
   const showSectionHeaders = groups.worktrees.length > 0 && groups.local.length > 0;
 
