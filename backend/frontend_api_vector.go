@@ -537,27 +537,38 @@ func (f *FrontendAPI) ReindexVectorIndex() error {
 	return vm.Reindex(f.ctx())
 }
 
-// ListVectorIndexGPUs enumerates the NVIDIA GPUs visible on the machine for
-// the vector-index settings UI (populating the execution-provider device
+// ListVectorIndexGPUs enumerates the GPUs visible on the machine for the
+// vector-index settings UI (populating the execution-provider device
 // picker). It is the lazy, on-demand counterpart to the startup GPU probe:
 // the UI calls it when the picker is opened, instead of the backend probing
 // unconditionally at startup.
 //
-// The call delegates to embedding.ListGPUDevices, which shells out to
-// nvidia-smi under the same bounded probe budget (gpuProbeTimeout, 2s) as
-// GPUInUse — so the RPC can never block the UI thread indefinitely on a
-// wedged driver.
+// The call delegates to embedding.ListGPUDevices, which merges two external
+// probe sources under the same bounded probe budget (gpuProbeTimeout, 2s
+// each):
+//   - NVIDIA GPUs via nvidia-smi (provider "cuda") — exactly the pre-OpenVINO
+//     behavior;
+//   - Intel GPUs via vulkaninfo --summary (provider "openvino"), the hardware
+//     the OpenVINO execution provider runs on. Entries always carry index 0:
+//     the plugin-based OpenVINO surface selects the provider's best device,
+//     so 0 is the only valid device_id — the entry exists to show that the
+//     Intel hardware is present and what the driver calls it.
+//
+// so the RPC can never block the UI thread indefinitely on a wedged driver.
 //
 // Semantics:
-//   - nvidia-smi not found in PATH → an empty, non-nil slice with a nil
-//     error. Absence of the NVIDIA userspace means "no GPUs to offer", not
-//     a failure — the picker renders an empty/CPU-only state.
-//   - nvidia-smi found but the invocation fails (driver down, non-zero
-//     exit, probe timeout) → nil slice with the wrapped error, so the UI
-//     can distinguish "no hardware" from "hardware present, probe failed".
+//   - no probe tool found in PATH → an empty, non-nil slice with a nil
+//     error. Absence of both driver userspaces means "no GPUs to offer",
+//     not a failure — the picker renders an empty/CPU-only state.
+//   - probe tool(s) found but the invocation(s) fail (driver down,
+//     non-zero exit, probe timeout) and no source answered → nil slice
+//     with the wrapped error, so the UI distinguishes "no hardware" from
+//     "hardware present, probe failed". A healthy source wins over a
+//     failing one: a partial device list with a nil error is preferred
+//     over hiding working hardware behind a broken driver stack.
 //
 // The result is independent of the running embedder: it reflects what the
-// driver reports right now, not what the embedder was created with (the
+// drivers report right now, not what the embedder was created with (the
 // embedder's facts travel in VectorIndexStatus via applyEmbedderInfo).
 func (f *FrontendAPI) ListVectorIndexGPUs() ([]GPUDeviceResponse, error) {
 	devices, err := embedding.ListGPUDevices(f.ctx())
@@ -568,8 +579,9 @@ func (f *FrontendAPI) ListVectorIndexGPUs() ([]GPUDeviceResponse, error) {
 	out := make([]GPUDeviceResponse, len(devices))
 	for i, d := range devices {
 		out[i] = GPUDeviceResponse{
-			Index: d.Index,
-			Name:  d.Name,
+			Index:    d.Index,
+			Name:     d.Name,
+			Provider: d.Provider,
 		}
 	}
 	return out, nil

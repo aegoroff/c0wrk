@@ -137,6 +137,80 @@ func TestGetVectorIndexStatus_FallbackFieldsSurfaced(t *testing.T) {
 	}
 }
 
+// TestGetVectorIndexStatus_OpenVINOEmbedderInfoSurfaced mirrors the cuda
+// embedder-info test for the OpenVINO provider (same contract, different
+// name): every status carries requested/effective plus the xpu-smi ov_device
+// device-class verdict when probed, so the plugin's own GPU-vs-CPU device
+// choice is observable from the status alone.
+func TestGetVectorIndexStatus_OpenVINOEmbedderInfoSurfaced(t *testing.T) {
+	f := &FrontendAPI{
+		appCtx:          context.Background,
+		activeProjectID: project.NoProjectID,
+		vectorEmbedderInfo: VectorEmbedderInfo{
+			EffectiveProvider: "openvino",
+			RequestedProvider: "openvino",
+			OVDevice:          "gpu",
+		},
+	}
+	f.seedPublished.Store(true)
+	f.seedPublished.Store(true)
+
+	st := f.GetVectorIndexStatus()
+	if st.State != "unavailable" {
+		t.Fatalf("expected state %q, got %q", "unavailable", st.State)
+	}
+	if st.ExecutionProvider != "openvino" {
+		t.Errorf("ExecutionProvider = %q, want openvino", st.ExecutionProvider)
+	}
+	if st.RequestedExecutionProvider != "openvino" {
+		t.Errorf("RequestedExecutionProvider = %q, want openvino", st.RequestedExecutionProvider)
+	}
+	if st.OVDevice != "gpu" {
+		t.Errorf("OVDevice = %q, want gpu", st.OVDevice)
+	}
+	if st.CUDAVerified != nil {
+		t.Errorf("CUDAVerified = %v, want nil (no nvidia-smi probe on an OpenVINO embedder)", st.CUDAVerified)
+	}
+	if st.ProviderFallbackReason != "" {
+		t.Errorf("ProviderFallbackReason = %q, want empty for honored request", st.ProviderFallbackReason)
+	}
+}
+
+// TestGetVectorIndexStatus_OpenVINOFallbackFieldsSurfaced mirrors the cuda
+// fallback variant for OpenVINO: requested openvino, effective cpu (explicit
+// openvino loud fallback), with the cause recorded — the payload a UI renders
+// as "running on CPU, Intel setup broken".
+func TestGetVectorIndexStatus_OpenVINOFallbackFieldsSurfaced(t *testing.T) {
+	f := &FrontendAPI{
+		appCtx:          context.Background,
+		activeProjectID: project.NoProjectID,
+		vectorEmbedderInfo: VectorEmbedderInfo{
+			EffectiveProvider: "cpu",
+			RequestedProvider: "openvino",
+			FallbackReason:    "OpenVINO execution provider plugin not found at /opt/app/libonnxruntime_providers_openvino_plugin.so",
+		},
+	}
+	f.seedPublished.Store(true)
+	f.seedPublished.Store(true)
+
+	st := f.GetVectorIndexStatus()
+	if st.ExecutionProvider != "cpu" {
+		t.Errorf("ExecutionProvider = %q, want cpu (fallback)", st.ExecutionProvider)
+	}
+	if st.RequestedExecutionProvider != "openvino" {
+		t.Errorf("RequestedExecutionProvider = %q, want openvino", st.RequestedExecutionProvider)
+	}
+	if st.ProviderFallbackReason == "" {
+		t.Error("ProviderFallbackReason empty, want the OpenVINO failure cause")
+	}
+	if st.OVDevice != "" {
+		t.Errorf("OVDevice = %q, want empty (no probe on a CPU embedder)", st.OVDevice)
+	}
+	if st.CUDAVerified != nil {
+		t.Errorf("CUDAVerified = %v, want nil (no probe on CPU embedder)", st.CUDAVerified)
+	}
+}
+
 // TestGetVectorIndexStatus_NoEmbedderInfoKeepsFieldsEmpty pins the
 // pre-init/broken-init shape: without recorded embedder info the provider
 // fields stay empty (omitted from JSON), matching the legacy payload shape.
@@ -150,7 +224,7 @@ func TestGetVectorIndexStatus_NoEmbedderInfoKeepsFieldsEmpty(t *testing.T) {
 
 	st := f.GetVectorIndexStatus()
 	if st.ExecutionProvider != "" || st.RequestedExecutionProvider != "" ||
-		st.ProviderFallbackReason != "" || st.CUDAVerified != nil {
+		st.ProviderFallbackReason != "" || st.CUDAVerified != nil || st.OVDevice != "" {
 		t.Errorf("provider fields not empty without embedder info: %+v", st)
 	}
 }
@@ -304,4 +378,43 @@ func TestReindexVectorIndex_NoActiveIndexer(t *testing.T) {
 	if !strings.Contains(err.Error(), "no indexer configured") {
 		t.Errorf("expected a no-indexer error, got %v", err)
 	}
+}
+
+// TestListVectorIndexGPUs_DevicesCarryProvider verifies the device-picker
+// RPC surface: the merged multi-vendor enumeration must tag every entry
+// with its execution provider ("cuda" for nvidia-smi devices, "openvino"
+// for Intel vulkaninfo devices), and Intel entries always carry index 0 —
+// the only device_id the plugin-based OpenVINO surface accepts. On a
+// machine without any GPU tooling the list is simply empty (nil error) —
+// the assertions hold trivially there; on Intel hardware (the reference
+// Arrow Lake iGPU machine) the Arc entry must appear with the openvino
+// provider.
+func TestListVectorIndexGPUs_DevicesCarryProvider(t *testing.T) {
+	f := &FrontendAPI{
+		appCtx: context.Background,
+	}
+	f.seedPublished.Store(true)
+
+	devices, err := f.ListVectorIndexGPUs()
+	if err != nil {
+		t.Fatalf("ListVectorIndexGPUs() error = %v, want nil on a healthy machine or one without GPU tooling", err)
+	}
+	sawOpenVINO := false
+	for _, d := range devices {
+		switch d.Provider {
+		case "cuda":
+			// NVIDIA entry: the driver ordinal is the device id.
+		case "openvino":
+			sawOpenVINO = true
+			if d.Index != 0 {
+				t.Errorf("openvino device %q carries index %d, want 0 (the OpenVINO surface has no per-device selection)", d.Name, d.Index)
+			}
+			if d.Name == "" {
+				t.Error("openvino device carries an empty name")
+			}
+		default:
+			t.Errorf("device %q carries unknown provider %q", d.Name, d.Provider)
+		}
+	}
+	t.Logf("ListVectorIndexGPUs() = %d devices (openvino present: %v)", len(devices), sawOpenVINO)
 }

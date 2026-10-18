@@ -81,6 +81,28 @@ jobs:
       - name: Build
         run: xvfb-run make build
 
+      # Recipe smoke for the OpenVINO flavor channel (ADR-046 pattern): a
+      # broken wheel URL, a stale pinned digest, or a recipe regression must
+      # fail the PR instead of the release. Runs the real download + digest
+      # verification + extraction (~50 MiB from PyPI) on the amd64 leg, where
+      # the pinned manylinux wheel applies. unzip is preinstalled on the
+      # runner image; the target itself fails closed without it.
+      - name: Smoke ONNX Runtime OpenVINO flavor fetch
+        if: matrix.arch == 'amd64'
+        run: make fetch-onnx-openvino
+
+      # The flavor target is Linux x64-only by design: on arm64 it must fail
+      # closed (no download, clear error) — assert exactly that so a
+      # platform-gate regression cannot go unnoticed.
+      - name: OpenVINO flavor fetch refuses arm64
+        if: matrix.arch == 'arm64'
+        run: |
+          if make fetch-onnx-openvino; then
+            echo "::error::fetch-onnx-openvino unexpectedly succeeded on arm64"
+            exit 1
+          fi
+          echo "OK: fetch-onnx-openvino fails closed on arm64"
+
   macos:
     runs-on: macos-14
     timeout-minutes: 30

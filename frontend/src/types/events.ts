@@ -1702,6 +1702,9 @@ export function isVectorIndexPayload(d: unknown): d is VectorIndexStatus {
   // `provider_fallback_reason` is optional (omitempty) but reaches
   // .trim() in VectorIndexDiagnostics — pin the string type when present.
   if (d.provider_fallback_reason !== undefined && typeof d.provider_fallback_reason !== 'string') return false
+  // `ov_device` ("gpu"|"cpu"|absent = unverified) is matched against
+  // literals in VectorIndexDiagnostics — pin the string type when present.
+  if (d.ov_device !== undefined && typeof d.ov_device !== 'string') return false
   return true
 }
 

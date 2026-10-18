@@ -1100,10 +1100,11 @@ func (a *App) startVectorIndexBackground(
 		// environment-only proof-of-concept knobs are gone. The provider is
 		// resolved exactly ONCE here and the embedder (plus its ONNX session)
 		// is created once per process and never re-created: changing either
-		// knob therefore requires an app restart. All three values pass
-		// through to sp4rk verbatim — "auto" tries CUDA and falls back to
-		// CPU with a WARN inside NewEmbedder, "cpu" forces the CPU provider,
-		// "cuda" demands the GPU.
+		// knob therefore requires an app restart. All four values pass
+		// through to sp4rk verbatim — "auto" walks the hardware ladder
+		// (CUDA, then OpenVINO) and falls back to CPU with a WARN inside
+		// NewEmbedder, "cpu" forces the CPU provider, "cuda" demands the
+		// NVIDIA GPU, "openvino" demands Intel hardware.
 		requestedProvider := cfg.VectorIndex.ExecutionProvider
 		if requestedProvider == "" {
 			requestedProvider = config.VectorIndexProviderAuto
@@ -1123,26 +1124,34 @@ func (a *App) startVectorIndexBackground(
 		}
 		emb, embErr := embedding.NewEmbedder(embCfg)
 		// embedderInfo feeds the execution-provider facts into every
-		// vector-index status payload; the explicit-cuda→cpu fallback (the
-		// only true fallback — an "auto" request always resolves to a
-		// winner, so auto→cuda is a success and auto→cpu is Auto's expected
-		// degradation) is what the settings UI renders from the
-		// requested/effective pair (ADR-045 observability contract).
+		// vector-index status payload; the explicit-cuda/openvino→cpu
+		// fallback (the only true fallback — an "auto" request always
+		// resolves to a winner, so auto→cuda and auto→openvino are
+		// successes and auto→cpu is Auto's expected degradation) is what
+		// the settings UI renders from the requested/effective pair
+		// (ADR-045 observability contract).
 		embedderInfo := backend.VectorEmbedderInfo{RequestedProvider: requestedProvider, DeviceID: onnxDevice}
-		if embErr != nil && requestedProvider == config.VectorIndexProviderCUDA {
-			// Explicit "cuda" that cannot come up must not silently kill
-			// vector search: continue on the CPU provider so search stays
-			// available — but the user explicitly asked for the GPU, so the
-			// fallback is made unmissable: WARN log + runtime_error toast +
-			// the requested/effective mismatch recorded in every status.
-			log.Warn("CUDA execution provider unavailable, falling back to CPU",
+		if embErr != nil && (requestedProvider == config.VectorIndexProviderCUDA || requestedProvider == config.VectorIndexProviderOpenVINO) {
+			// Explicit "cuda"/"openvino" that cannot come up must not
+			// silently kill vector search: continue on the CPU provider so
+			// search stays available — but the user explicitly asked for a
+			// hardware provider, so the fallback is made unmissable: WARN
+			// log + runtime_error toast + the requested/effective mismatch
+			// recorded in every status.
+			providerLabel, errorCode, fixHint := "CUDA", "vector_cuda_fallback",
+				"Fix the GPU setup (make fetch-onnx-gpu + CUDA driver) or set vector_index.execution_provider: auto|cpu."
+			if requestedProvider == config.VectorIndexProviderOpenVINO {
+				providerLabel, errorCode, fixHint = "OpenVINO", "vector_openvino_fallback",
+					"Fix the Intel setup (make fetch-onnx-openvino installs the OpenVINO execution-provider plugin next to the ONNX Runtime library, Linux x64 only) or set vector_index.execution_provider: auto|cpu."
+			}
+			log.Warn(providerLabel+" execution provider unavailable, falling back to CPU",
 				"error", embErr,
 				"deviceID", onnxDevice,
 				"library", libraryPath)
 			a.emit(backend.EventRuntimeError, map[string]string{
 				"id":         uuid.New().String(),
-				"message":    "Vector index: CUDA execution provider is unavailable — running on the CPU, embeddings will be slower. Cause: " + embErr.Error() + " Fix the GPU setup (make fetch-onnx-gpu + CUDA driver) or set vector_index.execution_provider: auto|cpu.",
-				"error_code": "vector_cuda_fallback",
+				"message":    "Vector index: " + providerLabel + " execution provider is unavailable — running on the CPU, embeddings will be slower. Cause: " + embErr.Error() + " " + fixHint,
+				"error_code": errorCode,
 			})
 			embedderInfo.FallbackReason = embErr.Error()
 			embCfg.ExecutionProvider = embedding.ExecutionProviderCPU
@@ -1180,13 +1189,21 @@ func (a *App) startVectorIndexBackground(
 			log.Warn("vector index embedder running on CPU provider",
 				"requestedExecutionProvider", requestedProvider,
 				"effectiveExecutionProvider", embedderInfo.EffectiveProvider,
-				"hint", "CUDA unavailable; see the WARN above for the cause")
+				"hint", "no usable hardware execution provider; see the WARN above for the per-provider causes")
 		}
 		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderCUDA {
 			// External verification that the process really runs on the GPU —
 			// diagnostics only, never blocks or fails startup.
 			verified := a.verifyEmbedderGPU(emb, log)
 			embedderInfo.CUDAVerified = &verified
+		}
+		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderOpenVINO {
+			// External verification of the device class the OpenVINO
+			// provider actually drives ("gpu" | "cpu" | "" unverified) —
+			// the plugin appends both its GPU and CPU devices and OpenVINO
+			// picks one itself, so only an external probe can tell them
+			// apart. Diagnostics only, never blocks or fails startup.
+			embedderInfo.OVDevice = vectorindex.VerifyEmbedderOvDevice(context.Background(), emb, log)
 		}
 		a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)
 

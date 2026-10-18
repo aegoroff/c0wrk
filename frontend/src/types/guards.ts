@@ -168,6 +168,7 @@ export function isToolInfo(v: unknown): v is ToolInfo {
  *  as `#{index} — {name}`. */
 export function isGPUDevice(v: unknown): v is GPUDeviceResponse {
     return isObj(v) && typeof v.index === 'number' && typeof v.name === 'string'
+        && (v.provider === undefined || typeof v.provider === 'string')
 }
 
 /** Element guard for SearchVectorStore results: the results list calls string

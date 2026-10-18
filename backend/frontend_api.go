@@ -1016,10 +1016,10 @@ func (l *FrontendAPILifecycle) NotifyVectorFileChange(root string) {
 }
 
 // SetVectorEmbedderInfo records the embedder's execution-provider facts
-// (effective/requested provider, CUDA verification verdict) for inclusion in
-// every subsequent VectorIndexStatus payload. Called once by desktop's
-// background vector init after the embedder creation outcome is known —
-// including the unavailable paths, where the info makes the failure
+// (effective/requested provider, CUDA/OpenVINO verification verdicts) for
+// inclusion in every subsequent VectorIndexStatus payload. Called once by
+// desktop's background vector init after the embedder creation outcome is
+// known — including the unavailable paths, where the info makes the failure
 // self-explanatory in the status (which provider was asked for and why it did
 // not come up). Thread-safe.
 func (l *FrontendAPILifecycle) SetVectorEmbedderInfo(info VectorEmbedderInfo) {
@@ -1044,6 +1044,7 @@ func (f *FrontendAPI) applyEmbedderInfo(st *VectorIndexStatus) {
 	st.RequestedExecutionProvider = info.RequestedProvider
 	st.ProviderFallbackReason = info.FallbackReason
 	st.CUDAVerified = info.CUDAVerified
+	st.OVDevice = info.OVDevice
 	st.DeviceID = info.DeviceID
 }
 

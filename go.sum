@@ -238,8 +238,8 @@ github.com/tkrajina/go-reflector v0.5.8 h1:yPADHrwmUbMq4RGEyaOUpz2H90sRsETNVpjzo
 github.com/tkrajina/go-reflector v0.5.8/go.mod h1:ECbqLgccecY5kPmPmXg1MrHW585yMcDkVl6IvJe64T4=
 github.com/v0lka/flowsh v0.6.0 h1:lcX8c7Ou0hjbSy/wd6wRnd6XJFz/2AIVpqYDwUSoGOQ=
 github.com/v0lka/flowsh v0.6.0/go.mod h1:D0SkC7Wry2qMiAixq3FYWIl/gdRaC3KhzOfokl/1/Mo=
-github.com/v0lka/sp4rk v0.15.1-0.20261018081230-ea927918561c h1:Im7A1J8XNFG25RjQZcu1bdlL+esIHa6llsN1stPfQ2c=
-github.com/v0lka/sp4rk v0.15.1-0.20261018081230-ea927918561c/go.mod h1:Y3zaBXvwQUMY0xYCWkoQXVBAr+OmvYHa6Gs0p/njkHk=
+github.com/v0lka/sp4rk v0.15.1-0.20261018105837-48b680f7d8eb h1:sefcOrU3zPdYJIwLzGxA7T7oT6Y+f+CFQmMHr+6Rzdg=
+github.com/v0lka/sp4rk v0.15.1-0.20261018105837-48b680f7d8eb/go.mod h1:TUeaaxaf3cJQ7G/QtUN2ftXUM65Xe9yAqqF/oRXkjtM=
 github.com/valyala/bytebufferpool v1.0.0 h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw=
 github.com/valyala/bytebufferpool v1.0.0/go.mod h1:6bBcMArwyJ5K/AmCkWv1jt77kVWyCJ6HpOuEn7z0Csc=
 github.com/valyala/fasttemplate v1.2.2 h1:lxLXG0uE3Qnshl9QyaK6XJxMXlQZELvChBOCmQD0Loo=
@@ -252,8 +252,8 @@ github.com/wailsapp/wails/v2 v2.16.0 h1:hLYrSHUUq6hRXl3rWT9ZXiyFIgM94nVN9Ns6iEJz
 github.com/wailsapp/wails/v2 v2.16.0/go.mod h1:scxrgwfsv6yR6fE6cCF+Flfl+JeU+SR87T9x4kILJ6M=
 github.com/wk8/go-ordered-map/v2 v2.1.8 h1:5h/BUHu93oj4gIdvHHHGsScSTMijfx5PeYkE/fJgbpc=
 github.com/wk8/go-ordered-map/v2 v2.1.8/go.mod h1:5nJHM5DyteebpVlHnWMV0rPz6Zp7+xBAnxjb1X5vnTw=
-github.com/yalue/onnxruntime_go v1.27.0 h1:c1YSgDNtpf0WGtxj3YeRIb8VC5LmM1J+Ve3uHdteC1U=
-github.com/yalue/onnxruntime_go v1.27.0/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
+github.com/yalue/onnxruntime_go v1.29.0 h1:wk0pQPz4pVHfAThXJd/sVGHFduqtjtZdurgzw6TmRTM=
+github.com/yalue/onnxruntime_go v1.29.0/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

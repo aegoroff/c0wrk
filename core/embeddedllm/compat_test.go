@@ -294,6 +294,13 @@ func TestClassifyGPU(t *testing.T) {
 		{"Intel(R) Arc(TM) B390 Graphics", GPUFamilyIntelArc},
 		{"Intel Arc A770", GPUFamilyIntelArc},
 		{"Arc B580", GPUFamilyIntelArc},
+		// The Mesa Vulkan names for the Xe2 iGPUs: the Arc brand never appears
+		// in them, so the parenthesized generation code is the token. ARL is
+		// the captured `--list-devices` description of the project's live Linux
+		// Vulkan host (pinned runtime b10735); LNL is its Lunar Lake sibling,
+		// constructed from the same Mesa naming scheme.
+		{"Intel(R) Graphics (ARL)", GPUFamilyIntelArc},
+		{"Intel(R) Graphics (LNL)", GPUFamilyIntelArc},
 
 		// AMD gfx1151 / Strix Halo (#223): recognized only when the string
 		// carries the gfx target or the product name, which is the documented
@@ -337,6 +344,10 @@ func TestClassifyGPU(t *testing.T) {
 		{"", GPUFamilyUnknown},
 		{"   ", GPUFamilyUnknown},
 		{"Accelerate", GPUFamilyUnknown}, // the measured Metal CPU/BLAS pseudo-device
+		// The OpenCL spelling of the same Xe2 iGPUs: no generation suffix, so no
+		// rule claims it — Unknown stays the honest answer, and the #192 guard
+		// cannot fire on a description that never named the part.
+		{"Intel(R) Graphics", GPUFamilyUnknown},
 		{"AMD Radeon RX 7900 XTX", GPUFamilyAMDRDNA3},
 		{"gfx1100", GPUFamilyAMDRDNA3},
 		{"AMD Radeon RX 7600", GPUFamilyAMDRDNA3},
@@ -395,6 +406,16 @@ func TestClassifyGPUFoldsAnInventory(t *testing.T) {
 			want: GPUFamilyIntelArc,
 		},
 		{
+			// The project's live Linux Vulkan host, exactly as the pinned
+			// runtime prints it (`--list-devices`): the slot name carries no
+			// vendor information, the Mesa description does.
+			name: "live ARL Vulkan host (captured)",
+			devices: []DeviceMemory{
+				{Name: "Vulkan0", Description: "Intel(R) Graphics (ARL)"},
+			},
+			want: GPUFamilyIntelArc,
+		},
+		{
 			name: "nothing recognized",
 			devices: []DeviceMemory{
 				{Name: "X0", Description: "Mystery Accelerator"},
@@ -411,6 +432,32 @@ func TestClassifyGPUFoldsAnInventory(t *testing.T) {
 				t.Errorf("ClassifyGPUs(...) = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestLiveARLVulkanHostFiresTheArcHangGuard chains the classifier into the
+// guard table with the description captured verbatim from the project's live
+// Linux Vulkan host (`llama-server --list-devices`, pinned runtime b10735:
+// "Vulkan0: Intel(R) Graphics (ARL) (72035 MiB, 64832 MiB free)"). Before the
+// ARL/LNL tokens the Mesa name carried no classifiable token, the machine
+// classified as Unknown, and the #192 advisory could not fire on the exact
+// hardware it documents.
+func TestLiveARLVulkanHostFiresTheArcHangGuard(t *testing.T) {
+	t.Parallel()
+
+	const liveDescription = "Intel(R) Graphics (ARL)"
+	if got := ClassifyGPU(liveDescription); got != GPUFamilyIntelArc {
+		t.Fatalf("ClassifyGPU(%q) = %q, want %q", liveDescription, got, GPUFamilyIntelArc)
+	}
+
+	guards := CompatibilityGuards(BackendVulkan, GPUFamilyIntelArc, PlatformLinuxAMD64)
+	if len(guards) != 1 || guards[0].Guard != GuardVulkanIntelArcHang {
+		t.Fatalf("CompatibilityGuards(vulkan, intel-arc, linux) = %v, want exactly [%s]",
+			guards, GuardVulkanIntelArcHang)
+	}
+	if guards[0].Reason != GuardReasonHang || guards[0].Issue != "PrismML-Eng/llama.cpp#192" {
+		t.Errorf("#192 decision = reason %q issue %q, want %q / PrismML-Eng/llama.cpp#192",
+			guards[0].Reason, guards[0].Issue, GuardReasonHang)
 	}
 }
 

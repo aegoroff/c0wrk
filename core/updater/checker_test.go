@@ -404,14 +404,16 @@ func linuxFlavorAssets(tag string) []ReleaseAsset {
 	return []ReleaseAsset{
 		{Name: "c0wrk-desktop-linux-amd64.tar.gz", BrowserDownloadURL: base + "c0wrk-desktop-linux-amd64.tar.gz"},
 		{Name: "c0wrk-desktop-linux-amd64-cuda13.tar.gz", BrowserDownloadURL: base + "c0wrk-desktop-linux-amd64-cuda13.tar.gz"},
+		{Name: "c0wrk-desktop-linux-amd64-openvino.tar.gz", BrowserDownloadURL: base + "c0wrk-desktop-linux-amd64-openvino.tar.gz"},
 	}
 }
 
 // TestCheck_FlavorSelection drives the full Checker path (Check → evaluate →
 // SelectAsset) for the linux/amd64 flavor split: a CPU-flavored checker picks
-// the CPU archive, a cuda13-flavored checker picks the cuda13 archive, and a
-// cuda13 checker fails closed with ErrNoAssetForPlatform when the release
-// ships no cuda13 asset rather than silently downgrading to the CPU archive.
+// the CPU archive, a cuda13-flavored checker picks the cuda13 archive, an
+// openvino-flavored checker picks the openvino archive, and a flavored
+// checker fails closed with ErrNoAssetForPlatform when the release ships no
+// asset for its flavor rather than silently downgrading to another archive.
 func TestCheck_FlavorSelection(t *testing.T) {
 	t.Parallel()
 
@@ -448,6 +450,48 @@ func TestCheck_FlavorSelection(t *testing.T) {
 		}
 		if res.AssetName != "c0wrk-desktop-linux-amd64-cuda13.tar.gz" {
 			t.Fatalf("AssetName = %q, want the cuda13 archive", res.AssetName)
+		}
+	})
+
+	t.Run("openvino flavor picks the openvino archive", func(t *testing.T) {
+		t.Parallel()
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(releasePayload("v2.0.0", linuxFlavorAssets("v2.0.0")...)))
+		}))
+		defer ts.Close()
+
+		c := newTestChecker(t, ts, "v1.0.0", "")
+		c.WithPlatform("linux", "amd64").WithFlavor(FlavorOpenVINO)
+		res, err := c.Check(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.AssetName != "c0wrk-desktop-linux-amd64-openvino.tar.gz" {
+			t.Fatalf("AssetName = %q, want the openvino archive", res.AssetName)
+		}
+	})
+
+	t.Run("openvino flavor without an openvino asset fails closed", func(t *testing.T) {
+		t.Parallel()
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(releasePayload("v2.0.0",
+				ReleaseAsset{Name: "c0wrk-desktop-linux-amd64.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64.tar.gz"},
+				ReleaseAsset{Name: "c0wrk-desktop-linux-amd64-cuda13.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-cuda13.tar.gz"},
+			)))
+		}))
+		defer ts.Close()
+
+		c := newTestChecker(t, ts, "v1.0.0", "")
+		c.WithPlatform("linux", "amd64").WithFlavor(FlavorOpenVINO)
+		res, err := c.Check(context.Background())
+		if err == nil {
+			t.Fatal("expected an error, not a silent \"no update\" when the flavor's asset is missing")
+		}
+		if !errors.Is(err, ErrNoAssetForPlatform) {
+			t.Fatalf("expected ErrNoAssetForPlatform, got %v", err)
+		}
+		if res.Available {
+			t.Fatalf("Available = true with a failed asset selection, want false")
 		}
 	})
 

@@ -1,4 +1,4 @@
-.PHONY: build build-gpu test test-go test-stress bench-startup lint fmt-check vulncheck dev-desktop dev-frontend bump fetch-onnx fetch-onnx-gpu fetch-embedding-model clean-onnx clean frontend-deps
+.PHONY: build build-gpu test test-go test-stress bench-startup lint fmt-check vulncheck dev-desktop dev-frontend bump fetch-onnx fetch-onnx-gpu fetch-onnx-openvino fetch-embedding-model clean-onnx clean frontend-deps
 
 # govulncheck version pinned for reproducible vulnerability scans (CI runs the
 # same `make vulncheck` command; upgrade deliberately, both repos in lockstep).
@@ -162,6 +162,60 @@ ONNX_GPU_LIB_SHA256 := 4680895afc920629c16fd4aea9d04e1b40cf6d66cbb1495dead4953de
 ONNX_GPU_CUDA_LIB_SHA256 := a3a9e9d3d99b8292e9a472176367fd5e03a0dfd07762150f2a8a6c93bdd97e31
 ONNX_GPU_SHARED_LIB_SHA256 := c6a12593396095f5670160e284c35d1700b7708cf3037b7042e2a5200ccae772
 
+# --- ONNX Runtime OpenVINO EP flavor (Intel GPU/NPU/CPU, Linux x64 only) ---------
+# Second opt-in flavor, installed ONLY by the explicit `make fetch-onnx-openvino`
+# target — never by `make build`. Unlike the CUDA flavor it does NOT replace
+# libonnxruntime.so: the OpenVINO execution-provider plugin is registered into
+# the stock CPU runtime at run time (RegisterExecutionProviderLibrary), so the
+# flavor is CPU ONNX Runtime PLUS an additive stack of OpenVINO/TBB libraries.
+# Recommended order:
+#   make build && make fetch-onnx-openvino
+#
+# The stack is harvested from the official `onnxruntime-ep-openvino` PyPI wheel
+# (Intel's release vehicle for the plugin): the wheel is downloaded as a whole,
+# digest-verified fail-closed, and its shared libraries are extracted flat next
+# to the executable — the exact layout the step-A spike validated on Arrow Lake
+# iGPU (Arc Pro, Xe2). No Python runtime is involved: the wheel is used purely
+# as a digest-pinned transport container for the libraries. The wheel bundles
+# the full OpenVINO runtime (libopenvino.so.2641, ONNX frontend/IR frontends,
+# CPU/GPU/NPU device plugins), TBB and hwloc — one pinned digest governs all of
+# them, and unzip's CRC check guards the extraction itself. The plugin library
+# (the file ONNX Runtime actually loads) additionally carries its own pinned
+# digest, verified after extraction, mirroring ONNX_LIB_SHA256's role above.
+# cache.json (an OpenVINO kernel-JIT cache, optional) and the Python package
+# files are not installed.
+#
+# Digests are pinned trust-on-first-use from the PyPI JSON API's declared
+# sha256 for the exact wheel file, cross-verified against a fresh download.
+# When bumping ONNX_OV_WHEEL_VERSION (or ONNX_VERSION, which the plugin must
+# stay ABI-compatible with), recompute both digests:
+#   curl -LO <ONNX_OV_WHEEL_URL> && shasum -a 256 <wheel>
+#   unzip -j <wheel> 'onnxruntime_ep_openvino/*.so*' -d /tmp/ov && shasum -a 256 /tmp/ov/$(ONNX_OV_PLUGIN_LIB)
+# and re-run the integration smoke on real hardware before shipping.
+#
+# Stamp policy: the OpenVINO flavor is compatible with the CPU flavor's state
+# (same libonnxruntime.so, additive libraries), so this target leaves the CPU
+# stamp (ONNX_STAMP) untouched and `make build` keeps working over an OpenVINO
+# install. It is MUTUALLY EXCLUSIVE with the CUDA flavor, and the stamps
+# enforce both directions: this target refuses to run over a CUDA install
+# (providers_cuda.so present or GPU stamp matching — the CPU wrapper it would
+# lay down must never land on top of a GPU install), and fetch-onnx-gpu
+# refuses over an OpenVINO install (the GPU main library would replace the
+# CPU base the plugin stack is validated against, while the updater — reading
+# the CUDA marker — would hand out CUDA archives that drop the plugin).
+# Reset to CPU via `make clean-onnx && make build` before switching flavors.
+# Windows/macOS/arm64 are out of scope: the pinned wheel is manylinux x86_64.
+ONNX_OV_WHEEL_VERSION := 1.8.0
+ONNX_OV_WHEEL := onnxruntime_ep_openvino-$(ONNX_OV_WHEEL_VERSION)-py3-none-manylinux_2_28_x86_64.whl
+ONNX_OV_WHEEL_URL := https://files.pythonhosted.org/packages/75/de/1d07df4f71e3505d9ca725b173a746138d0939053fd0ddfed09b2173b5a1/$(ONNX_OV_WHEEL)
+ONNX_OV_WHEEL_SHA256 := aaa9544cbfd5d52478967760bc981107850cc8f96ab280d9393ba28d249d802b
+ONNX_OV_PLUGIN_LIB := libonnxruntime_providers_openvino_plugin.so
+ONNX_OV_PLUGIN_SHA256 := 5496e9ef68b22d20e98d6bba7e92c9b6b8bfd58aab1a6a368da3401ee737f562
+ONNX_OV_CACHE_DIR := $(ONNX_CACHE_DIR)/onnx-openvino
+ONNX_OV_CACHE_STAMP := $(ONNX_OV_CACHE_DIR)/.openvino-wheel-version
+ONNX_OV_STAMP_VALUE := $(ONNX_VERSION)-openvino-ep$(ONNX_OV_WHEEL_VERSION)
+ONNX_OV_STAMP := $(APP_BUNDLE_DIR)/.onnxruntime-openvino-version
+
 # Embedding model configuration
 MODELS_CACHE_DIR := .cache/models
 EMBEDDING_MODEL_URL := https://huggingface.co/jinaai/jina-embeddings-v2-small-en/resolve/main/model.onnx
@@ -186,6 +240,13 @@ EMBEDDING_TOKENIZER_SHA256 := e9f999ac74497843ed9f4303246a8f43d9f100ee8aab8e1336
 # comes back empty and never matches — verification fails closed.
 SHASUM ?= $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
+# unzip extracts the OpenVINO EP wheel (fetch-onnx-openvino): a wheel is a zip
+# container, and the flavor harvests its shared libraries rather than importing
+# anything as Python. Fail-closed like SHASUM: an empty value never matches and
+# the recipe aborts with a clear message instead of silently skipping the
+# extraction.
+UNZIP ?= $(shell command -v unzip >/dev/null 2>&1 && echo unzip || echo "")
+
 # Compares the digest of file $(1) against expected hex digest $(2). On mismatch
 # (including an unset/empty $(2)) it prints an error, removes the bad file and
 # aborts the whole recipe with a non-zero exit — nothing unverified is ever
@@ -202,6 +263,25 @@ if [ "$$sha_actual" != "$(2)" ]; then \
 	exit 1; \
 fi; \
 echo "SHA256 verified: $(1)"
+endef
+
+# Installs the OpenVINO EP stack from an already digest-verified wheel: extracts
+# the shared libraries and the license note flat into a temp dir, re-verifies
+# the plugin library against its own pinned digest (the file ONNX Runtime loads
+# at registration time), copies everything next to the executable and writes the
+# flavor stamp. Parameter $(1) = path to the verified .whl. Every state-changing
+# command carries `|| exit 1` so a partial extraction can never be stamped as
+# installed. Must stay a single shell line: the recipe lines it is expanded
+# into run in one shell, and the inner `exit 1` has to terminate that shell.
+define install_openvino_from_wheel
+ov_tmp=$$(mktemp -d); \
+$(UNZIP) -o -j "$(1)" 'onnxruntime_ep_openvino/*.so*' 'onnxruntime_ep_openvino/third-party-programs.txt' -d "$$ov_tmp" >/dev/null || exit 1; \
+$(call verify_sha256,$$ov_tmp/$(ONNX_OV_PLUGIN_LIB),$(ONNX_OV_PLUGIN_SHA256)); \
+cp "$$ov_tmp"/*.so* "$(APP_BUNDLE_DIR)/" || exit 1; \
+mv "$$ov_tmp/third-party-programs.txt" "$(APP_BUNDLE_DIR)/openvino-third-party-programs.txt" || exit 1; \
+rm -rf "$$ov_tmp"; \
+echo "$(ONNX_OV_STAMP_VALUE)" > $(ONNX_OV_STAMP) || exit 1; \
+echo "ONNX Runtime OpenVINO EP libraries installed to $(APP_BUNDLE_DIR)"
 endef
 
 # --- Build-time version metadata -------------------------------------------------
@@ -363,6 +443,13 @@ endif
 ifeq ($(UNAME_S)$(UNAME_M),Linuxx86_64)
 fetch-onnx-gpu:
 	@mkdir -p $(APP_BUNDLE_DIR); \
+	if [ -f "$(APP_BUNDLE_DIR)/$(ONNX_OV_PLUGIN_LIB)" ]; then \
+		echo "ERROR: refusing to install the CUDA GPU flavor over an OpenVINO install:" >&2; \
+		echo "  $(APP_BUNDLE_DIR)/$(ONNX_OV_PLUGIN_LIB) marks an openvino-flavored tree," >&2; \
+		echo "  and the GPU libonnxruntime.so would replace the CPU base that stack is validated against." >&2; \
+		echo "  Reset to CPU first: make clean-onnx && make build" >&2; \
+		exit 1; \
+	fi; \
 	if [ -f "$(APP_BUNDLE_DIR)/$(ONNX_GPU_CUDA_LIB)" ] && [ "$$(cat "$(ONNX_GPU_STAMP)" 2>/dev/null)" = "$(ONNX_GPU_STAMP_VALUE)" ]; then \
 		echo "ONNX Runtime $(ONNX_GPU_STAMP_VALUE) already installed at $(APP_BUNDLE_DIR)"; \
 	elif [ -f "$(ONNX_GPU_CACHE_DIR)/$(ONNX_GPU_LIB)" ] && [ -f "$(ONNX_GPU_CACHE_DIR)/$(ONNX_GPU_CUDA_LIB)" ] && [ -f "$(ONNX_GPU_CACHE_DIR)/$(ONNX_GPU_SHARED_LIB)" ]; then \
@@ -402,6 +489,58 @@ fetch-onnx-gpu:
 	@echo "ERROR: fetch-onnx-gpu is Linux x64 only (got $(UNAME_S)/$(UNAME_M)):" >&2; \
 	echo "  the pinned artifact $(ONNX_GPU_ARCHIVE) has no build for this platform," >&2; \
 	echo "  and no digest can be verified. Run plain 'make build' (CPU flavor) instead." >&2; \
+	exit 1
+endif
+
+# Install the opt-in OpenVINO EP flavor of ONNX Runtime for Linux x64: the
+# stock CPU libonnxruntime.so (ensured by delegating to fetch-onnx) plus the
+# OpenVINO execution-provider plugin and its OpenVINO/TBB runtime libraries,
+# harvested from the digest-pinned PyPI wheel (see the ONNX_OV_* block above).
+# The main library is NOT replaced — the plugin is additive — so the CPU stamp
+# stays valid and `make build` keeps working over an OpenVINO install.
+# Mutually exclusive with the CUDA flavor; the stamp policy comment on the
+# ONNX_OV_* block documents why both directions refuse to mix.
+# Linux x64 only — fail-closed elsewhere: no download, no partial install.
+# Every artifact is SHA256-verified fail-closed exactly like fetch-onnx: the
+# downloaded wheel, the cached wheel on every reuse, and the plugin library
+# after every extraction (unzip's CRC check guards the remaining libraries).
+ifeq ($(UNAME_S)$(UNAME_M),Linuxx86_64)
+fetch-onnx-openvino:
+	@if [ -z "$(UNZIP)" ]; then \
+		echo "ERROR: unzip not found on PATH; it is required to extract the OpenVINO EP wheel" >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p $(APP_BUNDLE_DIR); \
+	if [ -f "$(APP_BUNDLE_DIR)/$(ONNX_GPU_CUDA_LIB)" ] || [ "$$(cat "$(ONNX_GPU_STAMP)" 2>/dev/null)" = "$(ONNX_GPU_STAMP_VALUE)" ]; then \
+		echo "ERROR: refusing to install the OpenVINO flavor over a CUDA (cuda13) install:" >&2; \
+		echo "  $(APP_BUNDLE_DIR) carries the CUDA-flavored ONNX Runtime (marker: $(ONNX_GPU_CUDA_LIB)," >&2; \
+		echo "  or stamp $(ONNX_GPU_STAMP) = $(ONNX_GPU_STAMP_VALUE))." >&2; \
+		echo "  The OpenVINO stack requires the CPU libonnxruntime.so as its base; laying it down here" >&2; \
+		echo "  would downgrade the GPU flavor - the exact silent downgrade the flavor system forbids." >&2; \
+		echo "  Reset to CPU first: make clean-onnx && make build" >&2; \
+		exit 1; \
+	fi; \
+	$(MAKE) fetch-onnx || exit 1; \
+	if [ -f "$(APP_BUNDLE_DIR)/$(ONNX_OV_PLUGIN_LIB)" ] && [ "$$(cat "$(ONNX_OV_STAMP)" 2>/dev/null)" = "$(ONNX_OV_STAMP_VALUE)" ]; then \
+		echo "ONNX Runtime OpenVINO EP $(ONNX_OV_STAMP_VALUE) already installed at $(APP_BUNDLE_DIR)"; \
+	elif [ -f "$(ONNX_OV_CACHE_DIR)/$(ONNX_OV_WHEEL)" ]; then \
+		echo "Using cached ONNX Runtime OpenVINO EP wheel..."; \
+		$(call verify_sha256,$(ONNX_OV_CACHE_DIR)/$(ONNX_OV_WHEEL),$(ONNX_OV_WHEEL_SHA256)); \
+		$(call install_openvino_from_wheel,$(ONNX_OV_CACHE_DIR)/$(ONNX_OV_WHEEL)); \
+	else \
+		mkdir -p $(ONNX_OV_CACHE_DIR); \
+		echo "Downloading ONNX Runtime OpenVINO EP $(ONNX_OV_STAMP_VALUE) for $(UNAME_S)/$(UNAME_M)..."; \
+		curl -f -L -o /tmp/$(ONNX_OV_WHEEL) $(ONNX_OV_WHEEL_URL) || exit 1; \
+		$(call verify_sha256,/tmp/$(ONNX_OV_WHEEL),$(ONNX_OV_WHEEL_SHA256)); \
+		mv -f /tmp/$(ONNX_OV_WHEEL) $(ONNX_OV_CACHE_DIR)/$(ONNX_OV_WHEEL) || exit 1; \
+		echo "$(ONNX_OV_STAMP_VALUE)" > $(ONNX_OV_CACHE_STAMP) || exit 1; \
+		$(call install_openvino_from_wheel,$(ONNX_OV_CACHE_DIR)/$(ONNX_OV_WHEEL)); \
+	fi
+else
+fetch-onnx-openvino:
+	@echo "ERROR: fetch-onnx-openvino is Linux x64 only (got $(UNAME_S)/$(UNAME_M)):" >&2; \
+	echo "  the pinned artifact $(ONNX_OV_WHEEL) is a manylinux x86_64 wheel," >&2; \
+	echo "  and no digest can be verified for this platform. Run plain 'make build' (CPU flavor) instead." >&2; \
 	exit 1
 endif
 
@@ -453,10 +592,17 @@ clean-onnx:
 	@rm -f $(APP_BUNDLE_DIR)/libonnxruntime_providers_cuda.so
 	@rm -f $(APP_BUNDLE_DIR)/libonnxruntime_providers_shared.so
 	@rm -f $(APP_BUNDLE_DIR)/.onnxruntime-gpu-version
+	@rm -f $(APP_BUNDLE_DIR)/libonnxruntime_providers_openvino_plugin.so*
+	@rm -f $(APP_BUNDLE_DIR)/libopenvino*.so*
+	@rm -f $(APP_BUNDLE_DIR)/libtbb*.so*
+	@rm -f $(APP_BUNDLE_DIR)/libhwloc.so.*
+	@rm -f $(APP_BUNDLE_DIR)/openvino-third-party-programs.txt
+	@rm -f $(APP_BUNDLE_DIR)/.onnxruntime-openvino-version
 	@rm -f $(ONNX_CACHE_DIR)/libonnxruntime.dylib
 	@rm -f $(ONNX_CACHE_DIR)/libonnxruntime.so
 	@rm -f $(ONNX_CACHE_DIR)/onnxruntime.dll
 	@rm -rf $(ONNX_GPU_CACHE_DIR)
+	@rm -rf $(ONNX_OV_CACHE_DIR)
 	@echo "ONNX Runtime library removed from $(APP_BUNDLE_DIR)/ and $(ONNX_CACHE_DIR)/"
 
 clean:

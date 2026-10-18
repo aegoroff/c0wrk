@@ -282,10 +282,13 @@ export type IndexPhase = 'both' | 'embedding' | 'lexical' | 'open'
 
 /**
  * ONNX Runtime execution provider for the vector-index embedder
- * (vector_index.execution_provider config knob). "auto" tries CUDA and
- * falls back to CPU; "cpu" forces CPU; "cuda" targets an NVIDIA GPU.
+ * (vector_index.execution_provider config knob). "auto" tries the CUDA
+ * provider, then the OpenVINO provider, and falls back to CPU when neither
+ * hardware provider is usable; "cpu" forces CPU; "cuda" targets an NVIDIA
+ * GPU; "openvino" targets Intel hardware via the OpenVINO execution
+ * provider (device 0 only — the plugin picks the concrete Intel device).
  */
-export type ExecutionProvider = 'auto' | 'cpu' | 'cuda'
+export type ExecutionProvider = 'auto' | 'cpu' | 'cuda' | 'openvino'
 
 export interface VectorIndexStatus {
   state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading'
@@ -298,20 +301,21 @@ export interface VectorIndexStatus {
   indices?: string[]
   /**
    * ONNX Runtime execution provider the embedder effectively runs on:
-   * "cpu" or "cuda" — never "auto" ("auto" is resolved once, at embedder
-   * creation; the winner is reported here). Absent when no embedder
-   * exists (model files missing or creation failed). Comparing it with
-   * requested_execution_provider classifies the outcome: an explicit
-   * "cuda" landing on "cpu" is a fallback; "auto" always diverges (it is
-   * resolved to either winner), so auto→cuda is a success and auto→cpu
-   * is Auto's expected degradation.
+   * "cpu", "cuda" or "openvino" — never "auto" ("auto" is resolved once,
+   * at embedder creation; the winner is reported here). Absent when no
+   * embedder exists (model files missing or creation failed). Comparing it
+   * with requested_execution_provider classifies the outcome: an explicit
+   * "cuda" or "openvino" landing on "cpu" is a fallback; "auto" always
+   * diverges (it is resolved to the winner), so auto→cuda and auto→openvino
+   * are successes and auto→cpu is Auto's expected degradation.
    */
   execution_provider?: string
   /**
-   * Config value ("auto"|"cpu"|"cuda") the embedder was created with.
-   * Diverges from execution_provider for every "auto" request (auto is
-   * resolved to the winner) and for an explicit "cuda" degrading to CPU
-   * after init failure (WARN + toast) — only the latter is a fallback.
+   * Config value ("auto"|"cpu"|"cuda"|"openvino") the embedder was created
+   * with. Diverges from execution_provider for every "auto" request (auto
+   * is resolved to the winner) and for an explicit "cuda" or "openvino"
+   * degrading to CPU after init failure (WARN + toast) — only the latter
+   * is a fallback.
    */
   requested_execution_provider?: string
   /**
@@ -322,6 +326,17 @@ export interface VectorIndexStatus {
    * probe ran (CPU embedder, embedder unavailable, never initialized).
    */
   cuda_verified?: boolean
+  /**
+   * xpu-smi device-class verdict for the OpenVINO embedder, present only
+   * when the effective provider is "openvino" and the startup verification
+   * probe ran: "gpu" = the probe saw compute activity on an Intel GPU (the
+   * plugin chose a GPU device); "cpu" = the probe ran and saw no GPU
+   * activity (the plugin is running on a CPU device). Absent = unverified —
+   * no probe ran (non-openvino embedder, embedder unavailable) or xpu-smi
+   * could not answer (absent, failed, timed out); a missing verdict is
+   * never reported as "cpu".
+   */
+  ov_device?: string
   /**
    * Why the effective provider deviates from the requested one (CUDA init
    * failure text). Absent/empty when the requested provider was honored.
@@ -338,16 +353,22 @@ export interface VectorIndexStatus {
 }
 
 /**
- * One GPU visible to the NVIDIA driver, for the vector-index settings UI
+ * One GPU visible to a driver stack, for the vector-index settings UI
  * (populating the execution-provider device picker). Mirrors the backend's
  * GPUDeviceResponse (which mirrors sp4rk's embedding.GPUDevice): `index`
  * is the driver-assigned ordinal ("0" is the primary GPU — the ONNX device
  * index used by vector_index.device_id); `name` is the informational
- * product name ("NVIDIA GeForce RTX 5060 Ti").
+ * product name ("NVIDIA GeForce RTX 5060 Ti", "Intel(R) Graphics (ARL)").
+ * `provider` names the execution provider the device belongs to ("cuda"
+ * for nvidia-smi-enumerated devices, "openvino" for Intel devices
+ * enumerated through vulkaninfo) — the index is scoped to the provider,
+ * so the same index 0 under "cuda" and "openvino" names different
+ * hardware.
  */
 export interface GPUDeviceResponse {
   index: number
   name: string
+  provider?: string
 }
 
 export interface VectorStoreEntry {

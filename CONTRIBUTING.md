@@ -443,17 +443,18 @@ To exercise the workflow without cutting a real release:
 
 ### Artifact inventory
 
-Each release publishes five platform archives plus `SHA256SUMS`. Unzip/extract the archive matching your OS and architecture.
+Each release publishes six platform archives plus `SHA256SUMS`. Unzip/extract the archive matching your OS and architecture.
 
 | Filename                              | Target                       | Contents                                                                          |
 | ------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------- |
 | `c0wrk-desktop-macos-arm64.zip`       | macOS (Apple Silicon, arm64) | `c0wrk-desktop.app` bundle with bundled `libonnxruntime.dylib` + embedding models |
 | `c0wrk-desktop-linux-amd64.tar.gz`    | Linux (amd64)                | `c0wrk-desktop` binary + `libonnxruntime.so` + embedding models                   |
 | `c0wrk-desktop-linux-amd64-cuda13.tar.gz` | Linux (amd64, NVIDIA GPU) | `c0wrk-desktop` binary + CUDA-13-flavored `libonnxruntime.so` + CUDA provider libraries + embedding models |
+| `c0wrk-desktop-linux-amd64-openvino.tar.gz` | Linux (amd64, Intel GPU/NPU) | `c0wrk-desktop` binary + `libonnxruntime.so` (CPU) + OpenVINO EP plugin + OpenVINO/TBB runtime libraries + embedding models |
 | `c0wrk-desktop-linux-arm64.tar.gz`    | Linux (arm64)                | `c0wrk-desktop` binary + `libonnxruntime.so` + embedding models                   |
 | `c0wrk-desktop-windows-amd64.zip`     | Windows (amd64)              | `c0wrk-desktop.exe` + `onnxruntime.dll` + embedding models                        |
 
-> The ONNX Runtime shared library and the quantized embedding model + tokenizer are bundled so vector search works out of the box — no extra download step is required on the user's machine. The in-app updater verifies the selected archive fail-closed against `SHA256SUMS`; artifacts are still unsigned, so the checksum establishes release-byte integrity but not authorship if the release account and checksum are both compromised. The updater is flavor-aware: a cuda13 install only ever updates from the cuda13 archive and vice versa ([ADR-046](specs/decisions/046-cuda-release-artifact.md)).
+> The ONNX Runtime shared library and the quantized embedding model + tokenizer are bundled so vector search works out of the box — no extra download step is required on the user's machine. The in-app updater verifies the selected archive fail-closed against `SHA256SUMS`; artifacts are still unsigned, so the checksum establishes release-byte integrity but not authorship if the release account and checksum are both compromised. The updater is flavor-aware: a cuda13 install only ever updates from the cuda13 archive, an openvino install only from the openvino archive, and a plain install only from the plain archive ([ADR-046](specs/decisions/046-cuda-release-artifact.md)).
 
 End-user installation steps for each platform live in [README.md](README.md).
 

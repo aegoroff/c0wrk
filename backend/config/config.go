@@ -414,20 +414,26 @@ type VectorIndexConfig struct {
 
 	// ExecutionProvider selects the ONNX Runtime execution provider the
 	// embedding model runs on: VectorIndexProviderAuto ("auto"),
-	// VectorIndexProviderCPU ("cpu") or VectorIndexProviderCUDA ("cuda").
-	// The empty string (a config written before the knob existed) is
-	// normalized to "auto" by ApplyDefaults: try the NVIDIA CUDA provider
-	// and fall back to the CPU provider when CUDA is not usable. "cpu"
-	// always runs on the CPU; "cuda" targets an NVIDIA GPU. Both "auto"
-	// and "cuda" additionally require a GPU (CUDA-enabled) ONNX Runtime
-	// build sitting next to the executable — see config.example.yaml.
-	// Invalid values are rejected at load time by validate().
+	// VectorIndexProviderCPU ("cpu"), VectorIndexProviderCUDA ("cuda") or
+	// VectorIndexProviderOpenVINO ("openvino"). The empty string (a config
+	// written before the knob existed) is normalized to "auto" by
+	// ApplyDefaults: try the NVIDIA CUDA provider, then the OpenVINO
+	// provider, and fall back to the CPU provider when neither hardware
+	// provider is usable. "cpu" always runs on the CPU; "cuda" targets an
+	// NVIDIA GPU; "openvino" targets Intel hardware via the OpenVINO
+	// execution provider. "auto" and "cuda" additionally require a GPU
+	// (CUDA-enabled) ONNX Runtime build sitting next to the executable;
+	// "openvino" additionally requires the OpenVINO provider plugin next
+	// to it — see config.example.yaml. Invalid values are rejected at
+	// load time by validate().
 	ExecutionProvider string `yaml:"execution_provider"`
 
 	// DeviceID is the GPU device index used when ExecutionProvider
 	// resolves to CUDA. Defaults to 0 (the first GPU) — the right choice
-	// on single-GPU machines. It is ignored by the CPU provider. Negative
-	// values are rejected at load time by validate().
+	// on single-GPU machines. It is ignored by the CPU provider, and the
+	// OpenVINO provider accepts only 0 (the OpenVINO plugin picks the
+	// concrete Intel device itself; any other value fails embedder
+	// creation). Negative values are rejected at load time by validate().
 	DeviceID int `yaml:"device_id"`
 }
 
@@ -495,14 +501,21 @@ func (c VectorIndexContentFilterConfig) ResolveContentFilter() vectorindex.Conte
 // Vector index embedding execution provider values
 // (VectorIndexConfig.ExecutionProvider).
 const (
-	// VectorIndexProviderAuto tries the CUDA provider and falls back to
-	// the CPU provider when CUDA is not usable. The default.
+	// VectorIndexProviderAuto tries the CUDA provider, then the OpenVINO
+	// provider, and falls back to the CPU provider when neither hardware
+	// provider is usable. The default.
 	VectorIndexProviderAuto = "auto"
 	// VectorIndexProviderCPU always runs embedding inference on the CPU.
 	VectorIndexProviderCPU = "cpu"
 	// VectorIndexProviderCUDA runs embedding inference on an NVIDIA GPU
 	// via the CUDA execution provider.
 	VectorIndexProviderCUDA = "cuda"
+	// VectorIndexProviderOpenVINO runs embedding inference on Intel
+	// hardware (integrated or discrete GPUs, Intel CPUs) via the OpenVINO
+	// execution provider. Requires the OpenVINO provider plugin next to
+	// the ONNX Runtime library; only device_id 0 is valid — the plugin
+	// chooses the concrete Intel device itself.
+	VectorIndexProviderOpenVINO = "openvino"
 )
 
 // LLMConfig holds LLM provider configuration with fixed provider schema.
@@ -3531,13 +3544,13 @@ func validate(cfg *Config) error {
 	// already normalized the empty string to "auto", so anything else
 	// here is a user-authored value.
 	switch cfg.VectorIndex.ExecutionProvider {
-	case VectorIndexProviderAuto, VectorIndexProviderCPU, VectorIndexProviderCUDA:
+	case VectorIndexProviderAuto, VectorIndexProviderCPU, VectorIndexProviderCUDA, VectorIndexProviderOpenVINO:
 		// valid
 	default:
 		return fmt.Errorf(
-			"vector_index.execution_provider %q is not valid; must be one of: %s, %s, %s",
+			"vector_index.execution_provider %q is not valid; must be one of: %s, %s, %s, %s",
 			cfg.VectorIndex.ExecutionProvider,
-			VectorIndexProviderAuto, VectorIndexProviderCPU, VectorIndexProviderCUDA,
+			VectorIndexProviderAuto, VectorIndexProviderCPU, VectorIndexProviderCUDA, VectorIndexProviderOpenVINO,
 		)
 	}
 

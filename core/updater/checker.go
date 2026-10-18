@@ -151,8 +151,8 @@ func (c *Checker) WithPlatform(goos, goarch string) *Checker {
 
 // WithFlavor overrides the packaging flavor used for asset selection.
 // Returns the receiver for chaining. Flavors only diverge on linux/amd64
-// (cpu vs cuda13, ADR-045); on every other platform the flavor is ignored
-// because the release matrix ships a single archive there.
+// (cpu vs cuda13 vs openvino, ADR-045/ADR-046); on every other platform the
+// flavor is ignored because the release matrix ships a single archive there.
 func (c *Checker) WithFlavor(flavor Flavor) *Checker {
 	c.flavor = flavor
 	return c

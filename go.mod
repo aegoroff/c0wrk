@@ -16,7 +16,7 @@ require (
 	github.com/openai/openai-go v1.12.0
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/shirou/gopsutil/v4 v4.26.8
-	github.com/v0lka/sp4rk v0.15.1-0.20261018081230-ea927918561c
+	github.com/v0lka/sp4rk v0.15.1-0.20261018105837-48b680f7d8eb
 	github.com/wailsapp/wails/v2 v2.16.0
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/image v0.45.0
@@ -113,7 +113,7 @@ require (
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
-	github.com/yalue/onnxruntime_go v1.27.0 // indirect
+	github.com/yalue/onnxruntime_go v1.29.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
