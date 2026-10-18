@@ -525,6 +525,20 @@ export interface ConfigResponse {
    * without it is treated as "ModelProfiles off".
    */
   model_profiles?: ConfigModelProfilesResponse
+  /**
+   * Effective prompt-suggestions master gate (config `prompt_suggestions.enabled`,
+   * ADR-088). Optional so existing typed mocks/test fixtures — which predate the
+   * field — stay compatible; a payload without it is treated as "on" (the
+   * backend's nil default = on). The backend reports false only for an explicit
+   * `enabled: false` (or an unloaded config).
+   */
+  prompt_suggestions?: ConfigPromptSuggestionsResponse
+}
+
+/** Effective prompt-suggestions gate exposed by GetConfig — mirrors the
+ *  backend's PromptSuggestionsSettingsResponse (ADR-088). */
+export interface ConfigPromptSuggestionsResponse {
+  enabled: boolean
 }
 
 /** Experimental-features switch (all-or-nothing). Its sole availability gate is

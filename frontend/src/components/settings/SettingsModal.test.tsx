@@ -272,6 +272,33 @@ describe('SettingsModal General tab: session statistics display toggle', () => {
   })
 })
 
+describe('SettingsModal General tab: prompt suggestions gate', () => {
+  it('places the Prompt Suggestions section directly after System Notifications', async () => {
+    useSettingsStore.setState({ open: true, activeTab: 'general' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    const headers = Array.from(document.body.querySelectorAll('span'))
+    const notificationsHeader = headers.find((s) => s.textContent === 'System Notifications')
+    const suggestionsHeader = headers.find((s) => s.textContent === 'Prompt Suggestions')
+    expect(notificationsHeader).toBeDefined()
+    expect(suggestionsHeader).toBeDefined()
+    // DOM order pins the placement contract: the gate reads immediately after
+    // the system-notifications block, before Session Statistics.
+    expect(
+      notificationsHeader!.compareDocumentPosition(suggestionsHeader!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    // General-tab sections are divided by a border-t wrapper — the section
+    // must follow that convention, not float undivided between neighbors.
+    const section = suggestionsHeader!.closest('div.border-t')
+    expect(section).not.toBeNull()
+    expect(section!.className).toContain('pt-4')
+  })
+})
+
 describe('SettingsModal Appearance tab', () => {
   /** Tab labels in the settings tab strip, in DOM order. */
   function tabLabels(): string[] {

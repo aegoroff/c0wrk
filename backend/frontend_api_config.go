@@ -59,6 +59,11 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		// refreshModelProfilesGateLocked so this read path performs NO disk I/O — see the
 		// GUARANTEE on collectAllModels.
 		ModelProfiles: f.modelProfilesGateResp,
+		// The EFFECTIVE prompt-suggestions gate (prompt_suggestions.enabled,
+		// ADR-088): nil config = on, mirrored through SuggestionsEnabled().
+		PromptSuggestions: PromptSuggestionsSettingsResponse{
+			Enabled: f.config.PromptSuggestions.SuggestionsEnabled(),
+		},
 	}
 
 	// The gate block's ACTIVE/SUGGESTED identity half is filled FRESH (pure

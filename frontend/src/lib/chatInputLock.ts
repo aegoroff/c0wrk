@@ -46,6 +46,63 @@ export function computeChatPlaceholder(s: ChatInputLockInput): string {
   return 'Type a message... (Enter to send, Shift+Enter for new line)'
 }
 
+/** True when no special session state is active — the plain "Type a
+ *  message..." idle. Only this state may hand the placeholder over to the
+ *  prompt-suggestion hint; every state-specific placeholder outranks it. */
+export function isChatSessionIdle(s: ChatInputLockInput): boolean {
+  return !s.isNoProject && !s.compacting && !s.pausing && !s.paused && !s.taskActive
+}
+
+// Prompt-suggestion hint (ADR-088): while the input is empty and the session
+// is idle, the placeholder itself becomes the suggestions surface — the
+// previewed row's text plus the keyboard affordances. The hint is a
+// THREE-LINE placeholder; cmChatTheme's `.cm-placeholder` white-space rule is
+// what keeps the '\n' separators rendering as real lines.
+export const SUGGESTION_BROWSE_HINT = '↑↓ browse · → insert'
+export const SUGGESTION_TYPE_HINT = 'Or just type a message... (Enter to send, Shift+Enter for new line)'
+
+/** The row the placeholder previews: the browsed-to (selected) row, or the
+ *  top pick when nothing is selected yet (the resting -1 state) — so the
+ *  resting idle placeholder already shows the proactive prompt. The index is
+ *  clamped defensively (the store contract keeps it in [-1, len-1]); an
+ *  empty list previews nothing. */
+export function suggestionPreviewText(
+  suggestions: readonly { readonly text: string }[],
+  selectedIndex: number,
+): string | undefined {
+  if (suggestions.length === 0) return undefined
+  const idx = Math.max(0, Math.min(selectedIndex, suggestions.length - 1))
+  return suggestions[idx]?.text
+}
+
+/**
+ * The input placeholder with the prompt-suggestion hint folded in. A
+ * non-empty suggestion list in the idle state takes over the placeholder:
+ *
+ *   <previewed suggestion text>
+ *   ↑↓ browse · → insert
+ *   Or just type a message... (Enter to send, Shift+Enter for new line)
+ *
+ * Every other case — an empty list, or ANY state-specific placeholder
+ * (no-project, compacting, pausing, paused, working) — falls back to the
+ * plain state matrix (computeChatPlaceholder): the suggestion hint must
+ * never bury a more specific session state.
+ *
+ * Structural typing (a `{ text }` row) keeps this lib dependency-free of the
+ * suggestions event types.
+ */
+export function computeSuggestionPlaceholder(
+  s: ChatInputLockInput,
+  suggestions: readonly { readonly text: string }[],
+  selectedIndex: number,
+): string {
+  if (suggestions.length === 0 || !isChatSessionIdle(s)) return computeChatPlaceholder(s)
+  const preview = suggestionPreviewText(suggestions, selectedIndex)
+  return [preview, SUGGESTION_BROWSE_HINT, SUGGESTION_TYPE_HINT]
+    .filter((line): line is string => line !== undefined && line !== '')
+    .join('\n')
+}
+
 /**
  * Per-message EXECUTION-MODE lock (goal / E2S toggles and the goal budget
  * selector) — deliberately NARROWER than the model/reasoning selector lock:

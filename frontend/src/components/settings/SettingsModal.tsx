@@ -15,6 +15,7 @@ import { FontSettings } from './FontSettings'
 import { ProxySettings } from './ProxySettings'
 import { SoundSettings } from './SoundSettings'
 import { SystemNotificationSettings } from './SystemNotificationSettings'
+import { PromptSuggestionsSettings } from './PromptSuggestionsSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
 import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 import { LLMSettings } from './LLMSettings'
@@ -249,6 +250,9 @@ export function SettingsModal() {
               </div>
               <div className="border-t border-border pt-4">
                 <SystemNotificationSettings />
+              </div>
+              <div className="border-t border-border pt-4">
+                <PromptSuggestionsSettings />
               </div>
               <div className="border-t border-border pt-4">
                 <SessionStatsSettings />

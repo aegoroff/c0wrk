@@ -20,6 +20,7 @@ Manages real-time event subscription, validation, and store updates. Events flow
 - `frontend/src/hooks/events/useReviewRestore.ts` — restores code-review buffer state on session activation (reloads comments, reopens review page if mid-loop, reconciles stale loop flags)
 - `frontend/src/hooks/events/useGoalEvents.ts` — goal-mode events (`goal_proposal` pending action + `goal_status`/`goal_progress` service-phase events → goalStore + chat message)
 - `frontend/src/hooks/events/useE2SStateEvents.ts` — E2S execution-state events (`e2s_state` Σ snapshots → e2sStore via `e2sHandlers`; the outgoing session's snapshot is dropped on switch)
+- `frontend/src/hooks/usePromptSuggestionsSync.ts` — prompt-suggestions refetch wiring (ADR-088): loads the active session's set on session/project change (session creation rides the session-change trigger — a create selects the new session) and refetches on the session-scoped `prompt_suggestions` event; **mounted by the chat-input surface** with the active `(sessionId, projectId)` (not delegated by `useSessionEvents`, which carries no project identity) — the store, triggers and selector contract are specified in [stores.md](stores.md) § promptSuggestionsStore
 - `frontend/src/hooks/events/useSoundEvents.ts` — sound-notification events (plays Web Audio tones on task lifecycle milestones when `soundStore.enabled`); composed by `useSessionEvents`
 - `frontend/src/hooks/useFileDrop.ts` — global `files:dropped` subscription, HTML5 drag overlay, and navigation suppression
 - `frontend/src/hooks/useExitGuard.ts` — global `app:exit_requested` subscription (mounted once at the app root, above the per-phase renders): validates the intercepted-quit payload and writes `exitGuardStore`; a malformed payload is reported via `reportDroppedEvent` and still opens the generic list-less modal — the backend has already prevented the quit, so an unanswered dialog would leave the app unclosable. The user's decision travels back through the `ConfirmExit` RPC from `ExitConfirmDialog` (a pure view over the store; `update_pending` in the payload switches it to restart context)
@@ -59,7 +60,10 @@ useSessionEvents(sessionId)
   │
   │  (useTerminalEvents and useToolJudgeEvents are component-mounted, not
   │   orchestrator-delegated: Terminal.tsx and ToolConfirmation.tsx subscribe
-  │   to their own session-scoped events directly)
+  │   to their own session-scoped events directly, as does
+  │   usePromptSuggestionsSync — the chat-input surface mounts it with the
+  │   active (sessionId, projectId) pair, which the orchestrator hook does
+  │   not carry)
   │
   └─ On unmount/sessionId change:
       └─ Unsubscribe all listeners
@@ -120,6 +124,18 @@ Certain events create "pending actions" that require user response:
 | `plan_review_ready` | Plan review     | Approve/Request-Changes/Abandon + feedback | `plan_approval_response` event |
 
 Pending actions are stored in chatStore and rendered by the PendingActionsBar component.
+
+### Prompt Suggestions Sync
+
+`prompt_suggestions` is consumed by `usePromptSuggestionsSync`, mounted by the chat-input surface with the active `(sessionId, projectId)` — not by `useSessionEvents`. It owns every refetch trigger of `promptSuggestionsStore`:
+
+| Trigger | Mechanism |
+| ------- | --------- |
+| Session switch / session creation | `load` effect refires on the `sessionId` change (a creating flow selects the new session, so creation needs no separate trigger) |
+| Project switch | `load` effect refires on the `projectId` change (a null id is the No-Project/CHAT window, normalized to `''`) |
+| `prompt_suggestions` event | The scoped subscription validates the payload (`isPromptSuggestionsData`; malformed → `reportDroppedEvent`, no action) and calls `store.refetch()` |
+
+The event handler **refetches rather than applying the payload**: the event carries the session's FULL active set (both kinds), while `GetPromptSuggestions` re-routes by the session's current content and returns exactly the kind the context serves — the backend stays the single routing authority. The refetch reuses the `(sessionId, projectId)` context the load effect published, so a stale event from a just-left session can never load the wrong context. Store semantics (switch skeleton, sequence guard, fail-open degradation, selection clamping): [stores.md](stores.md) § promptSuggestionsStore.
 
 ## Error Handling
 

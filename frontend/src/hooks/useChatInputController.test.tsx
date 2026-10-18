@@ -87,7 +87,9 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
 import { NO_PROJECT_ID, type SessionInfo } from '@/types/models'
+import type { PromptSuggestionRow } from '@/types/events'
 
 /** Create a promise whose settlement is controlled by the test. */
 function deferred<T>() {
@@ -1033,5 +1035,171 @@ describe('handleSend session-kind-aware mention filtering', () => {
     // No filtering information → nothing is hidden on the client; the
     // backend's own disabled-mention drop remains the safety net.
     expect(sendMock).toHaveBeenCalledWith('use /srv now', [], [], ['srv'], 'sess-a')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prompt suggestions (ADR-088): the placeholder hint + arrow navigation.
+// The store is armed directly (the refetch triggers live in the sync hook's
+// own suite); here we prove the controller WIRING: the idle placeholder
+// becomes the three-line browse hint, ↑↓ drive the store's clamped selection,
+// and → inserts the previewed row as real content without a send.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SUGGESTION_ROWS: PromptSuggestionRow[] = [
+  { id: 's1', session_id: 'sess-a', task_id: 't1', kind: 'goal_advance', text: 'Follow up on the failing test', status: 'active', created_at: '2026-01-01T00:00:00Z' },
+  { id: 's2', session_id: 'sess-a', task_id: 't1', kind: 'goal_advance', text: 'Write release notes', status: 'active', created_at: '2026-01-01T00:00:01Z' },
+]
+
+const EMPTY_SUGGESTIONS_STATE = {
+  sessionId: null,
+  projectId: '',
+  source: 'none' as const,
+  suggestions: [] as PromptSuggestionRow[],
+  selectedIndex: -1,
+  loading: false,
+}
+
+describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
+  function armSuggestions(sessionId: string | null, rows: PromptSuggestionRow[] = SUGGESTION_ROWS) {
+    usePromptSuggestionsStore.setState({ ...EMPTY_SUGGESTIONS_STATE, sessionId, projectId: 'proj-1', source: 'continuation', suggestions: rows })
+  }
+
+  function suggestionState() {
+    return usePromptSuggestionsStore.getState()
+  }
+
+  function placeholderText(): string {
+    return container.querySelector('.cm-placeholder')?.textContent ?? ''
+  }
+
+  async function pressKey(key: string): Promise<boolean> {
+    const content = container.querySelector('.cm-content')
+    expect(content).not.toBeNull()
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+    // Async act: CodeMirror may defer its key handlers to a microtask
+    // (InputState.handleEvent → Promise.resolve().then(runHandlers)); the
+    // store write and the resulting React re-render must land inside act.
+    // defaultPrevented is read after act settles for the same reason.
+    await act(async () => {
+      content!.dispatchEvent(event)
+    })
+    return event.defaultPrevented
+  }
+
+  beforeEach(() => {
+    usePromptSuggestionsStore.setState(EMPTY_SUGGESTIONS_STATE)
+  })
+
+  afterEach(() => {
+    // Unmount BEFORE resetting the store: the reset is a real snapshot change
+    // and would re-render a still-mounted Harness outside act.
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+    document.body.innerHTML = ''
+    usePromptSuggestionsStore.setState(EMPTY_SUGGESTIONS_STATE)
+  })
+
+  it('idle + non-empty set: the placeholder becomes the three-line hint previewing the top pick', () => {
+    armSuggestions('sess-a')
+    render()
+    expect(placeholderText()).toBe(
+      'Follow up on the failing test\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
+    )
+  })
+
+  it('the hint arms and disarms live with the store (placeholder compartment reconfigure)', () => {
+    render()
+    expect(placeholderText()).toBe('Type a message... (Enter to send, Shift+Enter for new line)')
+    act(() => {
+      armSuggestions('sess-a')
+    })
+    expect(placeholderText()).toContain('↑↓ browse · → insert')
+    act(() => {
+      armSuggestions(null, [])
+    })
+    expect(placeholderText()).toBe('Type a message... (Enter to send, Shift+Enter for new line)')
+  })
+
+  it('a non-idle session keeps its own placeholder (the hint never buries a state)', () => {
+    armSuggestions('sess-a')
+    useChatStore.setState({ taskActive: { 'sess-a': true } })
+    render()
+    expect(placeholderText()).toBe('Working — your message joins the next request to the model')
+  })
+
+  it('a foreign-session snapshot renders nothing (the selectors key on the active session)', () => {
+    armSuggestions('sess-other')
+    render()
+    expect(placeholderText()).toBe('Type a message... (Enter to send, Shift+Enter for new line)')
+  })
+
+  it('ArrowDown/ArrowUp browse the selection and the placeholder follows the browsed row', async () => {
+    armSuggestions('sess-a')
+    render()
+
+    expect(await pressKey('ArrowDown')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(0)
+    expect(placeholderText().startsWith('Follow up on the failing test\n')).toBe(true)
+
+    expect(await pressKey('ArrowDown')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(1)
+    expect(placeholderText().startsWith('Write release notes\n')).toBe(true)
+
+    expect(await pressKey('ArrowUp')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(0)
+  })
+
+  it('navigation clamps at both ends (no wrap-around)', async () => {
+    armSuggestions('sess-a')
+    render()
+    expect(await pressKey('ArrowUp')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(await pressKey('ArrowDown')).toBe(true)
+    expect(await pressKey('ArrowDown')).toBe(true)
+    expect(await pressKey('ArrowDown')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(1)
+  })
+
+  it('ArrowRight inserts the previewed row as real content — draft persisted, nothing sent, selection reset', async () => {
+    armSuggestions('sess-a')
+    render()
+    expect(await pressKey('ArrowDown')).toBe(true)
+
+    expect(await pressKey('ArrowRight')).toBe(true)
+    expect(editorText()).toBe('Follow up on the failing test')
+    expect(slice('sess-a')?.draft).toBe('Follow up on the failing test')
+    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('ArrowRight at the resting -1 inserts exactly the top pick the placeholder displays', async () => {
+    armSuggestions('sess-a')
+    render()
+    expect(await pressKey('ArrowRight')).toBe(true)
+    expect(editorText()).toBe('Follow up on the failing test')
+    expect(sendMock).not.toHaveBeenCalled()
+  })
+
+  it('with content in the editor, the arrows are never intercepted', async () => {
+    armSuggestions('sess-a')
+    render()
+    await type('draft text')
+
+    await pressKey('ArrowDown')
+    await pressKey('ArrowRight')
+    expect(editorText()).toBe('draft text')
+    expect(suggestionState().selectedIndex).toBe(-1)
+  })
+
+  it('a foreign-session snapshot: the arrows fall through (the controller handler declines)', async () => {
+    armSuggestions('sess-other')
+    render()
+    await pressKey('ArrowDown')
+    await pressKey('ArrowRight')
+    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(editorText()).toBe('')
   })
 })

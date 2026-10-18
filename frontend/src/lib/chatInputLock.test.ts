@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { computeChatInputDisabled, computeChatPlaceholder, computeModeTogglesLocked, modeToggleLockReason } from '@/lib/chatInputLock'
+import {
+  computeChatInputDisabled,
+  computeChatPlaceholder,
+  computeModeTogglesLocked,
+  modeToggleLockReason,
+  computeSuggestionPlaceholder,
+  suggestionPreviewText,
+  isChatSessionIdle,
+} from '@/lib/chatInputLock'
 
 // The input-lock matrix for live-send: a running task keeps the input OPEN
 // (messages interject into the next LLM request); the pausing window, the
@@ -83,6 +91,82 @@ describe('computeChatPlaceholder', () => {
   it('prioritizes compacting over pausing/paused/task states', () => {
     const text = computeChatPlaceholder({ taskActive: true, paused: false, pausing: true, isNoProject: false, compacting: true })
     expect(text).toContain('Compacting')
+  })
+})
+
+// The prompt-suggestion hint (ADR-088): a non-empty suggestion list in the
+// idle state takes over the placeholder with the three-line browse hint —
+// the previewed row's text, the ↑↓/→ affordances, and the type-a-message
+// fallback. Every state-specific placeholder and the empty list keep the
+// base matrix: the hint must never bury a more specific session state.
+describe('computeSuggestionPlaceholder', () => {
+  const idle = { taskActive: false, paused: false, pausing: false, isNoProject: false, compacting: false }
+  const rows = (texts: string[]) => texts.map((text, i) => ({ id: String(i), text }))
+
+  it('idle + non-empty list: three-line hint previewing the top pick while nothing is selected (-1)', () => {
+    const text = computeSuggestionPlaceholder(idle, rows(['Follow up on the failing test', 'Write release notes']), -1)
+    expect(text).toBe(
+      'Follow up on the failing test\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
+    )
+  })
+
+  it('idle + browsed-to row: the placeholder previews exactly the selection', () => {
+    const text = computeSuggestionPlaceholder(idle, rows(['first', 'second']), 1)
+    expect(text).toBe(
+      'second\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
+    )
+  })
+
+  it('every non-idle state keeps its own placeholder (first match wins)', () => {
+    const armed = rows(['a suggestion'])
+    expect(computeSuggestionPlaceholder({ ...idle, taskActive: true }, armed, 0)).toContain('next request')
+    expect(computeSuggestionPlaceholder({ ...idle, paused: true }, armed, 0)).toContain('nudge-resume')
+    expect(computeSuggestionPlaceholder({ ...idle, pausing: true }, armed, 0)).toContain('Pausing')
+    expect(computeSuggestionPlaceholder({ ...idle, compacting: true }, armed, 0)).toContain('Compacting')
+    expect(computeSuggestionPlaceholder({ ...idle, isNoProject: true }, armed, 0)).toContain('project')
+  })
+
+  it('empty list: falls back to the full state matrix (idle default included)', () => {
+    expect(computeSuggestionPlaceholder(idle, [], -1)).toBe('Type a message... (Enter to send, Shift+Enter for new line)')
+    expect(computeSuggestionPlaceholder({ ...idle, taskActive: true }, [], -1)).toContain('next request')
+  })
+
+  it('empty preview text renders the two-line hint without a leading blank line', () => {
+    const text = computeSuggestionPlaceholder(idle, rows(['']), 0)
+    expect(text).toBe('↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)')
+  })
+
+  it('out-of-range selection is clamped defensively (the store keeps [-1, len-1])', () => {
+    expect(computeSuggestionPlaceholder(idle, rows(['only']), 99)).toContain('only')
+    expect(computeSuggestionPlaceholder(idle, rows(['only']), -7)).toContain('only')
+  })
+})
+
+describe('suggestionPreviewText', () => {
+  const rows = (texts: string[]) => texts.map((text, i) => ({ id: String(i), text }))
+  const list = rows(['first', 'second'])
+
+  it('resolves the browsed-to row, the top pick at -1, and nothing for an empty list', () => {
+    expect(suggestionPreviewText(list, 1)).toBe('second')
+    expect(suggestionPreviewText(list, 0)).toBe('first')
+    expect(suggestionPreviewText(list, -1)).toBe('first')
+    expect(suggestionPreviewText([], 0)).toBeUndefined()
+  })
+
+  it('clamps an out-of-range index instead of previewing nothing', () => {
+    expect(suggestionPreviewText(list, 99)).toBe('second')
+    expect(suggestionPreviewText(list, -7)).toBe('first')
+  })
+})
+
+describe('isChatSessionIdle', () => {
+  const idle = { taskActive: false, paused: false, pausing: false, isNoProject: false, compacting: false }
+
+  it('is idle only when no special state is active', () => {
+    expect(isChatSessionIdle(idle)).toBe(true)
+    for (const key of ['taskActive', 'paused', 'pausing', 'isNoProject', 'compacting'] as const) {
+      expect(isChatSessionIdle({ ...idle, [key]: true })).toBe(false)
+    }
   })
 })
 

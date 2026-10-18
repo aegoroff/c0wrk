@@ -38,6 +38,15 @@ export function createChatEditorTheme(isDark: boolean = true): Extension {
     '.cm-activeLine': {
       backgroundColor: 'transparent',
     },
+    '.cm-placeholder': {
+      // The prompt-suggestion hint (computeSuggestionPlaceholder) is a
+      // THREE-LINE placeholder joined with '\n'. CodeMirror inserts it as a
+      // single text node, and the base theme leaves white-space at its
+      // default — the newlines would collapse and the hint would render as
+      // one long line. pre-line preserves the explicit newlines while still
+      // letting a long suggestion text wrap naturally.
+      whiteSpace: 'pre-line',
+    },
     '.cm-gutters': {
       display: 'none',
     },
