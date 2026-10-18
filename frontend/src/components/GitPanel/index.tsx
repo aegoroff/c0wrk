@@ -14,7 +14,6 @@ import { ChangesList } from './ChangesList'
 import { CommitSection } from './CommitSection'
 import { GitHistoryTab } from './GitHistoryTab'
 import { GitPanelFooter } from './GitPanelFooter'
-import { GitFocusButton } from './GitFocusButton'
 import { FileTreePanel } from '@/components/layout/FileTreePanel'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 
@@ -106,13 +105,11 @@ export function GitPanel() {
   return (
     <div className="flex flex-col h-full min-h-0">
       <GitPanelToolbar />
-      {/* Files | Changes | History tab switcher with the focus button on the
-          right. "files" hosts the workspace file explorer (filter bar + tree)
-          as the FIRST section — the workspace-level Explorer tab does not
-          exist for git projects, so this is where the explorer lives. Graph
-          was merged into History. The shared app-wide segmented control
-          (ARIA tabs). The crosshair button focuses the Git panel on the
-          current session's worktree (highlighted while diverged). */}
+      {/* Files | Changes | History tab switcher. "files" hosts the workspace
+          file explorer (filter bar + tree) as the FIRST section — the
+          workspace-level Explorer tab does not exist for git projects, so
+          this is where the explorer lives. Graph was merged into History. The
+          shared app-wide segmented control (ARIA tabs). */}
       <div className="@container flex shrink-0 items-center border-b border-border bg-secondary/20 px-1.5 py-1">
         <div className="min-w-0 flex-1">
           <SegmentedControl
@@ -132,7 +129,6 @@ export function GitPanel() {
             className="p-0"
           />
         </div>
-        <GitFocusButton />
       </div>
       {error && (
         <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-destructive bg-destructive/10 border-b border-destructive/20">

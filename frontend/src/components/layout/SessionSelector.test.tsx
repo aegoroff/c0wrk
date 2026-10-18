@@ -5,15 +5,15 @@
 // - the header List⇄FolderTree toggle (same glyph as the git panel's tree
 //   view) sits on the search-input line, BEFORE the input, and flips the mode
 //   without dismissing the menu;
-// - grouped mode renders Managed → branch rows (GitBranch icon + chevron +
+// - grouped mode renders Worktrees → branch rows (GitBranch icon + chevron +
 //   branch name) → member sessions, then Local → sessions; section headers
 //   appear only when BOTH sections are non-empty (a lone Local section is the
 //   flat view) and share the branch combo's uppercase section styling;
 // - a branch-header selection (click or Enter) collapses/expands its group
-//   (ephemeral state) and NEVER closes the dropdown; the Managed/Local section
+//   (ephemeral state) and NEVER closes the dropdown; the Worktrees/Local section
 //   headers collapse the same way;
 // - the popup is a fixed wide `w-[28rem]`;
-// - grouped mode separates the Managed and Local sections with the branch
+// - grouped mode separates the Worktrees and Local sections with the branch
 //   combo's hairline divider (only when both sections render headers);
 // - each managed branch row carries a "New session in this worktree" item
 //   (the + action): it arms the ADR-080 draft pinned to that branch
@@ -22,7 +22,12 @@
 //   menu; it never toggles the branch's collapse state, and nothing but
 //   managed branch rows (flat mode, Local/Archived sections) has the action;
 // - an active search force-expands every group and section and hides empty ones;
-// - the Archived section behaves exactly as before in both modes;
+// - the Archived section renders in BOTH modes: archived managed sessions as
+//   collapsible branch rows (chevron + GitBranch + branch + freshest-member
+//   time) carrying their own THREE-action hover overlay — Pin/Unpin group
+//   (stays open), Unarchive all (no confirmation), Delete all (plural
+//   confirmation) — archived local sessions flat; archived branch rows toggle
+//   independently of the live rows of the same branch;
 // - every one of these controls is a REGISTERED Radix menu item — arrow keys
 //   traverse them and Enter/Space activate them (a group collapsed with the
 //   mouse stays reopenable from the keyboard; Radix prevents Tab inside the
@@ -77,9 +82,13 @@ const { sessionMocks } = vi.hoisted(() => ({
     updateSession: vi.fn(),
   },
 }))
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: (selector: (s: typeof sessionMocks) => unknown) => selector(sessionMocks),
-}))
+vi.mock('@/stores/sessionStore', () => {
+  // useSessionActions' handlers read the store imperatively (busy lookups,
+  // performDelete) — expose the same fixture object as the canonical state.
+  const useSessionStore = (selector: (s: typeof sessionMocks) => unknown) => selector(sessionMocks)
+  ;(useSessionStore as unknown as { getState: () => typeof sessionMocks }).getState = () => sessionMocks
+  return { useSessionStore }
+})
 
 // Selector-aware chat store stub so every row's indicator resolves to 'idle'
 // without touching live task state.
@@ -98,6 +107,7 @@ vi.mock('@/stores/chatStore', () => ({
 
 import { SessionSelector } from './SessionSelector'
 import { useUIStore } from '@/stores/uiStore'
+import { usePinnedGroupsStore } from '@/stores/pinnedGroupsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import type { ProjectInfo } from '@/types/models'
@@ -226,6 +236,10 @@ beforeEach(() => {
   sessionMocks.activeSessionId = null
   // The real (persisted) uiStore — start every test from the shipped default.
   useUIStore.setState({ sessionListGrouped: false })
+  // CODE-mode project for the real projectStore — group pins are keyed by it.
+  useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
+  // The pin action toggles the REAL pinned-groups store — start unpinned.
+  usePinnedGroupsStore.setState({ pinsByProject: {} })
 })
 
 afterEach(() => {
@@ -249,7 +263,7 @@ describe('SessionSelector — flat mode (default)', () => {
 
     const text = menuText(menu)
     // No section headers, no branch rows...
-    expect(text).not.toContain('Managed')
+    expect(text).not.toContain('Worktrees')
     expect(text).not.toContain('feat-a')
     // ...but every session row is visible.
     expect(text).toContain('Feat A one')
@@ -349,7 +363,7 @@ describe('SessionSelector — grouped layout', () => {
     makeSession({ id: 'l1', name: 'Checkout work' }),
   ]
 
-  it('renders Managed header → branch rows → member sessions → Local header → local sessions', async () => {
+  it('renders Worktrees header → branch rows → member sessions → Local header → local sessions', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = groupedFixture()
     const container = await render(<SessionSelector />)
@@ -357,7 +371,7 @@ describe('SessionSelector — grouped layout', () => {
 
     const text = menuText(menu)
     // Section headers + branch names + all sessions present.
-    expect(text).toContain('Managed')
+    expect(text).toContain('Worktrees')
     expect(text).toContain('feat-a')
     expect(text).toContain('feat-b')
     expect(text).toContain('Local')
@@ -366,9 +380,9 @@ describe('SessionSelector — grouped layout', () => {
     expect(text).toContain('Feat B one')
     expect(text).toContain('Checkout work')
 
-    // Document order: Managed header before the branch rows before the Local
+    // Document order: Worktrees header before the branch rows before the Local
     // header before the local session rows.
-    const order = ['Managed', 'feat-a', 'Feat A one', 'Local', 'Checkout work'].map((t) =>
+    const order = ['Worktrees', 'feat-a', 'Feat A one', 'Local', 'Checkout work'].map((t) =>
       text.indexOf(t),
     )
     expect(order.every((i) => i >= 0)).toBe(true)
@@ -391,7 +405,7 @@ describe('SessionSelector — grouped layout', () => {
     const menu = await openMenu(container)
 
     const text = menuText(menu)
-    expect(text).not.toContain('Managed')
+    expect(text).not.toContain('Worktrees')
     expect(text).not.toContain('Local')
     expect(text).toContain('Checkout work')
     expect(text).toContain('Older session')
@@ -418,9 +432,9 @@ describe('SessionSelector — grouped layout', () => {
         (el) => el.getAttribute('role') === 'menuitem' && (el.textContent ?? '').trim() === label,
       ) as HTMLElement
 
-    // The Managed header is expanded and controls a live region holding the
+    // The Worktrees header is expanded and controls a live region holding the
     // branch rows and their member sessions.
-    const managedHeader = headerIn(menu, 'Managed')
+    const managedHeader = headerIn(menu, 'Worktrees')
     expect(managedHeader.getAttribute('aria-expanded')).toBe('true')
     const managedRegionId = managedHeader.getAttribute('aria-controls')!
     expect(managedRegionId).toBeTruthy()
@@ -438,7 +452,7 @@ describe('SessionSelector — grouped layout', () => {
     // Collapsing flips the state and unmounts the region it named.
     await click(managedHeader)
     const menu2 = document.body.querySelector('[role="menu"]') as HTMLElement
-    expect(headerIn(menu2, 'Managed').getAttribute('aria-expanded')).toBe('false')
+    expect(headerIn(menu2, 'Worktrees').getAttribute('aria-expanded')).toBe('false')
     expect(document.getElementById(managedRegionId)).toBeNull()
 
     // Archived starts collapsed — aria-expanded says so up front.
@@ -474,13 +488,13 @@ describe('SessionSelector — popup chrome (width & section separators)', () => 
     expect(menu.className).not.toContain('w-96')
   })
 
-  it('separates the Managed and Local sections with a hairline, like the branch combo', async () => {
+  it('separates the Worktrees and Local sections with a hairline, like the branch combo', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = bothSectionsFixture()
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    const managedIdx = childIndex(menu, (el) => isSectionHeader(el, 'Managed'))
+    const managedIdx = childIndex(menu, (el) => isSectionHeader(el, 'Worktrees'))
     const localIdx = childIndex(menu, (el) => isSectionHeader(el, 'Local'))
     expect(managedIdx).toBeGreaterThanOrEqual(0)
     expect(localIdx).toBeGreaterThan(managedIdx)
@@ -491,13 +505,13 @@ describe('SessionSelector — popup chrome (width & section separators)', () => 
     ).toBe(true)
   })
 
-  it('keeps the Managed/Local separator while a section is collapsed — it belongs to the headers', async () => {
+  it('keeps the Worktrees/Local separator while a section is collapsed — it belongs to the headers', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = bothSectionsFixture()
     const container = await render(<SessionSelector />)
     let menu = await openMenu(container)
 
-    const managedIdx = childIndex(menu, (el) => isSectionHeader(el, 'Managed'))
+    const managedIdx = childIndex(menu, (el) => isSectionHeader(el, 'Worktrees'))
     expect(managedIdx).toBeGreaterThanOrEqual(0)
     const managedBtn = menu.children[managedIdx] as HTMLElement
     await click(managedBtn)
@@ -576,7 +590,7 @@ describe('SessionSelector — section collapse', () => {
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    for (const label of ['Managed', 'Local']) {
+    for (const label of ['Worktrees', 'Local']) {
       const btn = sectionHeader(menu, label)
       expect(btn.className).toContain('uppercase')
       expect(btn.className).toContain('font-semibold')
@@ -586,25 +600,25 @@ describe('SessionSelector — section collapse', () => {
     }
   })
 
-  it('collapsing the Managed section hides its branch rows and keeps Local; re-expanding restores', async () => {
+  it('collapsing the Worktrees section hides its branch rows and keeps Local; re-expanding restores', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = bothSectionsFixture()
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    await click(sectionHeader(menu, 'Managed'))
+    await click(sectionHeader(menu, 'Worktrees'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).not.toContain('feat-a')
     expect(menuText(menu)).not.toContain('Feat A one')
     // The Local section is untouched.
     expect(menuText(menu)).toContain('Checkout work')
 
-    await click(sectionHeader(menu, 'Managed'))
+    await click(sectionHeader(menu, 'Worktrees'))
     expect(menuText(menu)).toContain('feat-a')
     expect(menuText(menu)).toContain('Feat A one')
   })
 
-  it('collapsing the Local section hides local sessions and keeps Managed; re-expanding restores', async () => {
+  it('collapsing the Local section hides local sessions and keeps Worktrees; re-expanding restores', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = bothSectionsFixture()
     const container = await render(<SessionSelector />)
@@ -613,7 +627,7 @@ describe('SessionSelector — section collapse', () => {
     await click(sectionHeader(menu, 'Local'))
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
     expect(menuText(menu)).not.toContain('Checkout work')
-    // The Managed branch group is untouched.
+    // The Worktrees branch group is untouched.
     expect(menuText(menu)).toContain('Feat A one')
 
     await click(sectionHeader(menu, 'Local'))
@@ -632,8 +646,8 @@ describe('SessionSelector — section collapse', () => {
     const container = await render(<SessionSelector />)
     let menu = await openMenu(container)
 
-    // Collapse the whole Managed section: branch content disappears.
-    await click(sectionHeader(menu, 'Managed'))
+    // Collapse the whole Worktrees section: branch content disappears.
+    await click(sectionHeader(menu, 'Worktrees'))
     expect(menuText(menu)).not.toContain('Alpha work')
 
     // Searching for a member inside the collapsed section force-expands it...
@@ -659,6 +673,44 @@ describe('SessionSelector — search in grouped mode', () => {
     makeSession({ id: 'l2', name: 'Checkout two' }),
     makeSession({ id: 'l3', name: 'Checkout three' }),
   ]
+
+  it('group delete during a search targets the FULL branch membership, and the dialog says so', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    // feat-a holds TWO sessions; the search below will leave one visible.
+    sessionMocks.sessions = [
+      makeSession({ id: 'm1', name: 'Alpha work', workspace_binding: managedBinding('feat-a') }),
+      makeSession({ id: 'm2', name: 'Zeta work', workspace_binding: managedBinding('feat-a') }),
+      makeSession({ id: 'l1', name: 'Checkout one' }),
+      makeSession({ id: 'l2', name: 'Checkout two' }),
+      makeSession({ id: 'l3', name: 'Checkout three' }),
+    ]
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // The search narrows feat-a to ONE visible row.
+    await typeInto(menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!, 'Alpha')
+    const narrowed = document.body.querySelector('[role="menu"]') as HTMLElement
+    expect(menuText(narrowed)).toContain('Alpha work')
+    expect(menuText(narrowed)).not.toContain('Zeta work')
+
+    const del = Array.from(
+      branchToggle(narrowed, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => (el.getAttribute('title') ?? '').startsWith('Delete sessions'))
+    await click(del!)
+
+    // The plural confirmation counts the branch's FULL membership — both
+    // sessions — not the single row the search left visible.
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('Branch "feat-a" groups 2 sessions')
+
+    const confirm = Array.from(dialog!.querySelectorAll('button')).find((b) =>
+      (b.textContent ?? '').trim().startsWith('Delete'),
+    )
+    await click(confirm!)
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('m1')
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('m2')
+  })
 
   it('force-expands collapsed groups so matches stay reachable, and hides empty groups', async () => {
     useUIStore.setState({ sessionListGrouped: true })
@@ -813,24 +865,341 @@ describe('SessionSelector — grouped sessions still select', () => {
   })
 })
 
-describe('SessionSelector — archived section unchanged', () => {
-  it('still renders its collapsed header and expands on click in grouped mode', async () => {
+describe('SessionSelector — archived section (branch groups + flat local)', () => {
+  /** Live content (one managed branch + one local row) plus an archive with
+   *  BOTH kinds: two archived sessions on managed branch feat-a (2h / 5h
+   *  stale — the row must show the fresher clock) and one archived local
+   *  session. Archived header count: 3. */
+  const archivedFixture = (): SessionRow[] => [
+    makeSession({ id: 'm1', name: 'Feat A one', workspace_binding: managedBinding('feat-a') }),
+    makeSession({ id: 'l1', name: 'Checkout work' }),
+    makeSession({
+      id: 'am1',
+      name: 'Archived feat older',
+      archived: true,
+      workspace_binding: managedBinding('feat-a'),
+      last_active_at: new Date(NOW - 5 * 3600_000).toISOString(),
+    }),
+    makeSession({
+      id: 'am2',
+      name: 'Archived feat newer',
+      archived: true,
+      workspace_binding: managedBinding('feat-a'),
+      last_active_at: new Date(NOW - 2 * 3600_000).toISOString(),
+    }),
+    makeSession({
+      id: 'al1',
+      name: 'Archived local one',
+      archived: true,
+      last_active_at: new Date(NOW - 90_000).toISOString(),
+    }),
+  ]
+
+  /** The archived branch row for `branch` — matched by its collapse title, so
+   *  the LIVE branch row of the same branch name (grouped mode) never wins. */
+  function archivedBranchToggle(menu: HTMLElement, branch: string): HTMLElement {
+    const item = Array.from(
+      menu.querySelectorAll<HTMLElement>('[role="menuitem"][title$="archived branch sessions"]'),
+    ).find((el) => (el.textContent ?? '').includes(branch))
+    expect(item, `archived branch toggle for "${branch}"`).toBeTruthy()
+    return item as HTMLElement
+  }
+
+  /** The Archived section header ("Archived (n)"). */
+  function archivedHeader(menu: HTMLElement): HTMLElement {
+    const el = Array.from(menu.querySelectorAll('[role="menuitem"]')).find((item) =>
+      /^Archived \(\d+\)$/.test((item.textContent ?? '').trim()),
+    )
+    expect(el, 'Archived section header').toBeTruthy()
+    return el as HTMLElement
+  }
+
+  it('grouped mode: archived managed sessions render as collapsible branch rows with the freshest time; archived local stays flat', async () => {
     useUIStore.setState({ sessionListGrouped: true })
-    sessionMocks.sessions = [
-      makeSession({ id: 'm1', name: 'Feat A one', workspace_binding: managedBinding('feat-a') }),
-      makeSession({ id: 'l1', name: 'Checkout work' }),
-      makeSession({ id: 'a1', name: 'Old archived', archived: true }),
-    ]
+    sessionMocks.sessions = archivedFixture()
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    const text = menuText(menu)
-    expect(text).toContain('Archived (1)')
-    expect(text).not.toContain('Old archived')
+    // Collapsed by default — the header counts BOTH archived kinds, no rows leak.
+    expect(menuText(menu)).toContain('Archived (3)')
+    expect(menuText(menu)).not.toContain('Archived feat')
+    expect(menuText(menu)).not.toContain('Archived local one')
 
-    await click(Array.from(menu.querySelectorAll('[role="menuitem"]')).find((b) => b.textContent?.includes('Archived'))! as HTMLElement)
+    await click(archivedHeader(menu))
+
+    // Archived local is flat — visible immediately, no extra toggle.
+    expect(menuText(menu)).toContain('Archived local one')
+
+    // The archived branch row shows the FRESHEST member's time (2h, not the
+    // 5h stale member's). Like the live branch groups, archived groups start
+    // expanded — members render right away, indented.
+    const row = archivedBranchToggle(menu, 'feat-a')
+    expect(row.textContent).toContain('2h')
+    expect(row.textContent).not.toContain('5h')
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(menuText(menu)).toContain('Archived feat older')
+    const member = Array.from(menu.querySelectorAll('[role="menuitem"]')).find((el) =>
+      (el.textContent ?? '').includes('Archived feat newer'),
+    )
+    expect(member?.className).toContain('pl-6')
+
+    // The row toggle collapses its members; the menu never closed.
+    await click(row)
     expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
-    expect(menuText(menu)).toContain('Old archived')
+    expect(menuText(menu)).not.toContain('Archived feat newer')
+  })
+
+  it('archived branch rows carry a THREE-action overlay — Pin/Unpin, Restore, Delete', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    // The archived row registers exactly its three action items inside the
+    // toggle — no "+" (a draft has no meaning in the archive), no Archive.
+    const actions = Array.from(
+      archivedBranchToggle(menu, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).map((el) => el.getAttribute('title'))
+    expect(actions).toEqual([
+      'Pin group (feat-a)',
+      'Restore sessions (feat-a)',
+      'Delete sessions (feat-a)',
+    ])
+
+    // Cross-check: the LIVE feat-a row of the same branch carries its own
+    // four-item overlay — the assertion above is not vacuous.
+    expect(branchToggle(menu, 'feat-a').querySelectorAll('[role="menuitem"]')).toHaveLength(4)
+  })
+
+  it('archived group Pin toggles the GROUP pin and keeps the menu open', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    const pin = Array.from(
+      archivedBranchToggle(menu, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => (el.getAttribute('title') ?? '').startsWith('Pin group'))
+    expect(pin).toBeTruthy()
+    await click(pin!)
+
+    // The GROUP pin flipped in the store; no per-member RPC fired.
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toContain('feat-a')
+    expect(apiMocks.pinSession).not.toHaveBeenCalled()
+
+    // A state flip, not an action — the menu never closed.
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+
+    // The archived row itself now carries the always-visible pin badge.
+    const pinnedRowIcons = Array.from(
+      archivedBranchToggle(menu, 'feat-a').querySelectorAll('svg.lucide-pin'),
+    )
+    expect(pinnedRowIcons.some((svg) => !svg.closest('span.opacity-0'))).toBe(true)
+  })
+
+  it('stale group pins are pruned against the UNFILTERED model — live or archived membership keeps a pin', async () => {
+    // A pin on a branch whose last session is GONE, next to feat-a (which
+    // holds BOTH live and archived groups in the fixture): only the stale
+    // one may drop — and feat-a must survive even while a search could
+    // temporarily hide it (the prune reads the unfiltered grouping).
+    usePinnedGroupsStore.setState({ pinsByProject: { 'proj-1': ['ghost-branch', 'feat-a'] } })
+    sessionMocks.sessions = archivedFixture()
+
+    await render(<SessionSelector />)
+
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toEqual(['feat-a'])
+  })
+
+  it('a not-yet-loaded list (null) never prunes — the project-switch transient is safe', async () => {
+    usePinnedGroupsStore.setState({ pinsByProject: { 'proj-1': ['ghost-branch'] } })
+    // `null` = the reset/switch transient: an empty model then would wipe
+    // the destination project's pins.
+    sessionMocks.sessions = null as unknown as unknown[]
+
+    await render(<SessionSelector />)
+
+    expect(usePinnedGroupsStore.getState().pinsByProject['proj-1']).toEqual(['ghost-branch'])
+  })
+
+  it('archived group Restore unarchives every member without a confirmation', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    const restore = Array.from(
+      archivedBranchToggle(menu, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => (el.getAttribute('title') ?? '').startsWith('Restore sessions'))
+    await click(restore!)
+
+    // Restore is non-destructive: the archive RPC fires per archived member
+    // (the toggle semantic un-archives), nothing else — and no dialog arms.
+    expect(apiMocks.archiveSession).toHaveBeenCalledTimes(2)
+    expect(apiMocks.archiveSession).toHaveBeenCalledWith('am1')
+    expect(apiMocks.archiveSession).toHaveBeenCalledWith('am2')
+    expect(apiMocks.archiveSession).not.toHaveBeenCalledWith('m1')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('archived group Delete arms the plural confirmation naming the branch, then deletes every member', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    const del = Array.from(
+      archivedBranchToggle(menu, 'feat-a').querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => (el.getAttribute('title') ?? '').startsWith('Delete sessions'))
+    await click(del!)
+
+    // Plural copy, branch-named — deleting always asks, archived or not.
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('Delete sessions?')
+    expect(dialog!.textContent).toContain('Branch "feat-a" groups 2 sessions')
+
+    // Confirm applies the operation to EVERY member.
+    const confirm = Array.from(dialog!.querySelectorAll('button')).find((b) =>
+      (b.textContent ?? '').trim().startsWith('Delete'),
+    )
+    await click(confirm!)
+    expect(apiMocks.deleteSession).toHaveBeenCalledTimes(2)
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('am1')
+    expect(apiMocks.deleteSession).toHaveBeenCalledWith('am2')
+    expect(sessionMocks.removeSession).toHaveBeenCalledWith('am1')
+    expect(sessionMocks.removeSession).toHaveBeenCalledWith('am2')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('flat mode: the Archived section renders the same branch rows + flat local sessions', async () => {
+    // sessionListGrouped stays false — the shipped default.
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    expect(menuText(menu)).toContain('Archived (3)')
+    await click(archivedHeader(menu))
+
+    // The archived branch row is the ONLY GitBranch row — the flat active
+    // list has no branch chrome.
+    expect(menu.querySelectorAll('[role="menuitem"] svg.lucide-git-branch')).toHaveLength(1)
+    expect(archivedBranchToggle(menu, 'feat-a').textContent).toContain('2h')
+
+    // Archived groups start expanded — members show right away; archived
+    // local is flat next to them.
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(menuText(menu)).toContain('Archived local one')
+
+    // The row toggle collapses the archived members (menu stays open).
+    await click(archivedBranchToggle(menu, 'feat-a'))
+    expect(menuText(menu)).not.toContain('Archived feat newer')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+
+    // No new-session buttons anywhere in flat mode — archived rows included.
+    expect(menu.querySelectorAll('[role="menuitem"][title^="New session in this worktree"]')).toHaveLength(0)
+  })
+
+  it('toggling an archived branch collapses/expands its members and keeps the menu open', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    await click(archivedBranchToggle(menu, 'feat-a'))
+    expect(archivedBranchToggle(menu, 'feat-a').getAttribute('aria-expanded')).toBe('false')
+    expect(menuText(menu)).not.toContain('Archived feat newer')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+
+    await click(archivedBranchToggle(menu, 'feat-a'))
+    expect(archivedBranchToggle(menu, 'feat-a').getAttribute('aria-expanded')).toBe('true')
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+  })
+
+  it('archived and live branch groups of the SAME branch toggle independently', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    // Collapse only the ARCHIVED feat-a group...
+    await click(archivedBranchToggle(menu, 'feat-a'))
+    expect(menuText(menu)).not.toContain('Archived feat newer')
+
+    // ...the LIVE feat-a group of the same branch is untouched.
+    expect(menuText(menu)).toContain('Feat A one')
+    expect(branchToggle(menu, 'feat-a').getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('search filters both archived buckets, force-expands the section and updates the count; empty groups disappear', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    let menu = await openMenu(container)
+
+    // A match inside the collapsed section: Archived force-expands, the
+    // matching branch row + member show, the count follows. (Searching swaps
+    // the menu DOM — re-query menu and input after every keystroke.)
+    await typeInto(menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!, 'Archived feat newer')
+    menu = document.body.querySelector('[role="menu"]') as HTMLElement
+    expect(archivedHeader(menu).textContent).toContain('Archived (1)')
+    expect(archivedBranchToggle(menu, 'feat-a').getAttribute('aria-expanded')).toBe('true')
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(menuText(menu)).not.toContain('Archived local one')
+
+    // A local-bucket match only: the feat-a group loses every member and
+    // disappears entirely.
+    await typeInto(menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!, 'Archived local')
+    menu = document.body.querySelector('[role="menu"]') as HTMLElement
+    expect(archivedHeader(menu).textContent).toContain('Archived (1)')
+    expect(menu.querySelectorAll('[role="menuitem"][title$="archived branch sessions"]')).toHaveLength(0)
+    expect(menuText(menu)).toContain('Archived local one')
+
+    // A live-only match: nothing archived matches — the section hides whole.
+    await typeInto(menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!, 'Checkout')
+    menu = document.body.querySelector('[role="menu"]') as HTMLElement
+    const archivedHeaders = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter((item) =>
+      /^Archived \(\d+\)$/.test((item.textContent ?? '').trim()),
+    )
+    expect(archivedHeaders).toHaveLength(0)
+    expect(menuText(menu)).not.toContain('Archived feat')
+    expect(menuText(menu)).not.toContain('Archived local one')
+  })
+
+  it('keyboard: the archived branch row is a registered item — Enter toggles its group without closing the menu', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    // Walk the roving collection down to the archived feat-a row (DOM order:
+    // grouping toggle → Worktrees header → live feat-a row + its 4 actions +
+    // its member row → Local header → local row → Archived header → archived
+    // feat-a row).
+    await pressKey(menu, 'ArrowDown')
+    for (let i = 0; i < 11; i++) {
+      await pressKey(document.activeElement!, 'ArrowDown')
+    }
+    expect(document.activeElement).toBe(archivedBranchToggle(menu, 'feat-a'))
+
+    await pressKey(document.activeElement!, 'Enter')
+    expect(menuText(menu)).not.toContain('Archived feat newer')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+
+    // A collapse re-render may hand focus back to the menu content — dispatch
+    // the second Enter on the toggle itself: it re-expands.
+    await pressKey(archivedBranchToggle(menu, 'feat-a'), 'Enter')
+    expect(archivedBranchToggle(menu, 'feat-a').getAttribute('aria-expanded')).toBe('true')
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
   })
 })
 
@@ -936,7 +1305,7 @@ describe('SessionSelector — branch new-session action', () => {
 
 describe('SessionSelector — keyboard reachability of the new controls', () => {
   // 5 total sessions (the search input renders) with one managed branch, two
-  // local rows and an archived row: the grouping toggle, the Managed header,
+  // local rows and an archived row: the grouping toggle, the Worktrees header,
   // the branch toggle and its "+", the Local/Archived headers and the footer
   // action all render as registered items.
   const kbFixture = (): SessionRow[] => [
@@ -956,7 +1325,7 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     return el as HTMLElement
   }
 
-  it('ArrowDown enters the collection at the grouping toggle and walks DOM order — toggle → Managed header', async () => {
+  it('ArrowDown enters the collection at the grouping toggle and walks DOM order — toggle → Worktrees header', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = kbFixture()
     const container = await render(<SessionSelector />)
@@ -970,10 +1339,10 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     const toggle = menu.querySelector<HTMLElement>('[role="menuitem"][title="Show flat list"]')!
     expect(document.activeElement).toBe(toggle)
 
-    // Next in DOM order: the Managed section header — previously a plain
+    // Next in DOM order: the Worktrees section header — previously a plain
     // button the arrows skipped entirely (Tab is prevented inside the menu).
     await pressKey(toggle, 'ArrowDown')
-    expect(document.activeElement).toBe(headerItem(menu, 'Managed'))
+    expect(document.activeElement).toBe(headerItem(menu, 'Worktrees'))
   })
 
   it('Enter on the grouping toggle flips the mode without closing the menu', async () => {
@@ -992,19 +1361,19 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     expect(menuText(menu)).toContain('Checkout one')
   })
 
-  it('Enter on the Managed header collapses and re-expands the section — the menu stays open', async () => {
+  it('Enter on the Worktrees header collapses and re-expands the section — the menu stays open', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = kbFixture()
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    // toggle → Managed header, then Enter to collapse.
+    // toggle → Worktrees header, then Enter to collapse.
     await pressKey(menu, 'ArrowDown')
     await pressKey(document.activeElement!, 'ArrowDown')
-    expect(document.activeElement).toBe(headerItem(menu, 'Managed'))
+    expect(document.activeElement).toBe(headerItem(menu, 'Worktrees'))
     await pressKey(document.activeElement!, 'Enter')
 
-    expect(headerItem(menu, 'Managed').getAttribute('aria-expanded')).toBe('false')
+    expect(headerItem(menu, 'Worktrees').getAttribute('aria-expanded')).toBe('false')
     expect(menuText(menu)).not.toContain('Feat A one')
     // The Local section is untouched and the menu is still open.
     expect(menuText(menu)).toContain('Checkout one')
@@ -1026,7 +1395,7 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     await click(branchToggle(menu, 'feat-a'))
     expect(menuText(menu)).not.toContain('Feat A one')
 
-    // Keyboard: toggle → Managed header → feat-a toggle (the collapsed row
+    // Keyboard: toggle → Worktrees header → feat-a toggle (the collapsed row
     // keeps its registered toggle and "+"), then Enter re-expands.
     await pressKey(menu, 'ArrowDown')
     await pressKey(document.activeElement!, 'ArrowDown')
@@ -1048,7 +1417,7 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
-    // toggle → Managed header → feat-a toggle → feat-a "+".
+    // toggle → Worktrees header → feat-a toggle → feat-a "+".
     await pressKey(menu, 'ArrowDown')
     for (let i = 0; i < 3; i++) {
       await pressKey(document.activeElement!, 'ArrowDown')

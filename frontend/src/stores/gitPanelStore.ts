@@ -258,13 +258,6 @@ interface GitPanelState {
    */
   focus: GitPanelFocus | null
   /**
-   * The active session's execution workspace — the DEFAULT focus target
-   * (the managed tree of a managed session, the checkout for a local
-   * session, null for no session). The focus button highlights divergence
-   * against this value. Transient — NOT persisted.
-   */
-  focusSessionPath: string | null
-  /**
    * Every worktree of the active project (local checkout + app-managed
    * session trees + external linked trees) with owning-session metadata,
    * from the backend's ListProjectWorktrees. Powers the focus switcher in
@@ -341,8 +334,6 @@ interface GitPanelActions {
   clearPendingBranchBase: () => void
   /** Set the resolved Git-panel focus target (null = no project/unresolved). */
   setFocus: (focus: GitPanelFocus | null) => void
-  /** Set the active session's execution workspace (the default focus target). */
-  setFocusSessionPath: (path: string | null) => void
   /** Replace the worktree list of the active project. */
   setWorktrees: (worktrees: GitWorktree[]) => void
   reset: () => void
@@ -373,7 +364,6 @@ const initialState: GitPanelState = {
   pendingHistoryFilter: null,
   pendingBranchBase: null,
   focus: null,
-  focusSessionPath: null,
   worktrees: [],
 }
 
@@ -712,7 +702,6 @@ export const useGitPanelStore = create<GitPanelState & GitPanelActions>()(
       clearPendingBranchBase: () => set({ pendingBranchBase: null }),
 
       setFocus: (focus) => set({ focus }),
-      setFocusSessionPath: (path) => set({ focusSessionPath: path }),
       setWorktrees: (worktrees) => set({ worktrees }),
 
       reset: () => {

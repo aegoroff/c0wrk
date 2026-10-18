@@ -43,6 +43,12 @@ export interface PendingSessionAction {
   sessionName: string
   /** Current archived state — only meaningful for 'archive' (false = archiving). */
   isArchived: boolean
+  /**
+   * Group targeting (branch-group actions): when set, confirmation applies the
+   * operation to EVERY id here; `sessionName` is the group label — the branch
+   * name — and `sessionId` is just the first member (kept for compatibility).
+   */
+  sessionIds?: string[]
 }
 
 export interface SessionActions {
@@ -69,6 +75,16 @@ export interface SessionActions {
   handleArchive: (id: string, isArchived: boolean) => Promise<void>
   handlePin: (id: string, isPinned: boolean) => Promise<void>
   handleFork: (id: string) => Promise<void>
+  /**
+   * Archive every member of a branch group; arms confirmation whenever the
+   * group holds more than one member (one click would archive N sessions) or
+   * the lone member is busy.
+   */
+  handleArchiveGroup: (branch: string, ids: string[]) => Promise<void>
+  /** Restore (unarchive) every member of an ARCHIVED branch group — non-destructive, never asks. */
+  handleUnarchiveGroup: (branch: string, ids: string[]) => Promise<void>
+  /** Delete every member of a branch group; always asks first. */
+  handleDeleteGroup: (branch: string, ids: string[]) => Promise<void>
   /** Pending destructive action awaiting confirmation, or null. */
   pendingAction: PendingSessionAction | null
   /** Execute the pending action (user confirmed). */
@@ -235,6 +251,41 @@ export function useSessionActions(): SessionActions {
     [updateSession],
   )
 
+  const handleArchiveGroup = useCallback(
+    async (branch: string, ids: string[]) => {
+      // Branch groups only ever hold non-archived sessions (archived ones land
+      // in the separate Archived bucket), so a group action always archives.
+      // Archiving cancels any running/unfinished task per member — confirm
+      // whenever the blast radius exceeds one session (a multi-member group
+      // archives N sessions in one click, busy or not) and, for a lone
+      // member, when it is busy (the same guard as the per-row action).
+      if (ids.length > 1 || ids.some((id) => isSessionBusy(id))) {
+        setPendingAction({ kind: 'archive', sessionId: ids[0] ?? '', sessionName: branch, isArchived: false, sessionIds: ids })
+        return
+      }
+      for (const id of ids) await performArchive(id, false)
+    },
+    [performArchive],
+  )
+
+  const handleUnarchiveGroup = useCallback(
+    async (_branch: string, ids: string[]) => {
+      // Restoring is non-destructive (nothing is cancelled), so it never asks.
+      // Each perform* catches its own error, so one failure never breaks the loop.
+      for (const id of ids) await performArchive(id, true)
+    },
+    [performArchive],
+  )
+
+  const handleDeleteGroup = useCallback(
+    async (branch: string, ids: string[]) => {
+      // Deleting always cancels tasks and destroys sessions — always ask,
+      // regardless of busy state; the pending action targets the whole group.
+      setPendingAction({ kind: 'delete', sessionId: ids[0] ?? '', sessionName: branch, isArchived: false, sessionIds: ids })
+    },
+    [],
+  )
+
   const handleFork = useCallback(
     async (id: string) => {
       try {
@@ -252,12 +303,16 @@ export function useSessionActions(): SessionActions {
 
   const confirmPendingAction = useCallback(async () => {
     if (!pendingAction) return
-    const { kind, sessionId, isArchived } = pendingAction
+    const { kind, sessionId, isArchived, sessionIds } = pendingAction
     setPendingAction(null)
-    if (kind === 'delete') {
-      await performDelete(sessionId)
-    } else {
-      await performArchive(sessionId, isArchived)
+    // Group actions (sessionIds set) apply the operation to EVERY member;
+    // each perform* catches its own error, so one failure never breaks the loop.
+    for (const id of sessionIds ?? [sessionId]) {
+      if (kind === 'delete') {
+        await performDelete(id)
+      } else {
+        await performArchive(id, isArchived)
+      }
     }
   }, [pendingAction, performDelete, performArchive])
 
@@ -302,6 +357,9 @@ export function useSessionActions(): SessionActions {
     handleArchive,
     handlePin,
     handleFork,
+    handleArchiveGroup,
+    handleUnarchiveGroup,
+    handleDeleteGroup,
     pendingAction,
     confirmPendingAction,
     cancelPendingAction,
