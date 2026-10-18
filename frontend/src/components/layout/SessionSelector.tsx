@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { Fragment, useState, useMemo, useCallback, useEffect } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useUIStore } from "@/stores/uiStore";
 import {
@@ -11,14 +11,29 @@ import {
 import { Button } from "@/components/ui/button";
 import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
 import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
-import { ChevronDown, Plus } from "lucide-react";
+import {
+  ArchiveRestore,
+  ChevronDown,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
 import { SessionGroupedList } from "./SessionGroupedList";
+import { BranchRow, PinGroupAction, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
-import { ARCHIVED_SECTION_KEY, buildSessionGroups, sessionRegionId } from "@/lib/sessionGroups";
+import { ARCHIVED_SECTION_KEY, buildSessionGroups, freshestSession, sessionRegionId } from "@/lib/sessionGroups";
+import { useProjectStore } from "@/stores/projectStore";
+import { useGroupPins, usePinnedGroupsStore } from "@/stores/pinnedGroupsStore";
+
+/** Collapse key of an archived branch group — namespaced under `archived:`
+ *  so it can never collide with the live `branch:<name>` key of the same
+ *  branch (a branch may hold both live and archived sessions). */
+function archivedBranchKey(branch: string): string {
+  return `archived:${branch}`;
+}
 
 /**
  * Dropdown session selector — used in CODE mode (a real project is active).
@@ -26,7 +41,9 @@ import { ARCHIVED_SECTION_KEY, buildSessionGroups, sessionRegionId } from "@/lib
  * In CHAT (No Project) mode the sidebar renders the flat {@link SessionList}
  * instead, so this component only mounts when `isChatMode` is false. Grouped
  * mode delegates to {@link SessionGroupedList}; the Archived section renders
- * in both modes.
+ * in both modes — archived worktree sessions as collapsible branch rows with
+ * their own action overlay (Pin/Unpin, Unarchive all, Delete all), archived
+ * local sessions flat.
  */
 export function SessionSelector() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -37,23 +54,63 @@ export function SessionSelector() {
   const setSessionListGrouped = useUIStore((s) => s.setSessionListGrouped);
 
   const actions = useSessionActions();
+  // The GROUP-level pin (persisted in pinnedGroupsStore, keyed by the active
+  // project): a pinned branch group floats above the unpinned ones — in the
+  // Worktrees section AND the Archived section (the same branch name is the
+  // pin key in both).
+  const activeProjectId = useProjectStore((s) => s.activeProjectId);
+  const { pinnedBranches, togglePinnedBranch } = useGroupPins(activeProjectId);
 
   const [search, setSearch] = useState("");
   const [dropdownOpen, setDropdownOpen] = useState(false);
   // Ephemeral collapse state for the sections and branch groups; keys are the
   // stable collapse keys from lib/sessionGroups (`archived` — and in grouped
-  // mode `managed` / `local` / `branch:<name>` — archived starts collapsed).
+  // mode `managed` / `local` / `branch:<name>`; archived branch groups use
+  // the local `archived:<name>` keys — the archived SECTION starts collapsed).
   const { toggleSection, isSectionExpanded } = useCollapsibleSections([ARCHIVED_SECTION_KEY]);
 
   const activeSessionsList = useMemo(() => (sessions ?? []).filter((s) => !s.archived), [sessions]);
-  const archivedList = useMemo(() => (sessions ?? []).filter((s) => s.archived), [sessions]);
 
   // Grouping model (grouped mode only, but cheap enough to always compute):
   // classification + ordering live entirely in lib/sessionGroups; the search
-  // filter there hides groups left without members.
-  const groups = useMemo(() => buildSessionGroups(sessions ?? [], { search }), [sessions, search]);
+  // filter there hides groups left without members. The Archived section
+  // renders from it too — in BOTH display modes.
+  const groups = useMemo(
+    () => buildSessionGroups(sessions ?? [], { search, pinnedBranches }),
+    [sessions, search, pinnedBranches],
+  );
+  // The UNFILTERED grouping (no search) — group actions act on the WHOLE
+  // branch even while a search narrows the visible rows, so the confirmation
+  // dialog counts the branch's full membership.
+  const allGroups = useMemo(() => buildSessionGroups(sessions ?? []), [sessions]);
+  const fullBranchIds = useCallback(
+    (branch: string) =>
+      allGroups.worktrees.find((g) => g.branch === branch)?.sessions.map((s) => s.id) ?? [],
+    [allGroups],
+  );
+
+  // Stale-pin hygiene (pinnedGroupsStore): a branch whose last session was
+  // deleted keeps its group pin forever otherwise — drop pins with no live or
+  // archived group in the UNFILTERED model (a search only hides groups
+  // temporarily). Gated on a LOADED list: `sessions === null` means the
+  // switch/reset transient, and pruning against an empty model then would
+  // wipe the destination project's pins.
+  const prunePins = usePinnedGroupsStore((s) => s.prunePins);
+  const livePinBranches = useMemo(
+    () => [...allGroups.worktrees, ...allGroups.archivedWorktrees].map((g) => g.branch),
+    [allGroups],
+  );
+  useEffect(() => {
+    if (sessions !== null && activeProjectId !== null) prunePins(activeProjectId, livePinBranches);
+  }, [sessions, activeProjectId, livePinBranches, prunePins]);
+
   const searchActive = search.trim() !== "";
-  const showSectionHeaders = groups.managed.length > 0 && groups.local.length > 0;
+  const showSectionHeaders = groups.worktrees.length > 0 && groups.local.length > 0;
+
+  // Archived section content: managed branch groups + flat local sessions,
+  // search already applied (so header count and rows can never disagree).
+  const archivedCount =
+    groups.archivedWorktrees.reduce((n, g) => n + g.sessions.length, 0) + groups.archivedLocal.length;
 
   // Trimmed to match `buildSessionGroups` (and the branch combo's own
   // filterFn): a whitespace-only search is "no filter", so the grouped
@@ -67,11 +124,11 @@ export function SessionSelector() {
     [search],
   );
 
-  const totalCount = activeSessionsList.length + archivedList.length;
-  const showSearch = totalCount >= 5;
+  // Unfiltered total — `showSearch` must NOT shrink while a search is
+  // narrowing the list (the input would unmount mid-search).
+  const showSearch = (sessions ?? []).length >= 5;
 
   const visibleActive = activeSessionsList.filter((s) => filterFn(s.name));
-  const visibleArchived = archivedList.filter((s) => filterFn(s.name));
 
   const activeSession = sessions?.find((s) => s.id === activeSessionId);
 
@@ -149,25 +206,81 @@ export function SessionSelector() {
                 toggleSection={toggleSection}
                 renderSessionItem={renderSessionItem}
                 onNewSessionOnBranch={newSessionOnBranch}
+                fullBranchIds={fullBranchIds}
+                onArchiveGroup={actions.handleArchiveGroup}
+                onDeleteGroup={actions.handleDeleteGroup}
               />
             ) : (
               visibleActive.map((s) => renderSessionItem(s))
             )}
 
-            {visibleArchived.length > 0 && (
+            {archivedCount > 0 && (
               <>
                 <DropdownMenuSeparator />
                 <CollapsibleSectionHeader
                   label="Archived"
                   noun="sessions"
-                  count={visibleArchived.length}
+                  count={archivedCount}
                   expanded={isSectionExpanded(ARCHIVED_SECTION_KEY, searchActive)}
                   onToggle={() => toggleSection(ARCHIVED_SECTION_KEY)}
                   controlsId={sessionRegionId(ARCHIVED_SECTION_KEY)}
                 />
                 {isSectionExpanded(ARCHIVED_SECTION_KEY, searchActive) && (
                   <div id={sessionRegionId(ARCHIVED_SECTION_KEY)} role="presentation">
-                    {visibleArchived.map((s) => renderSessionItem(s))}
+                    {groups.archivedWorktrees.map((group) => {
+                      const key = archivedBranchKey(group.branch);
+                      const expanded = isSectionExpanded(key, searchActive);
+                      // Full (unfiltered) membership — same rule as the live
+                      // rows: the group acts on the whole branch, and the
+                      // plural confirmation copy counts exactly these ids.
+                      const ids =
+                        allGroups.archivedWorktrees.find((g) => g.branch === group.branch)?.sessions.map(
+                          (s) => s.id,
+                        ) ?? [];
+                      const groupPinned = pinnedBranches.includes(group.branch);
+                      return (
+                        <Fragment key={key}>
+                          <BranchRow
+                            variant="archived"
+                            branch={group.branch}
+                            expanded={expanded}
+                            pinned={groupPinned}
+                            regionId={sessionRegionId(key)}
+                            onToggle={() => toggleSection(key)}
+                            freshest={freshestSession(group.sessions)}
+                            actionItems={
+                              <>
+                                <PinGroupAction
+                                  branch={group.branch}
+                                  pinned={groupPinned}
+                                  onToggle={() => togglePinnedBranch(group.branch)}
+                                />
+                                <DropdownMenuItem
+                                  title={`Restore sessions (${group.branch})`}
+                                  className={branchActionItemClasses}
+                                  onSelect={() => void actions.handleUnarchiveGroup(group.branch, ids)}
+                                >
+                                  <ArchiveRestore className="size-3 text-warning" />
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  title={`Delete sessions (${group.branch})`}
+                                  className={branchActionItemClasses}
+                                  onSelect={() => actions.handleDeleteGroup(group.branch, ids)}
+                                >
+                                  <Trash2 className="size-3 text-destructive" />
+                                </DropdownMenuItem>
+                              </>
+                            }
+                          />
+                          {expanded && (
+                            <div id={sessionRegionId(key)} role="presentation">
+                              {group.sessions.map((s) => renderSessionItem(s, { indented: true }))}
+                            </div>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                    {groups.archivedLocal.map((s) => renderSessionItem(s))}
                   </div>
                 )}
               </>

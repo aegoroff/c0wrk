@@ -79,6 +79,14 @@ export function ItemActions({ children }: ItemActionsProps) {
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
+      // Enter/Space are handled by the action inside the overlay (a plain
+      // button, or a nested Radix menu item in the branch rows); without this
+      // stop the bubbled keydown would ALSO reach the parent row's activation
+      // handler (Radix menu items fire on bubbled events) and re-select it.
+      // Arrow keys must still bubble — roving focus listens at the menu level.
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
+      }}
     >
       {children}
     </span>

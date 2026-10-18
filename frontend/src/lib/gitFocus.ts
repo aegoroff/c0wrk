@@ -65,8 +65,8 @@ export async function refreshGitFocus(): Promise<void> {
 
 /**
  * Focus the Git panel on the current session's worktree — the default
- * target, re-applied on every project/session switch (useGitFocusSync) and
- * by the header focus button. Returns true when the apply ran (was not
+ * target, re-applied on every project/session switch (useGitFocusSync).
+ * Returns true when the apply ran (was not
  * superseded by a newer one).
  */
 export async function focusSessionWorkspace(): Promise<boolean> {
@@ -79,7 +79,6 @@ export async function focusSessionWorkspace(): Promise<boolean> {
     } catch (err) {
       logger.warn('focusing the git panel on the session worktree failed', err)
     }
-    useGitPanelStore.getState().setFocusSessionPath(target || null)
     await refreshGitFocus()
     return true
   })
@@ -107,6 +106,5 @@ export async function focusWorktree(path: string): Promise<void> {
 export function clearGitFocusState(): void {
   const store = useGitPanelStore.getState()
   store.setFocus(null)
-  store.setFocusSessionPath(null)
   store.setWorktrees([])
 }

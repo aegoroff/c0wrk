@@ -185,4 +185,208 @@ describe('LocalBranchRow', () => {
     const push = btns[0]!
     expect(push.querySelector('svg')?.classList.contains('animate-spin')).toBe(true)
   })
+
+  describe('pinned branch (managed session)', () => {
+    it('shows a lock instead of the check and marks the row current', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      expect(container.querySelector('svg.lucide-lock')).not.toBeNull()
+      expect(container.querySelector('svg.lucide-check')).toBeNull()
+      expect(container.querySelector('[aria-label="Pinned to this session"]')).not.toBeNull()
+      expect(row(container).getAttribute('aria-current')).toBe('true')
+      // The pin is communicated up front, not discovered through dead clicks.
+      expect(row(container).title).toBe('Pinned to this session — branch switching is disabled')
+    })
+
+    it('renders no delete action and disables rename', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      const btns = buttons(container)
+      // push | rename (merge & rebase hidden for the current branch, delete gone)
+      expect(btns.length).toBe(2)
+      for (const b of btns) {
+        expect(b.querySelector('svg.lucide-trash2')).toBeNull()
+      }
+      // Rename stays visible but is disabled with the pinned reason — the
+      // branch name is part of the immutable binding (ErrPinnedWorktreeBranch).
+      const rename = btns[1]!
+      expect(rename.disabled).toBe(true)
+      expect(rename.title).toBe('Pinned to this session — renaming is disabled')
+      expect(rename.parentElement?.title).toBe('Pinned to this session — renaming is disabled')
+      expect(rename.parentElement?.getAttribute('aria-label')).toBe(
+        'Rename: Pinned to this session — renaming is disabled',
+      )
+    })
+
+    it('disables rename on the pinned branch even when it is not the focused one', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: false })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      const btns = buttons(container)
+      // push | merge | rebase | rename (delete gone) — rename is disabled
+      // although a non-current branch normally renames freely.
+      expect(btns.length).toBe(4)
+      const rename = btns[3]!
+      expect(rename.disabled).toBe(true)
+      expect(rename.title).toBe('Pinned to this session — renaming is disabled')
+    })
+
+    it('does not checkout the pinned branch even when it is not the focused tree’s current one', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: false })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...callbacks}
+        />,
+      )
+      act(() => {
+        row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      expect(callbacks.onCheckout).not.toHaveBeenCalled()
+    })
+
+    it('announces the pin via aria-disabled and stays keyboard-reachable for the tooltip', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      const r = row(container)
+      // The row is a no-op, but it stays in the tab order: the explaining
+      // tooltip must be reachable without a pointer, and the inert primary
+      // action is announced (aria-disabled), not just painted.
+      expect(r.getAttribute('aria-disabled')).toBe('true')
+      expect(r.getAttribute('tabindex')).toBe('0')
+    })
+
+    it('keeps the check on a non-pinned current row', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'main', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          {...defaultCallbacks}
+        />,
+      )
+      expect(container.querySelector('svg.lucide-check')).not.toBeNull()
+      expect(container.querySelector('svg.lucide-lock')).toBeNull()
+    })
+  })
+
+  describe('managed-focus gate (checkoutBlockedReason)', () => {
+    // The reason handed down by useSessionWorktreePin while the Git panel's
+    // focus rests on a managed session tree — asserted verbatim to prove the
+    // pass-through (the wording itself is the hook's test's business).
+    const reason = 'Branch switching is disabled while focused on a session worktree'
+
+    it('dims the row, no-ops the click, and explains itself up front', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch()}
+          inFlight={null}
+          disabled={false}
+          checkoutBlockedReason={reason}
+          {...callbacks}
+        />,
+      )
+      const r = row(container)
+      act(() => {
+        r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      expect(callbacks.onCheckout).not.toHaveBeenCalled()
+      expect(r.className).toContain('cursor-not-allowed')
+      expect(r.className).toContain('opacity-50')
+      // The refusal is discoverable without a failing server call.
+      expect(r.title).toBe(reason)
+      expect(r.getAttribute('aria-disabled')).toBe('true')
+      // Keyboard users can reach the tooltip: the row keeps its tab stop
+      // despite being a click no-op.
+      expect(r.getAttribute('tabindex')).toBe('0')
+    })
+
+    it('blocks the keyboard activation path too', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch()}
+          inFlight={null}
+          disabled={false}
+          checkoutBlockedReason={reason}
+          {...callbacks}
+        />,
+      )
+      act(() => {
+        row(container).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      })
+      expect(callbacks.onCheckout).not.toHaveBeenCalled()
+    })
+
+    it('keeps the hover actions live — the backend allows them under a managed focus', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch()}
+          inFlight={null}
+          disabled={false}
+          checkoutBlockedReason={reason}
+          {...callbacks}
+        />,
+      )
+      // push | merge | rebase | rename | delete — all enabled: only the
+      // checkout is refused by the managed-focus pin.
+      const btns = buttons(container)
+      expect(btns.length).toBe(5)
+      for (const b of btns) {
+        expect(b.disabled).toBe(false)
+      }
+    })
+
+    it('checks out normally when the gate hands down null (off-managed focus)', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch()}
+          inFlight={null}
+          disabled={false}
+          checkoutBlockedReason={null}
+          {...callbacks}
+        />,
+      )
+      const r = row(container)
+      expect(r.getAttribute('aria-disabled')).toBeNull()
+      expect(r.getAttribute('title')).toBeNull()
+      act(() => {
+        r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      expect(callbacks.onCheckout).toHaveBeenCalledWith('feature/x')
+    })
+  })
 })

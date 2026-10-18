@@ -299,3 +299,73 @@ describe('NewBranchSection — failures', () => {
     expect(nameInput().value).toBe('feat/wt')
   })
 })
+
+describe('NewBranchSection — managed-focus gate (disabledReason, ADR-080)', () => {
+  // Handed down by BranchPicker while the Git panel's focus rests on a
+  // managed session tree: in-place creation (CreateBranch) moves the focused
+  // tree off its pin and is refused server-side; the Worktree path is not.
+  const reason = 'Branch switching is disabled while focused on a session worktree'
+
+  function newButton(): HTMLButtonElement {
+    return allButtons().find((b) => b.textContent?.includes('New'))!
+  }
+
+  it('disables the in-place submit with the refusal reason as its tooltip', () => {
+    renderSection(makeProps({ disabledReason: reason }))
+
+    const btn = newButton()
+    // Even with a typed name the button stays disabled.
+    act(() => {
+      setInputValue(nameInput(), 'feat/a')
+    })
+    expect(btn.disabled).toBe(true)
+    expect(btn.title).toBe(reason)
+  })
+
+  it('blocks the submit and the Enter path — no CreateBranch call goes out', async () => {
+    renderSection(makeProps({ disabledReason: reason }))
+
+    await typeAndSubmit('feat/a')
+
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+    expect(gitMocks.createBranchInWorktree).not.toHaveBeenCalled()
+  })
+
+  it('the Worktree path stays available: ticking the checkbox un-blocks the button', async () => {
+    const onCreated = vi.fn()
+    renderSection(makeProps({ disabledReason: reason, onCreated }))
+
+    act(() => {
+      worktreeCheckbox().click()
+    })
+
+    // The checkbox re-enables the submit — creating in a fresh tree never
+    // touches the focused one.
+    const btn = newButton()
+    act(() => {
+      setInputValue(nameInput(), 'feat/wt')
+    })
+    expect(btn.disabled).toBe(false)
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(gitMocks.createBranchInWorktree).toHaveBeenCalledWith('feat/wt', '')
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+    expect(onCreated).toHaveBeenCalledTimes(1)
+    // The tooltip is back to the worktree-path wording, not the refusal.
+    expect(btn.title).toBe('Create the branch in a new worktree (the current checkout stays untouched)')
+  })
+
+  it('draft mode ignores the gate: the reason is never passed and the draft records', async () => {
+    const onDraftCreate = vi.fn()
+    // BranchPicker drops disabledReason in draft mode — assert the section
+    // itself keeps working when a (dropped) reason is absent.
+    renderSection(makeProps({ onDraftCreate }))
+    await typeAndSubmit('feat/draft')
+
+    expect(onDraftCreate).toHaveBeenCalledWith('feat/draft', '')
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+  })
+})

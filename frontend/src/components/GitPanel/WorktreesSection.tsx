@@ -26,7 +26,10 @@ import type { GitWorktree } from '@/types/models'
  * ItemActions overlay pattern from LocalBranchRow); the local checkout is
  * the project's registration root and never offers one. The delete goes
  * through the mandatory WorktreeDeleteConfirmDialog — the section only
- * raises `onDelete`.
+ * raises `onDelete`. The ACTIVE managed session's own tree (the
+ * `isPinnedWorktree` predicate) is the one exception: it renders a lock
+ * instead of the focus checkmark and offers no delete — its binding is
+ * immutable and deleting it from inside the session is never valid.
  *
  * `variant="menu"` renders Radix dropdown items (BranchDropdown);
  * `variant="list"` renders plain rows (BranchPicker). In the menu variant
@@ -43,6 +46,7 @@ export function WorktreesSection({
   draftBlockedReason,
   onDelete,
   deleteBusyPath = null,
+  isPinnedWorktree,
 }: {
   worktrees: GitWorktree[]
   onSelect: (worktree: GitWorktree) => void
@@ -72,6 +76,17 @@ export function WorktreesSection({
   onDelete?: (worktree: GitWorktree) => void
   /** Path of a worktree whose deletion is in flight (spinner action, disabled row). */
   deleteBusyPath?: string | null
+  /**
+   * Managed-session pin (ADR-080): predicate for the ACTIVE session's own
+   * managed tree. The pinned row renders a LOCK instead of the focus
+   * checkmark (the binding is immutable; the backend refuses branch switches
+   * off the session's tree) and offers no delete action — deleting the
+   * active session's own worktree is never a valid move from inside the
+   * session. Focus switching stays allowed on every row, the pinned one
+   * included. Consumers pass it in manage mode only; draft mode never
+   * carries a session pin.
+   */
+  isPinnedWorktree?: (worktree: GitWorktree) => boolean
 }) {
   if (worktrees.length === 0) return null
 
@@ -81,7 +96,11 @@ export function WorktreesSection({
         const busy = busyPath === w.path
         const deleting = deleteBusyPath === w.path
         const rowBusy = busy || deleting
-        const deletable = onDelete !== undefined && w.kind !== 'main'
+        // The pin is a manage-mode concept; draft selection never carries one.
+        const pinnedHere = !draftSelect && (isPinnedWorktree?.(w) ?? false)
+        // The session's own tree offers no delete: the immutable binding would
+        // outlive it and every next restore would re-provision the tree.
+        const deletable = onDelete !== undefined && w.kind !== 'main' && !pinnedHere
         // Draft-mode block gate: a gated row is not a selection target —
         // inert like a busy row, but its delete action stays available.
         const draftBlocked =
@@ -113,7 +132,17 @@ export function WorktreesSection({
             {busy ? (
               <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
             ) : (
-              w.is_focus && <Check className="size-3.5 shrink-0 text-primary" aria-label="Focused" />
+              <>
+                {w.is_focus && !pinnedHere && (
+                  <Check className="size-3.5 shrink-0 text-primary" aria-label="Focused" />
+                )}
+                {pinnedHere && (
+                  <Lock
+                    className="size-3.5 shrink-0 text-primary"
+                    aria-label="Pinned to this session"
+                  />
+                )}
+              </>
             )}
             {deletable && (
               <ItemActions>
@@ -178,7 +207,9 @@ export function WorktreesSection({
                     : w.kind === 'managed' && w.branch
                       ? `Run the new session in worktree ${w.name} on ${w.branch} — joins the existing worktree`
                       : `Run the new session in worktree ${w.name}${w.branch ? ` on ${w.branch}` : ''}`
-                  : `Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`
+                  : pinnedHere
+                    ? `Worktree ${w.name} — pinned to this session${w.branch ? ` (${w.branch})` : ''}`
+                    : `Focus ${w.kind === 'main' ? 'the local checkout' : `worktree ${w.name}`}${w.branch ? ` (${w.branch})` : ''}`
             }
             className={cn(
               'group/item relative flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',

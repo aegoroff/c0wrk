@@ -7,10 +7,9 @@ import { create } from 'zustand'
  * Settings → LLM block plus the model's entries in BOTH model pickers — the
  * default-model picker and the chat toolbar's ModelCombobox; backend RPCs stay
  * ungated), and the General tab's Session Statistics settings block. The
- * worktree/focus controls (the chat toolbar's `SessionWorkspaceSelector` and
- * the Git panel's `GitFocusButton`) are NOT gated — they render regardless of
- * this switch. Model Profiles is a first-class feature and is not gated
- * either.
+ * chat toolbar's branch/workspace picker (`SessionWorkspaceSelector`) is NOT
+ * gated — it renders regardless of this switch. Model Profiles is a
+ * first-class feature and is not gated either.
  *
  * This switch is the SOLE availability gate for E2S — there is no
  * per-feature config toggle. E2S availability is exactly `enabled`, which is
