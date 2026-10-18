@@ -328,6 +328,7 @@ System-introspection RPCs that share one house rule: "the probe does not exist h
 | Method       | Parameters | Returns              | Description                              |
 | ------------ | ---------- | -------------------- | ---------------------------------------- |
 | `ListSkills` | —          | []SkillDescriptorDTO | List available skills (name+description) |
+| `RefreshSkills` | —       | []SkillDescriptorDTO | Manual re-discovery behind the Capabilities tab's `Reload skills` button: bumps the catalog cache generation and re-scans the skill directories, then returns the fresh descriptors in the `ListSkills` shape. Plain `ListSkills` is cache-served, and the directory watchers never see directories created after startup, so this is the only manual catch-up path |
 
 ### Goal (`backend/frontend_api_goal.go`)
 
@@ -377,6 +378,7 @@ Code-review authoring surface (human-in-the-loop review of agent changes). Revie
 | Method | Parameters | Returns | Description |
 | ------ | ---------- | ------- | ----------- |
 | `ListAgents` | — | []AgentDescriptorDTO | List available Subagent Profiles (name+description+meta) |
+| `RefreshAgents` | — | []AgentDescriptorDTO | Manual re-discovery behind the Capabilities tab's `Reload subagents` button: bumps the catalog cache generation and re-scans the Subagent Profile directories, then returns the fresh hidden-excluded descriptors in the `ListAgents` shape. Plain `ListAgents` is cache-served, and the directory watchers never see directories created after startup, so this is the only manual catch-up path |
 
 ### Research (`backend/frontend_api_research.go`)
 

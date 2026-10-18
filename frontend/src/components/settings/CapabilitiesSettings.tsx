@@ -66,9 +66,12 @@ export function CapabilitiesSettings() {
   useEffect(() => { loadData() }, [loadData])
 
   // Persist one context's mode for one catalog entry. The payload must carry
-  // the FULL section (the backend replaces it wholesale), so every rendered
-  // card contributes its current entry; names the backend no longer knows
-  // (a deleted profile/skill/server) are trimmed server-side.
+  // the FULL section (the backend replaces it wholesale): the loaded modes
+  // map is written back entry-for-entry with only this one change —
+  // including names that are no longer in the catalog. Server-side
+  // unknown-name cleanup is MCP-only (names outside mcp.servers are
+  // trimmed); a stale skills/agents entry is kept as-is — inert (it matches
+  // nothing) until the name returns and the stored preference revives.
   const handleModeChange = async (section: Exclude<CapabilitySection, 'mcp'>, name: string, context: 'chat' | 'code', mode: MCPServerMode) => {
     if (!caps || savingRef.current) return
     const sectionCaps = caps[section]
@@ -97,8 +100,11 @@ export function CapabilitiesSettings() {
   // backend's catalog cache and re-scans the skill/agent directories (the
   // watchers keep the lists fresh otherwise, but directories created after
   // startup are never watched). Only the rendered list is swapped — the
-  // capabilities modes map is untouched; a stale entry for a name the
-  // re-discovery dropped is trimmed server-side on the next mode write.
+  // capabilities modes map is untouched, so a stale entry for a name the
+  // re-discovery dropped survives the next mode write: server-side
+  // unknown-name trimming is MCP-only, and a stale skills/agents entry is
+  // inert (it matches nothing; the stored preference revives if the name
+  // returns).
   const handleRefresh = async (section: 'agents' | 'skills') => {
     if (isRefreshing[section]) return
     setIsRefreshing((prev) => ({ ...prev, [section]: true }))
