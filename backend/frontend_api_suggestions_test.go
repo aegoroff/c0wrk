@@ -328,6 +328,68 @@ func TestGetPromptSuggestions_ContentSessionStaysOnContinuationBranch(t *testing
 	}
 }
 
+// TestGetPromptSuggestions_DraftSurfaceServesProjectNextTask pins the
+// draft-surface contract: the armed New-Session draft (ADR-080) has no
+// session row, so the frontend addresses it with the EMPTY session id — the
+// new_session branch must serve the project's freshest active next_task set
+// exactly as it does for an empty named session, never reading a transcript.
+func TestGetPromptSuggestions_DraftSurfaceServesProjectNextTask(t *testing.T) {
+	h := newSuggestionsAPIHarness(t)
+	projID := h.mustProject(t, "DraftSurface")
+	h.mustSession(t, "s-origin", projID, 0)
+	h.mustMessage(t, "s-origin", "user", "сделай дашборд")
+	h.mustMessage(t, "s-origin", "assistant", "готово")
+	h.mustSuggestionPass(t, "s-origin", session.SuggestionKindNextTask, "добавь фильтры", "настрой алерты")
+	h.mustSuggestionPass(t, "s-origin", session.SuggestionKindGoalAdvance, "не смешивать ветки")
+
+	resp := h.f.GetPromptSuggestions("", projID)
+	if resp.Source != promptSuggestionsSourceNewSession {
+		t.Errorf("Source = %q, want %q", resp.Source, promptSuggestionsSourceNewSession)
+	}
+	want := []string{"добавь фильтры", "настрой алерты"}
+	if got := suggestionTextsOf(resp.Suggestions); !slices.Equal(got, want) {
+		t.Errorf("texts = %v, want %v", got, want)
+	}
+	for _, row := range resp.Suggestions {
+		if row.Kind != session.SuggestionKindNextTask {
+			t.Errorf("row kind = %q, want only %q", row.Kind, session.SuggestionKindNextTask)
+		}
+		if row.SessionID != "s-origin" {
+			t.Errorf("row session = %q, want the originating s-origin", row.SessionID)
+		}
+	}
+	if resp.SessionID != "" || resp.ProjectID != projID {
+		t.Errorf("addressed ids = (%q, %q), want the draft surface verbatim (%q, %q)", resp.SessionID, resp.ProjectID, "", projID)
+	}
+}
+
+// TestGetPromptSuggestions_DraftSurfaceChatOffersNothing pins the draft
+// surface's CHAT gate: an empty session id in the No-Project window (and
+// with no project id at all) stays on the none source — CHAT has no project
+// window to draw from, draft or not.
+func TestGetPromptSuggestions_DraftSurfaceChatOffersNothing(t *testing.T) {
+	h := newSuggestionsAPIHarness(t)
+	chatID := h.mustNoProject(t)
+	h.mustSession(t, "s-chat", chatID, 0)
+	h.mustSuggestionPass(t, "s-chat", session.SuggestionKindNextTask, "не для чата")
+
+	resp := h.f.GetPromptSuggestions("", project.NoProjectID)
+	if resp.Source != promptSuggestionsSourceNone {
+		t.Errorf("Source = %q, want %q", resp.Source, promptSuggestionsSourceNone)
+	}
+	if len(resp.Suggestions) != 0 {
+		t.Errorf("texts = %v, want none", suggestionTextsOf(resp.Suggestions))
+	}
+
+	resp = h.f.GetPromptSuggestions("", "")
+	if resp.Source != promptSuggestionsSourceNone {
+		t.Errorf("Source = %q, want %q", resp.Source, promptSuggestionsSourceNone)
+	}
+	if len(resp.Suggestions) != 0 {
+		t.Errorf("texts = %v, want none", suggestionTextsOf(resp.Suggestions))
+	}
+}
+
 // TestSetPromptSuggestionsEnabled_PersistsAndApplies verifies the toggle
 // round-trip: the flip reaches config.yaml as an explicit value AND the
 // session manager's outcome gate in the same call, in both directions.

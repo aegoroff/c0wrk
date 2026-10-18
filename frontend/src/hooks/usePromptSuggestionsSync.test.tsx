@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 // Tests for usePromptSuggestionsSync — every refetch trigger of the
 // promptSuggestionsStore. Session switch / project switch / session creation
-// (an activating create is an activeSessionId change) go through the load
-// effect; the session-scoped `prompt_suggestions` event goes through
+// (an activating create is an activeSessionId change) and the armed
+// New-Session draft's project surface (the empty session key) go through the
+// load effect; the session-scoped `prompt_suggestions` event goes through
 // refetch(). Malformed payloads are dropped at the boundary; the hook never
 // applies the event's raw both-kinds set.
 //
@@ -34,10 +35,25 @@ vi.mock('@/api/suggestions', () => ({
 
 import { usePromptSuggestionsSync } from '@/hooks/usePromptSuggestionsSync'
 import { usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
+import { useProjectStore } from '@/stores/projectStore'
+import type { ProjectInfo } from '@/types/models'
 import type { PromptSuggestionsResponse } from '@/api/suggestions'
 
 const SESSION = 'sess-1'
 const OTHER = 'sess-2'
+
+function makeProject(overrides: Partial<ProjectInfo> = {}): ProjectInfo {
+  return {
+    id: 'proj-1',
+    name: 'Project One',
+    workspace_path: '/tmp/proj-1',
+    is_external: false,
+    is_no_project: false,
+    created_at: '2026-10-17T09:00:00Z',
+    last_active_at: '2026-10-17T09:00:00Z',
+    ...overrides,
+  }
+}
 
 function makeResponse(overrides: Partial<PromptSuggestionsResponse> = {}): PromptSuggestionsResponse {
   return {
@@ -81,6 +97,7 @@ beforeEach(() => {
   getPromptSuggestionsMock.mockResolvedValue(makeResponse())
   reportDroppedEventMock.mockClear()
   runtimeHandlers.clear()
+  useProjectStore.setState({ projects: null, activeProjectId: null })
   usePromptSuggestionsStore.setState({
     sessionId: null,
     projectId: '',
@@ -154,7 +171,66 @@ describe('usePromptSuggestionsSync triggers', () => {
     const s = usePromptSuggestionsStore.getState()
     expect(s.sessionId).toBeNull()
     expect(s.suggestions).toHaveLength(0)
-    expect(getPromptSuggestionsMock).toHaveBeenCalledTimes(1) // no load without a session
+    expect(getPromptSuggestionsMock).toHaveBeenCalledTimes(1) // no project window → no load
+  })
+
+  it('loads the project draft surface under the empty session key (armed New-Session draft)', async () => {
+    // A CODE project's armed New-Session draft has no session row: the hook
+    // must address the backend's new_session branch with the EMPTY session
+    // id instead of resetting (the per-project next_task surface).
+    getPromptSuggestionsMock.mockReset()
+    getPromptSuggestionsMock.mockResolvedValue(makeResponse({
+      session_id: '',
+      source: 'new_session',
+      suggestions: [{
+        id: 'row-next',
+        session_id: 'sess-origin',
+        task_id: 't1',
+        kind: 'next_task',
+        text: 'Project follow-up',
+        status: 'active',
+        created_at: '2026-10-17T11:00:00Z',
+      }],
+    }))
+    await act(async () => {
+      root.render(createElement(Harness, { sessionId: null, projectId: 'proj-1' }))
+    })
+    expect(getPromptSuggestionsMock).toHaveBeenCalledWith('', 'proj-1')
+    const s = usePromptSuggestionsStore.getState()
+    expect(s.sessionId).toBe('')
+    expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0]?.kind).toBe('next_task')
+  })
+
+  it('resets instead of loading when the armed draft sits in the No-Project window', async () => {
+    useProjectStore.setState({
+      projects: [makeProject({ id: 'no-project', name: 'No Project', is_no_project: true })],
+      activeProjectId: 'no-project',
+    })
+    getPromptSuggestionsMock.mockClear()
+    await act(async () => {
+      root.render(createElement(Harness, { sessionId: null, projectId: 'no-project' }))
+    })
+    expect(getPromptSuggestionsMock).not.toHaveBeenCalled()
+    const s = usePromptSuggestionsStore.getState()
+    expect(s.sessionId).toBeNull()
+    expect(s.suggestions).toHaveLength(0)
+  })
+
+  it('resets when the draft surface loses its project window (CHAT switch)', async () => {
+    getPromptSuggestionsMock.mockResolvedValue(makeResponse({ session_id: '', source: 'new_session', suggestions: [] }))
+    await act(async () => {
+      root.render(createElement(Harness, { sessionId: null, projectId: 'proj-1' }))
+    })
+    expect(usePromptSuggestionsStore.getState().sessionId).toBe('')
+    getPromptSuggestionsMock.mockClear()
+    await act(async () => {
+      root.render(createElement(Harness, { sessionId: null, projectId: null }))
+    })
+    const s = usePromptSuggestionsStore.getState()
+    expect(s.sessionId).toBeNull()
+    expect(s.suggestions).toHaveLength(0)
+    expect(getPromptSuggestionsMock).not.toHaveBeenCalled()
   })
 
   it('refetches on a valid prompt_suggestions event for the active session', async () => {

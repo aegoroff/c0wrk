@@ -1042,7 +1042,8 @@ describe('handleSend session-kind-aware mention filtering', () => {
 // Prompt suggestions (ADR-088): the placeholder hint + arrow navigation.
 // The store is armed directly (the refetch triggers live in the sync hook's
 // own suite); here we prove the controller WIRING: the idle placeholder
-// becomes the three-line browse hint, ↑↓ drive the store's clamped selection,
+// becomes the hint surface (the previewed row, a blank line, the italic
+// usage hints), ↑↓ drive the store's clamped selection,
 // and → inserts the previewed row as real content without a send.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1062,15 +1063,44 @@ const EMPTY_SUGGESTIONS_STATE = {
 
 describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
   function armSuggestions(sessionId: string | null, rows: PromptSuggestionRow[] = SUGGESTION_ROWS) {
-    usePromptSuggestionsStore.setState({ ...EMPTY_SUGGESTIONS_STATE, sessionId, projectId: 'proj-1', source: 'continuation', suggestions: rows })
+    usePromptSuggestionsStore.setState({
+      ...EMPTY_SUGGESTIONS_STATE,
+      sessionId,
+      projectId: 'proj-1',
+      source: 'continuation',
+      suggestions: rows,
+      // Mirror the real load() rest: a fresh non-empty set rests ON the top row.
+      selectedIndex: rows.length > 0 ? 0 : -1,
+    })
   }
 
   function suggestionState() {
     return usePromptSuggestionsStore.getState()
   }
 
+  function placeholderWrap(): HTMLElement | null {
+    return container.querySelector<HTMLElement>('.cm-placeholder')
+  }
+
   function placeholderText(): string {
-    return container.querySelector('.cm-placeholder')?.textContent ?? ''
+    return placeholderWrap()?.textContent ?? ''
+  }
+
+  function placeholderPreview(): string {
+    return placeholderWrap()?.querySelector('.cm-suggestion-preview')?.textContent ?? ''
+  }
+
+  function placeholderHints(): string {
+    return placeholderWrap()?.querySelector('.cm-suggestion-hints')?.textContent ?? ''
+  }
+
+  function placeholderHintsItalic(): string {
+    return placeholderWrap()?.querySelector<HTMLElement>('.cm-suggestion-hints')?.style.fontStyle ?? ''
+  }
+
+  /** The blank-line separator as rendered: the two explicit <br> elements. */
+  function placeholderBlankLine(): number {
+    return placeholderWrap()?.querySelectorAll('.cm-suggestion-placeholder > br').length ?? 0
   }
 
   async function pressKey(key: string): Promise<boolean> {
@@ -1102,12 +1132,15 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     usePromptSuggestionsStore.setState(EMPTY_SUGGESTIONS_STATE)
   })
 
-  it('idle + non-empty set: the placeholder becomes the three-line hint previewing the top pick', () => {
+  it('idle + non-empty set: the placeholder previews the top pick over a BLANK line above the italic usage hints', () => {
     armSuggestions('sess-a')
     render()
-    expect(placeholderText()).toBe(
-      'Follow up on the failing test\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
+    expect(placeholderPreview()).toBe('Follow up on the failing test')
+    expect(placeholderBlankLine()).toBe(2)
+    expect(placeholderHints()).toBe(
+      '↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
     )
+    expect(placeholderHintsItalic()).toBe('italic')
   })
 
   it('the hint arms and disarms live with the store (placeholder compartment reconfigure)', () => {
@@ -1116,7 +1149,8 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     act(() => {
       armSuggestions('sess-a')
     })
-    expect(placeholderText()).toContain('↑↓ browse · → insert')
+    expect(placeholderPreview()).toBe('Follow up on the failing test')
+    expect(placeholderHints()).toContain('↑↓ browse · → insert')
     act(() => {
       armSuggestions(null, [])
     })
@@ -1140,14 +1174,21 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     armSuggestions('sess-a')
     render()
 
-    expect(await pressKey('ArrowDown')).toBe(true)
-    expect(suggestionState().selectedIndex).toBe(0)
-    expect(placeholderText().startsWith('Follow up on the failing test\n')).toBe(true)
-
+    // Resting ON the top row: the placeholder already previews it, so the
+    // first ↓ must land on a VISIBLY different row (regression: the old
+    // unselected -1 rest rendered identically to row 0 and the first press
+    // looked dead — switching only started on the second press).
+    expect(placeholderPreview()).toBe('Follow up on the failing test')
     expect(await pressKey('ArrowDown')).toBe(true)
     expect(suggestionState().selectedIndex).toBe(1)
-    expect(placeholderText().startsWith('Write release notes\n')).toBe(true)
+    expect(placeholderPreview()).toBe('Write release notes')
 
+    expect(await pressKey('ArrowUp')).toBe(true)
+    expect(suggestionState().selectedIndex).toBe(0)
+    expect(placeholderPreview()).toBe('Follow up on the failing test')
+
+    // Clamped at the top: consumed, no further change (and no dead-looking
+    // hop to a hidden state — the top row IS the resting state).
     expect(await pressKey('ArrowUp')).toBe(true)
     expect(suggestionState().selectedIndex).toBe(0)
   })
@@ -1156,30 +1197,31 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     armSuggestions('sess-a')
     render()
     expect(await pressKey('ArrowUp')).toBe(true)
-    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(suggestionState().selectedIndex).toBe(0)
     expect(await pressKey('ArrowDown')).toBe(true)
     expect(await pressKey('ArrowDown')).toBe(true)
     expect(await pressKey('ArrowDown')).toBe(true)
     expect(suggestionState().selectedIndex).toBe(1)
   })
 
-  it('ArrowRight inserts the previewed row as real content — draft persisted, nothing sent, selection reset', async () => {
+  it('ArrowRight inserts the previewed row as real content — draft persisted, nothing sent, selection rests back on the top row', async () => {
     armSuggestions('sess-a')
     render()
     expect(await pressKey('ArrowDown')).toBe(true)
 
     expect(await pressKey('ArrowRight')).toBe(true)
-    expect(editorText()).toBe('Follow up on the failing test')
-    expect(slice('sess-a')?.draft).toBe('Follow up on the failing test')
-    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(editorText()).toBe('Write release notes')
+    expect(slice('sess-a')?.draft).toBe('Write release notes')
+    expect(suggestionState().selectedIndex).toBe(0)
     expect(sendMock).not.toHaveBeenCalled()
   })
 
-  it('ArrowRight at the resting -1 inserts exactly the top pick the placeholder displays', async () => {
+  it('ArrowRight at rest inserts exactly the top row the placeholder displays', async () => {
     armSuggestions('sess-a')
     render()
     expect(await pressKey('ArrowRight')).toBe(true)
     expect(editorText()).toBe('Follow up on the failing test')
+    expect(suggestionState().selectedIndex).toBe(0)
     expect(sendMock).not.toHaveBeenCalled()
   })
 
@@ -1191,7 +1233,7 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     await pressKey('ArrowDown')
     await pressKey('ArrowRight')
     expect(editorText()).toBe('draft text')
-    expect(suggestionState().selectedIndex).toBe(-1)
+    expect(suggestionState().selectedIndex).toBe(0)
   })
 
   it('a foreign-session snapshot: the arrows fall through (the controller handler declines)', async () => {
@@ -1199,7 +1241,11 @@ describe('prompt-suggestions: placeholder hint + arrow navigation', () => {
     render()
     await pressKey('ArrowDown')
     await pressKey('ArrowRight')
+    // The sync layer has already swapped the foreign snapshot for the harness
+    // session's own (empty) set — the sentinel stands; the arrows declined,
+    // nothing was browsed or inserted.
     expect(suggestionState().selectedIndex).toBe(-1)
     expect(editorText()).toBe('')
+    expect(sendMock).not.toHaveBeenCalled()
   })
 })

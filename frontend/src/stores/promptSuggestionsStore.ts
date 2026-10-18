@@ -39,7 +39,10 @@ export interface PromptSuggestionsState {
   /** The active set, backend-routed and kind-filtered. Reference changes only
    *  when a snapshot is applied. */
   suggestions: readonly PromptSuggestionRow[]
-  /** ↑↓ selection into `suggestions`; -1 = nothing selected (raw input). */
+  /** ↑↓ selection into `suggestions`. A non-empty set ALWAYS keeps the
+   *  selection ON a row — a fresh snapshot rests on the top row (0), which is
+   *  the row the resting placeholder previews, so the first ↓ lands on a
+   *  visibly different row. -1 is the empty-set / no-snapshot sentinel only. */
   selectedIndex: number
   /** True while a load is in flight for the current session. */
   loading: boolean
@@ -47,30 +50,43 @@ export interface PromptSuggestionsState {
 
 interface PromptSuggestionsActions {
   /** Fetch the active set for a session (the single refetch entry). A switch
-   *  to a different session clears the previous session's rows immediately —
-   *  session A's suggestions must never render under session B. Responses are
+   *  to a different context — another session, or another project under the
+   *  shared '' draft key — clears the previous context's rows immediately:
+   *  context A's suggestions must never render under context B. Responses are
    *  sequence-guarded: a stale in-flight response never overwrites a newer
-   *  load. A failed/null response degrades to an empty set (fail-open). */
+   *  load. A failed/null response degrades to an empty set (fail-open).
+   *  sessionId '' names the DRAFT surface: the armed New-Session draft of a
+   *  real project has no session row, so it addresses the backend's
+   *  new_session branch with the empty id (which the backend echoes
+   *  verbatim). */
   load: (sessionId: string, projectId: string) => Promise<void>
   /** Re-run load for the store's current (sessionId, projectId) context —
-   *  the `prompt_suggestions` event entry point. No-op without a session. */
+   *  the `prompt_suggestions` event entry point. No-op without a loaded
+   *  context (sessionId null); the '' draft surface refetches like any
+   *  session. */
   refetch: () => Promise<void>
-  /** Select a row by index; clamped to [-1, suggestions.length - 1].
-   *  -1 deselects (back to the raw input). Reference-stable no-op when the
-   *  index is unchanged or out of a non-empty range's neighborhood. */
+  /** Select a row by index; clamped to [0, suggestions.length - 1] for a
+   *  non-empty set (-1 only stands for an empty set). Reference-stable no-op
+   *  when the index is unchanged. */
   setSelectedIndex: (index: number) => void
   /** Move the selection by delta (↑↓); clamped the same way. No-op on an
    *  empty set. */
   moveSelection: (delta: number) => void
-  /** Deselect (back to -1) without touching the rows. */
+  /** Rest the selection back on the top row (the resting state; -1 for an
+   *  empty set) without touching the rows. */
   clearSelection: () => void
-  /** Drop the snapshot entirely (no active session / chat teardown). */
+  /** Drop the snapshot entirely (no active session / chat teardown). Also
+   *  unconditionally invalidates in-flight loads: a draft response resolves
+   *  with the shared '' key, which would match any later consumer context —
+   *  only the sequence guard can keep it from re-populating the torn-down
+   *  store. */
   reset: () => void
 }
 
-/** Monotonic load token — increments on every `load`; only the latest
- *  response may apply. Lives on the closure, not the state (not a selector
- *  concern). */
+/** Monotonic load token — increments on every `load` and on every `reset`;
+ *  only the latest response may apply, and a response already in flight when
+ *  the store is torn down can never apply. Lives on the closure, not the
+ *  state (not a selector concern). */
 let loadSeq = 0
 
 // --- Store ---
@@ -85,10 +101,17 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
 
   load: async (sessionId, projectId) => {
     const prev = get()
-    const switching = prev.sessionId !== sessionId
+    // A switch is a change of EITHER identity. The '' draft key is shared by
+    // every project's armed New-Session surface, so the session id alone
+    // cannot see a project change there — without the project disjunct the
+    // outgoing project's rows would stay visible (and insertable via →) in
+    // the next project's draft until the fetch lands. A real session always
+    // belongs to exactly one project (its (sessionId, projectId) pair is
+    // immutable), so the disjunct never fires for real sessions.
+    const switching = prev.sessionId !== sessionId || prev.projectId !== projectId
     const seq = ++loadSeq
     if (switching) {
-      // Immediate skeleton: never let the outgoing session's rows show under
+      // Immediate skeleton: never let the outgoing context's rows show under
       // the incoming one while the fetch is in flight.
       set({
         sessionId,
@@ -125,21 +148,26 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
     set({
       source: resp.source,
       suggestions: resp.suggestions,
-      selectedIndex: -1, // a fresh snapshot starts unselected
+      // Rest ON the top row: the resting placeholder previews it (the
+      // proactive prompt stays visible), and the first ↓ moves to a visibly
+      // different row — an unselected -1 rest would render identically to
+      // row 0 and make that first press look dead.
+      selectedIndex: resp.suggestions.length > 0 ? 0 : -1,
       loading: false,
     })
   },
 
   refetch: async () => {
     const { sessionId, projectId } = get()
-    if (!sessionId) return
+    if (sessionId === null) return // nothing loaded (pristine store)
     await get().load(sessionId, projectId)
   },
 
   setSelectedIndex: (index) =>
     set((s) => {
       const max = s.suggestions.length - 1
-      const clamped = Math.max(-1, Math.min(index, max))
+      const min = max < 0 ? -1 : 0
+      const clamped = Math.max(min, Math.min(index, max))
       if (clamped === s.selectedIndex) return s
       return { selectedIndex: clamped }
     }),
@@ -151,9 +179,18 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
   },
 
   clearSelection: () =>
-    set((s) => (s.selectedIndex === -1 ? s : { selectedIndex: -1 })),
+    set((s) => {
+      const rest = s.suggestions.length === 0 ? -1 : 0
+      return s.selectedIndex === rest ? s : { selectedIndex: rest }
+    }),
 
   reset: () => {
+    // Invalidate in-flight loads FIRST, unconditionally — even on the pristine
+    // early return: load() publishes its context synchronously before
+    // awaiting, so no legitimate response can outlive the teardown, and the
+    // bump is what turns a late draft response into a dropped no-op instead
+    // of a re-populated (wrong-context) store.
+    ++loadSeq
     if (get().sessionId === null && get().suggestions.length === 0) {
       return // already pristine — keep the reference-stable no-op
     }

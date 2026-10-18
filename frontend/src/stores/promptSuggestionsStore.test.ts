@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 // Tests for promptSuggestionsStore — the single-slot active-session
-// suggestions snapshot. Covers: load application + immediate switch skeleton,
-// the sequence guard (a stale in-flight response never overwrites a newer
-// load), fail-open degradation (null/mismatched responses keep the session's
-// current rows), selection clamping with reference-stable no-ops, and the
-// stable-selector contract (direct references or primitives — never a fresh
+// suggestions snapshot. Covers: load application + immediate switch skeleton
+// (session switches AND project switches under the shared '' draft key), the
+// sequence guard (a stale in-flight response never overwrites a newer load,
+// and a response in flight across a reset is discarded), fail-open
+// degradation (null/mismatched responses keep the session's current rows),
+// selection clamping with reference-stable no-ops, and the stable-selector
+// contract (direct references or primitives — never a fresh
 // allocation; see AGENTS.md §2.7).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -73,6 +75,7 @@ describe('promptSuggestionsStore', () => {
       expect(s.projectId).toBe('proj-1')
       expect(s.source).toBe('continuation')
       expect(s.suggestions).toEqual(resp.suggestions)
+      expect(s.selectedIndex).toBe(0) // a fresh set rests ON the top row
       expect(s.loading).toBe(false)
     })
 
@@ -92,6 +95,51 @@ describe('promptSuggestionsStore', () => {
       expect(s.source).toBe('none')
       expect(s.selectedIndex).toBe(-1)
       expect(s.loading).toBe(true)
+    })
+
+    it('skeletons a draft project switch instantly and supersedes the outgoing project in-flight load', async () => {
+      // Draft of project A fully loaded — its rows are visible.
+      const rowsA = [makeRow({ id: 'a-1', session_id: '' })]
+      getPromptSuggestionsMock.mockResolvedValueOnce(
+        makeResponse({ session_id: '', project_id: 'proj-a', source: 'new_session', suggestions: rowsA }),
+      )
+      await usePromptSuggestionsStore.getState().load('', 'proj-a')
+      expect(usePromptSuggestionsStore.getState().suggestions).toEqual(rowsA)
+
+      // A same-key refetch of A goes in flight (e.g. a fresh generation).
+      let resolveStaleA!: (v: PromptSuggestionsResponse) => void
+      getPromptSuggestionsMock.mockImplementationOnce(() => new Promise((res) => { resolveStaleA = res }))
+      const staleA = usePromptSuggestionsStore.getState().load('', 'proj-a')
+
+      // The user switches the project while the draft stays armed: the SAME
+      // '' session key, a DIFFERENT project. The session id alone cannot see
+      // this switch — the project disjunct must skeleton A's rows away
+      // synchronously, before the fetch lands.
+      let resolveB!: (v: PromptSuggestionsResponse) => void
+      getPromptSuggestionsMock.mockImplementationOnce(() => new Promise((res) => { resolveB = res }))
+      const projB = usePromptSuggestionsStore.getState().load('', 'proj-b')
+      const mid = usePromptSuggestionsStore.getState()
+      expect(mid.sessionId).toBe('')
+      expect(mid.projectId).toBe('proj-b')
+      expect(mid.suggestions).toHaveLength(0) // A's rows never show under B
+      expect(mid.source).toBe('none')
+      expect(mid.selectedIndex).toBe(-1)
+      expect(mid.loading).toBe(true)
+
+      // A's late response echoes the SAME '' key, so the session guard
+      // cannot reject it — only the sequence guard can (B superseded it).
+      resolveStaleA(makeResponse({ session_id: '', project_id: 'proj-a', source: 'new_session', suggestions: rowsA }))
+      await staleA
+      const afterStale = usePromptSuggestionsStore.getState()
+      expect(afterStale.suggestions).toHaveLength(0)
+      expect(afterStale.projectId).toBe('proj-b')
+      expect(afterStale.loading).toBe(true) // B's load is still the live one
+
+      resolveB(makeResponse({ session_id: '', project_id: 'proj-b', source: 'new_session', suggestions: [makeRow({ id: 'b-1', session_id: '' })] }))
+      await projB
+      const done = usePromptSuggestionsStore.getState()
+      expect(done.suggestions.map((r) => r.id)).toEqual(['b-1'])
+      expect(done.loading).toBe(false)
     })
 
     it('drops a stale in-flight response (sequence guard: newest load wins)', async () => {
@@ -144,9 +192,13 @@ describe('promptSuggestionsStore', () => {
       expect(s.loading).toBe(false)
     })
 
-    it('resets the selection when a snapshot is applied', async () => {
+    it('rests the selection on the top row when a snapshot is applied (-1 only for an empty set)', async () => {
       usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions, selectedIndex: 1 })
       getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse())
+      await usePromptSuggestionsStore.getState().refetch()
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
+
+      getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse({ suggestions: [] }))
       await usePromptSuggestionsStore.getState().refetch()
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
@@ -160,6 +212,13 @@ describe('promptSuggestionsStore', () => {
       expect(getPromptSuggestionsMock).toHaveBeenCalledWith('sess-1', 'proj-9')
     })
 
+    it('re-loads the draft surface (empty session key) like any session', async () => {
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: '', projectId: 'proj-1' })
+      getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse({ session_id: '', source: 'new_session', suggestions: [] }))
+      await usePromptSuggestionsStore.getState().refetch()
+      expect(getPromptSuggestionsMock).toHaveBeenCalledWith('', 'proj-1')
+    })
+
     it('is a no-op without a loaded session', async () => {
       await usePromptSuggestionsStore.getState().refetch()
       expect(getPromptSuggestionsMock).not.toHaveBeenCalled()
@@ -167,11 +226,12 @@ describe('promptSuggestionsStore', () => {
   })
 
   describe('selection', () => {
+    // Mirrors the real load() rest: a fresh non-empty set rests ON the top row.
     const withRows = (): void => {
-      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions })
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions, selectedIndex: 0 })
     }
 
-    it('clamps setSelectedIndex to [-1, length-1]', () => {
+    it('clamps setSelectedIndex to [0, length-1] for a non-empty set (-1 only for an empty set)', () => {
       withRows()
       const store = usePromptSuggestionsStore.getState()
       store.setSelectedIndex(1)
@@ -179,30 +239,33 @@ describe('promptSuggestionsStore', () => {
       store.setSelectedIndex(99)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
       store.setSelectedIndex(-5)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
+
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: [] })
+      usePromptSuggestionsStore.getState().setSelectedIndex(3)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
 
     it('moveSelection steps and clamps; no-op on an empty set', () => {
       withRows()
       const store = usePromptSuggestionsStore.getState()
-      store.moveSelection(1) // -1 → 0
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
-      store.moveSelection(1)
+      store.moveSelection(1) // 0 → 1
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
       store.moveSelection(1) // clamped at the last row
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
-      store.moveSelection(-3) // clamped at -1
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
+      store.moveSelection(-3) // clamped at the top row (the resting state)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
 
       usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: [] })
       usePromptSuggestionsStore.getState().moveSelection(1)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
 
-    it('clearSelection deselects without touching the rows', () => {
+    it('clearSelection rests the selection on the top row without touching the rows', () => {
       withRows()
-      usePromptSuggestionsStore.getState().setSelectedIndex(0)
+      usePromptSuggestionsStore.getState().setSelectedIndex(1)
       usePromptSuggestionsStore.getState().clearSelection()
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
       expect(usePromptSuggestionsStore.getState().suggestions).toHaveLength(2)
     })
 
@@ -226,6 +289,34 @@ describe('promptSuggestionsStore', () => {
       expect(s.suggestions).toHaveLength(0)
       expect(s.selectedIndex).toBe(-1)
       expect(s.loading).toBe(false)
+    })
+
+    it('discards a draft-load response that lands after the reset (loadSeq guard)', async () => {
+      // A draft load is in flight when the surface is torn down (the user
+      // left the armed draft for CHAT — the sync hook calls reset()).
+      let resolveDraft!: (v: PromptSuggestionsResponse) => void
+      getPromptSuggestionsMock.mockImplementationOnce(() => new Promise((res) => { resolveDraft = res }))
+      const draft = usePromptSuggestionsStore.getState().load('', 'proj-a')
+      usePromptSuggestionsStore.getState().reset()
+      expect(usePromptSuggestionsStore.getState().sessionId).toBeNull()
+
+      // The late response echoes the shared '' key — it would match every
+      // later consumer context, so only the loadSeq guard can drop it.
+      resolveDraft(makeResponse({ session_id: '', project_id: 'proj-a', source: 'new_session', suggestions: [makeRow({ id: 'late-1', session_id: '' })] }))
+      await draft
+      const s = usePromptSuggestionsStore.getState()
+      expect(s.sessionId).toBeNull()
+      expect(s.projectId).toBe('')
+      expect(s.suggestions).toHaveLength(0)
+      expect(s.source).toBe('none')
+
+      // The unconditional bump must not wedge later loads: a fresh draft
+      // load after the reset applies normally.
+      getPromptSuggestionsMock.mockResolvedValueOnce(
+        makeResponse({ session_id: '', project_id: 'proj-b', source: 'new_session', suggestions: [makeRow({ id: 'fresh-1', session_id: '' })] }),
+      )
+      await usePromptSuggestionsStore.getState().load('', 'proj-b')
+      expect(usePromptSuggestionsStore.getState().suggestions.map((r) => r.id)).toEqual(['fresh-1'])
     })
 
     it('is a reference-stable no-op when already pristine', () => {
@@ -311,13 +402,13 @@ describe('promptSuggestionsStore selectors', () => {
     expect(last()).toBe(-1)
   })
 
-  it('usePromptSelectedSuggestion returns the direct selected row (or undefined)', () => {
+  it('usePromptSelectedSuggestion returns the direct selected row (the top row at rest, undefined otherwise)', () => {
     const rows = makeResponse().suggestions
     usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: rows, selectedIndex: 1 })
     renderHarness('sess-1', usePromptSelectedSuggestion)
     expect(last()).toBe(rows[1])
     act(() => { usePromptSuggestionsStore.getState().clearSelection() })
-    expect(last()).toBeUndefined()
+    expect(last()).toBe(rows[0]) // clearSelection rests on the top row
     renderHarness('sess-other', usePromptSelectedSuggestion)
     expect(last()).toBeUndefined()
   })
