@@ -326,6 +326,10 @@ export function Rebase(arg1:string):Promise<void>;
 
 export function RecordFlashcardReview(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
+export function RefreshAgents():Promise<Array<backend.AgentDescriptorDTO>>;
+
+export function RefreshSkills():Promise<Array<backend.SkillDescriptorDTO>>;
+
 export function ReindexVectorIndex():Promise<void>;
 
 export function RemoveAttachment(arg1:string,arg2:string):Promise<void>;

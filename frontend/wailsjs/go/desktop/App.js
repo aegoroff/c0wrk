@@ -638,6 +638,14 @@ export function RecordFlashcardReview(arg1, arg2, arg3, arg4) {
   return window['go']['desktop']['App']['RecordFlashcardReview'](arg1, arg2, arg3, arg4);
 }
 
+export function RefreshAgents() {
+  return window['go']['desktop']['App']['RefreshAgents']();
+}
+
+export function RefreshSkills() {
+  return window['go']['desktop']['App']['RefreshSkills']();
+}
+
 export function ReindexVectorIndex() {
   return window['go']['desktop']['App']['ReindexVectorIndex']();
 }
