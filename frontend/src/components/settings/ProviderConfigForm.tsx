@@ -174,7 +174,8 @@ export function ProviderConfigForm({
 
   return (
     <>
-      {/* Base URL - for OpenAI Compatible */}
+      {/* Base URL — compatible providers only (both transports); the fixed
+          providers talk to their vendor endpoints. */}
       {showBaseUrl && (
         <div className="flex flex-col gap-2">
           <label className="text-xs text-muted-foreground">Base URL</label>

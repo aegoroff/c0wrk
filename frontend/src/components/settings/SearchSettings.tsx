@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { AlertTriangle, Info } from 'lucide-react'
+import { AlertTriangle, Globe, Info } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Combobox } from '@/components/ui/combobox'
 import { getConfig, updateSearchSettings, MASKED_API_KEY } from '@/api/config'
@@ -172,7 +172,13 @@ export function SearchSettings() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <label className="text-xs text-muted-foreground">Search Provider</label>
+        {/* Section heading in the shared settings style — icon + text-sm
+            font-medium, like "Default Model" (LLMSettings) and the section
+            headers in SettingsModal ("HTTP Proxy" carries the same Globe). */}
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <Globe className="h-4 w-4 text-muted-foreground" />
+          Web Search Provider
+        </label>
         <Combobox
           ariaLabel="Search provider"
           value={config.provider}

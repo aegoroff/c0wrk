@@ -1,34 +1,29 @@
-import { Bot, Sparkles, CircleOff } from 'lucide-react'
-import { CapabilityModeExplanations, CapabilityModeSelect } from './CapabilityModeSelect'
-import { isDisabledInBothContexts, isManualAnywhere } from '@/lib/capabilityModes'
 import { Badge } from '@/components/ui/badge'
+import { CapabilityModeSelect } from './CapabilityModeSelect'
+import { isDisabledInBothContexts, isManualAnywhere } from '@/lib/capabilityModes'
 import type { CapabilityModes, MCPServerMode } from '@/types/models'
 
 /**
  * Read-only capability card (Settings → Capabilities → Subagents / Skills).
  * Mirrors the MCP server card's information shape — name, description, one
- * activation selector per context with the per-context explanations — but
- * carries NO mutation controls: profiles and skills are files on disk, not
- * rows to add/delete here. The selectors themselves persist through the
- * capabilities RPC.
+ * activation selector per context — but carries NO mutation controls:
+ * profiles and skills are files on disk, not rows to add/delete here. The
+ * selectors themselves persist through the capabilities RPC. Unlike the MCP
+ * cards there is no per-card icon (catalog icons live on the section headers
+ * only) and no per-context explanation captions — the two selectors stack
+ * vertically so the description keeps the card's full width.
  */
-export function CapabilityCard({ icon, name, description, modes, disabled, onChange }: {
-  /** Which catalog the entry belongs to — picks the card icon. */
-  icon: 'agent' | 'skill'
+export function CapabilityCard({ name, description, modes, disabled, onChange }: {
   name: string
   description: string
   modes: CapabilityModes
   disabled: boolean
   onChange: (context: 'chat' | 'code', mode: MCPServerMode) => void
 }) {
-  const Icon = icon === 'agent' ? Bot : Sparkles
   const neutralDisabled = isDisabledInBothContexts(modes.chat_mode, modes.code_mode)
   return (
-    <div className="border rounded-lg p-3 space-y-2">
-      <div className="flex items-center gap-3">
-        {neutralDisabled
-          ? <CircleOff className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-          : <Icon className="h-4 w-4 text-muted-foreground flex-shrink-0" />}
+    <div className="border rounded-lg p-3">
+      <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="font-medium text-sm truncate">{name}</span>
@@ -47,7 +42,8 @@ export function CapabilityCard({ icon, name, description, modes, disabled, onCha
             <p className="text-xs text-muted-foreground break-words">{description}</p>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        {/* One activation selector per context, stacked vertically. */}
+        <div className="flex flex-col gap-2 flex-shrink-0">
           <CapabilityModeSelect
             name={name}
             context="chat"
@@ -64,7 +60,6 @@ export function CapabilityCard({ icon, name, description, modes, disabled, onCha
           />
         </div>
       </div>
-      <CapabilityModeExplanations chatMode={modes.chat_mode} codeMode={modes.code_mode} />
     </div>
   )
 }

@@ -244,7 +244,31 @@ describe('SettingsModal close flow', () => {
 })
 
 describe('SettingsModal General tab: session statistics display toggle', () => {
+  it('hides the Session Statistics block while the experimental switch is off', async () => {
+    // The block is an experimental surface: with the master switch off (the
+    // store default) it must not render anywhere on the General tab — not
+    // even its border wrapper.
+    useExperimentalStore.setState({ enabled: false, loaded: true })
+    useUIStore.setState({ showSessionStats: false })
+    useSettingsStore.setState({ open: true, activeTab: 'general' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    expect(bannerText()).not.toContain('Show the per-run summary row')
+    // The block's own header (a span whose exact text is "Session
+    // Statistics") must be gone; matching the exact span rather than the
+    // whole text body, because the always-visible Experimental Features
+    // toggle description names the block too.
+    const headers = Array.from(document.body.querySelectorAll('span'))
+    expect(headers.find((s) => s.textContent === 'Session Statistics')).toBeUndefined()
+  })
+
   it('shows the Session Statistics control, off by default, and toggling flips the uiStore flag', async () => {
+    // Gate on: the block renders and the display toggle still drives only
+    // the persisted uiStore flag that gates the ExecutionPanels stats row.
+    useExperimentalStore.setState({ enabled: true, loaded: true })
     useUIStore.setState({ showSessionStats: false })
     useSettingsStore.setState({ open: true, activeTab: 'general' })
     act(() => {

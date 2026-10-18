@@ -20,7 +20,9 @@ export function CapabilityModeSelect({ name, context, mode, disabled, onChange }
   const label = context === 'chat' ? 'Chat' : 'Code'
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground w-10 text-right">{label}</span>
+      {/* Uppercase rendering of the context label — uniform across every
+          capability card in the tab (MCP servers included). */}
+      <span className="text-xs text-muted-foreground w-10 text-right uppercase">{label}</span>
       <Combobox
         ariaLabel={`${name} ${context} mode`}
         value={mode}

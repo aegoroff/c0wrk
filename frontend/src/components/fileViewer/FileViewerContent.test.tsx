@@ -3,8 +3,9 @@
 //
 // The research pseudo-path (c0wrk:research) renders the ResearchWorkspace
 // unconditionally — RESEARCH is not gated on the experimental-features
-// switch (which now controls only the E2S execution mode), so the workspace
-// must render even while that switch is off.
+// switch (which gates the E2S execution mode, the embedded model's frontend
+// surfaces and the Session Statistics block), so the workspace must render
+// even while that switch is off.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'

@@ -542,8 +542,10 @@ export interface ConfigPromptSuggestionsResponse {
   enabled: boolean
 }
 
-/** Experimental-features switch (all-or-nothing). Its sole availability gate is
- *  the E2S execution mode; Model Profiles is NOT gated by this switch. */
+/** Experimental-features switch (all-or-nothing). Its gated surfaces are the
+ *  E2S execution mode, the embedded local model's frontend surfaces and the
+ *  Session Statistics block in Settings; Model Profiles is NOT gated by this
+ *  switch. */
 export interface ConfigExperimentalResponse {
   enabled: boolean
 }

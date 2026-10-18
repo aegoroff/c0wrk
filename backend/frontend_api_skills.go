@@ -55,6 +55,16 @@ func (f *FrontendAPI) ListSkills() []SkillDescriptorDTO {
 	return result
 }
 
+// RefreshSkills forces a re-discovery of every skill directory and returns
+// the fresh descriptors — the manual path behind the Capabilities tab's
+// refresh button. The directory watchers keep the cache fresh on file
+// changes, but directories created after startup are never watched; the
+// generation bump makes this call always re-scan.
+func (f *FrontendAPI) RefreshSkills() []SkillDescriptorDTO {
+	f.invalidateSkillCache()
+	return f.ListSkills()
+}
+
 // The c0wrk-owned skill packs (the research-* methodology skills and the
 // study-paper skill) are seeded into this GLOBAL skills directory once per
 // launch by seedGlobalPacks (see frontend_api_research.go); the project-local

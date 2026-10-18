@@ -6,7 +6,6 @@ import { TooltipProvider, TOOLTIP_DELAY_MS } from '@/components/ui/tooltip'
 import { createManagedSession, createSession } from '@/api/sessions'
 import { createSessionFromDraft } from '@/lib/sessionDraft'
 import { logger } from '@/lib/logger'
-import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -69,7 +68,6 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.mocked(createManagedSession).mockReset()
   vi.mocked(createSession).mockReset()
-  useExperimentalStore.setState({ enabled: true })
   useSessionStore.setState({ sessions: null, activeSessionId: null })
   useSessionDraftStore.setState({ draft: null, committing: false, committingDraft: null })
   useProjectStore.setState({ activeProjectId: 'proj-1', projects: [] })
@@ -179,11 +177,10 @@ describe('managed workspace preparation', () => {
     await act(async () => { rpc.resolve(session()); await pending })
   })
 
-  it.each(['experimental off', 'No Project', 'no active project', 'foreign draft'])(
+  it.each(['No Project', 'no active project', 'foreign draft'])(
     'does not show a WT spinner for %s', (gate) => {
       armBranch(gate === 'foreign draft' ? 'proj-other' : 'proj-1')
       useSessionDraftStore.getState().setCommitting(true)
-      if (gate === 'experimental off') useExperimentalStore.setState({ enabled: false })
       if (gate === 'no active project') useProjectStore.setState({ activeProjectId: null })
       if (gate === 'No Project') useProjectStore.setState({
         activeProjectId: '__no_project__',
