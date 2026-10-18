@@ -239,7 +239,7 @@ export function useSessionActions(): SessionActions {
     [performArchive],
   )
 
-  const performPin = useCallback(
+  const handlePin = useCallback(
     async (id: string, isPinned: boolean) => {
       try {
         await pinSession(id)
@@ -249,13 +249,6 @@ export function useSessionActions(): SessionActions {
       }
     },
     [updateSession],
-  )
-
-  const handlePin = useCallback(
-    async (id: string, isPinned: boolean) => {
-      await performPin(id, isPinned)
-    },
-    [performPin],
   )
 
   const handleArchiveGroup = useCallback(

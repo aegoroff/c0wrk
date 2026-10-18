@@ -14,8 +14,6 @@ import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
 import {
   ArchiveRestore,
   ChevronDown,
-  Pin,
-  PinOff,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -24,7 +22,7 @@ import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
 import { SessionGroupedList } from "./SessionGroupedList";
-import { BranchRow, branchActionItemClasses } from "./BranchRow";
+import { BranchRow, PinGroupAction, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
 import { ARCHIVED_SECTION_KEY, buildSessionGroups, freshestSession, sessionRegionId } from "@/lib/sessionGroups";
 import { useProjectStore } from "@/stores/projectStore";
@@ -252,21 +250,11 @@ export function SessionSelector() {
                             freshest={freshestSession(group.sessions)}
                             actionItems={
                               <>
-                                <DropdownMenuItem
-                                  title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
-                                  className={branchActionItemClasses}
-                                  onSelect={(event) => {
-                                    // A state flip, not an action — keep the menu open.
-                                    event.preventDefault();
-                                    togglePinnedBranch(group.branch);
-                                  }}
-                                >
-                                  {groupPinned ? (
-                                    <PinOff className="size-3 text-primary" />
-                                  ) : (
-                                    <Pin className="size-3 text-primary" />
-                                  )}
-                                </DropdownMenuItem>
+                                <PinGroupAction
+                                  branch={group.branch}
+                                  pinned={groupPinned}
+                                  onToggle={() => togglePinnedBranch(group.branch)}
+                                />
                                 <DropdownMenuItem
                                   title={`Restore sessions (${group.branch})`}
                                   className={branchActionItemClasses}

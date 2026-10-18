@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronDown, ChevronRight, GitBranch, Pin } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch, Pin, PinOff } from "lucide-react";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { ItemActions } from "./ItemAction";
 import { formatRelativeTime } from "@/lib/formatters";
@@ -9,6 +9,37 @@ import type { SessionInfo } from "@/types/models";
  *  the same compact icon-button look the always-visible "+" used to have. */
 export const branchActionItemClasses =
   "shrink-0 rounded p-0.5 hover:bg-muted/50 active:bg-muted/30";
+
+/** The group pin/unpin item of the branch-row hover overlay — a state flip
+ *  (pinnedGroupsStore) that keeps the menu open. Shared by the live
+ *  (SessionGroupedList) and archived (SessionSelector) rows. */
+export function PinGroupAction({
+  branch,
+  pinned,
+  onToggle,
+}: {
+  branch: string;
+  pinned: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <DropdownMenuItem
+      title={`${pinned ? "Unpin" : "Pin"} group (${branch})`}
+      className={branchActionItemClasses}
+      onSelect={(event) => {
+        // A state flip, not an action — keep the menu open.
+        event.preventDefault();
+        onToggle();
+      }}
+    >
+      {pinned ? (
+        <PinOff className="size-3 text-primary" />
+      ) : (
+        <Pin className="size-3 text-primary" />
+      )}
+    </DropdownMenuItem>
+  );
+}
 
 interface BranchRowProps {
   /** 'archived' rows speak the Archived wording ("Show archived branch

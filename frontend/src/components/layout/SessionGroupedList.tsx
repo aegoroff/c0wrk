@@ -1,8 +1,8 @@
 import { Fragment, useMemo, type ReactNode } from "react";
-import { Archive, Pin, PinOff, Plus, Trash2 } from "lucide-react";
+import { Archive, Plus, Trash2 } from "lucide-react";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHeader";
-import { BranchRow, branchActionItemClasses } from "./BranchRow";
+import { BranchRow, PinGroupAction, branchActionItemClasses } from "./BranchRow";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import { useActiveSessionsStore } from "@/stores/activeSessionsStore";
@@ -184,21 +184,11 @@ export function SessionGroupedList({
                       >
                         <Plus className="size-3.5" />
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        title={`${groupPinned ? "Unpin" : "Pin"} group (${group.branch})`}
-                        className={branchActionItemClasses}
-                        onSelect={(event) => {
-                          // A state flip, not an action — keep the menu open.
-                          event.preventDefault();
-                          togglePinnedBranch(group.branch);
-                        }}
-                      >
-                        {groupPinned ? (
-                          <PinOff className="size-3 text-primary" />
-                        ) : (
-                          <Pin className="size-3 text-primary" />
-                        )}
-                      </DropdownMenuItem>
+                      <PinGroupAction
+                        branch={group.branch}
+                        pinned={groupPinned}
+                        onToggle={() => togglePinnedBranch(group.branch)}
+                      />
                       <DropdownMenuItem
                         title={`Archive sessions (${group.branch})`}
                         className={branchActionItemClasses}
