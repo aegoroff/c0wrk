@@ -40,6 +40,18 @@ interface RemoteBranchRowProps {
     selected: boolean
     onSelect: (remoteBranch: string) => void
   }
+  /**
+   * Managed-focus gate (ADR-080): a non-null reason means the Git panel's
+   * focus sits on a managed session tree that refuses every off-pin branch
+   * switch — checking a remote branch out creates a local branch and moves
+   * the tree off its pin (ErrPinnedWorktreeBranch), so the click is a no-op,
+   * the row dims and the reason is its tooltip. The delete-remote hover
+   * action stays live: the backend allows it under a managed focus. The row
+   * stays in the tab order so keyboard users can reach the reason. Manage
+   * mode only (useSessionWorktreePin's branchSwitchBlockedReason); draft
+   * mode never checks anything out.
+   */
+  checkoutBlockedReason?: string | null
 }
 
 /**
@@ -60,6 +72,7 @@ export function RemoteBranchRow({
   onDeleteRemote,
   draftBlockedReason,
   draftSelect,
+  checkoutBlockedReason,
 }: RemoteBranchRowProps) {
   const slash = branch.name.indexOf('/')
   const remote = slash === -1 ? '' : branch.name.slice(0, slash)
@@ -75,9 +88,13 @@ export function RemoteBranchRow({
   // branch is blocked (and worded) identically in both sections. A null
   // reason (unknown main checkout, or a free branch) blocks nothing.
   const draftBlocked = draftSelect !== undefined && !!draftBlockedReason
+  // Managed-focus gate: manage mode only — the row's checkout (a branch
+  // switch onto a brand-new local branch) is refused while the panel's
+  // focus sits on a managed session tree.
+  const checkoutBlocked = draftSelect === undefined && (checkoutBlockedReason ?? '') !== ''
 
   const handleCheckout = () => {
-    if (blocked) return
+    if (blocked || checkoutBlocked) return
     if (draftSelect) {
       if (!draftBlocked) draftSelect.onSelect(branch.name)
       return
@@ -95,12 +112,18 @@ export function RemoteBranchRow({
   return (
     <div
       role="button"
+      // The checkout-gated row stays in the tab order despite the no-op:
+      // the tooltip with the reason must stay keyboard-reachable, and
+      // aria-disabled announces the inert primary action.
       tabIndex={blocked || draftBlocked ? -1 : 0}
+      aria-disabled={checkoutBlocked || draftBlocked ? 'true' : undefined}
       aria-current={selected ? 'true' : undefined}
       title={
         draftBlocked
           ? (draftBlockedReason ?? undefined)
-          : undefined
+          : checkoutBlocked
+            ? (checkoutBlockedReason ?? undefined)
+            : undefined
       }
       onClick={handleCheckout}
       onKeyDown={handleKeyDown}
@@ -108,8 +131,8 @@ export function RemoteBranchRow({
       className={cn(
         'group/item relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
         selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
-        (disabled || draftBlocked) && 'cursor-not-allowed opacity-50',
-        !disabled && !draftBlocked && 'cursor-pointer',
+        (disabled || draftBlocked || checkoutBlocked) && 'cursor-not-allowed opacity-50',
+        !disabled && !draftBlocked && !checkoutBlocked && 'cursor-pointer',
       )}
     >
       <Server className="size-4 shrink-0 text-muted-foreground" />

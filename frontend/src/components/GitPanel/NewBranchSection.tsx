@@ -17,6 +17,15 @@ import type { BranchBase } from '@/types/models'
 interface NewBranchSectionProps {
   /** Disabled while a checkout/merge/rebase is in flight elsewhere. */
   disabled: boolean
+  /**
+   * Managed-focus gate (ADR-080): a non-null reason disables the in-place
+   * creation path (CreateBranch checks the new branch out in the focused
+   * tree, which refuses the switch off its pin) and doubles as the disabled
+   * button's tooltip. The "Worktree" path (CreateBranchInWorktree) never
+   * touches the focused tree and stays available. Manage mode only — draft
+   * creation records an intent and runs nowhere near the focus.
+   */
+  disabledReason?: string | null
   /** Name of the currently checked-out branch (for BaseSelector annotation). */
   currentBranch: string
   /** Clear the picker's shared error banner on input. */
@@ -54,6 +63,11 @@ interface NewBranchSectionProps {
  * "Create new branch" footer of BranchPicker. Calls CreateBranch (which
  * checks out the new branch immediately) and closes the picker on success.
  *
+ * Under a managed-focus gate (`disabledReason`, ADR-080) the in-place
+ * creation is disabled with the reason as the button's tooltip — the
+ * focused managed tree refuses the switch off its pin — while the
+ * "Worktree" path stays available (it never touches the focused tree).
+ *
  * A "Worktree" checkbox routes the creation through CreateBranchInWorktree
  * instead: the branch is born inside a fresh managed worktree, the current
  * checkout is untouched and the panel's focus deliberately stays where it is
@@ -66,6 +80,7 @@ interface NewBranchSectionProps {
  */
 export function NewBranchSection({
   disabled,
+  disabledReason,
   currentBranch,
   onClearError,
   onError,
@@ -94,6 +109,13 @@ export function NewBranchSection({
   // single call regardless of when the store is cleared.
   const initialBase = useRef(pendingBase ?? '')
 
+  // The submit is blocked by an in-flight operation anywhere, or — manage
+  // mode only — by the managed-focus gate on the IN-PLACE path: checking a
+  // new branch out in the focused managed tree is refused server-side. The
+  // "Worktree" path creates the branch in a fresh tree and never touches
+  // the focused one, so checking the box un-blocks the button.
+  const createBlocked = disabled || (!inWorktree && (disabledReason ?? '') !== '')
+
   // Lazily load branch bases when the user first expands the selector.
   useEffect(() => {
     if (!chooseBase || basesLoaded) return
@@ -117,7 +139,7 @@ export function NewBranchSection({
 
   const handleCreate = useCallback(async () => {
     const trimmed = name.trim()
-    if (!trimmed || creating || disabled) return
+    if (!trimmed || creating || createBlocked) return
     if (onDraftCreate) {
       // Draft mode: the branch itself is created at draft commit inside the
       // session's managed worktree provisioning — where commit-time DWIM
@@ -158,7 +180,7 @@ export function NewBranchSection({
     } finally {
       setCreating(false)
     }
-  }, [name, creating, disabled, inWorktree, chooseBase, selectedBase, onCreated, onError, onDraftCreate, existingLocalBranches])
+  }, [name, creating, createBlocked, inWorktree, chooseBase, selectedBase, onCreated, onError, onDraftCreate, existingLocalBranches])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && name.trim()) {
@@ -187,13 +209,15 @@ export function NewBranchSection({
           variant="secondary"
           size="sm"
           onClick={handleCreate}
-          disabled={!name.trim() || creating || disabled}
+          disabled={!name.trim() || creating || createBlocked}
           title={
-            onDraftCreate
-              ? 'Create the branch in the new session\'s worktree on first send'
-              : inWorktree
-                ? 'Create the branch in a new worktree (the current checkout stays untouched)'
-                : 'Create and switch to new branch'
+            !inWorktree && (disabledReason ?? '') !== ''
+              ? (disabledReason ?? undefined)
+              : onDraftCreate
+                ? 'Create the branch in the new session\'s worktree on first send'
+                : inWorktree
+                  ? 'Create the branch in a new worktree (the current checkout stays untouched)'
+                  : 'Create and switch to new branch'
           }
         >
           {creating ? (

@@ -44,7 +44,10 @@ function branchRegionId(key: string): string {
  * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. The ACTIVE
  * managed session's pinned branch and its own tree are the exception: they
  * render a lock instead of the focus/current checkmark and offer no delete
- * (the immutable session binding, ADR-080). All three
+ * (the immutable session binding, ADR-080). The same ADR gates the rest of
+ * the branch list while the panel's FOCUS sits on a managed session tree:
+ * off-pin checkout rows dim with the explaining reason instead of failing
+ * server-side (ErrPinnedWorktreeBranch). All three
  * section headers are collapsible (ephemeral state; an active search
  * force-expands them). Branch
  * creation/management lives in the `BranchPicker` modal, opened from the git
@@ -62,7 +65,10 @@ export function BranchDropdown() {
   // lock instead of the current-branch check and offers no delete; its tree
   // row does the same in the Worktrees section. The dropdown is a
   // manage-mode surface — no draft selection ever flows through it.
-  const { pinnedBranch, isPinnedWorktree } = useSessionWorktreePin();
+  // `branchSwitchBlockedReason` is the managed-FOCUS gate: while the focus
+  // sits on a managed session tree, off-pin checkout rows dim up front
+  // instead of failing server-side.
+  const { pinnedBranch, isPinnedWorktree, branchSwitchBlockedReason } = useSessionWorktreePin();
 
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -191,6 +197,7 @@ export function BranchDropdown() {
                       inFlight={inFlightFor(b.name)}
                       disabled={disabledFor(b.name)}
                       pinned={b.name === pinnedBranch}
+                      checkoutBlockedReason={branchSwitchBlockedReason(b.name)}
                       onCheckout={(name) => {
                         actions.checkout(name);
                         close();
@@ -222,6 +229,7 @@ export function BranchDropdown() {
                       branch={b}
                       inFlight={inFlightFor(b.name)}
                       disabled={disabledFor(b.name)}
+                      checkoutBlockedReason={branchSwitchBlockedReason(b.name)}
                       onCheckoutRemote={(remoteBranch) => {
                         actions.checkoutRemote(remoteBranch);
                         close();

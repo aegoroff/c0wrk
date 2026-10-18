@@ -386,6 +386,23 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   `Choose Branch` selects a workspace for a NEW session and no session pin
   exists there. This is a UI reflection of the server-side refusal above,
   never a second enforcement layer.
+- The managed-FOCUS refusal is rendered up front too: the same hook exposes
+  a `branchSwitchBlockedReason` gate that keys on the FOCUSED tree (any
+  session's — the focus can rest on another session's tree while a local
+  session is active), not on the active session's binding. While the focus
+  sits on a managed session tree, every off-pin branch row in
+  `BranchDropdown` and `BranchPicker` (local AND remote checkouts) dims
+  with that reason as its tooltip, the click is a no-op, and the row keeps
+  its tab stop with `aria-disabled` so keyboard users reach the
+  explanation; `NewBranchSection`'s in-place creation path is disabled with
+  the same reason. Not gated: the rows' hover actions (push, merge, rebase,
+  rename, delete — none is focus-scoped), the Worktrees section's focus
+  switching, and `NewBranchSection`'s "Worktree" path (it births a fresh
+  tree and never touches the focused one). In draft mode the gate is absent
+  — rows record an intent and nothing is checked out. The gate is a
+  pre-emptive mirror of the same server-side refusal (a stale focus
+  snapshot can still hit the live backend answer), never a second
+  enforcement layer.
 - Focus is UI state on the backend because the RPCs resolve it server-side;
   it never retargets execution (ADR-080's `GitPanelTarget` separation).
   `GetGitStatus` follows the focus root the same way (containment accepts

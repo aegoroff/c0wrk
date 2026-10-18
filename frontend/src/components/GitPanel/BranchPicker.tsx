@@ -81,7 +81,13 @@ function remoteTwinName(remoteRef: string): string {
  *   the Manage-Branches mode keeps checkout-remote on remote rows.
  * - Provides a filter input to narrow the list by name.
  * - Provides a "New Branch" field + button (with optional base selector) that
- *   calls CreateBranch and checks out the new branch immediately.
+ *   calls CreateBranch and checks out the new branch immediately. In manage
+ *   mode, while the Git panel's focus sits on a managed session tree
+ *   (ADR-080), off-pin branch rows and the in-place creation path are
+ *   disabled with the backend-refusal reason (ErrPinnedWorktreeBranch) — the
+ *   refusal is communicated up front instead of being discovered through
+ *   clicks that fail server-side; the "Worktree" creation path stays
+ *   available (it never touches the focused tree).
  * - Checkout runs through the shared {@link useBranchActions} hook (single
  *   busy track that records each result in the Git panel's operation console);
  *   the picker closes once the checkout settles — on success AND on error — so
@@ -119,7 +125,9 @@ export function BranchPicker() {
   // The active managed session's pin (ADR-080) — a MANAGE-mode concept only:
   // in draft mode (Choose Branch) no session pin exists, the rows select the
   // drafted workspace, so the pin props are dropped there.
-  const { pinnedBranch, isPinnedWorktree } = useSessionWorktreePin()
+  // `branchSwitchBlockedReason` is the managed-FOCUS gate — also manage-mode
+  // only: draft rows record an intent, nothing is checked out.
+  const { pinnedBranch, isPinnedWorktree, branchSwitchBlockedReason } = useSessionWorktreePin()
   // Destructure the stable operation callbacks so the checkout handlers below
   // can list them (rather than the recreated `actions` object) as useCallback
   // dependencies, keeping `react-hooks/exhaustive-deps` satisfied.
@@ -405,6 +413,7 @@ export function BranchPicker() {
                     inFlight={inFlightFor(b.name)}
                     disabled={disabledFor(b.name)}
                     pinned={isDraftMode ? undefined : b.name === pinnedBranch}
+                    checkoutBlockedReason={isDraftMode ? undefined : branchSwitchBlockedReason(b.name)}
                     onCheckout={handleCheckout}
                     onRename={actions.startRename}
                     onMerge={actions.mergeBranch}
@@ -431,6 +440,7 @@ export function BranchPicker() {
                     branch={b}
                     inFlight={inFlightFor(b.name)}
                     disabled={disabledFor(b.name)}
+                    checkoutBlockedReason={isDraftMode ? undefined : branchSwitchBlockedReason(b.name)}
                     draftBlockedReason={
                       isDraftMode ? draftBlockedReason(remoteTwinName(b.name)) : undefined
                     }
@@ -510,6 +520,12 @@ export function BranchPicker() {
         <NewBranchSection
           key={isOpen ? 'open' : 'closed'}
           disabled={actions.isBusy}
+          // Managed-focus gate (manage mode): in-place creation moves the
+          // focused managed tree off its pin and is refused server-side. The
+          // reason is focus-scoped, not branch-scoped, so any off-pin name
+          // ('' never names the pin) yields it. The Worktree path inside the
+          // section stays available.
+          disabledReason={isDraftMode ? undefined : branchSwitchBlockedReason('')}
           currentBranch={currentBranch.name}
           pendingBase={pendingBranchBase}
           onClearError={handleClearError}

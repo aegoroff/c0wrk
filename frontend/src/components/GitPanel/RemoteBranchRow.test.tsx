@@ -4,7 +4,10 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { RemoteBranchRow } from './RemoteBranchRow'
+import type { ComponentProps } from 'react'
 import type { Branch } from '@/types/models'
+
+type RemoteBranchRowProps = ComponentProps<typeof RemoteBranchRow>
 
 function makeBranch(overrides: Partial<Branch> = {}): Branch {
   return { name: 'origin/feature/x', is_current: false, kind: 'remote', upstream: '', ...overrides }
@@ -126,6 +129,81 @@ describe('RemoteBranchRow', () => {
     )
     // The trailing spinner icon is rendered adjacent to the name.
     expect(container.querySelector('svg.animate-spin')).not.toBeNull()
+  })
+})
+
+describe('RemoteBranchRow — managed-focus gate (checkoutBlockedReason)', () => {
+  // Handed down by useSessionWorktreePin while the Git panel's focus rests
+  // on a managed session tree: checking a remote branch out creates a local
+  // branch and moves the focused tree off its pin (ErrPinnedWorktreeBranch).
+  const reason = 'Branch switching is disabled while focused on a session worktree'
+
+  function renderGated(overrides: Partial<RemoteBranchRowProps> = {}) {
+    return render(
+      <RemoteBranchRow
+        branch={makeBranch()}
+        inFlight={null}
+        disabled={false}
+        checkoutBlockedReason={reason}
+        {...defaultCallbacks}
+        {...overrides}
+      />,
+    )
+  }
+
+  it('dims the row, no-ops the checkout, and explains itself up front', () => {
+    const { container } = renderGated()
+    const r = row(container)
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+    expect(r.className).toContain('cursor-not-allowed')
+    expect(r.className).toContain('opacity-50')
+    expect(r.title).toBe(reason)
+    expect(r.getAttribute('aria-disabled')).toBe('true')
+    // Keyboard users can reach the tooltip: the row keeps its tab stop.
+    expect(r.getAttribute('tabindex')).toBe('0')
+  })
+
+  it('blocks the keyboard activation path too', () => {
+    const { container } = renderGated()
+    act(() => {
+      row(container).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(defaultCallbacks.onCheckoutRemote).not.toHaveBeenCalled()
+  })
+
+  it('keeps delete-remote live — the backend allows it under a managed focus', () => {
+    const callbacks = { ...defaultCallbacks }
+    const { container } = renderGated(callbacks)
+    const del = buttons(container)[0]!
+    expect(del.disabled).toBe(false)
+    act(() => {
+      del.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(callbacks.onDeleteRemote).toHaveBeenCalledWith('feature/x', 'origin')
+    expect(callbacks.onCheckoutRemote).not.toHaveBeenCalled()
+  })
+
+  it('checks out normally when the gate hands down null (off-managed focus)', () => {
+    const callbacks = { ...defaultCallbacks }
+    const { container } = render(
+      <RemoteBranchRow
+        branch={makeBranch()}
+        inFlight={null}
+        disabled={false}
+        checkoutBlockedReason={null}
+        {...callbacks}
+      />,
+    )
+    const r = row(container)
+    expect(r.getAttribute('aria-disabled')).toBeNull()
+    expect(r.getAttribute('title')).toBeNull()
+    act(() => {
+      r.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(callbacks.onCheckoutRemote).toHaveBeenCalledWith('origin/feature/x')
   })
 })
 

@@ -2,8 +2,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { useSessionWorktreePin } from './useSessionWorktreePin'
+import { useSessionWorktreePin, MANAGED_FOCUS_BLOCKED_REASON } from './useSessionWorktreePin'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useGitPanelStore } from '@/stores/gitPanelStore'
 import type { GitWorktree, SessionInfo } from '@/types/models'
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -66,6 +67,7 @@ function rerenderHook(): void {
 
 beforeEach(() => {
   useSessionStore.setState({ sessions: null, activeSessionId: null })
+  useGitPanelStore.getState().reset()
   last = null
 })
 
@@ -282,5 +284,113 @@ describe('useSessionWorktreePin — stability', () => {
     const first = last!.isPinnedWorktree
     rerenderHook()
     expect(last!.isPinnedWorktree).toBe(first)
+  })
+
+  it('keeps the focus-gate reason function referentially stable across a no-op re-render', () => {
+    useGitPanelStore.setState({
+      worktrees: [makeWorktree({ kind: 'main', is_focus: true })],
+    })
+    renderHook()
+    const first = last!.branchSwitchBlockedReason
+    rerenderHook()
+    expect(last!.branchSwitchBlockedReason).toBe(first)
+  })
+})
+
+describe('useSessionWorktreePin — managed-focus gate (branchSwitchBlockedReason)', () => {
+  // The backend refuses CheckoutBranch / CreateBranch / CheckoutRemoteBranch
+  // for every branch other than the FOCUSED tree's own whenever that tree is
+  // a managed session tree (refusePinnedBranchSwitch) — regardless of which
+  // session is active. The gate must mirror exactly that.
+  function focusManagedTree(overrides: Partial<GitWorktree> = {}): void {
+    useGitPanelStore.setState({
+      worktrees: [
+        makeWorktree({ kind: 'main', name: 'repo', path: '/w/proj' }),
+        makeWorktree({
+          kind: 'managed',
+          name: 's-9',
+          path: '/w/proj/.worktrees/s-9',
+          branch: 'feat/focused',
+          managed: true,
+          pinned: true,
+          session_id: 's-9',
+          is_focus: true,
+          ...overrides,
+        }),
+      ],
+    })
+  }
+
+  it('refuses off-pin names while the focus sits on a managed tree — with NO active session', () => {
+    // The gate follows the focus, not the active session's binding: it must
+    // apply even when the active session is local or absent.
+    focusManagedTree()
+    renderHook()
+    expect(last!.pinnedBranch).toBeNull()
+    expect(last!.branchSwitchBlockedReason('other')).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+    // The focused tree's own branch cannot move the tree off its pin — a
+    // same-branch checkout is allowed server-side.
+    expect(last!.branchSwitchBlockedReason('feat/focused')).toBeNull()
+  })
+
+  it('allows everything once the focus moves to the main checkout or an external tree', () => {
+    useGitPanelStore.setState({
+      worktrees: [
+        makeWorktree({ kind: 'main', name: 'repo', path: '/w/proj', is_focus: true }),
+        makeWorktree({
+          kind: 'managed',
+          name: 's-9',
+          path: '/w/proj/.worktrees/s-9',
+          branch: 'feat/focused',
+          managed: true,
+          pinned: true,
+          session_id: 's-9',
+        }),
+      ],
+    })
+    renderHook()
+    expect(last!.branchSwitchBlockedReason('anything')).toBeNull()
+
+    act(() => {
+      useGitPanelStore.setState({
+        worktrees: [
+          makeWorktree({ kind: 'external', name: 'ext', path: '/elsewhere', is_focus: true }),
+        ],
+      })
+    })
+    rerenderHook()
+    expect(last!.branchSwitchBlockedReason('anything')).toBeNull()
+  })
+
+  it('refuses every name on a detached (branch-less) managed focus', () => {
+    focusManagedTree({ branch: undefined })
+    renderHook()
+    expect(last!.branchSwitchBlockedReason('other')).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+    expect(last!.branchSwitchBlockedReason('')).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+  })
+
+  it('keys on the FOCUSED tree, not the active session pin (cross-session focus)', () => {
+    // Active session s-1 is pinned to feat/mine, but the panel focus rests
+    // on s-9's tree: the refusal is s-9's pin, and even the active session's
+    // own branch is refused there (a switch would move s-9's tree).
+    useSessionStore.setState({
+      sessions: [
+        makeSession({
+          id: 's-1',
+          workspace_binding: {
+            kind: 'managed_worktree',
+            workspace_path: '/w/proj/.worktrees/s-1',
+            worktree_name: 's-1',
+            branch: 'feat/mine',
+          },
+        }),
+      ],
+      activeSessionId: 's-1',
+    })
+    focusManagedTree()
+    renderHook()
+    expect(last!.pinnedBranch).toBe('feat/mine')
+    expect(last!.branchSwitchBlockedReason('feat/mine')).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+    expect(last!.branchSwitchBlockedReason('feat/focused')).toBeNull()
   })
 })

@@ -47,6 +47,19 @@ interface LocalBranchRowProps {
    * (never in draft mode, where no session pin exists).
    */
   pinned?: boolean
+  /**
+   * Managed-focus gate (ADR-080): a non-null reason means the Git panel's
+   * focus sits on a managed session tree that refuses every off-pin branch
+   * switch (ErrPinnedWorktreeBranch) — the checkout click is a no-op, the
+   * row dims and the reason is its tooltip, so the refusal is communicated
+   * up front rather than discovered through a failing server call. The
+   * row's hover actions (push/merge/rebase/rename/delete) stay live: the
+   * backend allows them under a managed focus. The row deliberately stays
+   * in the tab order so keyboard users can reach the reason. Consumers pass
+   * it in manage mode only (from useSessionWorktreePin's
+   * branchSwitchBlockedReason); draft mode never checks anything out.
+   */
+  checkoutBlockedReason?: string | null
 }
 
 /**
@@ -61,7 +74,10 @@ interface LocalBranchRowProps {
  * With `pinned` set (manage mode, active managed-worktree session), the row
  * is the session's pinned branch: a lock instead of the checkmark, no delete
  * action, a disabled Rename, and a no-op click — see
- * {@link LocalBranchRowProps.pinned}.
+ * {@link LocalBranchRowProps.pinned}. With `checkoutBlockedReason` set
+ * (manage mode, panel focus on a managed session tree), the checkout is a
+ * dimmed no-op with the reason as its tooltip — see
+ * {@link LocalBranchRowProps.checkoutBlockedReason}.
  */
 export function LocalBranchRow({
   branch,
@@ -76,6 +92,7 @@ export function LocalBranchRow({
   draftSelect,
   draftBlockedReason,
   pinned,
+  checkoutBlockedReason,
 }: LocalBranchRowProps) {
   const isCurrent = branch.is_current
   // The pin is a manage-mode concept; draft selection never carries one.
@@ -87,6 +104,9 @@ export function LocalBranchRow({
   // does not block here: it follows the Git panel's focus, and a branch held
   // by an existing managed worktree is adopted at draft commit (ADR-082).
   const draftBlocked = draftSelect !== undefined && !!draftBlockedReason
+  // Managed-focus gate: manage mode only — the row's checkout is refused
+  // while the panel's focus sits on a managed session tree.
+  const checkoutBlocked = !draftSelect && (checkoutBlockedReason ?? '') !== ''
 
   const handleCheckout = () => {
     if (draftSelect) {
@@ -94,7 +114,7 @@ export function LocalBranchRow({
       draftSelect.onSelect(branch.name)
       return
     }
-    if (isCurrent || isPinned || blocked) return
+    if (isCurrent || isPinned || checkoutBlocked || blocked) return
     onCheckout(branch.name)
   }
 
@@ -110,14 +130,20 @@ export function LocalBranchRow({
   return (
     <div
       role="button"
-      tabIndex={(draftSelect ? blocked || draftBlocked : isCurrent || isPinned || blocked) ? -1 : 0}
+      // The pinned and checkout-gated rows stay in the tab order despite
+      // being no-ops: the tooltip with the reason must stay keyboard-
+      // reachable, and aria-disabled announces the inert primary action.
+      tabIndex={(draftSelect ? blocked || draftBlocked : (isCurrent && !isPinned) || blocked) ? -1 : 0}
+      aria-disabled={isPinned || checkoutBlocked || draftBlocked ? 'true' : undefined}
       aria-current={isCurrent || selected || isPinned ? 'true' : undefined}
       title={
         draftBlocked
           ? (draftBlockedReason ?? undefined)
           : isPinned
             ? 'Pinned to this session — branch switching is disabled'
-            : undefined
+            : checkoutBlocked
+              ? (checkoutBlockedReason ?? undefined)
+              : undefined
       }
       onClick={handleCheckout}
       onKeyDown={handleKeyDown}
@@ -125,8 +151,8 @@ export function LocalBranchRow({
       className={cn(
         'group/item relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
         isCurrent || selected || isPinned ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
-        (disabled || draftBlocked) && 'cursor-not-allowed opacity-50',
-        (draftSelect ? !blocked && !draftBlocked : !disabled && !isCurrent && !isPinned) && 'cursor-pointer',
+        (disabled || draftBlocked || checkoutBlocked) && 'cursor-not-allowed opacity-50',
+        (draftSelect ? !blocked && !draftBlocked : !disabled && !isCurrent && !isPinned && !checkoutBlocked) && 'cursor-pointer',
       )}
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />
