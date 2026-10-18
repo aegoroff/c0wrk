@@ -126,8 +126,9 @@ const menuTriggers = () =>
 const findTrigger = (ariaLabel: string) =>
   menuTriggers().find((b) => b.getAttribute('aria-label') === ariaLabel)
 
-/** Open the combobox with `ariaLabel` and click its `optionLabel` option. */
-async function pickOption(ariaLabel: string, optionLabel: string): Promise<void> {
+/** Open the combobox with `ariaLabel` (the file's single real-timer wait,
+ * kept here so new call sites reuse it instead of copying the pattern). */
+async function openMenu(ariaLabel: string): Promise<void> {
   const trigger = findTrigger(ariaLabel)
   if (!trigger) throw new Error(`${ariaLabel} dropdown not found`)
   // Radix's DropdownMenuTrigger toggles on `pointerdown`, not `click`; the
@@ -136,6 +137,11 @@ async function pickOption(ariaLabel: string, optionLabel: string): Promise<void>
     trigger.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
     await new Promise((r) => setTimeout(r, 10))
   })
+}
+
+/** Open the combobox with `ariaLabel` and click its `optionLabel` option. */
+async function pickOption(ariaLabel: string, optionLabel: string): Promise<void> {
+  await openMenu(ariaLabel)
   const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
   // Exact match first: "CPU" is a substring of "Auto (CUDA → CPU fallback)",
   // and clicking the already-selected option is a no-op by design.
@@ -178,10 +184,7 @@ describe('VectorIndexSettings — render', () => {
     expect(device!.textContent).toContain('NVIDIA GeForce RTX 5060 Ti')
 
     // Open it: the options list every GPU with its ONNX index.
-    await act(async () => {
-      device!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-      await new Promise((r) => setTimeout(r, 10))
-    })
+    await openMenu('Embedder GPU device')
     const items = Array.from(document.body.querySelectorAll('[role="menuitem"]'))
       .map((o) => o.textContent ?? '')
     expect(items.some((t) => t.includes('0') && t.includes('NVIDIA GeForce RTX 5060 Ti'))).toBe(true)
@@ -202,10 +205,7 @@ describe('VectorIndexSettings — render', () => {
 
     const device = findTrigger('Embedder GPU device')
     expect(device).toBeDefined()
-    await act(async () => {
-      device!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-      await new Promise((r) => setTimeout(r, 10))
-    })
+    await openMenu('Embedder GPU device')
     const items = Array.from(document.body.querySelectorAll('[role="menuitem"]'))
       .map((o) => o.textContent ?? '')
     expect(items.some((t) => t.includes('Intel(R) Graphics (ARL)') && t.includes('(OPENVINO)'))).toBe(true)

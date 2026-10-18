@@ -576,6 +576,7 @@ export namespace backend {
 	export class ConfigSearchResp {
 	    provider: string;
 	    api_key: string;
+	    base_url: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConfigSearchResp(source);
@@ -585,6 +586,7 @@ export namespace backend {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
 	        this.api_key = source["api_key"];
+	        this.base_url = source["base_url"];
 	    }
 	}
 	export class ConfigResponse {
@@ -1080,6 +1082,7 @@ export namespace backend {
 	export class GPUDeviceResponse {
 	    index: number;
 	    name: string;
+	    provider: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new GPUDeviceResponse(source);
@@ -1089,6 +1092,7 @@ export namespace backend {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.index = source["index"];
 	        this.name = source["name"];
+	        this.provider = source["provider"];
 	    }
 	}
 	export class GetProviderTLSCertificateRequest {
@@ -2216,6 +2220,7 @@ export namespace backend {
 	export class SearchSettingsRequest {
 	    provider: string;
 	    api_key: string;
+	    base_url: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SearchSettingsRequest(source);
@@ -2225,6 +2230,7 @@ export namespace backend {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
 	        this.api_key = source["api_key"];
+	        this.base_url = source["base_url"];
 	    }
 	}
 	export class SilentSubPolicyResponse {
@@ -2567,6 +2573,7 @@ export namespace backend {
 	    execution_provider?: string;
 	    requested_execution_provider?: string;
 	    cuda_verified?: boolean;
+	    ov_device?: string;
 	    provider_fallback_reason?: string;
 	    device_id?: number;
 	
@@ -2587,6 +2594,7 @@ export namespace backend {
 	        this.execution_provider = source["execution_provider"];
 	        this.requested_execution_provider = source["requested_execution_provider"];
 	        this.cuda_verified = source["cuda_verified"];
+	        this.ov_device = source["ov_device"];
 	        this.provider_fallback_reason = source["provider_fallback_reason"];
 	        this.device_id = source["device_id"];
 	    }

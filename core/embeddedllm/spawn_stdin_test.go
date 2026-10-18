@@ -25,9 +25,10 @@ const helperStdinWatchEnv = "EMBEDDEDLLM_HELPER_STDIN_WATCH"
 // TestHelperWatchesStdin is not a test. It is the child process the spawn
 // stdin test re-executes: it prints READY, reports what its stdin actually is
 // (a pipe — the launch kept it open — or a character device, which is
-// os/exec's /dev/null for a nil Stdin), and then exits the way a
-// stdin-supervised server does when its stdin hits EOF: a marker on stdout
-// followed by a non-zero exit code.
+// os/exec's /dev/null for a nil Stdin), acks a byte written through the
+// supervisor's write end with a STDIN-LIVE line (the liveness probe the spawn
+// test joins on), and then exits the way a stdin-supervised server does when
+// its stdin hits EOF: a marker on stdout followed by a non-zero exit code.
 func TestHelperWatchesStdin(t *testing.T) {
 	if os.Getenv(helperStdinWatchEnv) != "1" {
 		t.Skip("helper mode only; re-executed by TestSpawnOSServerKeepsTheChildsStdinAlive")
@@ -49,6 +50,10 @@ func TestHelperWatchesStdin(t *testing.T) {
 	for {
 		n, err := os.Stdin.Read(buf)
 		if n > 0 {
+			// The parent's liveness probe reached us through the supervisor's
+			// held write end — ack on stdout so its barrier can join.
+			_, _ = out.WriteString("STDIN-LIVE\n")
+			_ = out.Flush()
 			continue
 		}
 		if err != nil {
@@ -67,12 +72,13 @@ func TestHelperWatchesStdin(t *testing.T) {
 // within milliseconds" shape; this pins the contract that the supervisor
 // keeps the child's stdin open for the child's whole lifetime.
 //
-// The child is real process integration, so no synctest: readiness is a
-// barrier (the child's own stdout lines), the stdin shape is asserted from
-// the child's own report (deterministic), and only the absence-of-a-death
-// check needs a bounded window — a watchdog for an exit that must NOT
-// happen, the only honest form that assertion can take against a live
-// process. Idempotent release is registered before any fatal assertion.
+// The child is real process integration, so no synctest, and no wall-clock
+// window either: readiness is a barrier (the child's own stdout lines), the
+// stdin shape is asserted from the child's own report (deterministic), and
+// liveness is a bidirectional barrier — the test writes one byte through the
+// supervisor's held stdin write end and joins on the child's STDIN-LIVE ack,
+// which a launch that left stdin at EOF can never deliver. Idempotent release
+// is registered before any fatal assertion.
 func TestSpawnOSServerKeepsTheChildsStdinAlive(t *testing.T) {
 	binary, err := os.Executable()
 	if err != nil {
@@ -131,14 +137,22 @@ func TestSpawnOSServerKeepsTheChildsStdinAlive(t *testing.T) {
 		t.Fatalf("the child's stdin is %q, want \"pipe\": the launch left it at the null device, so a stdin-supervised server tears itself down right after readiness", kind)
 	}
 
-	// The bounded half: the child's only self-exit is stdin EOF, and the launch
-	// keeps the pipe open, so it must stay alive on its own.
-	select {
-	case line, ok := <-lines:
-		if !ok || line == "STDIN-EOF" {
-			t.Fatal("the child exited on its own after readiness: its stdin hit EOF — the launch left it unsupervised")
-		}
-	case <-time.After(300 * time.Millisecond):
+	// The liveness half, as a deterministic barrier instead of a wall-clock
+	// absence window: write one byte through the supervisor's own stdin write
+	// end and join on the child's ack. A launch that left the stdin at EOF
+	// ends the child before the byte can be delivered, so the probe write or
+	// the ack read fails deterministically — no clock involved. The round trip
+	// is also the stronger proof: the byte crosses the real pipe, so the
+	// supervision contract holds end to end, not just for one bounded instant.
+	stdin, ok := proc.(*osProcess)
+	if !ok {
+		t.Fatalf("spawnOSServer returned %T, want *osProcess", proc)
+	}
+	if _, err := stdin.stdinWrite.Write([]byte{0}); err != nil {
+		t.Fatalf("writing the stdin liveness probe: the child's read end is gone — it exited on its own after readiness, so its stdin hit EOF and the launch left it unsupervised: %v", err)
+	}
+	if line := readLine("stdin liveness ack"); line != "STDIN-LIVE" {
+		t.Fatalf("stdin liveness ack = %q, want \"STDIN-LIVE\": the child died before the probe arrived — its stdin hit EOF, the launch left it unsupervised", line)
 	}
 
 	stop()

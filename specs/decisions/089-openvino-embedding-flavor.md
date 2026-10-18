@@ -64,9 +64,14 @@ AUTO pseudo-devices add overhead without benefit on the reference hardware.
    Device selection goes through the V2 `OrtEpDevice` surface
    (`onnxruntime_go` ≥ v1.29.0); for the c0wrk `openvino` provider value the
    device index is pinned to `0` — the only value the plugin surface accepts
-   — and the plugin chooses the concrete Intel device itself. The config
-   layer (`backend/config`) rejects any other `device_id` for `openvino`, so
-   the UI can never persist a pair the embedder would refuse.
+   — and the plugin chooses the concrete Intel device itself. Config
+   validation (`backend/config`) and the settings RPC check `device_id >= 0`
+   for every provider — they do not reject non-zero ids under `openvino`;
+   the settings UI is what enforces the pin (it normalizes a non-zero id to
+   `0` on a switch to `openvino` and pins the picker control). A hand-edited
+   config can persist `openvino` with a non-zero id: that pair passes load
+   validation and fails at embedder creation, into the loud CPU fallback
+   (decision 4).
 2. **Delivery channel: digest-pinned PyPI wheel, harvested at install time.**
    `make fetch-onnx-openvino` (Linux x86_64 only; fails closed on any other
    platform) downloads the pinned wheel
@@ -116,20 +121,28 @@ AUTO pseudo-devices add overhead without benefit on the reference hardware.
    `openvino` stays a hard error. `auto → openvino` is a success (Auto's
    middle rung), never a fallback.
 5. **Verification is device-level, not per-PID.** After a successful OpenVINO
-   embedder init the startup layer runs one warmup inference (the OpenVINO
-   context materializes lazily), then drives sustained inference on the
-   embedder's locked ONNX thread while sampling
-   `xpu-smi --query-gpu=utilization.compute --id=0` — a bounded sample count
-   (12), a per-invocation timeout (10 s; a wedged invocation is a skipped
-   sample), and deliberately no sleep between samples (the spawn is the
-   cadence). The highest readable utilization decides: ≥ 25% →
-   `ov_device: "gpu"` (INFO "OpenVINO GPU device verified via xpu-smi");
-   readable samples below the threshold → `"cpu"` plus a WARN naming the
-   CPU-device outcome; **missing tool, unreadable samples, or failed
-   sustained inference → the verdict stays empty (unverified)** — a probe
-   failure is never reported as `"cpu"`. The probe is diagnostics only: it
-   never blocks or fails startup, and its result travels in the vector-index
-   status payload (`ov_device`) exactly like `cuda_verified` does for CUDA.
+   embedder init the startup layer drives sustained inference on the
+   embedder's locked ONNX thread — no separate warmup pass: the loop's first
+   call materializes the lazily-created OpenVINO context — while sampling
+   `xpu-smi stats --device 0 -j`, parsing the compute-engine-utilization
+   leaves out of the JSON payload (a bounded sample count, ≤ 12) under one
+   whole-probe budget (30 s; there is no per-invocation timeout), with
+   deliberately no sleep between samples (the spawn is the cadence). A
+   sample that fails before the budget expires aborts the whole probe; a
+   wedged invocation burns the remaining budget to the same end — a wedged
+   invocation is never a skipped sample. The highest readable utilization
+   decides: ≥ 25% → `ov_device: "gpu"` (INFO "OpenVINO GPU device verified
+   via xpu-smi"); a concluded window whose samples all stayed below the
+   threshold → `"cpu"` plus a WARN naming the CPU-device outcome — an
+   unreadable payload is not a failure shape: a sample without a
+   recognizable compute-utilization field reads as 0, so an xpu-smi whose
+   schema the parser does not recognize idles through the window and
+   concludes `"cpu"`; **missing tool, a sample or probe error, an expired
+   budget, or failed sustained inference → the verdict stays empty
+   (unverified)** — those failure shapes are never reported as `"cpu"`. The
+   probe is diagnostics only: it never blocks or fails startup, and its
+   result travels in the vector-index status payload (`ov_device`) exactly
+   like `cuda_verified` does for CUDA.
 6. **External verification for tests follows the same device-level shape.**
    Tests asserting Intel-GPU execution check the utilization counter moves
    under sustained inference (`utilization.compute`, not a compositor-noisy
