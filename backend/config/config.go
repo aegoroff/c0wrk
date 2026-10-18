@@ -2275,6 +2275,10 @@ func migrateLegacyAutonomyMode(sec *SecurityConfig) []string {
 type SearchConfig struct {
 	Provider string `yaml:"provider"`
 	APIKey   string `yaml:"api_key"`
+	// BaseURL is the self-hosted SearXNG instance URL; only used when
+	// Provider is "searxng" (validated by ValidateSearchBaseURL, seeded to
+	// websearch.DefaultSearxngBaseURL by ApplyDefaults).
+	BaseURL string `yaml:"base_url"`
 }
 
 // ToolLimitsConfig holds configurable limits for builtin tools.
@@ -3189,6 +3193,15 @@ func Save(cfg *Config, path string) error {
 func validate(cfg *Config) error {
 	if cfg.Git.WorktreesRoot != "" && (!filepath.IsAbs(cfg.Git.WorktreesRoot) || filepath.Clean(cfg.Git.WorktreesRoot) != cfg.Git.WorktreesRoot) {
 		return errors.New("git.worktrees_root must be an absolute clean path")
+	}
+	// Validate search.base_url for the searxng provider. The raw value is
+	// checked here (an ${ENV_VAR} placeholder passes — it resolves at
+	// runtime); the expanded value is re-checked fail-closed at consumption
+	// time by core/tools.CreateSearchProviderWithClient, so a placeholder
+	// that expands to garbage still surfaces an explicit error instead of a
+	// silently missing web_search tool.
+	if err := ValidateSearchBaseURL(cfg.Search.Provider, cfg.Search.BaseURL); err != nil {
+		return err
 	}
 	// Validate default_model
 	if cfg.LLM.DefaultModel == "" {

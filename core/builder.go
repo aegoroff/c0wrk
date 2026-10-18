@@ -1048,8 +1048,9 @@ func (b *OrchestratorBuilder) UpdateShellBlocklist(cfg *BuilderConfig) error {
 }
 
 // UpdateSearchTool replaces or removes the web_search tool in the registry.
-func (b *OrchestratorBuilder) UpdateSearchTool(cfg *BuilderConfig) {
+func (b *OrchestratorBuilder) UpdateSearchTool(cfg *BuilderConfig) error {
 	apiKey := cfg.ExpandEnvVars(cfg.Search.APIKey)
+	baseURL := cfg.ExpandEnvVars(cfg.Search.BaseURL)
 	limits := builtins.WebSearchLimits{
 		MaxResults: cfg.ToolLimits.WebSearchMaxResults,
 		Timeout:    time.Duration(cfg.Timeouts.WebSearchTimeout) * time.Second,
@@ -1057,7 +1058,7 @@ func (b *OrchestratorBuilder) UpdateSearchTool(cfg *BuilderConfig) {
 	b.mu.RLock()
 	pc := b.proxyClient
 	b.mu.RUnlock()
-	tools.UpdateSearchToolWithClient(b.registry, cfg.Search.Provider, apiKey, limits, pc)
+	return tools.UpdateSearchToolWithClient(b.registry, cfg.Search.Provider, apiKey, baseURL, limits, pc)
 }
 
 // RebuildProxy rebuilds the proxy HTTP client from the given config and propagates
@@ -1093,7 +1094,9 @@ func (b *OrchestratorBuilder) RebuildProxy(ctx context.Context, cfg *BuilderConf
 	}
 
 	// Propagate to web tools
-	b.UpdateWebTools(cfg)
+	if err := b.UpdateWebTools(cfg); err != nil {
+		return fmt.Errorf("propagating web tools: %w", err)
+	}
 
 	// Propagate to MCP gateway (reconnects HTTP servers with new transport)
 	if err := b.ReconfigureMCP(ctx, cfg); err != nil {
@@ -1112,7 +1115,7 @@ func (b *OrchestratorBuilder) RebuildProxy(ctx context.Context, cfg *BuilderConf
 }
 
 // UpdateWebTools re-registers web_fetch and web_search tools with the current proxy client.
-func (b *OrchestratorBuilder) UpdateWebTools(cfg *BuilderConfig) {
+func (b *OrchestratorBuilder) UpdateWebTools(cfg *BuilderConfig) error {
 	fetchLimits := builtins.WebFetchLimits{
 		Timeout: time.Duration(cfg.Timeouts.WebFetchTimeout) * time.Second,
 		Retries: cfg.Timeouts.WebFetchRetries,
@@ -1127,7 +1130,8 @@ func (b *OrchestratorBuilder) UpdateWebTools(cfg *BuilderConfig) {
 		Timeout:    time.Duration(cfg.Timeouts.WebSearchTimeout) * time.Second,
 	}
 	apiKey := cfg.ExpandEnvVars(cfg.Search.APIKey)
-	tools.UpdateSearchToolWithClient(b.registry, cfg.Search.Provider, apiKey, searchLimits, pc)
+	baseURL := cfg.ExpandEnvVars(cfg.Search.BaseURL)
+	return tools.UpdateSearchToolWithClient(b.registry, cfg.Search.Provider, apiKey, baseURL, searchLimits, pc)
 }
 
 // GenerateTitle generates a concise title for a conversation using the cached LLM router.
@@ -3351,6 +3355,7 @@ func configToBuiltinToolsConfig(cfg *BuilderConfig) tools.BuiltinToolsConfig {
 		PoshShellInvocation: cfg.ShellExec.PoshExec,
 		SearchProvider:      cfg.Search.Provider,
 		SearchAPIKey:        cfg.ExpandEnvVars(cfg.Search.APIKey),
+		SearchBaseURL:       cfg.ExpandEnvVars(cfg.Search.BaseURL),
 		SearchTimeout:       time.Duration(cfg.Timeouts.WebSearchTimeout) * time.Second,
 
 		SilentMode: tools.SilentModeState{

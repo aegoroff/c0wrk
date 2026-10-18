@@ -322,6 +322,7 @@ func ToBuilderConfig(cfg *config.Config, modelProfilesCatalog []config.ModelProf
 		Search: core.BuilderSearchConfig{
 			Provider: cfg.Search.Provider,
 			APIKey:   cfg.Search.APIKey,
+			BaseURL:  cfg.Search.BaseURL,
 		},
 		MCP: core.BuilderMCPConfig{
 			Servers: mcpServers,
