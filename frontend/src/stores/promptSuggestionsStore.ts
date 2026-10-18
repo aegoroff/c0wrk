@@ -50,8 +50,9 @@ export interface PromptSuggestionsState {
 
 interface PromptSuggestionsActions {
   /** Fetch the active set for a session (the single refetch entry). A switch
-   *  to a different session clears the previous session's rows immediately —
-   *  session A's suggestions must never render under session B. Responses are
+   *  to a different context — another session, or another project under the
+   *  shared '' draft key — clears the previous context's rows immediately:
+   *  context A's suggestions must never render under context B. Responses are
    *  sequence-guarded: a stale in-flight response never overwrites a newer
    *  load. A failed/null response degrades to an empty set (fail-open).
    *  sessionId '' names the DRAFT surface: the armed New-Session draft of a
@@ -74,13 +75,18 @@ interface PromptSuggestionsActions {
   /** Rest the selection back on the top row (the resting state; -1 for an
    *  empty set) without touching the rows. */
   clearSelection: () => void
-  /** Drop the snapshot entirely (no active session / chat teardown). */
+  /** Drop the snapshot entirely (no active session / chat teardown). Also
+   *  unconditionally invalidates in-flight loads: a draft response resolves
+   *  with the shared '' key, which would match any later consumer context —
+   *  only the sequence guard can keep it from re-populating the torn-down
+   *  store. */
   reset: () => void
 }
 
-/** Monotonic load token — increments on every `load`; only the latest
- *  response may apply. Lives on the closure, not the state (not a selector
- *  concern). */
+/** Monotonic load token — increments on every `load` and on every `reset`;
+ *  only the latest response may apply, and a response already in flight when
+ *  the store is torn down can never apply. Lives on the closure, not the
+ *  state (not a selector concern). */
 let loadSeq = 0
 
 // --- Store ---
@@ -95,10 +101,17 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
 
   load: async (sessionId, projectId) => {
     const prev = get()
-    const switching = prev.sessionId !== sessionId
+    // A switch is a change of EITHER identity. The '' draft key is shared by
+    // every project's armed New-Session surface, so the session id alone
+    // cannot see a project change there — without the project disjunct the
+    // outgoing project's rows would stay visible (and insertable via →) in
+    // the next project's draft until the fetch lands. A real session always
+    // belongs to exactly one project (its (sessionId, projectId) pair is
+    // immutable), so the disjunct never fires for real sessions.
+    const switching = prev.sessionId !== sessionId || prev.projectId !== projectId
     const seq = ++loadSeq
     if (switching) {
-      // Immediate skeleton: never let the outgoing session's rows show under
+      // Immediate skeleton: never let the outgoing context's rows show under
       // the incoming one while the fetch is in flight.
       set({
         sessionId,
@@ -172,6 +185,12 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
     }),
 
   reset: () => {
+    // Invalidate in-flight loads FIRST, unconditionally — even on the pristine
+    // early return: load() publishes its context synchronously before
+    // awaiting, so no legitimate response can outlive the teardown, and the
+    // bump is what turns a late draft response into a dropped no-op instead
+    // of a re-populated (wrong-context) store.
+    ++loadSeq
     if (get().sessionId === null && get().suggestions.length === 0) {
       return // already pristine — keep the reference-stable no-op
     }
