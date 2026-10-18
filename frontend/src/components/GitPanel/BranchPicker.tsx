@@ -17,6 +17,7 @@ import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { getBranches, listProjectWorktrees } from '@/api/git'
 import { useBranchActions } from '@/hooks/useBranchActions'
 import type { BranchActionKind } from '@/hooks/useBranchActions'
+import { useSessionWorktreePin } from '@/hooks/useSessionWorktreePin'
 import type { GitWorktree } from '@/types/models'
 import { focusWorktree } from '@/lib/gitFocus'
 import { useWorktreeActions } from '@/hooks/useWorktreeActions'
@@ -115,6 +116,10 @@ export function BranchPicker() {
 
   const actions = useBranchActions()
   const worktreeActions = useWorktreeActions()
+  // The active managed session's pin (ADR-080) — a MANAGE-mode concept only:
+  // in draft mode (Choose Branch) no session pin exists, the rows select the
+  // drafted workspace, so the pin props are dropped there.
+  const { pinnedBranch, isPinnedWorktree } = useSessionWorktreePin()
   // Destructure the stable operation callbacks so the checkout handlers below
   // can list them (rather than the recreated `actions` object) as useCallback
   // dependencies, keeping `react-hooks/exhaustive-deps` satisfied.
@@ -399,6 +404,7 @@ export function BranchPicker() {
                     branch={b}
                     inFlight={inFlightFor(b.name)}
                     disabled={disabledFor(b.name)}
+                    pinned={isDraftMode ? undefined : b.name === pinnedBranch}
                     onCheckout={handleCheckout}
                     onRename={actions.startRename}
                     onMerge={actions.mergeBranch}
@@ -465,6 +471,7 @@ export function BranchPicker() {
             <WorktreesSection
               worktrees={worktrees}
               draftSelect={isDraftMode}
+              isPinnedWorktree={isDraftMode ? undefined : isPinnedWorktree}
               draftBlockedReason={isDraftMode ? draftWorktreeBlockedReason : undefined}
               onSelect={(w) => {
                 if (!isDraftMode) {

@@ -37,6 +37,7 @@ import { BranchDropdown } from './BranchDropdown'
 import { focusWorktree } from '@/lib/gitFocus'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useProjectStore } from '@/stores/projectStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { Branch } from '@/types/models'
 
 let container: HTMLDivElement
@@ -61,6 +62,8 @@ beforeEach(() => {
   useGitPanelStore.getState().reset()
   // Branch operations record their outcome against the ACTIVE project.
   useProjectStore.setState({ activeProjectId: 'p1' })
+  // The session pin (managed worktree) starts unset — no active session.
+  useSessionStore.setState({ sessions: null, activeSessionId: null })
   useGitPanelStore.setState({
     branch: { name: 'main', upstream: '', ahead: 0, behind: 0 },
   })
@@ -789,5 +792,153 @@ describe('BranchDropdown — collapsible sections', () => {
     await pressKey(document.activeElement!, 'Enter')
     expect(sectionHeader('Local').getAttribute('aria-expanded')).toBe('true')
     expect(body().textContent).toContain('feature/x')
+  })
+})
+
+describe('BranchDropdown — managed session pin', () => {
+  /** Arm an active session bound to a managed worktree on feat/x (tree s-1). */
+  function armManagedSession(): void {
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: 's-1',
+          project_id: 'p1',
+          name: 'Session',
+          created_at: '',
+          last_active_at: '',
+          archived: false,
+          pinned: false,
+          active: false,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          model: 'm',
+          family: 'f',
+          has_unfinished_task: false,
+          workspace_binding: {
+            kind: 'managed_worktree',
+            workspace_path: '/repo/.worktrees/s-1',
+            worktree_name: 's-1',
+            branch: 'feat/x',
+          },
+        },
+      ],
+      activeSessionId: 's-1',
+    })
+  }
+
+  it('renders a lock without a delete action on the pinned branch row', async () => {
+    armManagedSession()
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feat/x' }),
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const pinnedRow = rowByName('feat/x')
+    expect(pinnedRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-check')).toBeNull()
+    // push | merge | rebase | rename — the delete action is gone entirely
+    // (the pinned branch is not the focused tree's current one, so
+    // merge/rebase stay, exactly as for any non-current row).
+    expect(rowButtons(pinnedRow)).toHaveLength(4)
+    expect(rowButtons(pinnedRow).some((b) => b.querySelector('svg.lucide-trash2'))).toBe(false)
+
+    // An unpinned branch keeps the check and the full action set.
+    const mainRow = rowByName('main')
+    expect(mainRow.querySelector('svg.lucide-check')).not.toBeNull()
+    expect(mainRow.querySelector('svg.lucide-lock')).toBeNull()
+    expect(rowButtons(mainRow)).toHaveLength(3)
+  })
+
+  it('never checks out the pinned branch from the dropdown', async () => {
+    armManagedSession()
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feat/x' }),
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    act(() => {
+      rowByName('feat/x').dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
+    expect(isMenuOpen()).toBe(true)
+  })
+
+  it('renders a lock without a delete action on the session worktree row', async () => {
+    armManagedSession()
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-1', name: 's-1', kind: 'managed',
+        branch: 'feat/x', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 's-1', session_name: 'Session',
+      },
+      {
+        path: '/repo/.worktrees/s-2', name: 's-2', kind: 'managed',
+        branch: 'feat/y', head: 'c', managed: true, pinned: true,
+        is_focus: false, session_id: 's-2', session_name: 'Other',
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]')) as HTMLElement[]
+    const ownRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-1')!
+    const otherRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-2')!
+
+    expect(ownRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(ownRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(rowButtons(ownRow)).toHaveLength(0)
+
+    // Another session's managed tree keeps its delete affordance.
+    expect(otherRow.querySelector('svg.lucide-lock')).toBeNull()
+    expect(rowButtons(otherRow)).toHaveLength(1)
+  })
+
+  it('shows no locks for a local session', async () => {
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: 's-local',
+          project_id: 'p1',
+          name: 'Local',
+          created_at: '',
+          last_active_at: '',
+          archived: false,
+          pinned: false,
+          active: false,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          model: 'm',
+          family: 'f',
+          has_unfinished_task: false,
+          workspace_binding: { kind: 'local', workspace_path: '/repo' },
+        },
+      ],
+      activeSessionId: 's-local',
+    })
+    useGitPanelStore.getState().setBranches([
+      makeBranch({ name: 'main', is_current: true }),
+      makeBranch({ name: 'feat/x' }),
+    ])
+    useGitPanelStore.getState().setWorktrees([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: true,
+      },
+    ])
+    renderDropdown()
+    await openDropdown()
+
+    expect(body().querySelector('svg.lucide-lock')).toBeNull()
+    expect(rowButtons(rowByName('main'))).toHaveLength(3)
   })
 })

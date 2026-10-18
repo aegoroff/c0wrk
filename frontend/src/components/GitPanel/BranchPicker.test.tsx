@@ -41,6 +41,7 @@ import { focusWorktree } from '@/lib/gitFocus'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { useProjectStore } from '@/stores/projectStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { GitWorktree } from '@/types/models'
 
 let container: HTMLDivElement
@@ -70,6 +71,8 @@ beforeEach(() => {
   useGitPanelStore.getState().reset()
   // Branch operations record their outcome against the ACTIVE project.
   useProjectStore.setState({ activeProjectId: 'p1' })
+  // The session pin (managed worktree) starts unset — no active session.
+  useSessionStore.setState({ sessions: null, activeSessionId: null })
   useGitPanelStore.getState().openBranchPicker()
   useGitPanelStore.setState({
     branch: { name: 'main', upstream: '', ahead: 0, behind: 0 },
@@ -1156,5 +1159,109 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
     expect(useGitPanelStore.getState().branchPickerMode).toBe('switch')
+  })
+})
+
+describe('BranchPicker — managed session pin (manage mode only)', () => {
+  /** Arm an active session bound to a managed worktree on feat/x (tree s-1). */
+  function armManagedSession(): void {
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: 's-1',
+          project_id: 'p1',
+          name: 'Session',
+          created_at: '',
+          last_active_at: '',
+          archived: false,
+          pinned: false,
+          active: false,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          model: 'm',
+          family: 'f',
+          has_unfinished_task: false,
+          workspace_binding: {
+            kind: 'managed_worktree',
+            workspace_path: '/repo/.worktrees/s-1',
+            worktree_name: 's-1',
+            branch: 'feat/x',
+          },
+        },
+      ],
+      activeSessionId: 's-1',
+    })
+  }
+
+  function armGitLists(): void {
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: true, kind: 'local', upstream: '' },
+      { name: 'feat/x', is_current: false, kind: 'local', upstream: '' },
+    ])
+    gitMocks.listProjectWorktrees.mockResolvedValue([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-1', name: 's-1', kind: 'managed',
+        branch: 'feat/x', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 's-1', session_name: 'Session',
+      },
+      {
+        path: '/repo/.worktrees/s-2', name: 's-2', kind: 'managed',
+        branch: 'feat/y', head: 'c', managed: true, pinned: true,
+        is_focus: false, session_id: 's-2', session_name: 'Other',
+      },
+    ] satisfies GitWorktree[])
+  }
+
+  it('manage mode: lock instead of the check on the pinned branch, no delete there', async () => {
+    armManagedSession()
+    armGitLists()
+    renderPicker()
+    await flush()
+
+    const pinnedRow = branchRow('feat/x')!
+    expect(pinnedRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(pinnedRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(0)
+    // The pinned row is not an activation target even off the current branch.
+    expect(pinnedRow.getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('manage mode: lock on the session worktree row without a delete; foreign trees keep theirs', async () => {
+    armManagedSession()
+    armGitLists()
+    renderPicker()
+    await flush()
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]')) as HTMLElement[]
+    const ownRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-1')!
+    const otherRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-2')!
+
+    expect(ownRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(ownRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(ownRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(0)
+    expect(otherRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(1)
+  })
+
+  it('draft mode: no pin rendering even with a managed session active', async () => {
+    armManagedSession()
+    armGitLists()
+    useSessionDraftStore.getState().startDraft('p1')
+    act(() => {
+      useGitPanelStore.getState().openBranchPicker('draft')
+    })
+    renderPicker()
+    await flush()
+
+    // Draft rows are selection targets: no session lock anywhere, and the
+    // worktree rows keep their delete affordance (draft-mode contract).
+    expect(body().querySelector('svg.lucide-lock')).toBeNull()
+    const ownRow = Array.from(body().querySelectorAll('[data-testid="worktree-row"]')).find(
+      (r) => r.getAttribute('data-path') === '/repo/.worktrees/s-1',
+    ) as HTMLElement
+    expect(ownRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(1)
   })
 })

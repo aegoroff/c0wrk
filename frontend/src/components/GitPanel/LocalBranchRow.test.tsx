@@ -185,4 +185,102 @@ describe('LocalBranchRow', () => {
     const push = btns[0]!
     expect(push.querySelector('svg')?.classList.contains('animate-spin')).toBe(true)
   })
+
+  describe('pinned branch (managed session)', () => {
+    it('shows a lock instead of the check and marks the row current', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      expect(container.querySelector('svg.lucide-lock')).not.toBeNull()
+      expect(container.querySelector('svg.lucide-check')).toBeNull()
+      expect(container.querySelector('[aria-label="Pinned to this session"]')).not.toBeNull()
+      expect(row(container).getAttribute('aria-current')).toBe('true')
+      // The pin is communicated up front, not discovered through dead clicks.
+      expect(row(container).title).toBe('Pinned to this session — branch switching is disabled')
+    })
+
+    it('renders no delete action and disables rename', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      const btns = buttons(container)
+      // push | rename (merge & rebase hidden for the current branch, delete gone)
+      expect(btns.length).toBe(2)
+      for (const b of btns) {
+        expect(b.querySelector('svg.lucide-trash2')).toBeNull()
+      }
+      // Rename stays visible but is disabled with the pinned reason — the
+      // branch name is part of the immutable binding (ErrPinnedWorktreeBranch).
+      const rename = btns[1]!
+      expect(rename.disabled).toBe(true)
+      expect(rename.title).toBe('Pinned to this session — renaming is disabled')
+      expect(rename.parentElement?.title).toBe('Pinned to this session — renaming is disabled')
+      expect(rename.parentElement?.getAttribute('aria-label')).toBe(
+        'Rename: Pinned to this session — renaming is disabled',
+      )
+    })
+
+    it('disables rename on the pinned branch even when it is not the focused one', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: false })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...defaultCallbacks}
+        />,
+      )
+      const btns = buttons(container)
+      // push | merge | rebase | rename (delete gone) — rename is disabled
+      // although a non-current branch normally renames freely.
+      expect(btns.length).toBe(4)
+      const rename = btns[3]!
+      expect(rename.disabled).toBe(true)
+      expect(rename.title).toBe('Pinned to this session — renaming is disabled')
+    })
+
+    it('does not checkout the pinned branch even when it is not the focused tree’s current one', () => {
+      const callbacks = { ...defaultCallbacks }
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'feat/x', is_current: false })}
+          inFlight={null}
+          disabled={false}
+          pinned
+          {...callbacks}
+        />,
+      )
+      act(() => {
+        row(container).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      expect(callbacks.onCheckout).not.toHaveBeenCalled()
+      // Pinned rows are not activation targets.
+      expect(row(container).getAttribute('tabindex')).toBe('-1')
+    })
+
+    it('keeps the check on a non-pinned current row', () => {
+      const { container } = render(
+        <LocalBranchRow
+          branch={makeBranch({ name: 'main', is_current: true })}
+          inFlight={null}
+          disabled={false}
+          {...defaultCallbacks}
+        />,
+      )
+      expect(container.querySelector('svg.lucide-check')).not.toBeNull()
+      expect(container.querySelector('svg.lucide-lock')).toBeNull()
+    })
+  })
 })

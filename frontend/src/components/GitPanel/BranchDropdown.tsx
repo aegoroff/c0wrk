@@ -13,6 +13,7 @@ import { CollapsibleSectionHeader } from "@/components/ui/CollapsibleSectionHead
 import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
 import { useBranchActions } from "@/hooks/useBranchActions";
 import type { BranchActionKind } from "@/hooks/useBranchActions";
+import { useSessionWorktreePin } from "@/hooks/useSessionWorktreePin";
 import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { useWorktreeActions } from "@/hooks/useWorktreeActions";
 import { focusWorktree } from "@/lib/gitFocus";
@@ -40,7 +41,10 @@ function branchRegionId(key: string): string {
  * every worktree of the project (local checkout, managed session trees,
  * external trees) — a focus switch, never a checkout — and exposes a hover
  * delete on the linked trees (managed + external; never the checkout) that
- * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. All three
+ * runs through the mandatory {@link WorktreeDeleteConfirmDialog}. The ACTIVE
+ * managed session's pinned branch and its own tree are the exception: they
+ * render a lock instead of the focus/current checkmark and offer no delete
+ * (the immutable session binding, ADR-080). All three
  * section headers are collapsible (ephemeral state; an active search
  * force-expands them). Branch
  * creation/management lives in the `BranchPicker` modal, opened from the git
@@ -54,6 +58,11 @@ export function BranchDropdown() {
 
   const actions = useBranchActions();
   const worktreeActions = useWorktreeActions();
+  // The active managed session's pin (ADR-080): its branch row renders a
+  // lock instead of the current-branch check and offers no delete; its tree
+  // row does the same in the Worktrees section. The dropdown is a
+  // manage-mode surface — no draft selection ever flows through it.
+  const { pinnedBranch, isPinnedWorktree } = useSessionWorktreePin();
 
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -181,6 +190,7 @@ export function BranchDropdown() {
                       branch={b}
                       inFlight={inFlightFor(b.name)}
                       disabled={disabledFor(b.name)}
+                      pinned={b.name === pinnedBranch}
                       onCheckout={(name) => {
                         actions.checkout(name);
                         close();
@@ -239,6 +249,7 @@ export function BranchDropdown() {
                   <WorktreesSection
                     variant="menu"
                     worktrees={worktrees}
+                    isPinnedWorktree={isPinnedWorktree}
                     onSelect={(w) => {
                       void focusWorktree(w.path);
                       close();

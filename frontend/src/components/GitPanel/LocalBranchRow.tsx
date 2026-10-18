@@ -1,4 +1,4 @@
-import { GitBranch, Check, Loader2, GitMerge, GitFork, Pencil, Trash2, Upload } from 'lucide-react'
+import { GitBranch, Check, Loader2, GitMerge, GitFork, Lock, Pencil, Trash2, Upload } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ItemAction, ItemActions } from '@/components/layout/ItemAction'
 import type { Branch } from '@/types/models'
@@ -36,6 +36,17 @@ interface LocalBranchRowProps {
    * (GetBranches runs in the focused tree), not the main checkout.
    */
   draftBlockedReason?: string | null
+  /**
+   * Managed-session pin (ADR-080): the branch is the ACTIVE session's pinned
+   * branch. The backend refuses branch switches off a managed session tree
+   * (ErrPinnedWorktreeBranch) and the binding is immutable, so the row shows
+   * a LOCK instead of the current-branch checkmark, offers no delete action,
+   * renders Rename disabled with a pinned reason, and clicking is a no-op —
+   * the pin is communicated up front instead of being discovered through
+   * clicks that fail server-side. Consumers pass it in manage mode only
+   * (never in draft mode, where no session pin exists).
+   */
+  pinned?: boolean
 }
 
 /**
@@ -47,6 +58,10 @@ interface LocalBranchRowProps {
  *
  * With `draftSelect` set, the row is a pure selection target for the chat
  * draft's managed-worktree branch — see {@link LocalBranchRowProps.draftSelect}.
+ * With `pinned` set (manage mode, active managed-worktree session), the row
+ * is the session's pinned branch: a lock instead of the checkmark, no delete
+ * action, a disabled Rename, and a no-op click — see
+ * {@link LocalBranchRowProps.pinned}.
  */
 export function LocalBranchRow({
   branch,
@@ -60,8 +75,11 @@ export function LocalBranchRow({
   onDelete,
   draftSelect,
   draftBlockedReason,
+  pinned,
 }: LocalBranchRowProps) {
   const isCurrent = branch.is_current
+  // The pin is a manage-mode concept; draft selection never carries one.
+  const isPinned = !draftSelect && (pinned ?? false)
   // A row is blocked when any operation is running on it OR elsewhere.
   const blocked = disabled || inFlight !== null
   // Draft mode: blocked only when the picker says so — the MAIN checkout's
@@ -76,7 +94,7 @@ export function LocalBranchRow({
       draftSelect.onSelect(branch.name)
       return
     }
-    if (isCurrent || blocked) return
+    if (isCurrent || isPinned || blocked) return
     onCheckout(branch.name)
   }
 
@@ -92,22 +110,29 @@ export function LocalBranchRow({
   return (
     <div
       role="button"
-      tabIndex={(draftSelect ? blocked || draftBlocked : isCurrent || blocked) ? -1 : 0}
-      aria-current={isCurrent || selected ? 'true' : undefined}
-      title={draftBlocked ? (draftBlockedReason ?? undefined) : undefined}
+      tabIndex={(draftSelect ? blocked || draftBlocked : isCurrent || isPinned || blocked) ? -1 : 0}
+      aria-current={isCurrent || selected || isPinned ? 'true' : undefined}
+      title={
+        draftBlocked
+          ? (draftBlockedReason ?? undefined)
+          : isPinned
+            ? 'Pinned to this session — branch switching is disabled'
+            : undefined
+      }
       onClick={handleCheckout}
       onKeyDown={handleKeyDown}
       data-testid={draftSelect ? 'draft-branch-row' : undefined}
       className={cn(
         'group/item relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
-        isCurrent || selected ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
+        isCurrent || selected || isPinned ? 'bg-primary/10 text-primary' : 'text-foreground hover:bg-muted',
         (disabled || draftBlocked) && 'cursor-not-allowed opacity-50',
-        (draftSelect ? !blocked && !draftBlocked : !disabled && !isCurrent) && 'cursor-pointer',
+        (draftSelect ? !blocked && !draftBlocked : !disabled && !isCurrent && !isPinned) && 'cursor-pointer',
       )}
     >
       <GitBranch className="size-4 shrink-0 text-muted-foreground" />
       <span className="flex-1 truncate">{branch.name}</span>
-      {(isCurrent || selected) && <Check className="size-4 shrink-0" />}
+      {(isCurrent || selected) && !isPinned && <Check className="size-4 shrink-0" />}
+      {isPinned && <Lock className="size-4 shrink-0" aria-label="Pinned to this session" />}
       {inFlight === 'checkout' && (
         <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
       )}
@@ -162,8 +187,14 @@ export function LocalBranchRow({
         <ItemAction
           label="Rename"
           onClick={() => onRename(branch.name)}
-          disabled={blocked}
-          disabledReason={blocked ? 'A git operation is in progress' : undefined}
+          disabled={blocked || isPinned}
+          disabledReason={
+            isPinned
+              ? 'Pinned to this session — renaming is disabled'
+              : blocked
+                ? 'A git operation is in progress'
+                : undefined
+          }
         >
           {inFlight === 'rename' ? (
             <Loader2 className="size-3.5 animate-spin text-info" />
@@ -172,6 +203,10 @@ export function LocalBranchRow({
           )}
         </ItemAction>
 
+        {/* The session-pinned branch offers no delete: the backend refuses it
+            for a branch checked out in the session's managed worktree, and
+            deleting the active session's own branch is never a valid move. */}
+        {!isPinned && (
         <ItemAction
           label={isCurrent ? 'Delete branch' : `Delete ${branch.name}`}
           onClick={() => onDelete(branch.name)}
@@ -186,6 +221,7 @@ export function LocalBranchRow({
             <Trash2 className="size-3.5 text-destructive" />
           )}
         </ItemAction>
+        )}
       </ItemActions>
       )}
     </div>
