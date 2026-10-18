@@ -1,8 +1,8 @@
 // Tests for SessionWorkspaceSelector — the chat toolbar's draft/pinned
 // workspace selector (ADR-080 draft UX).
 //
-// Covers: hidden in CHAT mode / no project; hidden while the experimental
-// gate is off; interactive draft state (`local`
+// Covers: hidden in CHAT mode / no project; rendered regardless of the
+// experimental gate; interactive draft state (`local`
 // default, branch display, `branch…` opens the picker in draft mode and arms
 // the draft when missing, non-git projects hide `branch…`, choosing local
 // resets a branch draft); permanently disabled pinned button for existing
@@ -103,9 +103,6 @@ async function openMenu() {
 }
 
 function resetStores(opts: { noProject?: boolean; gitRepo?: boolean } = {}) {
-  // Default the experimental gate ON so the existing cases exercise the
-  // selector itself; the gate-off case flips it off explicitly.
-  useExperimentalStore.setState({ enabled: true })
   useSessionDraftStore.getState().clearDraft()
   useSessionDraftStore.getState().setCommitting(false)
   useSessionStore.setState({ sessions: null, activeSessionId: null })
@@ -152,17 +149,18 @@ describe('SessionWorkspaceSelector', () => {
     expect(trigger()).toBeNull()
   })
 
-  it('renders nothing while the experimental gate is off (visibility-only gate)', () => {
-    // The picker/display is an experimental surface: with the master switch
-    // off it must render nothing, though the underlying functionality and the
-    // hooks (draft retirement) stay intact.
+  it('renders the draft picker and the pinned chip regardless of the experimental gate', () => {
+    // The selector is a first-class surface: the master experimental switch
+    // does not hide it (this is the case that used to render nothing — gate
+    // OFF exercises exactly that).
     useExperimentalStore.setState({ enabled: false })
     useGitPanelStore.getState().setGitRepo(true, 'proj-1')
-    renderSelector()
-    expect(trigger()).toBeNull()
-    expect(readOnly()).toBeNull()
 
-    // The pinned disabled button for an existing session is gated the same way.
+    // Draft mode: the interactive picker renders.
+    renderSelector()
+    expect(trigger()).not.toBeNull()
+
+    // Existing session: the pinned disabled chip renders the same way.
     act(() => {
       useSessionStore.setState({
         activeSessionId: 's-m',
@@ -179,8 +177,10 @@ describe('SessionWorkspaceSelector', () => {
         ],
       })
     })
-    expect(readOnly()).toBeNull()
-    expect(trigger()).toBeNull()
+    const chip = readOnly()
+    expect(chip).not.toBeNull()
+    expect(chip!.getAttribute('aria-disabled')).toBe('true')
+    expect(chip!.textContent).toContain('feat/pinned')
   })
 
   it('draft state (no session): shows local and offers local + branch… in a git repo', async () => {

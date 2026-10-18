@@ -236,6 +236,63 @@ describe('LLMSettings section order', () => {
   })
 })
 
+// --- Compatible-provider grouping ---
+
+describe('LLMSettings compatible-provider grouping', () => {
+  async function renderPanel(): Promise<void> {
+    await act(async () => {
+      root.render(
+        <TooltipProvider>
+          <LLMSettings />
+        </TooltipProvider>,
+      )
+    })
+    await flush()
+  }
+
+  /** The accordion header button whose label is exactly `name` (plus the
+   *  enabled-models counter). */
+  function headerFor(name: string): HTMLButtonElement | undefined {
+    return Array.from(container.querySelectorAll('button')).find((b) =>
+      new RegExp(`^${name}\\d+ models? enabled$`).test((b.textContent ?? '').trim()),
+    )
+  }
+
+  it('gathers each transport type under its heading; labels carry no transport prefix', async () => {
+    mocks.getConfig.mockResolvedValue({
+      loaded: true,
+      llm: {
+        auto_retry_max_seconds: 3600,
+        default_model: 'lmstudio/glm-5.3',
+        anthropic: { api_key: 'sk', models: [] },
+        openai_compatible: {
+          lmstudio: { api_key: '', base_url: 'http://localhost:1234', models: ['glm-5.3'] },
+        },
+        anthropic_compatible: {
+          'my-proxy': { api_key: 'k', base_url: 'https://proxy.example.com', models: ['sonnet-x'] },
+        },
+      },
+    })
+    await renderPanel()
+
+    // One heading per transport; the old per-accordion prefixes are gone.
+    expect(container.textContent).toContain('OpenAI-compatible providers')
+    expect(container.textContent).toContain('Anthropic-compatible providers')
+    expect(container.textContent).not.toContain('OpenAI Compatible:')
+    expect(container.textContent).not.toContain('Anthropic Compatible:')
+
+    expect(headerFor('lmstudio')).toBeDefined()
+    expect(headerFor('my-proxy')).toBeDefined()
+  })
+
+  it('renders no heading for a transport with no providers', async () => {
+    await renderPanel()
+
+    expect(container.textContent).toContain('OpenAI-compatible providers')
+    expect(container.textContent).not.toContain('Anthropic-compatible providers')
+  })
+})
+
 // --- Per-provider TLS pin gate (ADR-054) ---
 
 describe('LLMSettings TLS pin proxy gate', () => {
@@ -837,8 +894,16 @@ describe('LLMSettings — the backend-owned embedded provider is not user-editab
     mocks.getConfig.mockResolvedValue(configWithEmbedded())
     await renderPanel()
 
-    expect(container.textContent).toContain('OpenAI Compatible: lmstudio')
-    expect(container.textContent).not.toContain('OpenAI Compatible: embedded')
+    // The transport lives once on the group heading; an accordion's label is
+    // just the provider name.
+    expect(container.textContent).toContain('OpenAI-compatible providers')
+    const headerFor = (name: string) =>
+      Array.from(container.querySelectorAll('button')).find((b) =>
+        new RegExp(`^${name}\\d+ models? enabled$`).test((b.textContent ?? '').trim()),
+      )
+    expect(headerFor('lmstudio')).toBeDefined()
+    // The backend-owned record still renders no accordion.
+    expect(headerFor('embedded')).toBeUndefined()
   })
 
   it('still lists the embedded model in the default-model picker', async () => {

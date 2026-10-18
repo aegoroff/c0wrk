@@ -6,6 +6,7 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useExperimentalStore } from '@/stores/experimentalStore'
 import { ConfigWarningBanner } from './ConfigWarningBanner'
 import { LogLevelSelector } from './LogLevelSelector'
 import { ThemeSelector } from './ThemeSelector'
@@ -88,6 +89,10 @@ export function SettingsModal() {
   const activeTab = useSettingsStore((s) => s.activeTab)
   const closeSettings = useSettingsStore((s) => s.closeSettings)
   const setActiveTab = useSettingsStore((s) => s.setActiveTab)
+  // The master experimental switch — the Session Statistics block on the
+  // General tab is part of its gate scope (read reactively, so flipping the
+  // switch in ExperimentalSettings hides/reveals the block without a reload).
+  const experimentalEnabled = useExperimentalStore((s) => s.enabled)
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
   const [closeBlocked, setCloseBlocked] = useState(false)
   const [checkingClose, setCheckingClose] = useState(false)
@@ -219,7 +224,9 @@ export function SettingsModal() {
               <span className="text-xs">LLM</span>
             </TabsTrigger>
             {/* Model Profiles is a first-class settings tab, independent of the
-                experimental-features switch (that gate covers only E2S). */}
+                experimental-features switch (that gate covers E2S, the embedded
+                local model's frontend surfaces, and the Session Statistics
+                block — not Model Profiles). */}
             <TabsTrigger value="model-profiles" className={TAB_TRIGGER_CLASS}>
               <Gauge className="h-4 w-4" />
               <span className="text-xs">Model Profiles</span>
@@ -254,9 +261,16 @@ export function SettingsModal() {
               <div className="border-t border-border pt-4">
                 <PromptSuggestionsSettings />
               </div>
-              <div className="border-t border-border pt-4">
-                <SessionStatsSettings />
-              </div>
+              {/* Session Statistics is an experimental surface: rendered only
+                  while the master experimental switch is on. The toggle itself
+                  stays off by default and gates DISPLAY only — the counters
+                  are always collected. Gated here (not inside the component)
+                  so the border wrapper disappears with the block. */}
+              {experimentalEnabled && (
+                <div className="border-t border-border pt-4">
+                  <SessionStatsSettings />
+                </div>
+              )}
               <div className="border-t border-border pt-4">
                 <WebviewGpuPolicySettings />
               </div>

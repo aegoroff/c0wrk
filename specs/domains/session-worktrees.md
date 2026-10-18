@@ -104,7 +104,7 @@ an old project's RPC to a new project's draft. The same lifecycle clears both
 covers the whole RPC wait, including synchronous embedding-cache seeding; it
 neither moves provisioning earlier nor makes the cache seed asynchronous.
 Local creation, another project's RPC, existing-session pinned chips, and
-selectors hidden by the experimental/No-Project/no-active-project gates show
+selectors hidden by the No-Project/no-active-project gates show
 no preparation spinner. Existing-session workspace pins remain immutable.
 
 ```

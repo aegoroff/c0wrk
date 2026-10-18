@@ -6,11 +6,10 @@ import { create } from 'zustand'
  * execution mode, the embedded local model's frontend surfaces (the
  * Settings → LLM block plus the model's entries in BOTH model pickers — the
  * default-model picker and the chat toolbar's ModelCombobox; backend RPCs stay
- * ungated), and the chat toolbar's branch/workspace picker
- * (`SessionWorkspaceSelector`) hidden for VISIBILITY only (its functionality
- * is untouched). It reads availability reactively so hiding/revealing
- * happens within the same session without a reload. Model Profiles is a
- * first-class feature and is NOT gated by this switch.
+ * ungated), and the General tab's Session Statistics settings block. The
+ * chat toolbar's branch/workspace picker (`SessionWorkspaceSelector`) is NOT
+ * gated — it renders regardless of this switch. Model Profiles is a
+ * first-class feature and is not gated either.
  *
  * This switch is the SOLE availability gate for E2S — there is no
  * per-feature config toggle. E2S availability is exactly `enabled`, which is

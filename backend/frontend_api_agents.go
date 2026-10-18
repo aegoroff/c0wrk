@@ -66,6 +66,16 @@ func (f *FrontendAPI) invalidateAgentCache() {
 	atomic.AddUint64(&f.agentCacheGen, 1)
 }
 
+// RefreshAgents forces a re-discovery of every Subagent Profile directory
+// and returns the fresh (hidden-excluded) descriptors — the manual path
+// behind the Capabilities tab's refresh button. Mirrors RefreshSkills: the
+// generation bump makes this call always re-scan, covering directories
+// created after startup that the watchers never see.
+func (f *FrontendAPI) RefreshAgents() []AgentDescriptorDTO {
+	f.invalidateAgentCache()
+	return f.ListAgents()
+}
+
 // startAgentsWatchers creates a debounced file watcher for each existing
 // Subagent Profile directory. When any change is detected the agent cache is
 // invalidated and an agents:changed event is emitted so the frontend

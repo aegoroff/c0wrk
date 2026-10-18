@@ -9,7 +9,8 @@ import { useModelProfilesGateStore } from '@/stores/modelProfilesGateStore'
  * Reads the Model Profiles gate (the `model_profiles.enabled` master toggle and the
  * `essential_tools_enabled` sub-toggle) from the shared store and keeps it in sync
  * with the backend's resolved config. This gate is independent of the
- * experimental-features switch, which controls only the E2S execution mode.
+ * experimental-features switch, which gates the E2S execution mode, the
+ * embedded local model's frontend surfaces and the Session Statistics block.
  * Unlike `useExperimentalFeatures` — whose Settings
  * writes the store directly — this store has NO direct writer, so the backend
  * events are the only way a runtime config change reaches it.

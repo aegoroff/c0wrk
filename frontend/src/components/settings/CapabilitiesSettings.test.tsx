@@ -3,14 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { CapabilitiesSettings } from './CapabilitiesSettings'
-import { listAgents } from '@/api/agents'
-import { listSkills } from '@/api/skills'
+import { listAgents, refreshAgents } from '@/api/agents'
+import { listSkills, refreshSkills } from '@/api/skills'
 import { getCapabilityModes, updateCapabilityModes } from '@/api/capabilities'
 import { logger } from '@/lib/logger'
 import type { CapabilitiesInfo } from '@/types/models'
 
-vi.mock('@/api/agents', () => ({ listAgents: vi.fn() }))
-vi.mock('@/api/skills', () => ({ listSkills: vi.fn() }))
+vi.mock('@/api/agents', () => ({ listAgents: vi.fn(), refreshAgents: vi.fn() }))
+vi.mock('@/api/skills', () => ({ listSkills: vi.fn(), refreshSkills: vi.fn() }))
 vi.mock('@/api/capabilities', () => ({ getCapabilityModes: vi.fn(), updateCapabilityModes: vi.fn(async () => undefined) }))
 // Scoped logger spy: the deliberately exercised failure paths below DO log
 // (the api wrapper and the component both report the failed load/save), and
@@ -41,6 +41,10 @@ beforeEach(async () => {
     { name: 'hidden-agent', description: 'ListAgents already excludes hidden profiles' },
   ])
   vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit discipline skill' }])
+  vi.mocked(refreshAgents).mockResolvedValue([
+    { name: 'code-reviewer', description: 'Reviews code changes' },
+  ])
+  vi.mocked(refreshSkills).mockResolvedValue([{ name: 'commit', description: 'Commit discipline skill' }])
   vi.mocked(getCapabilityModes).mockImplementation(async () => caps)
   vi.mocked(updateCapabilityModes).mockResolvedValue(undefined)
   container = document.createElement('div')
@@ -162,5 +166,71 @@ describe('CapabilitiesSettings', () => {
     })
     expect(container.textContent).toContain('No subagent profiles found.')
     expect(container.textContent).toContain('No skills found.')
+  })
+
+  it('re-discovers a catalog through its section refresh button, not a plain re-fetch', async () => {
+    vi.mocked(refreshAgents).mockResolvedValue([{ name: 'fresh-agent', description: 'Discovered on refresh' }])
+    const reloadAgents = container.querySelector<HTMLButtonElement>('[title="Reload subagents"]')
+    expect(reloadAgents).not.toBeNull()
+    await act(async () => { reloadAgents!.click() })
+    expect(refreshAgents).toHaveBeenCalledTimes(1)
+    // Only the initial mount used the cached list RPC — the button is a
+    // forced re-discovery, not a re-read of the backend cache.
+    expect(listAgents).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('fresh-agent')
+
+    vi.mocked(refreshSkills).mockResolvedValue([{ name: 'fresh-skill', description: 'Discovered on refresh' }])
+    await act(async () => { container.querySelector<HTMLButtonElement>('[title="Reload skills"]')!.click() })
+    expect(refreshSkills).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('fresh-skill')
+  })
+
+  it('disables only the refreshing section while its re-discovery is in flight', async () => {
+    let resolveRefresh!: (value: Awaited<ReturnType<typeof refreshAgents>>) => void
+    vi.mocked(refreshAgents).mockImplementation(() => new Promise((res) => { resolveRefresh = res }))
+    const reloadAgents = container.querySelector<HTMLButtonElement>('[title="Reload subagents"]')!
+    await act(async () => { reloadAgents.click() })
+    expect(reloadAgents.disabled).toBe(true)
+    expect(container.querySelector<HTMLButtonElement>('[title="Reload skills"]')!.disabled).toBe(false)
+    await act(async () => { resolveRefresh([{ name: 'code-reviewer', description: 'Reviews code changes' }]) })
+    expect(reloadAgents.disabled).toBe(false)
+  })
+
+  it('shows a failed re-discovery in the banner and re-enables the button', async () => {
+    vi.mocked(refreshSkills).mockRejectedValueOnce(new Error('refresh down'))
+    const reloadSkills = container.querySelector<HTMLButtonElement>('[title="Reload skills"]')!
+    await act(async () => { reloadSkills.click() })
+    expect(container.textContent).toContain('refresh down')
+    expect(reloadSkills.disabled).toBe(false)
+    // The previous catalog content survives a failed refresh.
+    expect(container.textContent).toContain('commit')
+  })
+
+  it('renders cards without catalog icons, with vertically stacked selectors and no explanation captions', () => {
+    // The catalog icons survive ONLY on the two section headers.
+    expect(container.querySelectorAll('svg.lucide-bot')).toHaveLength(1)
+    expect(container.querySelectorAll('svg.lucide-sparkles')).toHaveLength(1)
+    expect(container.querySelectorAll('svg.lucide-circle-off')).toHaveLength(0)
+    for (const name of ['code-reviewer', 'commit']) {
+      const card = trigger(name, 'chat').closest<HTMLElement>('div.rounded-lg')
+      expect(card).not.toBeNull()
+      expect(card!.querySelector('svg.lucide-bot, svg.lucide-sparkles, svg.lucide-circle-off')).toBeNull()
+      // CHAT stacked above CODE inside one vertical selector column.
+      const stack = trigger(name, 'chat').closest<HTMLElement>('div.flex-col')
+      expect(stack).not.toBeNull()
+      expect(stack!.contains(trigger(name, 'code'))).toBe(true)
+    }
+    // The per-context explanation captions stay MCP-only.
+    expect(container.textContent).not.toContain('Chat sessions:')
+    expect(container.textContent).not.toContain('Code sessions:')
+  })
+
+  it('labels the context selectors with uppercase CHAT/CODE captions', () => {
+    const chatLabel = trigger('code-reviewer', 'chat').previousElementSibling as HTMLElement
+    const codeLabel = trigger('code-reviewer', 'code').previousElementSibling as HTMLElement
+    expect(chatLabel.textContent).toBe('Chat')
+    expect(codeLabel.textContent).toBe('Code')
+    expect(chatLabel.classList.contains('uppercase')).toBe(true)
+    expect(codeLabel.classList.contains('uppercase')).toBe(true)
   })
 })

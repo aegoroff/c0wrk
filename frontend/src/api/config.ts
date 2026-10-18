@@ -317,8 +317,8 @@ export async function getModelProfiles(): Promise<ModelProfilesResponse> {
  * Toggle the manual-only Model Profiles master switch (config.yaml model_profiles.enabled).
  * The change is persisted and applied immediately. Model Profiles is a
  * first-class feature, independent of the experimental-features switch (which
- * gates the E2S execution mode and the embedded local model's frontend
- * surfaces).
+ * gates the E2S execution mode, the embedded local model's frontend surfaces
+ * and the Session Statistics block in Settings).
  */
 export async function setModelProfilesEnabled(enabled: boolean): Promise<void> {
   try {
@@ -382,8 +382,9 @@ export async function selectModelProfile(id: string): Promise<void> {
 
 /**
  * Toggle the experimental-features switch. The backend persists the change; the
- * switch gates the E2S execution mode and the embedded local model's frontend
- * surfaces (Model Profiles and RESEARCH are always available).
+ * switch gates the E2S execution mode, the embedded local model's frontend
+ * surfaces and the Session Statistics block in Settings (Model Profiles,
+ * RESEARCH and the worktree UI controls are always available).
  */
 export async function updateExperimentalFeatures(enabled: boolean): Promise<void> {
   try {
