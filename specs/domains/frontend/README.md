@@ -144,6 +144,13 @@ The former MCP settings tab is the **Capabilities** tab: three subsections in th
 - Mode state loads through `getCapabilityModes()`; a failed read leaves the selectors disabled rather than letting the UI write a half-known map (failing lists render, only mode editing is blocked).
 - The `/`-completion and send-path filters read the same modes keyed on the active session's context (`lib/capabilityModes.ts` + `lib/sessionKind.ts`): a capability is mentionable unless `disabled` in that context; an unknown session falls open to the active project's context.
 
+### Settings → General → Prompt Suggestions
+
+The **Prompt Suggestions** section sits directly after **System Notifications** and carries the ADR-088 master gate (`components/settings/PromptSuggestionsSettings.tsx`): when it is off, the backend never spawns a suggestion pass, so the chat input's ↑/↓/→ suggestion mode stays silent (the subsystem is fail-open — absence is unobservable on the chat path).
+
+- The value lives in backend config, not a frontend store: the section reads the effective gate through `getConfig().prompt_suggestions?.enabled` once on mount (a payload without the block reads as **on** — the backend's nil default = on; the backend reports `false` only for an explicit `enabled: false` or an unloaded config). The toggle stays disabled until that read answers.
+- Writes go through `setPromptSuggestionsEnabled` from `@/api/suggestions` (the subsystem's RPC module — the toggle rides the same bridge as the chat-input read path). The backend persists AND applies in one call (the session manager's outcome gate flips without a restart), so the UI updates optimistically and rolls back to the previous value when the RPC rejects — a rejected write persists nothing and flips nothing, leaving the previous value authoritative everywhere.
+
 ## Design System
 
 One Dark theme. All colors as Tailwind v4 `@theme` custom properties:

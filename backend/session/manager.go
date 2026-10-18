@@ -193,23 +193,25 @@ type Manager struct {
 	// session ID; value is a channel closed when the reservation is released.
 	// Guarded by mu. Waiters blocked here re-run their restore attempt from
 	// scratch once the window closes.
-	restoreParked       map[string]chan struct{}
-	mu                  sync.RWMutex
-	orchestratorFactory OrchestratorFactory
-	emitFunc            func(Event) // shared event emission callback
-	agentDir            string      // base agent directory (~/.c0wrk)
-	logLevel            string      // current log level for session loggers
-	tokenPersist        TokenPersistFunc
-	taskStore           TaskStore            // optional persistent task store
-	sessionStore        SessionStore         // optional persistent session store
-	projectStore        project.ProjectStore // optional persistent project store (project-scoped work dirs)
-	titleGen            *TitleGenerator      // optional title generator for auto-naming
-	envInfo             *sdktools.EnvInfo    // environment info for context injection
-	envInfoDone         chan struct{}        // closed when the background env-info collection finishes (WriteOnce)
-	envInfoOnce         sync.Once            // guards StartEnvInfoCollection against double-launch
-	stopTimeout         time.Duration        // how long to wait for goroutine on cancel/delete
-	maxSummaryLen       int                  // character limit for auto-generated step summaries
-	serviceLLMTimeout   time.Duration        // timeout for one-shot service LLM requests (session title); default 10m
+	restoreParked        map[string]chan struct{}
+	mu                   sync.RWMutex
+	orchestratorFactory  OrchestratorFactory
+	emitFunc             func(Event) // shared event emission callback
+	agentDir             string      // base agent directory (~/.c0wrk)
+	logLevel             string      // current log level for session loggers
+	tokenPersist         TokenPersistFunc
+	taskStore            TaskStore               // optional persistent task store
+	sessionStore         SessionStore            // optional persistent session store
+	projectStore         project.ProjectStore    // optional persistent project store (project-scoped work dirs)
+	titleGen             *TitleGenerator         // optional title generator for auto-naming
+	promptSuggestGen     *PromptSuggestGenerator // optional follow-up prompt suggestion generator (ADR-088)
+	promptSuggestEnabled bool                    // prompt_suggestions.enabled config gate; the feature defaults to on
+	envInfo              *sdktools.EnvInfo       // environment info for context injection
+	envInfoDone          chan struct{}           // closed when the background env-info collection finishes (WriteOnce)
+	envInfoOnce          sync.Once               // guards StartEnvInfoCollection against double-launch
+	stopTimeout          time.Duration           // how long to wait for goroutine on cancel/delete
+	maxSummaryLen        int                     // character limit for auto-generated step summaries
+	serviceLLMTimeout    time.Duration           // timeout for one-shot service LLM requests (session title); default 10m
 	// promoteRename is the fault-injection seam for MoveSessionStorage's
 	// renames; in-package tests assign it directly. nil = os.Rename.
 	promoteRename func(oldpath, newpath string) error
@@ -360,16 +362,17 @@ const slowShutdownWaitThreshold = 250 * time.Millisecond
 // NewManager creates a new session Manager.
 func NewManager(factory OrchestratorFactory, emitFunc func(Event), agentDir string) *Manager {
 	m := &Manager{
-		sessions:            make(map[string]*Session),
-		restoreInFlight:     make(map[string]chan struct{}),
-		restoreParked:       make(map[string]chan struct{}),
-		orchestratorFactory: factory,
-		emitFunc:            emitFunc,
-		agentDir:            agentDir,
-		logLevel:            "DEBUG",
-		stopTimeout:         10 * time.Second,
-		serviceLLMTimeout:   10 * time.Minute,
-		envInfoDone:         make(chan struct{}),
+		sessions:             make(map[string]*Session),
+		restoreInFlight:      make(map[string]chan struct{}),
+		restoreParked:        make(map[string]chan struct{}),
+		orchestratorFactory:  factory,
+		emitFunc:             emitFunc,
+		agentDir:             agentDir,
+		logLevel:             "DEBUG",
+		stopTimeout:          10 * time.Second,
+		serviceLLMTimeout:    10 * time.Minute,
+		promptSuggestEnabled: true, // prompt_suggestions.enabled: nil config = on
+		envInfoDone:          make(chan struct{}),
 	}
 	m.bg = newBackgroundTracker()
 	m.shutdownCtx, m.shutdownCancel = context.WithCancel(context.Background())

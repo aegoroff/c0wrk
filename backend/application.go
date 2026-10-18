@@ -433,6 +433,12 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 	app.titleGen = session.NewTitleGenerator(app.builder)
 	manager.SetTitleGenerator(app.titleGen)
 
+	// Prompt-suggestion generator (ADR-088), backed by the same builder. The
+	// prompt_suggestions.enabled gate (nil config = on) is applied at the
+	// manager's outcome gate: a disabled feature never spawns a pass.
+	manager.SetPromptSuggestionsGenerator(session.NewPromptSuggestGenerator(app.builder))
+	manager.SetPromptSuggestionsEnabled(cfg.Config.PromptSuggestions.SuggestionsEnabled())
+
 	return app, nil
 }
 

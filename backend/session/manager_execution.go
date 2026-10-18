@@ -2846,6 +2846,16 @@ func (m *Manager) emitTaskComplete(sessionID string, result *core.HandleResult, 
 	m.emitFunc(Event{SessionID: sessionID, Type: "task_complete", Data: data})
 	m.emitAgentMetrics(sessionID, completion)
 
+	// Prompt suggestions (ADR-088): one fail-open generation pass after a
+	// full or partial finish, on a tracked background goroutine. The gate
+	// reads the TYPED status — Cancelled and Paused share the "partial"
+	// completion string with degraded outcomes but finished nothing, so they
+	// never trigger. Guards (flag/generator/store) are checked before the
+	// goroutine spawns.
+	if promptSuggestOutcomeTriggers(result) {
+		m.maybeSpawnPromptSuggestions(sessionID, result)
+	}
+
 	// On a genuinely successful completion, NEVER offer a resume action — the
 	// result above is final. If the task that just ran is still marked
 	// unfinished, the completion write raced or was dropped; surface a

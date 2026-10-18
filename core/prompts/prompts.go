@@ -167,6 +167,22 @@ var RouterSystem string
 //go:embed goal_suggest.md
 var GoalSuggest string
 
+// Prompt-suggestion prompts (chat-input follow-up prompts; see
+// core/prompt_suggest.go and ADR-088). Both instruct the model to match the
+// dominant language of the supplied history and to answer with at most three
+// plain lines — one suggested prompt per line.
+//
+// PromptSuggestContinuation feeds goal_advance suggestions: keep driving an
+// active goal from the recent same-goal history. PromptSuggestNewSession
+// feeds next_task suggestions: the natural next task after a finished task,
+// from the recent project history.
+
+//go:embed prompt_suggest_continuation.md
+var PromptSuggestContinuation string
+
+//go:embed prompt_suggest_new_session.md
+var PromptSuggestNewSession string
+
 // Verification mandate — injected into tool-enabled system prompts
 
 //go:embed verification_mandate.md

@@ -1289,6 +1289,24 @@ orchestration:
 #     min_complexity: 2
 
 # ---------------------------------------------------------------------------
+# Prompt Suggestions
+# ---------------------------------------------------------------------------
+# Proactive follow-up prompts for the chat input: when a task finishes
+# successfully (full) or partially (partial), the backend generates a small
+# set of suggested next prompts and the input field offers them, navigated
+# with ↑/↓ and inserted with →. Two kinds — task follow-ups (next_task, a
+# window of the last 10 project sessions) and goal-advance prompts
+# (goal_advance, the just-finished session's transcript in v1). The whole
+# subsystem is fail-open: it can never delay, block, or break the chat path,
+# and a disabled feature costs zero LLM calls.
+#
+#   enabled (default true) — master gate; false opts out of generation
+#                            entirely (no pass, no LLM call, no event).
+#
+# prompt_suggestions:
+#   enabled: true
+
+# ---------------------------------------------------------------------------
 # Workspace Ignore Files (.gitignore / .aiignore)
 # ---------------------------------------------------------------------------
 # c0wrk respects repository ignore files to decide which files and directories

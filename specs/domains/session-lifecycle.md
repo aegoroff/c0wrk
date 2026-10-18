@@ -832,7 +832,7 @@ User types a message while paused → Send
           into the first resumed turn
 ```
 
-The nudge-resume path is how a user "steers" a paused agent: rather than starting a fresh task, the message resumes the paused one with the user's new input appended next to the pending tool result in the very first resumed LLM call. The nudge renders as a normal user message with a "Nudge" badge (see [frontend/rendering.md](frontend/rendering.md)).
+The nudge-resume path is how a user "steers" a paused agent: rather than starting a fresh task, the message resumes the paused one with the user's new input appended next to the pending tool result in the very first resumed LLM call. The nudge renders as a normal user message with a "Nudge" badge (see [frontend/rendering.md](frontend/rendering.md)). The `is_nudge` stamp these messages carry (like live-send interjections, below) also feeds the prompt-suggestions generation filter: nudge-marked messages never enter a suggestion window (see [prompt-suggestions.md](prompt-suggestions.md)).
 
 **Live-send (sending a message while a task is running):**
 
@@ -1461,4 +1461,5 @@ type HandleResult struct {
 - [memory/blackboard.md](memory/blackboard.md) — blackboard persistence
 - [../contracts/desktop-frontend.md](../contracts/desktop-frontend.md) — session RPC methods
 - [../contracts/event-catalog.md](../contracts/event-catalog.md) — task lifecycle events
+- [prompt-suggestions.md](prompt-suggestions.md) — proactive chat-input follow-ups generated after task outcomes `full`/`partial`; they consume this domain's `is_nudge` stamp and the task-finish outcome gate
 - [../decisions/030-session-context-restore.md](../decisions/030-session-context-restore.md) — saved-first restore, effective-activity semantics, archived exclusion, last-context startup restore

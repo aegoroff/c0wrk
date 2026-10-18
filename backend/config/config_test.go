@@ -2199,6 +2199,53 @@ goal_loop:
 	}
 }
 
+// TestPromptSuggestionsConfig_DefaultsOn verifies that the prompt-suggestion
+// gate defaults to ENABLED when the prompt_suggestions section is absent
+// (ADR-088 D9: fail-open and bounded, so the opt-out is the explicit choice).
+func TestPromptSuggestionsConfig_DefaultsOn(t *testing.T) {
+	content := securityGroupsTestBase
+	configPath := writeTestConfig(t, content)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if !cfg.PromptSuggestions.SuggestionsEnabled() {
+		t.Errorf("expected prompt_suggestions to default to enabled (nil pointer), got disabled")
+	}
+}
+
+// TestPromptSuggestionsConfig_ExplicitOff verifies that an explicit
+// prompt_suggestions.enabled: false disables the gate and survives a load
+// round-trip, and that an explicit true stays on.
+func TestPromptSuggestionsConfig_ExplicitOff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"explicit false", "false", false},
+		{"explicit true", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := securityGroupsTestBase + `
+prompt_suggestions:
+  enabled: ` + tc.val + `
+`
+			configPath := writeTestConfig(t, content)
+
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("Load() failed: %v", err)
+			}
+			if got := cfg.PromptSuggestions.SuggestionsEnabled(); got != tc.want {
+				t.Errorf("SuggestionsEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestGoalSuggestConfig_RejectsInvalidMinComplexity verifies that a
 // min_complexity outside [0,5] is a config error, not a silent clamp.
 func TestGoalSuggestConfig_RejectsInvalidMinComplexity(t *testing.T) {

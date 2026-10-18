@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useMemo } from 'react'
-import { EditorView, placeholder } from '@codemirror/view'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorView, placeholder, keymap } from '@codemirror/view'
+import { EditorState, Compartment, type Extension } from '@codemirror/state'
+import { completionStatus } from '@codemirror/autocomplete'
 import { createChatExtensions } from '@/lib/cmChatExtensions'
 import { createChatEditorTheme } from '@/lib/cmChatTheme'
 import { useThemeStore, selectActiveThemeType, selectActiveThemeId } from '@/stores/themeStore'
@@ -39,6 +40,47 @@ export function shouldFastPathPaste(data: DataTransfer): boolean {
   return true
 }
 
+/** The prompt-suggestion keyboard action a keydown encodes. */
+export type ChatSuggestionNavAction = 'up' | 'down' | 'insert'
+
+/**
+ * Keymap for the prompt-suggestion hint (ADR-088) while the input is EMPTY:
+ * bare ArrowUp/ArrowDown browse the store's selection, ArrowRight inserts the
+ * previewed row's text as real editor content — never a send.
+ *
+ * Chord routing is structural, not guarded: CodeMirror resolves a keydown's
+ * key NAME with modifier prefixes (Alt-/Ctrl-/Meta-/Shift-), so these bare
+ * 'Arrow*' bindings only ever match the unmodified chords — Shift+Arrow
+ * (selection), Mod/Alt+Arrow (word/bookmark motion) land under different
+ * names and are never ours. Key events during an active IME composition are
+ * dropped upstream by CodeMirror itself (InputState.ignoreDuringComposition —
+ * key handlers don't run while composing), so `run` — which receives only
+ * the view — needs no composition check either. The guards that remain here
+ * each fall through to CodeMirror's default bindings (return false):
+ *  - an active autocomplete popup (its own keymap owns the arrows);
+ *  - a non-empty document (interception ONLY while the input is empty — with
+ *    content, arrows move the caret exactly as before).
+ *
+ * The handler is ref-held: the keymap is created once at mount, while the
+ * controller re-arms it every render against the live promptSuggestionsStore
+ * state. It must be included BEFORE createChatExtensions' keymaps (earlier
+ * extensions win at equal precedence) so a consumed arrow never reaches the
+ * default cursor bindings.
+ */
+export function createSuggestionNavKeymap(
+  onNav: { current: ((action: ChatSuggestionNavAction) => boolean) | null },
+): Extension {
+  const bind = (key: 'ArrowUp' | 'ArrowDown' | 'ArrowRight', action: ChatSuggestionNavAction) => ({
+    key,
+    run: (view: EditorView): boolean => {
+      if (completionStatus(view.state) !== null) return false
+      if (view.state.doc.length !== 0) return false
+      return onNav.current?.(action) ?? false
+    },
+  })
+  return keymap.of([bind('ArrowUp', 'up'), bind('ArrowDown', 'down'), bind('ArrowRight', 'insert')])
+}
+
 interface UseChatEditorOptions {
   disabled: boolean
   placeholder: string
@@ -61,6 +103,13 @@ interface UseChatEditorOptions {
    *  backend paste, staging); the editor extension does not fall back to the
    *  native paste for non-fast-path events, so the handler owns the UX. */
   onPaste?: (data: DataTransfer) => Promise<void>
+  /** Prompt-suggestion navigation, consulted for the BARE ArrowUp/ArrowDown/
+   *  ArrowRight while the document is empty and no autocomplete popup is
+   *  active (see createSuggestionNavKeymap). Return true to consume the
+   *  keydown (preventDefault); false falls through to CodeMirror's default
+   *  bindings. The controller arms it only while the active session's
+   *  suggestion set is non-empty. */
+  onSuggestionNav?: (action: ChatSuggestionNavAction) => boolean
 }
 
 export interface ChatEditorAPI {
@@ -83,6 +132,10 @@ export function useChatEditor(options: UseChatEditorOptions): ChatEditorAPI {
   const onSendRef = useRef<(() => void) | null>(options.onSend)
   const onContentChangeRef = useRef(options.onContentChange)
   const onPasteRef = useRef<((data: DataTransfer) => Promise<void>) | null>(options.onPaste)
+  // Suggestion-nav handler is ref-held for the same mount-once keymap reason:
+  // createSuggestionNavKeymap is baked into the editor state at mount, while
+  // the controller re-arms (or disarms) the handler every render.
+  const onSuggestionNavRef = useRef<((action: ChatSuggestionNavAction) => boolean) | null>(null)
   const editableComp = useRef(new Compartment())
   const placeholderComp = useRef(new Compartment())
   const themeCompartment = useRef(new Compartment())
@@ -99,6 +152,7 @@ export function useChatEditor(options: UseChatEditorOptions): ChatEditorAPI {
   onSendRef.current = options.onSend
   onContentChangeRef.current = options.onContentChange
   onPasteRef.current = options.onPaste
+  onSuggestionNavRef.current = options.onSuggestionNav ?? null
 
   // Create the editor on mount.
   useEffect(() => {
@@ -112,6 +166,13 @@ export function useChatEditor(options: UseChatEditorOptions): ChatEditorAPI {
       extensions: [
         editableComp.current.of(EditorView.editable.of(!options.disabled)),
         placeholderComp.current.of(placeholder(options.placeholder)),
+        // The suggestion-nav keymap rides BEFORE createChatExtensions' keymaps
+        // (earlier extensions win at equal precedence) so a consumed arrow
+        // never reaches the default cursor bindings. Its own guards defer to
+        // active autocompletion and — crucially — any non-empty document;
+        // modifier chords and IME composition never reach it at all (CM's
+        // key-name resolution and InputState composition handling).
+        createSuggestionNavKeymap(onSuggestionNavRef),
         ...extensions,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {

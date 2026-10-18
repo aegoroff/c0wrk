@@ -523,6 +523,38 @@ export interface E2SStateData {
   readonly patch?: boolean
 }
 
+// --- Prompt suggestions payloads (ADR-088) ---
+
+/** One proactive prompt-suggestion row. Mirrors the backend
+ *  session.PromptSuggestion struct (snake_case JSON keys) — both the
+ *  `prompt_suggestions` session event and the GetPromptSuggestions RPC
+ *  carry it. `kind` is `next_task` (follow-up prompts after a completed
+ *  task) or `goal_advance` (prompts for advancing an active goal); `status`
+ *  is a backend SuggestionStatus value (`active` rows are the offered set).
+ *  In a `new_session`-sourced set `session_id` names the ORIGINATING
+ *  session, not the addressed one — consumers key nothing off it. */
+export interface PromptSuggestionRow {
+  readonly id: string
+  readonly session_id: string
+  /** Triggering task id ('' for session-level rows). */
+  readonly task_id: string
+  readonly kind: string
+  readonly text: string
+  readonly status: string
+  /** RFC 3339 timestamp of the generation. */
+  readonly created_at: string
+}
+
+/** Payload of the `prompt_suggestions` session event: the session's FULL
+ *  active set as persisted (BOTH kinds) — replacement semantics, the
+ *  frontend replaces its displayed set outright. Emitted after a generation
+ *  pass persists a non-empty set. Transient (not persisted): the durable
+ *  source is the store's active set, restored via GetPromptSuggestions. */
+export interface PromptSuggestionsData {
+  readonly session_id: string
+  readonly suggestions: readonly PromptSuggestionRow[]
+}
+
 // --- Tool manager event payloads ---
 
 export interface ToolManagerToolInfo { readonly name: string; readonly version: string }
@@ -627,6 +659,11 @@ export interface SessionEventMap {
   /** E2S execution-state snapshot (Σₜ): emitted per step/turn transition; the
    *  Execution State panel replaces the plan view for E2S sessions. */
   readonly e2s_state: E2SStateData
+  /** Proactive follow-up prompt suggestions (ADR-088): the session's FULL
+   *  active set (both kinds) after a generation pass — the consumer replaces
+   *  its set outright. Consumed by the prompt-suggestions sync hook, which
+   *  refetches via GetPromptSuggestions so the backend re-routes by content. */
+  readonly prompt_suggestions: PromptSuggestionsData
   /** Attachment list + optional per-file failures. Replace the store, toast failures. */
   readonly 'attachments:changed': AttachmentsChangedData
 }
@@ -1559,6 +1596,30 @@ export function isE2SStateData(d: unknown): d is E2SStateData {
   if (d.status !== undefined && typeof d.status !== 'string') return false
   if (d.patch !== undefined && typeof d.patch !== 'boolean') return false
   return true
+}
+
+/** Element guard for one prompt-suggestion row ({id, session_id, task_id,
+ *  kind, text, status, created_at}) — every field is consumed directly by the
+ *  suggestions popup. */
+export function isPromptSuggestionRow(v: unknown): v is PromptSuggestionRow {
+  return isObj(v)
+    && typeof v.id === 'string'
+    && typeof v.session_id === 'string'
+    && typeof v.task_id === 'string'
+    && typeof v.kind === 'string'
+    && typeof v.text === 'string'
+    && typeof v.status === 'string'
+    && typeof v.created_at === 'string'
+}
+
+/** Guard for a `prompt_suggestions` payload: the emitting session id plus its
+ *  full active set (both kinds). An invalid payload is dropped at the
+ *  boundary (reportDroppedEvent) — it must never reach the suggestions store. */
+export function isPromptSuggestionsData(d: unknown): d is PromptSuggestionsData {
+  if (!isObj(d)) return false
+  if (typeof d.session_id !== 'string') return false
+  if (!Array.isArray(d.suggestions)) return false
+  return d.suggestions.every((row) => isPromptSuggestionRow(row))
 }
 
 // --- Global event type guards ---
