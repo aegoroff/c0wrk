@@ -18,7 +18,8 @@ Defines the `capabilities:` config section that gives every mentionable capabili
 - `core/orchestrator_capabilities.go` — per-entry snapshot attachment (`attachCapabilitySnapshots`) and the mention filters (`mentionedSkillsForTask` / `mentionedAgentsForTask`)
 - `frontend/src/lib/capabilityModes.ts` — mentionable predicates shared by `/`-completion and the send path (`isMentionableInContext`, `mentionableNamesInContext`, `sessionKindFromProjectId`)
 - `frontend/src/lib/sessionKind.ts` — frontend session-kind resolution (`sessionKindForSession`, `activeSessionKind`)
-- `frontend/src/components/settings/CapabilitiesSettings.tsx` — the Settings → Capabilities surface (Subagents → MCP Servers → Skills)
+- `backend/frontend_api_skills.go` / `backend/frontend_api_agents.go` — `ListSkills`/`ListAgents` catalog reads (a watcher/project-switch-invalidated cache) and the `RefreshSkills`/`RefreshAgents` manual re-discovery RPCs: a cache-generation bump + re-read, so every refresh call re-scans the skill/agent directories (watchers never see directories created after startup)
+- `frontend/src/components/settings/CapabilitiesSettings.tsx` — the Settings → Capabilities surface (Subagents → MCP Servers → Skills); the Subagents/Skills headers carry MCP-style reload buttons wired to the refresh RPCs
 
 ## Behavior
 

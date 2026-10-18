@@ -111,6 +111,49 @@ func TestStartSkillsWatchers_InvalidatesCacheOnChange(t *testing.T) {
 	}
 }
 
+// TestRefreshSkills_ForcesRediscovery verifies that RefreshSkills bypasses
+// the skill cache: every call re-invokes GetSkillDescriptors and returns the
+// fresh catalog even when no watcher fired — the manual re-discovery path
+// behind the Capabilities tab's refresh button.
+func TestRefreshSkills_ForcesRediscovery(t *testing.T) {
+	mock := &mockBuilder{
+		getSkillDescriptorsRes: []skills.SkillDescriptor{
+			{Name: "my-skill", Description: "A test skill."},
+		},
+	}
+	f := &FrontendAPI{emitEvent: func(string, ...any) {}}
+	f.builderOverride = mock
+
+	if got := f.ListSkills(); len(got) != 1 || got[0].Name != "my-skill" {
+		t.Fatalf("ListSkills initial: got %v", got)
+	}
+	// A plain second ListSkills is served from the cache.
+	if got := f.ListSkills(); len(got) != 1 {
+		t.Fatalf("ListSkills cached: got %v", got)
+	}
+	if mock.getSkillDescriptorsCalls != 1 {
+		t.Fatalf("expected 1 GetSkillDescriptors call after cached reload, got %d", mock.getSkillDescriptorsCalls)
+	}
+
+	// A skill appears on disk (no watcher for it); RefreshSkills must see it.
+	mock.getSkillDescriptorsRes = append(mock.getSkillDescriptorsRes,
+		skills.SkillDescriptor{Name: "new-skill", Description: "Created after startup."})
+	fresh := f.RefreshSkills()
+	if mock.getSkillDescriptorsCalls != 2 {
+		t.Fatalf("expected RefreshSkills to re-scan (2 GetSkillDescriptors calls), got %d", mock.getSkillDescriptorsCalls)
+	}
+	if len(fresh) != 2 || fresh[1].Name != "new-skill" {
+		t.Fatalf("RefreshSkills: got %v", fresh)
+	}
+	// The re-scan result replaces the cache: the next ListSkills is fresh too.
+	if got := f.ListSkills(); len(got) != 2 || got[1].Name != "new-skill" {
+		t.Fatalf("ListSkills after refresh: got %v", got)
+	}
+	if mock.getSkillDescriptorsCalls != 2 {
+		t.Fatalf("expected the refresh result to be cached (still 2 calls), got %d", mock.getSkillDescriptorsCalls)
+	}
+}
+
 // TestCloseSkillsWatchers_Idempotent verifies that closeSkillsWatchers can be
 // called multiple times safely.
 func TestCloseSkillsWatchers_Idempotent(t *testing.T) {

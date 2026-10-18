@@ -160,11 +160,23 @@ async function flush(): Promise<void> {
   })
 }
 
-async function render(): Promise<void> {
+async function render(opts: { collapsed?: boolean } = {}): Promise<void> {
   await act(async () => {
     root.render(<EmbeddedLLMSettings />)
   })
   await flush()
+  // The block ships in a collapsed-by-default collapsible shell; every
+  // pre-existing test exercises the content, so the default path opens the
+  // shell first. An installing snapshot auto-expands the shell on its own
+  // (the effect), so the click only fires when it is still closed. The shell
+  // tests below pass { collapsed: true } to see the closed state.
+  if (!opts.collapsed) {
+    const toggle = q('embedded-llm-toggle')
+    if (toggle?.getAttribute('aria-expanded') === 'false') {
+      click(toggle)
+      await flush()
+    }
+  }
 }
 
 /** Query inside the block. */
@@ -1056,5 +1068,52 @@ describe('EmbeddedLLMSettings — the install copy describes the real gate', () 
     })
     await flush()
     expect(q('embedded-llm-install-hint')?.textContent).not.toContain('Reading the installed state')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('EmbeddedLLMSettings — the collapsible shell', () => {
+  it('mounts collapsed: only the header is visible until it is clicked', async () => {
+    await render({ collapsed: true })
+
+    const toggle = q('embedded-llm-toggle')
+    expect(toggle).not.toBeNull()
+    expect(toggle!.getAttribute('aria-expanded')).toBe('false')
+    expect(toggle!.textContent).toContain('Embedded LLM')
+
+    // The content is not mounted while collapsed.
+    expect(q('embedded-llm-install')).toBeNull()
+    expect(container.textContent).not.toContain('Run the pinned Bonsai 2 27B model')
+  })
+
+  it('expands on the header click and collapses back', async () => {
+    await render({ collapsed: true })
+
+    click(q('embedded-llm-toggle'))
+    await flush()
+
+    expect(q('embedded-llm-toggle')!.getAttribute('aria-expanded')).toBe('true')
+    // The Install action of the not-installed machine is now mounted.
+    expect(q('embedded-llm-install')).not.toBeNull()
+
+    click(q('embedded-llm-toggle'))
+    await flush()
+
+    expect(q('embedded-llm-toggle')!.getAttribute('aria-expanded')).toBe('false')
+    expect(q('embedded-llm-install')).toBeNull()
+  })
+
+  it('expands itself while an install is in flight, including on mount', async () => {
+    // Mount onto a machine that is mid-install: the first status read answers
+    // installing=true, which must open the shell without a click (reopening
+    // the dialog mid-download reveals the progress surface and its Cancel).
+    mocks.getEmbeddedLLMStatus.mockResolvedValue(
+      makeStatus({ state: 'installing', installing: true }),
+    )
+    await render({ collapsed: true })
+
+    expect(q('embedded-llm-toggle')!.getAttribute('aria-expanded')).toBe('true')
+    expect(q('embedded-llm-progress')).not.toBeNull()
   })
 })

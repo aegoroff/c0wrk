@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, Bot, Sparkles } from 'lucide-react'
-import { listAgents } from '@/api/agents'
-import { listSkills } from '@/api/skills'
+import { AlertCircle, Bot, RefreshCw, Sparkles } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { listAgents, refreshAgents } from '@/api/agents'
+import { listSkills, refreshSkills } from '@/api/skills'
 import { getCapabilityModes, updateCapabilityModes } from '@/api/capabilities'
 import { logger } from '@/lib/logger'
 import { CapabilityCard } from './CapabilityCard'
@@ -13,8 +14,10 @@ import type { AgentDescriptor, CapabilitiesInfo, CapabilityModes, CapabilitySect
  * the agent can reach, in three subsections — Subagents, MCP Servers,
  * Skills. MCP Servers keeps its full management surface (add/edit/delete +
  * live status); profiles and skills are view-only catalogs whose mode
- * selectors persist through the capabilities RPC. Hidden agent profiles
- * never appear here because ListAgents already excludes them.
+ * selectors persist through the capabilities RPC. Each catalog section
+ * carries an MCP-style reload button whose RPC forces the backend to
+ * re-discover the directories. Hidden agent profiles never appear here
+ * because ListAgents already excludes them.
  */
 export function CapabilitiesSettings() {
   const [agents, setAgents] = useState<AgentDescriptor[]>([])
@@ -25,6 +28,9 @@ export function CapabilitiesSettings() {
   const [caps, setCaps] = useState<CapabilitiesInfo | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  // Per-section manual re-discovery state: each refresh button only blocks
+  // its own section's button.
+  const [isRefreshing, setIsRefreshing] = useState({ agents: false, skills: false })
   const savingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -87,6 +93,27 @@ export function CapabilitiesSettings() {
     }
   }
 
+  // Manual re-discovery for one catalog: the refresh RPC invalidates the
+  // backend's catalog cache and re-scans the skill/agent directories (the
+  // watchers keep the lists fresh otherwise, but directories created after
+  // startup are never watched). Only the rendered list is swapped — the
+  // capabilities modes map is untouched; a stale entry for a name the
+  // re-discovery dropped is trimmed server-side on the next mode write.
+  const handleRefresh = async (section: 'agents' | 'skills') => {
+    if (isRefreshing[section]) return
+    setIsRefreshing((prev) => ({ ...prev, [section]: true }))
+    setError(null)
+    try {
+      const fresh = section === 'agents' ? await refreshAgents() : await refreshSkills()
+      if (section === 'agents') setAgents(fresh)
+      else setSkills(fresh)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsRefreshing((prev) => ({ ...prev, [section]: false }))
+    }
+  }
+
   if (isLoading) return <div className="flex items-center justify-center py-8"><span className="text-sm text-muted-foreground">Loading capabilities...</span></div>
 
   const sectionDisabled = isSaving || !caps
@@ -98,11 +125,14 @@ export function CapabilitiesSettings() {
       <CapabilitySection
         icon={<Bot className="h-4 w-4 text-muted-foreground" />}
         title="Subagents"
+        refreshTitle="Reload subagents"
         emptyText="No subagent profiles found."
         entries={agents.map((a) => ({ name: a.name, description: a.description }))}
         section="agents"
         modes={caps?.agents ?? {}}
         disabled={sectionDisabled}
+        isRefreshing={isRefreshing.agents}
+        onRefresh={() => { void handleRefresh('agents') }}
         onModeChange={(name, context, mode) => { void handleModeChange('agents', name, context, mode) }}
       />
 
@@ -111,36 +141,46 @@ export function CapabilitiesSettings() {
       <CapabilitySection
         icon={<Sparkles className="h-4 w-4 text-muted-foreground" />}
         title="Skills"
+        refreshTitle="Reload skills"
         emptyText="No skills found."
         entries={skills.map((s) => ({ name: s.name, description: s.description }))}
         section="skills"
         modes={caps?.skills ?? {}}
         disabled={sectionDisabled}
+        isRefreshing={isRefreshing.skills}
+        onRefresh={() => { void handleRefresh('skills') }}
         onModeChange={(name, context, mode) => { void handleModeChange('skills', name, context, mode) }}
       />
     </div>
   )
 }
 
-function CapabilitySection({ icon, title, emptyText, entries, section, modes, disabled, onModeChange }: {
+function CapabilitySection({ icon, title, refreshTitle, emptyText, entries, section, modes, disabled, isRefreshing, onRefresh, onModeChange }: {
   icon: React.ReactNode
   title: string
+  refreshTitle: string
   emptyText: string
   entries: Array<{ name: string; description: string }>
   section: Exclude<CapabilitySection, 'mcp'>
   modes: Record<string, CapabilityModes>
   disabled: boolean
+  isRefreshing: boolean
+  onRefresh: () => void
   onModeChange: (name: string, context: 'chat' | 'code', mode: MCPServerMode) => void
 }) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">{icon}<span className="text-sm font-medium">{title}</span></div>
+      {/* Section header mirrors the MCP section's: title left, the reload
+          button right — the manual re-discovery trigger for this catalog. */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">{icon}<span className="text-sm font-medium">{title}</span></div>
+        <Button variant="outline" size="sm" title={refreshTitle} onClick={onRefresh} disabled={isRefreshing}><RefreshCw className="h-3 w-3" /></Button>
+      </div>
       {entries.length === 0
         ? <div className="text-sm text-muted-foreground py-4 text-center">{emptyText}</div>
         : <div className="space-y-2">{entries.map((e) => (
             <CapabilityCard
               key={`${section}:${e.name}`}
-              icon={section === 'agents' ? 'agent' : 'skill'}
               name={e.name}
               description={e.description}
               modes={modes[e.name] ?? { chat_mode: 'auto', code_mode: 'auto' }}

@@ -11,7 +11,6 @@ import { useProjectStore, selectIsNoProject } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
-import { useExperimentalStore } from '@/stores/experimentalStore'
 import { WorktreePreparingIndicator } from './WorktreePreparingIndicator'
 
 /**
@@ -39,11 +38,11 @@ import { WorktreePreparingIndicator } from './WorktreePreparingIndicator'
  *   while the pin never does, so the chip stays disabled across chat
  *   continuations for the session's whole lifetime.
  *
- * The whole picker/display is an EXPERIMENTAL surface behind the master
- * experimental switch (`experimental.enabled`): it renders nothing while that
- * switch is off. This is a VISIBILITY gate only — the underlying
- * draft/pinned-workspace functionality is untouched, and the hooks run before
- * the early return so draft retirement still works while hidden.
+ * The whole picker/display is a first-class surface: it renders regardless of
+ * the master experimental switch (`experimental.enabled` — which gates the E2S
+ * execution mode, the embedded model's frontend surfaces, and the Session
+ * Statistics settings block, none of them this control). Only the ordinary
+ * visibility conditions below apply.
  *
  * Hidden entirely in CHAT (No Project) mode and while no project is active.
  */
@@ -60,11 +59,6 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
   const isGitRepo = useGitPanelStore(
     (s) => s.isGitRepo && s.gitRepoProjectId === activeProjectId,
   )
-  // The master experimental switch — this picker/display is an experimental
-  // surface, so it stays invisible in default installs (read reactively, so
-  // flipping the switch in Settings reveals it without a reload). Read from
-  // the store directly (no config fetch side effect here).
-  const experimentalEnabled = useExperimentalStore((s) => s.enabled)
   // Accessible-description target for the pinned-workspace chip's reason
   // (see the aria-describedby note below). Declared before the early returns.
   const reasonId = useId()
@@ -82,11 +76,6 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
       clearDraft()
     }
   }, [activeSessionId, activeProjectId])
-
-  // Experimental gate (visibility only): hide the picker/display while the
-  // master switch is off. Placed after the hooks above so draft retirement
-  // keeps running even when the control is hidden.
-  if (!experimentalEnabled) return null
 
   if (activeProjectId === null || isNoProject) return null
 

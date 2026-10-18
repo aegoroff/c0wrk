@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
 import { ModelPickerMenu } from '@/components/ui/ModelPickerMenu'
 import { FixedProviderForms } from './providers/FixedProviderForms'
-import { OpenAICompatibleProviderForms } from './providers/OpenAICompatibleProviderForms'
+import { CompatibleProviderGroup } from './providers/CompatibleProviderGroup'
 import { EmbeddedLLMSettings } from './EmbeddedLLMSettings'
 
 // ---------------------------------------------------------------------------
@@ -229,9 +229,10 @@ export function LLMSettings({
       </div>
 
       {/* Embedded LLM — the pinned local model's whole lifecycle (install,
-          per-component progress, remove, load/unload, auto unload). It LEADS
-          the provider section: running fully local is the primary offering, so
-          the block sits directly under the default-model field. Gated by the
+          per-component progress, remove, load/unload, auto unload) inside a
+          collapsed-by-default collapsible shell. It LEADS the provider
+          section: running fully local is the primary offering, so the block
+          sits directly under the default-model field. Gated by the
           experimental switch (frontend-only gate): with the switch off the
           block is not mounted and the model's entries stay out of the
           default-model picker above. */}
@@ -358,8 +359,11 @@ export function LLMSettings({
         autoRetryMaxSeconds={autoRetryMaxSeconds}
       />
 
-      {/* OpenAI-Compatible Provider Accordions */}
-      <OpenAICompatibleProviderForms
+      {/* Compatible provider groups — each transport type gathered under one
+          heading; an accordion's label is just the provider name. An empty
+          group (no providers of that transport yet) renders no heading. */}
+      <CompatibleProviderGroup
+        heading="OpenAI-compatible providers"
         providerNames={openaiCompatibleProviderNames}
         providerConfigs={providerConfigs}
         expandedProviders={expandedProviders}
@@ -369,11 +373,10 @@ export function LLMSettings({
         onDelete={deleteProvider}
         defaultModel={defaultModel}
         autoRetryMaxSeconds={autoRetryMaxSeconds}
-        labelPrefix="OpenAI Compatible"
       />
 
-      {/* Anthropic-Compatible Provider Accordions */}
-      <OpenAICompatibleProviderForms
+      <CompatibleProviderGroup
+        heading="Anthropic-compatible providers"
         providerNames={anthropicCompatibleProviderNames}
         providerConfigs={providerConfigs}
         expandedProviders={expandedProviders}
@@ -383,7 +386,6 @@ export function LLMSettings({
         onDelete={deleteProvider}
         defaultModel={defaultModel}
         autoRetryMaxSeconds={autoRetryMaxSeconds}
-        labelPrefix="Anthropic Compatible"
       />
     </div>
   )

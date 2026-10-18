@@ -218,3 +218,23 @@ describe('SearchSettings — explicit-commit debounced save', () => {
     expect(spies.updateSearchSettings).not.toHaveBeenCalled()
   })
 })
+
+describe('SearchSettings — section heading', () => {
+  it('renders the picker under the shared section heading: Globe icon + Web Search Provider', async () => {
+    await renderSearchSettings({ provider: 'tavily', api_key: '' })
+
+    const heading = [...container.querySelectorAll('label')].find((el) =>
+      (el.textContent ?? '').includes('Web Search Provider'),
+    )
+    expect(heading).toBeTruthy()
+    // Shared settings-heading idiom — a muted lucide icon next to
+    // text-sm font-medium text (see "Default Model" in LLMSettings and
+    // the section headers in SettingsModal; the Globe is the same web
+    // glyph "HTTP Proxy" carries). The old variant was a bare
+    // text-xs text-muted-foreground label with no icon.
+    expect(heading!.querySelector('svg.lucide-globe')).not.toBeNull()
+    expect(heading!.className).toContain('flex items-center gap-2')
+    expect(heading!.className).toContain('text-sm font-medium')
+    expect(heading!.className).not.toContain('text-xs')
+  })
+})

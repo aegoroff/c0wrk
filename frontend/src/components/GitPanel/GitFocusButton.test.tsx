@@ -48,9 +48,6 @@ beforeEach(() => {
   focusMocks.focusSessionWorkspace.mockReset()
   focusMocks.focusSessionWorkspace.mockResolvedValue(true)
   useGitPanelStore.getState().reset()
-  // Default the experimental gate ON so the existing cases exercise the
-  // button itself; the gate-off case flips it off explicitly.
-  useExperimentalStore.setState({ enabled: true })
 })
 
 afterEach(() => {
@@ -119,9 +116,10 @@ describe('GitFocusButton', () => {
     expect(focusSessionWorkspace).toHaveBeenCalledTimes(1)
   })
 
-  it('renders nothing while the experimental gate is off (visibility-only gate)', () => {
-    // The crosshair is an experimental surface: with the master switch off it
-    // must render nothing, though the focus functionality stays intact.
+  it('renders (and works) regardless of the experimental gate', () => {
+    // The crosshair is a first-class surface: the master experimental switch
+    // does not hide it. Pin the button visible and clickable with the gate
+    // OFF (the case that used to render nothing).
     useExperimentalStore.setState({ enabled: false })
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -131,6 +129,8 @@ describe('GitFocusButton', () => {
       r.render(<GitFocusButton />)
     })
 
-    expect(container.querySelector('[data-testid="git-focus-button"]')).toBeNull()
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="git-focus-button"]')
+    expect(button).not.toBeNull()
+    expect(button!.getAttribute('title')).toBe('Focus the Git panel on the current session')
   })
 })
