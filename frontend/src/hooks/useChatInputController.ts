@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useChatStore } from '@/stores/chatStore'
@@ -14,7 +14,14 @@ import { sessionKindForSession } from '@/lib/sessionKind'
 import { resolveUnfinishedStatus } from '@/lib/activeSessions'
 import { optimizePrompt } from '@/api/prompt'
 import { pauseSession, resumeSession } from '@/api/chat'
-import { computeChatInputDisabled, computeSuggestionPlaceholder, isChatSessionIdle } from '@/lib/chatInputLock'
+import {
+  buildSuggestionPlaceholderNode,
+  computeChatInputDisabled,
+  computeChatPlaceholder,
+  isChatSessionIdle,
+  isSuggestionPlaceholderActive,
+  suggestionPreviewText,
+} from '@/lib/chatInputLock'
 import { usePromptSuggestions, usePromptSelectedIndex, usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
 import { usePromptSuggestionsSync } from '@/hooks/usePromptSuggestionsSync'
 import { createSessionFromDraft } from '@/lib/sessionDraft'
@@ -185,14 +192,34 @@ export function useChatInputController(): ChatInputController {
   const showCancel = taskActive || paused || isProcessing || compacting
 
   // Prompt suggestions (ADR-088): the store's single-slot snapshot, keyed to
-  // the active session (selectors return the stable empty set / -1 while the
-  // store still holds another session's snapshot). A non-empty set in the
-  // idle state takes over the placeholder (the multi-line browse hint); the
-  // refs feed the arrow keymap below.
-  const suggestions = usePromptSuggestions(activeSessionId)
-  const selectedIndex = usePromptSelectedIndex(activeSessionId)
+  // the active session — or, while a CODE project's New-Session draft is
+  // armed (no session row), to the DRAFT surface under the empty key: the
+  // project's new_session set (see usePromptSuggestionsSync). Selectors
+  // return the stable empty set / -1 while the store still holds another
+  // context's snapshot. A non-empty set in the idle state takes over the
+  // placeholder (the multi-line browse hint); the refs feed the arrow keymap
+  // below.
+  const suggestionKey = activeSessionId ?? ''
+  const suggestions = usePromptSuggestions(suggestionKey)
+  const selectedIndex = usePromptSelectedIndex(suggestionKey)
 
-  const placeholderText = computeSuggestionPlaceholder(lockInput, suggestions, selectedIndex)
+  // The placeholder: the plain state matrix, or — in the idle state with a
+  // non-empty suggestion set — the prompt-suggestion hint surface as a DOM
+  // node (previewed row, a blank-line separator, the italic usage hints). The
+  // CM placeholder compartment reconfigures on options.placeholder IDENTITY
+  // (string value / node identity), so the node is memoized on the PRIMITIVE
+  // inputs below — a fresh node every render would dispatch a reconfigure on
+  // every render.
+  const suggestionPreview = isSuggestionPlaceholderActive(lockInput, suggestions)
+    ? (suggestionPreviewText(suggestions, selectedIndex) ?? '')
+    : null
+  const placeholder = useMemo(
+    () =>
+      suggestionPreview !== null
+        ? buildSuggestionPlaceholderNode(suggestionPreview)
+        : computeChatPlaceholder({ taskActive, paused, pausing, isNoProject, compacting }),
+    [suggestionPreview, taskActive, paused, pausing, isNoProject, compacting],
+  )
 
   // The editor needs a stable onSend reference, but handleSend captures the
   // editor itself. We resolve the cycle by holding the latest handleSend in a
@@ -218,7 +245,7 @@ export function useChatInputController(): ChatInputController {
 
   const editor = useChatEditor({
     disabled: isInputDisabled,
-    placeholder: placeholderText,
+    placeholder,
     // Mount-only initial document: the stored draft of the (freshly) active
     // session. The draft-swap layout effect covers subsequent switches, but
     // on mount it runs before the editor view exists — initialText makes the
@@ -237,8 +264,9 @@ export function useChatInputController(): ChatInputController {
   })
 
   // Suggestion keyboard navigation (ADR-088): armed only while the ACTIVE
-  // session's suggestion set is non-empty AND the session is in the same
-  // idle state whose placeholder carries the browse hint — the keys do
+  // context's suggestion set (the active session's, or the armed draft's
+  // project surface) is non-empty AND the input is in the same idle state
+  // whose placeholder carries the browse hint — the keys do
   // exactly what the placeholder says, nothing more (a compacting/pausing/
   // working window keeps its own placeholder and must never let → inject
   // text into a locked editor). The keymap's own guards handle the
@@ -246,17 +274,19 @@ export function useChatInputController(): ChatInputController {
   // clamped selection; → inserts the previewed row — exactly what the
   // placeholder is showing — as REAL editor content (insertAtCursor's
   // dispatch persists the draft via the update listener; nothing is sent).
-  // The selection resets afterwards, so the next emptied input starts
-  // unselected again.
+  // The selection rests back on the top row afterwards — the placeholder
+  // keeps previewing it.
   onSuggestionNavHolder.current = (action: ChatSuggestionNavAction): boolean => {
     if (!isChatSessionIdle(lockInput)) return false
     const st = usePromptSuggestionsStore.getState()
-    if (st.sessionId !== activeSessionId || st.suggestions.length === 0) return false
+    if (st.sessionId !== suggestionKey || st.suggestions.length === 0) return false
     if (action === 'up' || action === 'down') {
       st.moveSelection(action === 'up' ? -1 : 1)
       return true
     }
-    const row = st.suggestions[st.selectedIndex >= 0 ? st.selectedIndex : 0]
+    // The store contract keeps a non-empty set's selection ON a row, so the
+    // index is always valid here; `!row` stays as the fail-closed backstop.
+    const row = st.suggestions[st.selectedIndex]
     if (!row) return false
     editor.insertAtCursor(row.text)
     st.clearSelection()

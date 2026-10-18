@@ -55,17 +55,21 @@ export function isChatSessionIdle(s: ChatInputLockInput): boolean {
 
 // Prompt-suggestion hint (ADR-088): while the input is empty and the session
 // is idle, the placeholder itself becomes the suggestions surface — the
-// previewed row's text plus the keyboard affordances. The hint is a
-// THREE-LINE placeholder; cmChatTheme's `.cm-placeholder` white-space rule is
-// what keeps the '\n' separators rendering as real lines.
+// previewed row's text, a BLANK line, and the italic usage-hint block. The
+// surface is a DOM node (buildSuggestionPlaceholderNode) because a flat
+// placeholder string can express neither: under cmChatTheme's
+// `.cm-placeholder` white-space: pre-line rule a '\n\n' text run collapses to
+// a single break (no empty line), and CSS cannot italicize part of a text
+// node. The pre-line rule is what still turns the hints' internal '\n' into a
+// real second line.
 export const SUGGESTION_BROWSE_HINT = '↑↓ browse · → insert'
 export const SUGGESTION_TYPE_HINT = 'Or just type a message... (Enter to send, Shift+Enter for new line)'
 
-/** The row the placeholder previews: the browsed-to (selected) row, or the
- *  top pick when nothing is selected yet (the resting -1 state) — so the
- *  resting idle placeholder already shows the proactive prompt. The index is
- *  clamped defensively (the store contract keeps it in [-1, len-1]); an
- *  empty list previews nothing. */
+/** The row the placeholder previews: the selection's row — for a non-empty
+ *  set the store keeps the selection ON a row (a fresh snapshot rests on the
+ *  top row), so the resting idle placeholder already shows the proactive
+ *  prompt. The index is clamped defensively (out-of-range and the -1 empty
+ *  sentinel map to the nearest row); an empty list previews nothing. */
 export function suggestionPreviewText(
   suggestions: readonly { readonly text: string }[],
   selectedIndex: number,
@@ -76,31 +80,59 @@ export function suggestionPreviewText(
 }
 
 /**
- * The input placeholder with the prompt-suggestion hint folded in. A
- * non-empty suggestion list in the idle state takes over the placeholder:
- *
- *   <previewed suggestion text>
- *   ↑↓ browse · → insert
- *   Or just type a message... (Enter to send, Shift+Enter for new line)
- *
- * Every other case — an empty list, or ANY state-specific placeholder
- * (no-project, compacting, pausing, paused, working) — falls back to the
- * plain state matrix (computeChatPlaceholder): the suggestion hint must
- * never bury a more specific session state.
+ * Whether the prompt-suggestion hint owns the placeholder: exactly when a
+ * non-empty suggestion set exists AND the session is idle. Every other case —
+ * an empty list, or ANY state-specific placeholder (no-project, compacting,
+ * pausing, paused, working) — keeps the plain state matrix
+ * (computeChatPlaceholder): the suggestion hint must never bury a more
+ * specific session state.
  *
  * Structural typing (a `{ text }` row) keeps this lib dependency-free of the
  * suggestions event types.
  */
-export function computeSuggestionPlaceholder(
+export function isSuggestionPlaceholderActive(
   s: ChatInputLockInput,
   suggestions: readonly { readonly text: string }[],
-  selectedIndex: number,
-): string {
-  if (suggestions.length === 0 || !isChatSessionIdle(s)) return computeChatPlaceholder(s)
-  const preview = suggestionPreviewText(suggestions, selectedIndex)
-  return [preview, SUGGESTION_BROWSE_HINT, SUGGESTION_TYPE_HINT]
-    .filter((line): line is string => line !== undefined && line !== '')
-    .join('\n')
+): boolean {
+  return suggestions.length > 0 && isChatSessionIdle(s)
+}
+
+/**
+ * The prompt-suggestion placeholder surface as a DOM node for CodeMirror's
+ * `placeholder()` (it accepts a string or an HTMLElement and clones the node
+ * into its `.cm-placeholder` wrap; cmChatTheme keeps the white-space rule):
+ *
+ *   <previewed suggestion text>
+ *   (blank line)
+ *   ↑↓ browse · → insert            ← italic ┐ the whole usage block after
+ *   Or just type a message... (...) ← italic ┘ the separator is italic
+ *
+ * The blank line between the suggestion and the usage hints is built from two
+ * explicit <br> elements: under the wrap's `white-space: pre-line` a '\n\n'
+ * text sequence collapses to a single break, so text alone cannot render an
+ * empty line there. The hints' own internal '\n' stays plain text — pre-line
+ * preserves it. The italic rides an inline style because no stylesheet is
+ * loaded in the unit-test environment (the style survives cloneNode).
+ */
+export function buildSuggestionPlaceholderNode(preview: string): HTMLElement {
+  const root = document.createElement('span')
+  root.className = 'cm-suggestion-placeholder'
+  if (preview !== '') {
+    const previewLine = document.createElement('span')
+    previewLine.className = 'cm-suggestion-preview'
+    previewLine.textContent = preview
+    root.appendChild(previewLine)
+    // One BLANK line: the first <br> closes the preview row, the second is
+    // the empty line — explicit elements never collapse.
+    root.appendChild(document.createElement('br'))
+    root.appendChild(document.createElement('br'))
+  }
+  const hints = document.createElement('span')
+  hints.className = 'cm-suggestion-hints'
+  hints.style.fontStyle = 'italic'
+  hints.textContent = `${SUGGESTION_BROWSE_HINT}\n${SUGGESTION_TYPE_HINT}`
+  root.appendChild(hints)
+  return root
 }
 
 /**

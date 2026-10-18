@@ -83,7 +83,15 @@ export function createSuggestionNavKeymap(
 
 interface UseChatEditorOptions {
   disabled: boolean
-  placeholder: string
+  /** The empty-editor placeholder: a plain string for the state matrix, or
+   *  the prompt-suggestion hint surface as a prebuilt DOM node
+   *  (buildSuggestionPlaceholderNode — @codemirror/view's placeholder()
+   *  accepts an HTMLElement and clones it into its `.cm-placeholder` wrap).
+   *  The placeholder compartment reconfigures when this value CHANGES — by
+   *  string value or by node identity — so the node must be memoized by the
+   *  caller on its primitive inputs; a fresh node every render would dispatch
+   *  a reconfigure on every render. */
+  placeholder: string | HTMLElement
   /**
    * Initial document text, applied when the editor is CREATED (mount only —
    * later changes are ignored; use setText for updates). The controller
@@ -222,7 +230,8 @@ export function useChatEditor(options: UseChatEditorOptions): ChatEditorAPI {
     })
   }, [options.disabled])
 
-  // Reconfigure placeholder compartment when placeholder text changes.
+  // Reconfigure placeholder compartment when the placeholder content changes
+  // (string value / node identity — see UseChatEditorOptions.placeholder).
   useEffect(() => {
     const view = viewRef.current
     if (!view) return

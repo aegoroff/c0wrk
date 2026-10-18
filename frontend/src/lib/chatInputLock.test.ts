@@ -1,10 +1,12 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest'
 import {
   computeChatInputDisabled,
   computeChatPlaceholder,
   computeModeTogglesLocked,
   modeToggleLockReason,
-  computeSuggestionPlaceholder,
+  buildSuggestionPlaceholderNode,
+  isSuggestionPlaceholderActive,
   suggestionPreviewText,
   isChatSessionIdle,
 } from '@/lib/chatInputLock'
@@ -95,50 +97,48 @@ describe('computeChatPlaceholder', () => {
 })
 
 // The prompt-suggestion hint (ADR-088): a non-empty suggestion list in the
-// idle state takes over the placeholder with the three-line browse hint —
-// the previewed row's text, the ↑↓/→ affordances, and the type-a-message
-// fallback. Every state-specific placeholder and the empty list keep the
-// base matrix: the hint must never bury a more specific session state.
-describe('computeSuggestionPlaceholder', () => {
+// idle state takes over the placeholder as a DOM-node surface — the previewed
+// row's text, a BLANK line, and the italic usage-hint block. Every
+// state-specific placeholder and the empty list keep the base matrix: the
+// hint must never bury a more specific session state.
+describe('suggestion placeholder surface', () => {
   const idle = { taskActive: false, paused: false, pausing: false, isNoProject: false, compacting: false }
   const rows = (texts: string[]) => texts.map((text, i) => ({ id: String(i), text }))
 
-  it('idle + non-empty list: three-line hint previewing the top pick while nothing is selected (-1)', () => {
-    const text = computeSuggestionPlaceholder(idle, rows(['Follow up on the failing test', 'Write release notes']), -1)
-    expect(text).toBe(
-      'Follow up on the failing test\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
-    )
-  })
-
-  it('idle + browsed-to row: the placeholder previews exactly the selection', () => {
-    const text = computeSuggestionPlaceholder(idle, rows(['first', 'second']), 1)
-    expect(text).toBe(
-      'second\n↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
-    )
-  })
-
-  it('every non-idle state keeps its own placeholder (first match wins)', () => {
+  it('is active exactly when the set is non-empty AND the session is idle', () => {
     const armed = rows(['a suggestion'])
-    expect(computeSuggestionPlaceholder({ ...idle, taskActive: true }, armed, 0)).toContain('next request')
-    expect(computeSuggestionPlaceholder({ ...idle, paused: true }, armed, 0)).toContain('nudge-resume')
-    expect(computeSuggestionPlaceholder({ ...idle, pausing: true }, armed, 0)).toContain('Pausing')
-    expect(computeSuggestionPlaceholder({ ...idle, compacting: true }, armed, 0)).toContain('Compacting')
-    expect(computeSuggestionPlaceholder({ ...idle, isNoProject: true }, armed, 0)).toContain('project')
+    expect(isSuggestionPlaceholderActive(idle, armed)).toBe(true)
+    expect(isSuggestionPlaceholderActive(idle, [])).toBe(false)
+    expect(isSuggestionPlaceholderActive({ ...idle, taskActive: true }, armed)).toBe(false)
+    expect(isSuggestionPlaceholderActive({ ...idle, paused: true }, armed)).toBe(false)
+    expect(isSuggestionPlaceholderActive({ ...idle, pausing: true }, armed)).toBe(false)
+    expect(isSuggestionPlaceholderActive({ ...idle, compacting: true }, armed)).toBe(false)
+    expect(isSuggestionPlaceholderActive({ ...idle, isNoProject: true }, armed)).toBe(false)
   })
 
-  it('empty list: falls back to the full state matrix (idle default included)', () => {
-    expect(computeSuggestionPlaceholder(idle, [], -1)).toBe('Type a message... (Enter to send, Shift+Enter for new line)')
-    expect(computeSuggestionPlaceholder({ ...idle, taskActive: true }, [], -1)).toContain('next request')
+  it('builds the separated layout: preview, one BLANK line, italic hints', () => {
+    const node = buildSuggestionPlaceholderNode('Follow up on the failing test')
+    const preview = node.querySelector('.cm-suggestion-preview')
+    const hints = node.querySelector<HTMLElement>('.cm-suggestion-hints')
+    expect(preview?.textContent).toBe('Follow up on the failing test')
+    // The separator is an explicit EMPTY line: two <br> elements. Under the
+    // wrap's white-space: pre-line a '\n\n' text run would collapse to a
+    // single break, so text alone cannot render the blank line.
+    expect(node.querySelectorAll('br')).toHaveLength(2)
+    expect(hints?.textContent).toBe('↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)')
+    // The whole usage block after the separator is italic; the suggestion
+    // itself is not (no inline style — it inherits the wrap's normal).
+    expect(hints?.style.fontStyle).toBe('italic')
+    expect((preview as HTMLElement).style.fontStyle).toBe('')
   })
 
-  it('empty preview text renders the two-line hint without a leading blank line', () => {
-    const text = computeSuggestionPlaceholder(idle, rows(['']), 0)
-    expect(text).toBe('↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)')
-  })
-
-  it('out-of-range selection is clamped defensively (the store keeps [-1, len-1])', () => {
-    expect(computeSuggestionPlaceholder(idle, rows(['only']), 99)).toContain('only')
-    expect(computeSuggestionPlaceholder(idle, rows(['only']), -7)).toContain('only')
+  it('empty preview text renders the hints alone, without a leading blank line', () => {
+    const node = buildSuggestionPlaceholderNode('')
+    expect(node.querySelector('.cm-suggestion-preview')).toBeNull()
+    expect(node.querySelectorAll('br')).toHaveLength(0)
+    expect(node.querySelector('.cm-suggestion-hints')?.textContent).toBe(
+      '↑↓ browse · → insert\nOr just type a message... (Enter to send, Shift+Enter for new line)',
+    )
   })
 })
 

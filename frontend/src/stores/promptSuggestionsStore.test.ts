@@ -73,6 +73,7 @@ describe('promptSuggestionsStore', () => {
       expect(s.projectId).toBe('proj-1')
       expect(s.source).toBe('continuation')
       expect(s.suggestions).toEqual(resp.suggestions)
+      expect(s.selectedIndex).toBe(0) // a fresh set rests ON the top row
       expect(s.loading).toBe(false)
     })
 
@@ -144,9 +145,13 @@ describe('promptSuggestionsStore', () => {
       expect(s.loading).toBe(false)
     })
 
-    it('resets the selection when a snapshot is applied', async () => {
+    it('rests the selection on the top row when a snapshot is applied (-1 only for an empty set)', async () => {
       usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions, selectedIndex: 1 })
       getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse())
+      await usePromptSuggestionsStore.getState().refetch()
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
+
+      getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse({ suggestions: [] }))
       await usePromptSuggestionsStore.getState().refetch()
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
@@ -160,6 +165,13 @@ describe('promptSuggestionsStore', () => {
       expect(getPromptSuggestionsMock).toHaveBeenCalledWith('sess-1', 'proj-9')
     })
 
+    it('re-loads the draft surface (empty session key) like any session', async () => {
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: '', projectId: 'proj-1' })
+      getPromptSuggestionsMock.mockResolvedValueOnce(makeResponse({ session_id: '', source: 'new_session', suggestions: [] }))
+      await usePromptSuggestionsStore.getState().refetch()
+      expect(getPromptSuggestionsMock).toHaveBeenCalledWith('', 'proj-1')
+    })
+
     it('is a no-op without a loaded session', async () => {
       await usePromptSuggestionsStore.getState().refetch()
       expect(getPromptSuggestionsMock).not.toHaveBeenCalled()
@@ -167,11 +179,12 @@ describe('promptSuggestionsStore', () => {
   })
 
   describe('selection', () => {
+    // Mirrors the real load() rest: a fresh non-empty set rests ON the top row.
     const withRows = (): void => {
-      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions })
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: makeResponse().suggestions, selectedIndex: 0 })
     }
 
-    it('clamps setSelectedIndex to [-1, length-1]', () => {
+    it('clamps setSelectedIndex to [0, length-1] for a non-empty set (-1 only for an empty set)', () => {
       withRows()
       const store = usePromptSuggestionsStore.getState()
       store.setSelectedIndex(1)
@@ -179,30 +192,33 @@ describe('promptSuggestionsStore', () => {
       store.setSelectedIndex(99)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
       store.setSelectedIndex(-5)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
+
+      usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: [] })
+      usePromptSuggestionsStore.getState().setSelectedIndex(3)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
 
     it('moveSelection steps and clamps; no-op on an empty set', () => {
       withRows()
       const store = usePromptSuggestionsStore.getState()
-      store.moveSelection(1) // -1 → 0
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
-      store.moveSelection(1)
+      store.moveSelection(1) // 0 → 1
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
       store.moveSelection(1) // clamped at the last row
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(1)
-      store.moveSelection(-3) // clamped at -1
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
+      store.moveSelection(-3) // clamped at the top row (the resting state)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
 
       usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: [] })
       usePromptSuggestionsStore.getState().moveSelection(1)
       expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
     })
 
-    it('clearSelection deselects without touching the rows', () => {
+    it('clearSelection rests the selection on the top row without touching the rows', () => {
       withRows()
-      usePromptSuggestionsStore.getState().setSelectedIndex(0)
+      usePromptSuggestionsStore.getState().setSelectedIndex(1)
       usePromptSuggestionsStore.getState().clearSelection()
-      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(-1)
+      expect(usePromptSuggestionsStore.getState().selectedIndex).toBe(0)
       expect(usePromptSuggestionsStore.getState().suggestions).toHaveLength(2)
     })
 
@@ -311,13 +327,13 @@ describe('promptSuggestionsStore selectors', () => {
     expect(last()).toBe(-1)
   })
 
-  it('usePromptSelectedSuggestion returns the direct selected row (or undefined)', () => {
+  it('usePromptSelectedSuggestion returns the direct selected row (the top row at rest, undefined otherwise)', () => {
     const rows = makeResponse().suggestions
     usePromptSuggestionsStore.setState({ ...pristine(), sessionId: 'sess-1', suggestions: rows, selectedIndex: 1 })
     renderHarness('sess-1', usePromptSelectedSuggestion)
     expect(last()).toBe(rows[1])
     act(() => { usePromptSuggestionsStore.getState().clearSelection() })
-    expect(last()).toBeUndefined()
+    expect(last()).toBe(rows[0]) // clearSelection rests on the top row
     renderHarness('sess-other', usePromptSelectedSuggestion)
     expect(last()).toBeUndefined()
   })

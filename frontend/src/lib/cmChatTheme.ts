@@ -39,12 +39,13 @@ export function createChatEditorTheme(isDark: boolean = true): Extension {
       backgroundColor: 'transparent',
     },
     '.cm-placeholder': {
-      // The prompt-suggestion hint (computeSuggestionPlaceholder) is a
-      // THREE-LINE placeholder joined with '\n'. CodeMirror inserts it as a
-      // single text node, and the base theme leaves white-space at its
-      // default — the newlines would collapse and the hint would render as
-      // one long line. pre-line preserves the explicit newlines while still
-      // letting a long suggestion text wrap naturally.
+      // The prompt-suggestion hint (buildSuggestionPlaceholderNode) is a
+      // DOM-node placeholder: the previewed row, a blank line, and the italic
+      // usage block whose two hint lines are '\n'-separated text. The base
+      // theme leaves white-space at its default — those '\n's would collapse
+      // and the hints would render as one long line. pre-line preserves the
+      // explicit newlines while still letting a long suggestion text wrap
+      // naturally.
       whiteSpace: 'pre-line',
     },
     '.cm-gutters': {

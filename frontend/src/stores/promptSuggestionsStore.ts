@@ -39,7 +39,10 @@ export interface PromptSuggestionsState {
   /** The active set, backend-routed and kind-filtered. Reference changes only
    *  when a snapshot is applied. */
   suggestions: readonly PromptSuggestionRow[]
-  /** ↑↓ selection into `suggestions`; -1 = nothing selected (raw input). */
+  /** ↑↓ selection into `suggestions`. A non-empty set ALWAYS keeps the
+   *  selection ON a row — a fresh snapshot rests on the top row (0), which is
+   *  the row the resting placeholder previews, so the first ↓ lands on a
+   *  visibly different row. -1 is the empty-set / no-snapshot sentinel only. */
   selectedIndex: number
   /** True while a load is in flight for the current session. */
   loading: boolean
@@ -50,19 +53,26 @@ interface PromptSuggestionsActions {
    *  to a different session clears the previous session's rows immediately —
    *  session A's suggestions must never render under session B. Responses are
    *  sequence-guarded: a stale in-flight response never overwrites a newer
-   *  load. A failed/null response degrades to an empty set (fail-open). */
+   *  load. A failed/null response degrades to an empty set (fail-open).
+   *  sessionId '' names the DRAFT surface: the armed New-Session draft of a
+   *  real project has no session row, so it addresses the backend's
+   *  new_session branch with the empty id (which the backend echoes
+   *  verbatim). */
   load: (sessionId: string, projectId: string) => Promise<void>
   /** Re-run load for the store's current (sessionId, projectId) context —
-   *  the `prompt_suggestions` event entry point. No-op without a session. */
+   *  the `prompt_suggestions` event entry point. No-op without a loaded
+   *  context (sessionId null); the '' draft surface refetches like any
+   *  session. */
   refetch: () => Promise<void>
-  /** Select a row by index; clamped to [-1, suggestions.length - 1].
-   *  -1 deselects (back to the raw input). Reference-stable no-op when the
-   *  index is unchanged or out of a non-empty range's neighborhood. */
+  /** Select a row by index; clamped to [0, suggestions.length - 1] for a
+   *  non-empty set (-1 only stands for an empty set). Reference-stable no-op
+   *  when the index is unchanged. */
   setSelectedIndex: (index: number) => void
   /** Move the selection by delta (↑↓); clamped the same way. No-op on an
    *  empty set. */
   moveSelection: (delta: number) => void
-  /** Deselect (back to -1) without touching the rows. */
+  /** Rest the selection back on the top row (the resting state; -1 for an
+   *  empty set) without touching the rows. */
   clearSelection: () => void
   /** Drop the snapshot entirely (no active session / chat teardown). */
   reset: () => void
@@ -125,21 +135,26 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
     set({
       source: resp.source,
       suggestions: resp.suggestions,
-      selectedIndex: -1, // a fresh snapshot starts unselected
+      // Rest ON the top row: the resting placeholder previews it (the
+      // proactive prompt stays visible), and the first ↓ moves to a visibly
+      // different row — an unselected -1 rest would render identically to
+      // row 0 and make that first press look dead.
+      selectedIndex: resp.suggestions.length > 0 ? 0 : -1,
       loading: false,
     })
   },
 
   refetch: async () => {
     const { sessionId, projectId } = get()
-    if (!sessionId) return
+    if (sessionId === null) return // nothing loaded (pristine store)
     await get().load(sessionId, projectId)
   },
 
   setSelectedIndex: (index) =>
     set((s) => {
       const max = s.suggestions.length - 1
-      const clamped = Math.max(-1, Math.min(index, max))
+      const min = max < 0 ? -1 : 0
+      const clamped = Math.max(min, Math.min(index, max))
       if (clamped === s.selectedIndex) return s
       return { selectedIndex: clamped }
     }),
@@ -151,7 +166,10 @@ export const usePromptSuggestionsStore = create<PromptSuggestionsState & PromptS
   },
 
   clearSelection: () =>
-    set((s) => (s.selectedIndex === -1 ? s : { selectedIndex: -1 })),
+    set((s) => {
+      const rest = s.suggestions.length === 0 ? -1 : 0
+      return s.selectedIndex === rest ? s : { selectedIndex: rest }
+    }),
 
   reset: () => {
     if (get().sessionId === null && get().suggestions.length === 0) {
