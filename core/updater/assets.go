@@ -24,25 +24,29 @@ var ErrNoAssetForPlatform = errors.New("no asset for platform")
 type platformSpec struct {
 	goos     string // GOOS value, e.g. "darwin"
 	goarch   string // GOARCH value, e.g. "arm64"
-	flavor   Flavor // packaging flavor the asset carries; FlavorCPU everywhere, plus FlavorCUDA13 on linux/amd64
+	flavor   Flavor // packaging flavor; FlavorCPU everywhere, plus FlavorCUDA13/FlavorOpenVINO on linux/amd64
 	basename string // canonical asset filename, e.g. "c0wrk-desktop-macos-arm64.zip"
 	token    string // suffix token used to match an asset regardless of version, e.g. "macos-arm64"
 }
 
 // supportedPlatforms mirrors the build matrix in .github/workflows/release.yml.
 // The asset names are produced by the "Package …" steps of each platform job.
-// linux/amd64 is listed twice: the default CPU flavor and the opt-in CUDA 13
-// flavor (ADR-045), whose archive name appends "-cuda13" after the arch token.
+// linux/amd64 is listed three times: the default CPU flavor and the two opt-in
+// GPU flavors — the CUDA 13 flavor (ADR-045/ADR-046), whose archive name
+// appends "-cuda13" after the arch token, and the OpenVINO flavor, whose
+// archive name appends "-openvino".
 //
-//	darwin/arm64       → c0wrk-desktop-macos-arm64.zip   (ditto of the .app bundle)
-//	linux/amd64 cpu    → c0wrk-desktop-linux-amd64.tar.gz
-//	linux/amd64 cuda13 → c0wrk-desktop-linux-amd64-cuda13.tar.gz
-//	linux/arm64        → c0wrk-desktop-linux-arm64.tar.gz
-//	windows/amd64      → c0wrk-desktop-windows-amd64.zip
+//	darwin/arm64         → c0wrk-desktop-macos-arm64.zip   (ditto of the .app bundle)
+//	linux/amd64 cpu      → c0wrk-desktop-linux-amd64.tar.gz
+//	linux/amd64 cuda13   → c0wrk-desktop-linux-amd64-cuda13.tar.gz
+//	linux/amd64 openvino → c0wrk-desktop-linux-amd64-openvino.tar.gz
+//	linux/arm64          → c0wrk-desktop-linux-arm64.tar.gz
+//	windows/amd64        → c0wrk-desktop-windows-amd64.zip
 var supportedPlatforms = []platformSpec{
 	{goos: "darwin", goarch: "arm64", flavor: FlavorCPU, basename: "c0wrk-desktop-macos-arm64.zip", token: "macos-arm64"},
 	{goos: "linux", goarch: "amd64", flavor: FlavorCPU, basename: "c0wrk-desktop-linux-amd64.tar.gz", token: "linux-amd64"},
 	{goos: "linux", goarch: "amd64", flavor: FlavorCUDA13, basename: "c0wrk-desktop-linux-amd64-cuda13.tar.gz", token: "linux-amd64-cuda13"},
+	{goos: "linux", goarch: "amd64", flavor: FlavorOpenVINO, basename: "c0wrk-desktop-linux-amd64-openvino.tar.gz", token: "linux-amd64-openvino"},
 	{goos: "linux", goarch: "arm64", flavor: FlavorCPU, basename: "c0wrk-desktop-linux-arm64.tar.gz", token: "linux-arm64"},
 	{goos: "windows", goarch: "amd64", flavor: FlavorCPU, basename: "c0wrk-desktop-windows-amd64.zip", token: "windows-amd64"},
 }
@@ -50,7 +54,7 @@ var supportedPlatforms = []platformSpec{
 // AssetNameFor returns the canonical release asset filename for the given
 // GOOS/GOARCH pair and packaging flavor. It returns ErrNoAssetForPlatform
 // when the combination is not part of the release matrix (e.g.
-// linux/riscv64, darwin/amd64, or a CUDA flavor on a platform that ships no
+// linux/riscv64, darwin/amd64, or a GPU flavor on a platform that ships no
 // flavor variants).
 func AssetNameFor(goos, goarch string, flavor Flavor) (string, error) {
 	for _, p := range supportedPlatforms {
@@ -84,8 +88,9 @@ func platformToken(goos, goarch string, flavor Flavor) string {
 // companion files (detached signatures, checksums) and differently-flavored
 // archives never win over the archive itself. The anchoring is load-bearing
 // for the CPU flavor on linux/amd64: its token "linux-amd64" is a substring
-// of the CUDA asset name "…-linux-amd64-cuda13.tar.gz", and a plain Contains
-// match would silently hand a CPU installation a CUDA archive (or vice versa).
+// of both flavored asset names "…-linux-amd64-cuda13.tar.gz" and
+// "…-linux-amd64-openvino.tar.gz", and a plain Contains match would silently
+// hand a CPU installation a GPU archive (or vice versa).
 //
 // It returns ErrNoAssetForPlatform when the platform+flavor is unsupported or
 // when no asset in the release matches it.

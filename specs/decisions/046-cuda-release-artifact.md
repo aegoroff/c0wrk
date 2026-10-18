@@ -154,3 +154,22 @@ vice versa. A release that carries no asset for the running flavor is a hard
   release matrix from four artifacts to five).
 - [domains/workspace.md](../domains/workspace.md) — Embedding Execution
   Provider section (GPU flavor packaging and runtime requirements).
+
+## Corrigendum (2026-10-18)
+
+Decision 3 above describes a ci.yml recipe smoke that runs `make build`
+followed by `make fetch-onnx-gpu` on the linux/amd64 leg, and the
+Consequences section leans on it twice ("CI pays it on every linux/amd64
+push/PR too"; "Drift is caught by the ci.yml smoke test, not by a compile
+error"). **That job was never added to the workflow.**
+[.github/workflows/ci.yml](../../.github/workflows/ci.yml) contains no
+`fetch-onnx-gpu` step — no CI leg downloads or installs the CUDA flavor —
+so flavor-matrix drift is caught in practice by the code-level matrix-sync
+test ([matrix_sync_test.go](../../core/updater/matrix_sync_test.go)), not by
+a recipe smoke, and the only fetch recipe CI exercises today belongs to the
+OpenVINO flavor ([ADR-089](089-openvino-embedding-flavor.md), whose decision
+3 records the same drift).
+
+The original text above is left standing unchanged; this section is the
+record of where it diverges from the repository. Implementing decision 3's
+smoke — or retiring its claim — remains open and needs its own decision.

@@ -2021,6 +2021,7 @@ func TestVectorIndexConfig_ExecutionProvider_Validation(t *testing.T) {
 		{name: "cpu", provider: "cpu", deviceID: 0},
 		{name: "cuda device 0", provider: "cuda", deviceID: 0},
 		{name: "cuda device 1", provider: "cuda", deviceID: 1},
+		{name: "openvino device 0", provider: "openvino", deviceID: 0},
 	}
 	for _, tt := range valid {
 		t.Run("valid/"+tt.name, func(t *testing.T) {
@@ -2050,6 +2051,11 @@ vector_index:
 		{
 			name:     "unknown provider tpu",
 			yaml:     "vector_index:\n  execution_provider: tpu\n",
+			wantPart: "vector_index.execution_provider",
+		},
+		{
+			name:     "capitalized provider OpenVINO",
+			yaml:     "vector_index:\n  execution_provider: OpenVINO\n",
 			wantPart: "vector_index.execution_provider",
 		},
 		{

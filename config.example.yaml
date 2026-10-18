@@ -1410,11 +1410,12 @@ orchestration:
 # it uses:
 #
 #   execution_provider: auto  # default (also what an unset/empty value
-#                             # normalizes to): try the NVIDIA CUDA
-#                             # provider and fall back to the CPU provider
-#                             # when CUDA is not usable. When the CUDA
-#                             # attempt fails, a WARN is logged and
-#                             # indexing/search continues on the CPU —
+#                             # normalizes to): walk the hardware ladder —
+#                             # the NVIDIA CUDA provider first, then the
+#                             # OpenVINO provider — and fall back to the
+#                             # CPU provider when neither is usable. When
+#                             # a hardware attempt fails, a WARN is logged
+#                             # and indexing/search continues on the CPU —
 #                             # never a hard failure and never a silent
 #                             # switch.
 #   execution_provider: cpu   # always run on the CPU provider.
@@ -1429,11 +1430,32 @@ orchestration:
 #                             # requested-vs-effective provider mismatch
 #                             # recorded in every vector-index status
 #                             # payload. The fallback is never silent.
+#   execution_provider: openvino
+#                             # run on Intel hardware via the OpenVINO
+#                             # execution provider (integrated or discrete
+#                             # Intel GPUs, Intel CPUs). Same loud-fallback
+#                             # contract as "cuda": if the provider cannot
+#                             # come up (missing plugin, bad device id),
+#                             # the vector index falls back to the CPU
+#                             # provider — WARN log, runtime-error toast
+#                             # (error_code "vector_openvino_fallback"),
+#                             # and the requested-vs-effective mismatch
+#                             # recorded in every status payload. When the
+#                             # provider does come up, the OpenVINO plugin
+#                             # picks the concrete Intel device itself; the
+#                             # status payload records the externally
+#                             # verified device class in "ov_device"
+#                             # ("gpu" | "cpu", or absent when the xpu-smi
+#                             # probe could not answer).
 #
 #   device_id: 0              # GPU index used when the CUDA provider is
 #                             # active (default 0 = the first GPU, which
 #                             # is what most machines want; ignored by
-#                             # the CPU provider). Must be >= 0.
+#                             # the CPU provider). Must be >= 0; the
+#                             # OpenVINO provider additionally accepts
+#                             # only 0 — it chooses the concrete Intel
+#                             # device itself, and any other value fails
+#                             # embedder creation (loud CPU fallback).
 #
 # GPU requirements — "auto" and "cuda" only use the GPU when a CUDA-
 # enabled ONNX Runtime build sits next to the executable (the standard
@@ -1448,6 +1470,17 @@ orchestration:
 # the CPU provider. The in-app updater always updates within the same
 # flavor — a cuda13 install receives cuda13 archives and vice versa
 # (switching flavors is a manual reinstall).
+#
+# OpenVINO requirements — "auto" and "openvino" only use the OpenVINO
+# provider when its plugin (`libonnxruntime_providers_openvino_plugin.so`)
+# sits next to the ONNX Runtime library. `make fetch-onnx-openvino`
+# installs it (Linux x64 only; it refuses to lay the OpenVINO stack over
+# a CUDA-flavored install — reset to the CPU flavor first). Without the
+# plugin an explicit "openvino" fails loudly (the toast above) and
+# "auto" skips to the next ladder rung. The effective device class is
+# externally verified via the `xpu-smi` tool; without it the status
+# carries no ov_device verdict (a missing verdict is never reported as
+# "cpu").
 #
 # Changing either knob requires an app restart: the provider is chosen
 # once when the embedder is created at startup and the ONNX session is

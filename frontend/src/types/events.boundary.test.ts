@@ -311,3 +311,18 @@ describe('isVectorIndexPayload (#159 provider_fallback_reason)', () => {
     expect(isVectorIndexPayload({ ...base, provider_fallback_reason: { why: 'x' } })).toBe(false)
   })
 })
+
+describe('isVectorIndexPayload (ov_device)', () => {
+  const base = { state: 'idle', progress: 0, files_indexed: 0, total_files: 0 }
+
+  it('accepts a payload with the optional verdict ("gpu"/"cpu") and without it', () => {
+    expect(isVectorIndexPayload({ ...base, ov_device: 'gpu' })).toBe(true)
+    expect(isVectorIndexPayload({ ...base, ov_device: 'cpu' })).toBe(true)
+    expect(isVectorIndexPayload(base)).toBe(true)
+  })
+
+  it('rejects a present non-string ov_device (VectorIndexDiagnostics matches it against literals)', () => {
+    expect(isVectorIndexPayload({ ...base, ov_device: 1 })).toBe(false)
+    expect(isVectorIndexPayload({ ...base, ov_device: null })).toBe(false)
+  })
+})

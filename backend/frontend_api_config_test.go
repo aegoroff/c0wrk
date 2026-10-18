@@ -1621,6 +1621,33 @@ func TestUpdateVectorIndexSettings_PersistsAndRoundTrips(t *testing.T) {
 	}
 }
 
+// TestUpdateVectorIndexSettings_AcceptsEveryValidProvider pins the RPC-level
+// acceptance of every valid execution_provider value — openvino follows the
+// same contract as cuda (same validation point, same persistence), only the
+// name differs. Each accepted value must land in the in-memory config; the
+// full round-trip is pinned separately for cuda.
+func TestUpdateVectorIndexSettings_AcceptsEveryValidProvider(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	for _, p := range []string{
+		config.VectorIndexProviderAuto,
+		config.VectorIndexProviderCPU,
+		config.VectorIndexProviderCUDA,
+		config.VectorIndexProviderOpenVINO,
+	} {
+		if err := f.UpdateVectorIndexSettings(VectorIndexSettingsResponse{
+			ExecutionProvider: p,
+			DeviceID:          0,
+		}); err != nil {
+			t.Errorf("UpdateVectorIndexSettings(%q) error = %v, want nil", p, err)
+			continue
+		}
+		if got := f.config.VectorIndex.ExecutionProvider; got != p {
+			t.Errorf("in-memory execution_provider = %q, want %q", got, p)
+		}
+	}
+}
+
 // TestUpdateVectorIndexSettings_InvalidValuesRejectedBeforeWrite verifies
 // that an invalid provider or a negative device id is rejected BEFORE any
 // mutation or disk write: the in-memory config keeps its prior values and

@@ -18,11 +18,15 @@ func TestAssetNameFor(t *testing.T) {
 		{name: "darwin/arm64", goos: "darwin", goarch: "arm64", flavor: FlavorCPU, want: "c0wrk-desktop-macos-arm64.zip"},
 		{name: "linux/amd64 cpu", goos: "linux", goarch: "amd64", flavor: FlavorCPU, want: "c0wrk-desktop-linux-amd64.tar.gz"},
 		{name: "linux/amd64 cuda13", goos: "linux", goarch: "amd64", flavor: FlavorCUDA13, want: "c0wrk-desktop-linux-amd64-cuda13.tar.gz"},
+		{name: "linux/amd64 openvino", goos: "linux", goarch: "amd64", flavor: FlavorOpenVINO, want: "c0wrk-desktop-linux-amd64-openvino.tar.gz"},
 		{name: "windows/amd64", goos: "windows", goarch: "amd64", flavor: FlavorCPU, want: "c0wrk-desktop-windows-amd64.zip"},
 		{name: "linux/arm64", goos: "linux", goarch: "arm64", flavor: FlavorCPU, want: "c0wrk-desktop-linux-arm64.tar.gz"},
 		{name: "linux/arm64 cuda13 unsupported", goos: "linux", goarch: "arm64", flavor: FlavorCUDA13, wantErr: ErrNoAssetForPlatform},
+		{name: "linux/arm64 openvino unsupported", goos: "linux", goarch: "arm64", flavor: FlavorOpenVINO, wantErr: ErrNoAssetForPlatform},
 		{name: "darwin/arm64 cuda13 unsupported", goos: "darwin", goarch: "arm64", flavor: FlavorCUDA13, wantErr: ErrNoAssetForPlatform},
+		{name: "darwin/arm64 openvino unsupported", goos: "darwin", goarch: "arm64", flavor: FlavorOpenVINO, wantErr: ErrNoAssetForPlatform},
 		{name: "windows/amd64 cuda13 unsupported", goos: "windows", goarch: "amd64", flavor: FlavorCUDA13, wantErr: ErrNoAssetForPlatform},
+		{name: "windows/amd64 openvino unsupported", goos: "windows", goarch: "amd64", flavor: FlavorOpenVINO, wantErr: ErrNoAssetForPlatform},
 		{name: "unsupported linux/riscv64", goos: "linux", goarch: "riscv64", flavor: FlavorCPU, wantErr: ErrNoAssetForPlatform},
 		{name: "unsupported darwin/amd64", goos: "darwin", goarch: "amd64", flavor: FlavorCPU, wantErr: ErrNoAssetForPlatform},
 		{name: "empty platform", goos: "", goarch: "", flavor: FlavorCPU, wantErr: ErrNoAssetForPlatform},
@@ -157,13 +161,14 @@ func TestSelectAsset(t *testing.T) {
 	})
 }
 
-// linuxAssetsBothFlavors is the release asset list for linux/amd64 carrying
-// BOTH flavors under their canonical names. Both names are canonical, so a
-// CPU-flavored lookup must win via the exact-name pass.
-func linuxAssetsBothFlavors() []ReleaseAsset {
+// linuxAssetsAllFlavors is the release asset list for linux/amd64 carrying
+// ALL three flavors under their canonical names. All names are canonical, so
+// any flavor's lookup must win via the exact-name pass.
+func linuxAssetsAllFlavors() []ReleaseAsset {
 	return []ReleaseAsset{
 		{Name: "c0wrk-desktop-linux-amd64.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64.tar.gz"},
 		{Name: "c0wrk-desktop-linux-amd64-cuda13.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-cuda13.tar.gz"},
+		{Name: "c0wrk-desktop-linux-amd64-openvino.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-openvino.tar.gz"},
 	}
 }
 
@@ -177,7 +182,7 @@ func TestSelectAsset_CPUFlavorNeverPicksCUDA(t *testing.T) {
 
 	t.Run("both canonical assets present → CPU archive wins for CPU flavor", func(t *testing.T) {
 		t.Parallel()
-		got, err := SelectAsset(linuxAssetsBothFlavors(), "linux", "amd64", FlavorCPU)
+		got, err := SelectAsset(linuxAssetsAllFlavors(), "linux", "amd64", FlavorCPU)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -231,6 +236,18 @@ func TestSelectAsset_CPUFlavorNeverPicksCUDA(t *testing.T) {
 			t.Fatalf("got %q, want the plain versioned CPU archive", got.Name)
 		}
 	})
+
+	// The openvino archive is a second substring hazard for the CPU token:
+	// "linux-amd64" is a substring of "…-linux-amd64-openvino.tar.gz" too.
+	t.Run("fallback: only an openvino archive present → CPU flavor errors, never cross-picks", func(t *testing.T) {
+		t.Parallel()
+		ovOnly := []ReleaseAsset{
+			{Name: "c0wrk-desktop-linux-amd64-openvino.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-openvino.tar.gz"},
+		}
+		if _, err := SelectAsset(ovOnly, "linux", "amd64", FlavorCPU); !errors.Is(err, ErrNoAssetForPlatform) {
+			t.Fatalf("expected ErrNoAssetForPlatform for CPU flavor with only an openvino asset, got %v", err)
+		}
+	})
 }
 
 // TestSelectAsset_CUDA13Flavor verifies the GPU side of flavor selection: the
@@ -242,7 +259,7 @@ func TestSelectAsset_CUDA13Flavor(t *testing.T) {
 
 	t.Run("canonical exact name", func(t *testing.T) {
 		t.Parallel()
-		got, err := SelectAsset(linuxAssetsBothFlavors(), "linux", "amd64", FlavorCUDA13)
+		got, err := SelectAsset(linuxAssetsAllFlavors(), "linux", "amd64", FlavorCUDA13)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -279,6 +296,69 @@ func TestSelectAsset_CUDA13Flavor(t *testing.T) {
 	t.Run("empty asset list → ErrNoAssetForPlatform", func(t *testing.T) {
 		t.Parallel()
 		if _, err := SelectAsset(nil, "linux", "amd64", FlavorCUDA13); !errors.Is(err, ErrNoAssetForPlatform) {
+			t.Fatalf("expected ErrNoAssetForPlatform, got %v", err)
+		}
+	})
+}
+
+// TestSelectAsset_OpenVINOFlavor verifies the OpenVINO side of flavor
+// selection: the canonical exact name and the token-based fallback both
+// resolve to the openvino archive, a release without one fails closed with
+// ErrNoAssetForPlatform (never a silent CPU downgrade), and neither the CUDA
+// nor the CPU archive can satisfy an OpenVINO lookup (and vice versa).
+func TestSelectAsset_OpenVINOFlavor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("canonical exact name", func(t *testing.T) {
+		t.Parallel()
+		got, err := SelectAsset(linuxAssetsAllFlavors(), "linux", "amd64", FlavorOpenVINO)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Name != "c0wrk-desktop-linux-amd64-openvino.tar.gz" {
+			t.Fatalf("got %q, want the openvino archive", got.Name)
+		}
+	})
+
+	t.Run("token fallback with versioned names", func(t *testing.T) {
+		t.Parallel()
+		versioned := []ReleaseAsset{
+			{Name: "c0wrk-desktop-v2.0.0-linux-amd64.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-v2.0.0-linux-amd64.tar.gz"},
+			{Name: "c0wrk-desktop-v2.0.0-linux-amd64-openvino.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-v2.0.0-linux-amd64-openvino.tar.gz"},
+		}
+		got, err := SelectAsset(versioned, "linux", "amd64", FlavorOpenVINO)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Name != "c0wrk-desktop-v2.0.0-linux-amd64-openvino.tar.gz" {
+			t.Fatalf("got %q, want the versioned openvino archive", got.Name)
+		}
+	})
+
+	t.Run("no openvino asset → ErrNoAssetForPlatform, never downgrades to CPU or cuda13", func(t *testing.T) {
+		t.Parallel()
+		otherFlavors := []ReleaseAsset{
+			{Name: "c0wrk-desktop-linux-amd64.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64.tar.gz"},
+			{Name: "c0wrk-desktop-linux-amd64-cuda13.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-cuda13.tar.gz"},
+		}
+		if _, err := SelectAsset(otherFlavors, "linux", "amd64", FlavorOpenVINO); !errors.Is(err, ErrNoAssetForPlatform) {
+			t.Fatalf("expected ErrNoAssetForPlatform for openvino flavor with only CPU/cuda13 assets, got %v", err)
+		}
+	})
+
+	t.Run("cuda13 flavor never picks the openvino archive", func(t *testing.T) {
+		t.Parallel()
+		ovOnly := []ReleaseAsset{
+			{Name: "c0wrk-desktop-linux-amd64-openvino.tar.gz", BrowserDownloadURL: "https://x/c0wrk-desktop-linux-amd64-openvino.tar.gz"},
+		}
+		if _, err := SelectAsset(ovOnly, "linux", "amd64", FlavorCUDA13); !errors.Is(err, ErrNoAssetForPlatform) {
+			t.Fatalf("expected ErrNoAssetForPlatform for cuda13 flavor with only an openvino asset, got %v", err)
+		}
+	})
+
+	t.Run("empty asset list → ErrNoAssetForPlatform", func(t *testing.T) {
+		t.Parallel()
+		if _, err := SelectAsset(nil, "linux", "amd64", FlavorOpenVINO); !errors.Is(err, ErrNoAssetForPlatform) {
 			t.Fatalf("expected ErrNoAssetForPlatform, got %v", err)
 		}
 	})

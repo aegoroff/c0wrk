@@ -2276,18 +2276,42 @@ func spawnOSServer(ctx context.Context, cmd LaunchCommand, logger *slog.Logger) 
 	proc.Stdout = stdoutWrite
 	proc.Stderr = stderrWrite
 
-	if err := proc.Start(); err != nil {
+	// The child's stdin is a pipe THIS process holds open for the child's whole
+	// lifetime — never nil. With a nil Stdin, os/exec points the child at the
+	// null device, and a server build that watches its stdin (shut down when
+	// stdin reaches EOF — a supervision shape llama-server has shipped) then
+	// tears itself down the moment its main loop starts reading, which looks
+	// exactly like an inexplicable self-exit seconds after a successful launch.
+	// The write end is held by the returned osProcess and closed on Wait/Kill,
+	// which hands a stdin-supervised build a graceful stop trigger on the way.
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
 		closeRelays([]*io.PipeWriter{stdoutWrite, stderrWrite})
 		_ = stdoutRead.Close()
 		_ = stderrRead.Close()
 		return nil, err
 	}
+	proc.Stdin = stdinRead
+
+	if err := proc.Start(); err != nil {
+		_ = stdinWrite.Close()
+		_ = stdinRead.Close()
+		closeRelays([]*io.PipeWriter{stdoutWrite, stderrWrite})
+		_ = stdoutRead.Close()
+		_ = stderrRead.Close()
+		return nil, err
+	}
+	// The parent's own copy of the read end must go: an open duplicate here
+	// would keep the child's reads from ever seeing EOF once the write end
+	// closes.
+	_ = stdinRead.Close()
 	logger.Debug("embedded LLM server started", "pid", proc.Process.Pid, "binary", cmd.Binary)
 	return &osProcess{
-		cmd:    proc,
-		stdout: stdoutRead,
-		stderr: stderrRead,
-		relay:  []*io.PipeWriter{stdoutWrite, stderrWrite},
+		cmd:        proc,
+		stdout:     stdoutRead,
+		stderr:     stderrRead,
+		stdinWrite: stdinWrite,
+		relay:      []*io.PipeWriter{stdoutWrite, stderrWrite},
 	}, nil
 }
 
@@ -2310,6 +2334,14 @@ type osProcess struct {
 
 	relayOnce sync.Once
 	relay     []*io.PipeWriter
+
+	// stdinWrite is the parent's end of the child's stdin, held open for the
+	// child's whole lifetime (see spawnOSServer for why it must never be the
+	// null device). Closed exactly once — after the exit has been observed, or
+	// on a kill — so the descriptor does not leak and a stdin-supervised child
+	// gets its EOF-based stop before the SIGKILL lands.
+	stdinOnce  sync.Once
+	stdinWrite *os.File
 }
 
 // Wait blocks until the child has exited AND os/exec has finished (or, at
@@ -2317,7 +2349,19 @@ type osProcess struct {
 func (p *osProcess) Wait() error {
 	err := p.cmd.Wait()
 	p.relayOnce.Do(func() { closeRelays(p.relay) })
+	p.closeStdin()
 	return err
+}
+
+// closeStdin releases the child's stdin write end exactly once. Wait and Kill
+// can race (a discard alongside a supervised exit), so the close is
+// once-guarded; the field itself is written only by the constructor, before
+// the process is published.
+func (p *osProcess) closeStdin() {
+	if p.stdinWrite == nil {
+		return
+	}
+	p.stdinOnce.Do(func() { _ = p.stdinWrite.Close() })
 }
 
 func (p *osProcess) Pid() int {
@@ -2338,6 +2382,7 @@ func (p *osProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return os.ErrProcessDone
 	}
+	p.closeStdin()
 	return p.cmd.Process.Kill()
 }
 

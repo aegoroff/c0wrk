@@ -3,13 +3,14 @@ import type { VectorIndexStatus } from '@/types/models'
 
 /**
  * Short display labels for provider wire values. "auto" can appear only as
- * the requested value — the effective provider is always resolved ("cpu" or
- * "cuda") by the time the embedder exists.
+ * the requested value — the effective provider is always resolved ("cpu",
+ * "cuda" or "openvino") by the time the embedder exists.
  */
 const PROVIDER_LABELS: Record<string, string> = {
   auto: 'Auto',
   cpu: 'CPU',
   cuda: 'CUDA',
+  openvino: 'OpenVINO',
 }
 
 function providerLabel(value: string | undefined): string {
@@ -25,15 +26,19 @@ const BADGE_UNVERIFIED = 'border-warning/40 bg-warning/10 text-warning'
  * embedder creation), so raw inequality cannot mean "fallback":
  *
  * - 'cuda-fallback' — an explicit "cuda" request degraded to "cpu": the one
- *   true fallback. The backend guarantees a non-empty
+ *   true CUDA fallback. The backend guarantees a non-empty
  *   provider_fallback_reason on this path (WARN + runtime_error toast).
+ * - 'openvino-fallback' — an explicit "openvino" request degraded to
+ *   "cpu": the OpenVINO twin of the CUDA fallback (plugin missing or init
+ *   failure); same non-empty-reason guarantee.
  * - 'auto-cpu' — "auto" resolved to "cpu": the expected degradation path of
- *   Auto (CUDA unavailable). Legitimate, not an error; the concrete cause is
- *   WARN-logged at startup and is not part of the status payload.
- * - 'honored' — everything else, including "auto" resolving to "cuda"
- *   (Auto's best outcome — a success, never a fallback).
+ *   Auto (no hardware provider usable). Legitimate, not an error; the
+ *   concrete cause is WARN-logged at startup and is not part of the status
+ *   payload.
+ * - 'honored' — everything else, including "auto" resolving to "cuda" or
+ *   "openvino" (Auto's best outcomes — a success, never a fallback).
  */
-type ProviderOutcome = 'honored' | 'auto-cpu' | 'cuda-fallback'
+type ProviderOutcome = 'honored' | 'auto-cpu' | 'cuda-fallback' | 'openvino-fallback'
 
 function classifyOutcome(
   requested: string | undefined,
@@ -41,6 +46,7 @@ function classifyOutcome(
 ): ProviderOutcome {
   if (effective !== 'cpu') return 'honored'
   if (requested === 'cuda') return 'cuda-fallback'
+  if (requested === 'openvino') return 'openvino-fallback'
   if (requested === 'auto') return 'auto-cpu'
   return 'honored'
 }
@@ -49,6 +55,7 @@ const EFFECTIVE_COLOR: Record<ProviderOutcome, string> = {
   honored: 'text-success',
   'auto-cpu': 'text-info',
   'cuda-fallback': 'text-warning',
+  'openvino-fallback': 'text-warning',
 }
 
 /**
@@ -56,13 +63,16 @@ const EFFECTIVE_COLOR: Record<ProviderOutcome, string> = {
  * `useVectorIndexStore.status` (populated by `vector_index:status` events):
  *
  * - requested → effective provider, colored by outcome (see
- *   classifyOutcome): success when honored (incl. "auto" winning with CUDA),
- *   info for the expected Auto→CPU degradation, warning for a real
- *   explicit-cuda→CPU fallback;
- * - the fallback reason callout (explicit-cuda fallback only — the backend
- *   fills provider_fallback_reason on exactly that path);
+ *   classifyOutcome): success when honored (incl. "auto" winning with CUDA
+ *   or OpenVINO), info for the expected Auto→CPU degradation, warning for a
+ *   real explicit-"cuda"/"openvino"→CPU fallback;
+ * - the fallback reason callout (explicit "cuda"/"openvino" fallbacks only —
+ *   the backend fills provider_fallback_reason on exactly those paths);
  * - the `cuda_verified` badge: the external nvidia-smi verdict, present only
  *   when the effective provider is CUDA and the startup probe ran;
+ * - the `ov_device` badge: the xpu-smi device-class verdict for an OpenVINO
+ *   embedder ("gpu" = Intel GPU activity seen, "cpu" = probe ran and saw no
+ *   GPU activity), present only when the probe actually answered;
  * - the ONNX device index the running embedder was created with.
  *
  * Absent `execution_provider` means no embedder exists (model files missing
@@ -76,6 +86,14 @@ export function VectorIndexDiagnostics({ status }: { status: VectorIndexStatus }
   const outcome = classifyOutcome(requested, effective)
   const showCudaBadge = effective === 'cuda' && typeof status.cuda_verified === 'boolean'
   const verified = status.cuda_verified === true
+  // The OpenVINO device-class badge renders only when the xpu-smi probe
+  // actually answered ("gpu"|"cpu"): an absent ov_device is "unverified,
+  // not negative" (xpu-smi missing/failed/timeout), so it renders nothing —
+  // mirroring how an absent cuda_verified hides the CUDA badge.
+  const ovDevice = status.ov_device
+  const showOvBadge =
+    effective === 'openvino' && (ovDevice === 'gpu' || ovDevice === 'cpu')
+  const ovVerified = ovDevice === 'gpu'
 
   return (
     <div
@@ -107,7 +125,7 @@ export function VectorIndexDiagnostics({ status }: { status: VectorIndexStatus }
             Device: {status.device_id ?? 0}
           </div>
 
-          {outcome === 'cuda-fallback' && (
+          {(outcome === 'cuda-fallback' || outcome === 'openvino-fallback') && (
             <div
               data-testid="vector-fallback-reason"
               className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning"
@@ -126,9 +144,10 @@ export function VectorIndexDiagnostics({ status }: { status: VectorIndexStatus }
             >
               <Info className="mt-0.5 size-3.5 shrink-0" />
               <span>
-                Auto resolved to the CPU provider — CUDA is unavailable, so embeddings run on
-                CPU. This is the expected Auto behavior, not an error; the concrete cause is
-                WARN-logged at startup (see the app logs in ~/.c0wrk/logs/).
+                Auto resolved to the CPU provider — no hardware provider (CUDA, OpenVINO) is
+                usable, so embeddings run on CPU. This is the expected Auto behavior, not an
+                error; the concrete cause is WARN-logged at startup (see the app logs in
+                ~/.c0wrk/logs/).
               </span>
             </div>
           )}
@@ -146,6 +165,24 @@ export function VectorIndexDiagnostics({ status }: { status: VectorIndexStatus }
                 <HelpCircle className="size-3.5 shrink-0" />
               )}
               {verified ? 'CUDA verified' : 'CUDA not verified by driver probe'}
+            </div>
+          )}
+
+          {showOvBadge && (
+            <div
+              data-testid="vector-ov-device-badge"
+              className={`inline-flex w-fit items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium ${
+                ovVerified ? BADGE_VERIFIED : BADGE_UNVERIFIED
+              }`}
+            >
+              {ovVerified ? (
+                <CheckCircle2 className="size-3.5 shrink-0" />
+              ) : (
+                <HelpCircle className="size-3.5 shrink-0" />
+              )}
+              {ovVerified
+                ? 'Intel GPU verified'
+                : 'No Intel GPU activity — OpenVINO is on a CPU device'}
             </div>
           )}
         </>

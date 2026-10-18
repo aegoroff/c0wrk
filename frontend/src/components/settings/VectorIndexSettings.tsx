@@ -11,15 +11,17 @@ import { VectorIndexDiagnostics } from './VectorIndexDiagnostics'
 import type { ExecutionProvider, GPUDeviceResponse } from '@/types/models'
 
 const PROVIDER_DISPLAY_NAMES: Record<ExecutionProvider, string> = {
-  auto: 'Auto (CUDA → CPU fallback)',
+  auto: 'Auto (CUDA → OpenVINO → CPU)',
   cpu: 'CPU',
   cuda: 'CUDA (NVIDIA GPU)',
+  openvino: 'OpenVINO (Intel GPU)',
 }
 
 const PROVIDER_DESCRIPTIONS: Record<ExecutionProvider, string> = {
-  auto: 'Try CUDA first, fall back to CPU when no usable NVIDIA GPU or CUDA runtime is found.',
+  auto: 'Try the NVIDIA CUDA provider first, then OpenVINO for Intel hardware; fall back to CPU when neither hardware provider is usable.',
   cpu: 'Always run the embedder on CPU. Use when GPU acceleration is unwanted or unstable.',
   cuda: 'Require an NVIDIA GPU. Falls back to CPU with a warning when CUDA init fails.',
+  openvino: 'Target Intel GPUs via the OpenVINO execution provider. Requires the OpenVINO provider plugin; falls back to CPU with a warning when it fails to load.',
 }
 
 const PROVIDER_OPTIONS = (Object.keys(PROVIDER_DISPLAY_NAMES) as ExecutionProvider[]).map((key) => ({
@@ -51,16 +53,18 @@ const DEFAULT_CONFIG: SavedConfig = { execution_provider: 'auto', device_id: 0 }
  * contract visible instead of letting edits look ignored.
  *
  * The provider/device controls are Linux-host-only (`isLinuxHost()`): the
- * CUDA flavor they configure is linux/amd64 (ADR-046) and Windows/macOS
- * hardware acceleration is a separate future implementation. Off Linux the
+ * hardware-acceleration flavors they configure (CUDA, OpenVINO) ship as
+ * linux/amd64 builds (ADR-046) and Windows/macOS hardware acceleration is a
+ * separate future implementation. Off Linux the
  * section renders a muted note plus the cross-platform diagnostics block —
  * and issues neither mount-time RPC nor any save.
  */
 export function VectorIndexSettings() {
   const status = useVectorIndexStore((s) => s.status)
 
-  // Provider/device selection ships for Linux hosts only: the CUDA ONNX
-  // Runtime flavor is linux/amd64 (ADR-046) and Windows/macOS hardware
+  // Provider/device selection ships for Linux hosts only: the hardware
+  // acceleration flavors (CUDA, OpenVINO) are linux/amd64 builds
+  // (ADR-046) and Windows/macOS hardware
   // acceleration is a separate future implementation. The runtime
   // diagnostics below stay cross-platform — they describe whatever embedder
   // is actually running.
@@ -165,7 +169,16 @@ export function VectorIndexSettings() {
   }, [saveSettings])
 
   const handleProviderChange = (value: string) => {
-    const newConfig = { ...config, execution_provider: value as ExecutionProvider }
+    const provider = value as ExecutionProvider
+    const newConfig = { ...config, execution_provider: provider }
+    // The OpenVINO plugin surface accepts device 0 only (it picks the
+    // concrete Intel device itself); normalize the saved pair so a switch
+    // to openvino can never persist a device id the embedder would reject
+    // at creation time.
+    if (provider === 'openvino' && newConfig.device_id !== 0) {
+      newConfig.device_id = 0
+      setDeviceInput('0')
+    }
     setConfig(newConfig)
     debouncedSave(newConfig)
   }
@@ -198,6 +211,12 @@ export function VectorIndexSettings() {
   }
 
   const deviceDisabled = config.execution_provider === 'cpu'
+  // OpenVINO accepts device 0 only (the plugin picks the concrete Intel
+  // device), so the control is pinned with its own explanation rather than
+  // the CPU note.
+  const devicePinnedReason = config.execution_provider === 'openvino'
+    ? 'OpenVINO always runs on device 0 — the plugin picks the concrete Intel device itself.'
+    : undefined
 
   // ── Restart-pending detection ────────────────────────────────────────
   // The running embedder's creation-time facts travel in VectorIndexStatus;
@@ -214,9 +233,9 @@ export function VectorIndexSettings() {
       {!showControls && (
         <p data-testid="vector-controls-unavailable" className="text-xs text-muted-foreground">
           Execution-provider and GPU-device selection is available on Linux hosts only —
-          the CUDA acceleration it configures ships as a Linux build, and Windows/macOS
-          hardware acceleration is a separate future implementation. The runtime
-          diagnostics below still apply.
+          the hardware acceleration it configures (CUDA, OpenVINO) ships as Linux builds,
+          and Windows/macOS hardware acceleration is a separate future implementation.
+          The runtime diagnostics below still apply.
         </p>
       )}
 
@@ -241,6 +260,8 @@ export function VectorIndexSettings() {
           gpus={gpus}
           gpusLoaded={gpusLoaded}
           disabled={deviceDisabled}
+          pinnedReason={devicePinnedReason}
+          provider={config.execution_provider}
           value={config.device_id}
           input={deviceInput}
           error={deviceError}

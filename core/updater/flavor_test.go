@@ -16,6 +16,16 @@ func writeCUDAProviderLib(t *testing.T, dir string) {
 	}
 }
 
+// writeOpenVINOPluginLib creates the OpenVINO EP plugin library file in dir,
+// simulating the footprint `make fetch-onnx-openvino` leaves in an install
+// tree.
+func writeOpenVINOPluginLib(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, openvinoPluginLibrary), []byte("placeholder"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", openvinoPluginLibrary, err)
+	}
+}
+
 // TestFlavorFor_LinuxAMD64_NoLibrary covers the acceptance criterion
 // "linux/amd64 without the library → FlavorCPU": a linux/amd64 install tree
 // without the CUDA provider library is the default CPU flavor.
@@ -39,17 +49,46 @@ func TestFlavorFor_LinuxAMD64_WithLibrary(t *testing.T) {
 	}
 }
 
+// TestFlavorFor_LinuxAMD64_WithOpenVINOPlugin covers the acceptance criterion
+// "linux/amd64 with the plugin library → FlavorOpenVINO": the OpenVINO EP
+// plugin's presence next to the binary — without the CUDA marker — is the
+// install-time signal of the openvino flavor.
+func TestFlavorFor_LinuxAMD64_WithOpenVINOPlugin(t *testing.T) {
+	dir := t.TempDir()
+	writeOpenVINOPluginLib(t, dir)
+	exe := filepath.Join(dir, "c0wrk-desktop")
+	if got := flavorFor("linux", "amd64", exe); got != FlavorOpenVINO {
+		t.Fatalf("flavorFor(linux/amd64, openvino plugin present) = %q, want %q", got, FlavorOpenVINO)
+	}
+}
+
+// TestFlavorFor_LinuxAMD64_BothMarkers_CUDAPrecedence pins the mixed-tree
+// precedence: when both flavor markers sit next to the binary (a state the
+// Makefile's mutual-exclusion guards make unreachable), the CUDA marker wins
+// deterministically — the conservative payload for a tree whose main library
+// may be the GPU build.
+func TestFlavorFor_LinuxAMD64_BothMarkers_CUDAPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeCUDAProviderLib(t, dir)
+	writeOpenVINOPluginLib(t, dir)
+	exe := filepath.Join(dir, "c0wrk-desktop")
+	if got := flavorFor("linux", "amd64", exe); got != FlavorCUDA13 {
+		t.Fatalf("flavorFor(linux/amd64, both markers) = %q, want %q (CUDA precedence)", got, FlavorCUDA13)
+	}
+}
+
 // TestFlavorFor_NonLinuxPlatforms covers the acceptance criterion
-// "non-linux/amd64 → always FlavorCPU": the GPU flavor is published for
-// linux/amd64 only, so every other platform — with or without a stray
-// provider library sitting next to the binary — resolves to CPU.
+// "non-linux/amd64 → always FlavorCPU": the GPU flavors are published for
+// linux/amd64 only, so every other platform — with or without stray provider
+// libraries sitting next to the binary — resolves to CPU.
 func TestFlavorFor_NonLinuxPlatforms(t *testing.T) {
 	dir := t.TempDir()
 	writeCUDAProviderLib(t, dir)
+	writeOpenVINOPluginLib(t, dir)
 	exe := filepath.Join(dir, "c0wrk-desktop")
 
-	// The library is present in all cases below: only the platform gate can
-	// explain a FlavorCPU answer.
+	// Both marker libraries are present in all cases below: only the
+	// platform gate can explain a FlavorCPU answer.
 	for _, p := range [][2]string{
 		{"darwin", "arm64"},
 		{"darwin", "amd64"},

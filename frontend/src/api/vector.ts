@@ -48,15 +48,17 @@ export async function reindexVectorIndex(): Promise<void> {
 }
 
 /**
- * List the NVIDIA GPUs visible on the machine (for the vector-index
- * settings device picker). The backend shells out to
- * `nvidia-smi --query-gpu=index,name` under a bounded 2s probe budget:
- * machines without nvidia-smi yield an empty list (absence of the NVIDIA
- * userspace means "no GPUs to offer", not a failure); a present-but-failing
- * driver (down, non-zero exit, timeout) rejects the promise so the UI can
- * distinguish "no hardware" from "probe failed". The result reflects what
- * the driver reports right now — the running embedder's facts travel in
- * VectorIndexStatus, not here.
+ * List the GPUs visible on the machine (for the vector-index settings
+ * device picker). The backend merges two external probe sources under a
+ * bounded 2s probe budget each — `nvidia-smi --query-gpu=index,name`
+ * (provider "cuda") and `vulkaninfo --summary` filtered to Intel
+ * (provider "openvino"): machines without either tool yield an empty list
+ * (absence of a driver's userspace means "no GPUs to offer", not a
+ * failure); a present-but-failing driver (down, non-zero exit, timeout)
+ * rejects the promise so the UI can distinguish "no hardware" from "probe
+ * failed" — but only when no source answered; a healthy source wins over
+ * a broken one. The result reflects what the drivers report right now —
+ * the running embedder's facts travel in VectorIndexStatus, not here.
  */
 export async function listVectorIndexGPUs(): Promise<GPUDeviceResponse[]> {
   try {

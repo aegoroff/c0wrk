@@ -1206,7 +1206,7 @@ CompatibilityGuards(backend, gpuFamily, platform)  →  []GuardDecision
 | `cuda-13.3-crash` | effective backend `cuda-13.3` — **on linux-amd64 only when the probed `CUDA12Userland` verdict is `present`** (`absent`/`unknown` keep 13.3 and record the decision unapplied with verdict-specific guidance; the cuda-12.8 build dynamically links the CUDA 12.x userland, so the substitution is safe only when the libraries are genuinely there). On windows-amd64 the substitution is unconditional: the `cudart` companion archive bundles the runtime | prefer `cuda-12.8` on linux-amd64, `cuda-12.4` on windows-amd64 | `crash_on_load` → critical | `llama.cpp#222` — Linux segfault; Windows prints the banner and exits |
 | `rocm-rdna2-abort` | `rocm` + RDNA2 (gfx1030-class) | prefer `vulkan` | `process_abort` → critical | `Bonsai-demo#197` — HIP aborts on consumer RDNA2; "try the Vulkan build" |
 | `windows-hip-gfx1151-garbled` | windows-amd64 + `rocm` (HIP) + gfx1151 | prefer `vulkan`, which resolves to `PTQ1_0` | `garbled_output` → critical | `llama.cpp#223` — `PQ2_0` output is garbage; `-ngl 0` or Vulkan+`PTQ1_0` are correct |
-| `vulkan-intel-arc-hang` | `vulkan` + Intel Arc | advisory | `hang` → warning | `llama.cpp#192` — hangs after ~1,900 generated tokens; "run on CPU for now" |
+| `vulkan-intel-arc-hang` | `vulkan` + Intel Arc (`intel-arc` family: the upstream report is a discrete Arc B580; live-validated on an integrated Arrow Lake Xe2 iGPU — see the validation note below) | advisory | `hang` → warning | `llama.cpp#192` — prompt processing once the prompt reaches ~1,900 tokens loses the Vulkan device mid-prefill and the `llama-server` process aborts (reproduced on Arrow Lake at a ~2,090-token prompt); output length is not a trigger; "run on CPU for now" |
 | `windows-cuda-no-start` | windows-amd64 + any CUDA backend | advisory | `fails_to_start` → warning | `llama.cpp#241` — some Windows CUDA builds do not start; the CPU-only build does |
 
 Severity is **derived** from the reason (`severityFor`), never set per guard, so
@@ -1216,9 +1216,95 @@ failure nobody classified must never render as the mildest thing on the list.
 **Why two guards are advisory only.** `windows-cuda-no-start` names no CPUID, no
 driver version and no card, so nothing can predict it statically; what the guard
 can do is put the documented fallback in the install record *before* the failure
-instead of after it. `vulkan-intel-arc-hang` has a workaround that gives up GPU
-acceleration entirely, and it degrades only after ~1,900 tokens of *output* — a
-trade c0wrk discloses rather than makes silently on the user's behalf.
+instead of after it. `vulkan-intel-arc-hang` has exactly one documented
+workaround — "run on CPU for now", which gives up GPU acceleration entirely on
+the machines it fires for (the fork pins no SYCL artifact, so no accelerated
+substitute exists) — a trade c0wrk discloses rather than makes silently on the
+user's behalf. The 2026-10-18 validation below sharpened what the disclosure
+warns about: the trigger is prompt size, and the failure is a server-process
+crash, not a late-answer stall.
+
+> **Live validation 2026-10-18 — `vulkan-intel-arc-hang` reproduced on integrated Arrow Lake; guard kept family-wide.**
+>
+> The upstream report behind this guard (`llama.cpp#192`, still open at this
+> validation) is a discrete Arc B580 (Battlemage). A complete install of the
+> current pin (`prism-b10735-842b188`, Vulkan flavor resolving to `PTQ1_0`, all
+> three manifest SHA256s re-verified byte-identical) was exercised through the
+> production `Server.Load` path on an integrated Arrow Lake-P Xe2 iGPU (unified
+> memory, Mesa ANV `vulkan-intel`, xe kernel driver), and the failure reproduced
+> at the documented threshold: a ~2,090-token prompt lost the Vulkan device
+> ~57 s into prefill (`ErrorDeviceLost`) and the `llama-server` process aborted —
+> a crash of the server process rather than a recoverable stall; a freshly
+> spawned server came up healthy afterwards. The output axis is clean: with a
+> 102-token prompt the server generated 3,072 tokens end to end with no stall,
+> so output length is not the trigger, and the pinned repo's "generated tokens"
+> wording describes the wrong axis. `ClassifyGPUs` returns `intel-arc` for the
+> live host, so the family token fires on integrated Xe2 exactly as on the
+> reported discrete part: the guard stays family-wide, because narrowing it to
+> the B580 would leave the reproduced machine unguarded. Every other discrete
+> Arc SKU remains documented-only — the B580 report and this iGPU are the two
+> data points, and this table claims nothing beyond them. Validating further
+> members of the family (a B580-class discrete part first) is recorded
+> backlog that starts when reference hardware exists. The row's
+> `hang` → warning classification is unchanged: the measured failure mode (a
+> device-lost abort) is the more severe of the two readings, and this
+> measurement records the evidence a deliberate re-ranking would weigh without
+> making that decision.
+>
+> Discrete Arc (B580/B70) remains unvalidated — backlog until reference hardware exists.
+
+> **NPU on the same reference host, 2026-10-18 — hardware present, userspace driver installed, path still unverified: the blocker is device access.**
+>
+> The Arrow Lake-P machine this validation ran on also carries an Intel NPU
+> (PCI `8086:7d1d`, in-tree `intel_vpu` kernel driver loaded and bound,
+> `/dev/accel/accel0` present). Two probes, same day. The first ran without a
+> userspace NPU driver at all: the OpenVINO execution provider
+> ([ADR-089](../decisions/089-openvino-embedding-flavor.md) — the
+> vector-index embedder's route to OpenVINO, probed on the same machine)
+> enumerated five devices — ORT CPU, the Arc iGPU, OV CPU and the two AUTO
+> pseudo-devices — and no NPU, silently even at `OPENVINO_LOG_LEVEL=5`. The
+> operator then installed `intel-npu-driver` 1.35.0-2, and the
+> re-enumeration returned the same five devices — the failure point moved,
+> measurably, from "no UMD" to "no device access": the level-zero loader now
+> finds and resolves `libze_intel_npu.so.1` (the 1.35 UMD name; the older
+> `libze_intel_vpu.so` no longer exists) as a supported VPU/NPU driver, but
+> its `zeInitDrivers` answers `ZE_RESULT_ERROR_UNINITIALIZED`, and the
+> controlled contrast explains it — the package's udev rule makes `accel0`
+> `root:render 0660` with no uaccess tag, the validation user is not in the
+> `render` group (a direct `open()` fails with EACCES), while the GPU UMD
+> initializes through `renderD128`, which is world-writable. `ZE_ENABLE_LOADER_DEBUG_TRACE=1`
+> is the switch that surfaces this failing init; without it the installed
+> driver is as silent as the missing one. The boot also predates the install
+> (the kernel loaded `vpu_37xx` firmware from linux-firmware, not the
+> package's `updates/` copies), so a reboot belongs to the remaining check.
+> The remedy — `render` group membership (or a uaccess rule), re-login,
+> reboot, then device re-enumeration — is a host-admin action; the sixth
+> `ov_device=NPU` entry stays the unverified expectation and embedder
+> inference on the NPU remains honestly **N/A**. The discrete-Arc backlog
+> above and this NPU note are the two open hardware-validation tracks of
+> this host: discrete Arc waits for reference hardware, the NPU waits for a
+> `render`-group login — today only the iGPU is both present and usable.
+
+> **Post-load stop-caller audit, 2026-10-18 — the B2 exit signature has no production counterpart.**
+>
+> The B2 validation observed the supervised child exit ~1.5 ms after its
+> ready log; that signature was traced to the validation harness's own
+> deferred stop, and this audit closes the question for the real app path by
+> enumerating every production stop entry. The complete inventory: the
+> Shutdown teardown (`desktop/startup.go` — the only desktop caller of
+> `stopEmbeddedLLM`), the `UnloadEmbeddedLLM`, `RemoveEmbeddedLLM` and
+> `InstallEmbeddedLLM`-step-0 entry points — each a deliberate user click
+> through the RPC surface — and the idle auto-unload timer, the one
+> automatic stopper, bounded by construction to fire no sooner than one
+> minute after the last activity (default sixty). The window between the
+> ready log and `Load`'s return contains no stop-shaped call at all: the
+> readiness poll, the `/props` readback, the manifest write, `PersistContext`
+> (a config mirror — sync-or-skip provider record, atomic save-or-rollback,
+> a display-window push and a scheduled ASYNC router refresh), the state
+> event and the idle-timer arm; no `config:updated` consumer owns or stops
+> the supervised process. The audit therefore changes no code: the B2
+> signature is a test-harness artifact, and the stdin hardening shipped
+> alongside its analysis stays as pure defense-in-depth.
 
 **Where the decisions are made.** A guard is data, so the same table is read
 twice: by the resolver, to apply the substitutions it still can, and by the
@@ -2627,6 +2713,8 @@ error      → an explicit hint carrying the backend's message (truncated in the
 **Backend compatibility guards:**
 
 - Every guard cites the upstream report that justifies it (`GuardDecision.Issue`, `<repo>#<number>`) and carries a typed `GuardReason`. A guard invented from a hunch is a bug: the table is a transcription of the pinned model's `KNOWN_ISSUES.md`, not a theory about hardware.
+- A guard fires wherever its `GPUFamily` token classifies the machine, and a reproduction on a new member of the family is evidence about the family. `vulkan-intel-arc-hang` reproduced on an integrated Arrow Lake Xe2 iGPU — the live host classifies as `intel-arc`, the same family the discrete Arc B580 report names — so the guard stays family-wide: narrowing it to the originally reported part would leave the machine that reproduced the failure unguarded.
+- A validated reproduction outranks the transcribed wording on the axis it measured. The `#192` row and its validation note record prompt size as the trigger (the output axis ran clean to 3,072 generated tokens) and a device-lost abort of the server process as the failure mode, because the table's job is to predict the failure on the machines it fires for; the row's derived `hang` severity remains the classification this pin ships, with the measurement recorded as the evidence a re-ranking decision would weigh.
 - `CompatibilityGuards(backend, gpuFamily, platform)` is a **pure** table lookup: no I/O, no clock, no failure, and a machine nothing is documented against gets no decisions at all. That is what makes the whole backend × family × platform matrix table-testable.
 - Severity is **derived** from the reason, never hand-set per guard, and an unranked reason maps to `critical` — an unclassified failure must never render as the mildest thing on the list.
 - A guard substitutes a backend only when the registry **pins** that backend for the platform — and the Linux half of `cuda-13.3-crash` additionally only when the probed `CUDA12Userland` verdict is `present` (ADR-073): `absent` means the substitute build could not load here, `unknown` means it was never measured, and firing on a guess converts an upstream failure into a runtime that cannot start. Otherwise the decision is recorded unapplied with the reason in its guidance: converting an upstream failure into c0wrk's own `ErrArtifactNotPinned` — or into an unloadable fallback — would be strictly worse than the failure.

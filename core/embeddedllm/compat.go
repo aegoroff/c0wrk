@@ -144,6 +144,16 @@ const (
 	// tokens", workaround "run on CPU for now", status open (#192). Vulkan is
 	// the only backend c0wrk ships for Intel GPUs and Vulkan always resolves to
 	// PTQ1_0, so this family plus Vulkan is exactly the documented condition.
+	//
+	// The same honesty rule as gfx1151's governs coverage: a description must
+	// NAME the part. The Mesa Vulkan driver names the Xe2 iGPUs without the Arc
+	// brand — "Intel(R) Graphics (ARL)" (Arrow Lake) or "Intel(R) Graphics
+	// (LNL)" (Lunar Lake) — so the parenthesized generation code is the
+	// classifying token (captured verbatim from the project's live Linux Vulkan
+	// host: "Vulkan0: Intel(R) Graphics (ARL) (72035 MiB, 64832 MiB free)").
+	// The bare spelling of the same parts — "Intel(R) Graphics", the shape the
+	// OpenCL driver prints, with no generation suffix — names no generation and
+	// classifies as Unknown.
 	GPUFamilyIntelArc GPUFamily = "intel-arc"
 )
 
@@ -167,7 +177,14 @@ var gpuRules = []struct {
 	patterns []*regexp.Regexp
 }{
 	{GPUFamilyAppleSilicon, gpuPatterns(`apple\s+m\d`, `apple silicon`)},
-	{GPUFamilyIntelArc, gpuPatterns(`\barc\b`, `\bxe2\b`, `\bb[357]\d0\b`, `\ba[357]\d0\b`)},
+	// The ARL/LNL tokens are the Mesa Vulkan generation codes for the Xe2 iGPUs:
+	// "Intel(R) Graphics (ARL)" (Arrow Lake) and "(LNL)" (Lunar Lake) carry no
+	// "Arc" brand to match, so the generation code is the token (the ARL name is
+	// captured verbatim from the project's live Linux Vulkan host). The bare
+	// OpenCL spelling of the same parts — "Intel(R) Graphics" — carries no code
+	// and stays deliberately unrecognized: no rule keys on a name that does not
+	// name the part.
+	{GPUFamilyIntelArc, gpuPatterns(`\barc\b`, `\bxe2\b`, `\barl\b`, `\blnl\b`, `\bb[357]\d0\b`, `\ba[357]\d0\b`)},
 	{GPUFamilyAMDGFX1151, gpuPatterns(`\bgfx1151\b`, `strix halo`, `ryzen ai max`, `radeon 80[56]0s`)},
 	{GPUFamilyAMDRDNA3, gpuPatterns(`\bgfx11\d{2}\b`, `\brx\s*7\d{3}\b`, `rdna ?3`)},
 	{GPUFamilyAMDRDNA2, gpuPatterns(`\bgfx103\d`, `\brx\s*6\d{3}\b`, `radeon\s+pro\s+w6\d{3}`, `rdna ?2`)},
@@ -384,9 +401,12 @@ const (
 	// PTQ1_0 (Vulkan has no PQ2_0 kernels), so every Intel Arc Vulkan install
 	// is in scope, and the only documented workaround gives up GPU acceleration
 	// entirely. That trade is the user's, so the guard records and discloses it
-	// instead of making it silently — and unlike the two aborting guards it
-	// degrades after ~1,900 tokens of OUTPUT, which short answers may never
-	// reach.
+	// instead of making it silently. Live validation on an integrated Arrow
+	// Lake-P Xe2 iGPU (2026-10, recorded in the domain spec) fixed the real
+	// axis: the trigger is PROMPT size — a ~2,090-token prompt lost the Vulkan
+	// device ~57 s into prefill and the llama-server process aborted — while
+	// 3,072 generated tokens ran clean, so the failure is a crash of the
+	// server, not a late-answer stall a short answer might dodge.
 	GuardVulkanIntelArcHang GuardID = "vulkan-intel-arc-hang"
 
 	// GuardWindowsCUDANoStart covers KNOWN_ISSUES "Windows CUDA builds don't
@@ -442,8 +462,11 @@ const (
 	// attributed to the model.
 	GuardReasonGarbledOutput GuardReason = "garbled_output"
 
-	// GuardReasonHang is a documented hang partway through generation (#192:
-	// PTQ1_0 on Vulkan with Intel Arc, after about 1,900 tokens).
+	// GuardReasonHang is the documented "hang" classification (#192: PTQ1_0
+	// on Vulkan with Intel Arc, after about 1,900 tokens). Live validation on
+	// Arrow Lake measured the failure as a device-lost abort of the server
+	// during PROMPT processing rather than a stall, so the guidance carries
+	// the measured mode while the enum keeps the upstream name.
 	GuardReasonHang GuardReason = "hang"
 
 	// GuardReasonFailsToStart is a documented start failure with no statically
@@ -461,8 +484,9 @@ const (
 	// WRONG: a crash, an abort, garbled output.
 	GuardSeverityCritical GuardSeverity = "critical"
 
-	// GuardSeverityWarning is a failure that degrades or interrupts use: a hang
-	// after a long output, a start failure that may or may not happen.
+	// GuardSeverityWarning is a failure that degrades or interrupts use: a
+	// mid-session abort once the prompt grows long (#192's measured mode), a
+	// start failure that may or may not happen.
 	GuardSeverityWarning GuardSeverity = "warning"
 )
 
@@ -593,15 +617,17 @@ func CompatibilityGuards(backend Backend, gpu GPUFamily, platform string) []Guar
 	}
 
 	// #192 — PTQ1_0 on Vulkan can hang Intel Arc GPUs after about 1,900
-	// tokens. Advisory: see the constant's doc comment for why the guard does
-	// not substitute the CPU build on the user's behalf.
+	// prompt tokens (live-validated 2026-10: a device-lost abort of the
+	// server mid-prefill, not a generation stall — see the constant's doc
+	// comment and the domain spec's validation note). Advisory: the guard
+	// does not substitute the CPU build on the user's behalf.
 	if backend == BackendVulkan && gpu == GPUFamilyIntelArc {
 		decisions = append(decisions, GuardDecision{
 			Guard:    GuardVulkanIntelArcHang,
 			Action:   GuardActionAdvisory,
 			Reason:   GuardReasonHang,
 			Issue:    "PrismML-Eng/llama.cpp#192",
-			Guidance: "PTQ1_0 on Vulkan is documented to hang Intel Arc GPUs after about 1,900 generated tokens; if generation stalls, the upstream workaround is to run on the CPU (reinstall with the CPU build, or start the server with -ngl 0)",
+			Guidance: "PTQ1_0 on Vulkan loses the Intel Arc GPU once the prompt reaches about 1,900 tokens: prompt processing aborts the llama-server process with a lost device (reproduced on Arrow Lake at a ~2,090-token prompt; generated output is not the trigger), so the upstream workaround is to run on the CPU (reinstall with the CPU build, or start the server with -ngl 0)",
 		})
 	}
 

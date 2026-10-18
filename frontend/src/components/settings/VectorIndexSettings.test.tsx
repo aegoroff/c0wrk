@@ -188,6 +188,30 @@ describe('VectorIndexSettings — render', () => {
     expect(items.some((t) => t.includes('1') && t.includes('NVIDIA GeForce RTX 3090'))).toBe(true)
   })
 
+  it('tags provider-scoped entries in the dropdown (Intel/OpenVINO)', async () => {
+    // A hybrid enumeration: the Intel entry carries the openvino provider,
+    // and the picker must label the provider scope — under openvino the
+    // index is always 0, so an untagged "0 — Intel…" would read as the
+    // same device as "0 — NVIDIA…" on hybrid machines.
+    mocks.listVectorIndexGPUs.mockResolvedValue([
+      { index: 0, name: 'NVIDIA GeForce RTX 5060 Ti', provider: 'cuda' },
+      { index: 0, name: 'Intel(R) Graphics (ARL)', provider: 'openvino' },
+    ])
+    await render()
+    await flush()
+
+    const device = findTrigger('Embedder GPU device')
+    expect(device).toBeDefined()
+    await act(async () => {
+      device!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+      await new Promise((r) => setTimeout(r, 10))
+    })
+    const items = Array.from(document.body.querySelectorAll('[role="menuitem"]'))
+      .map((o) => o.textContent ?? '')
+    expect(items.some((t) => t.includes('Intel(R) Graphics (ARL)') && t.includes('(OPENVINO)'))).toBe(true)
+    expect(items.some((t) => t.includes('NVIDIA GeForce RTX 5060 Ti') && t.includes('(CUDA)'))).toBe(true)
+  })
+
   it('falls back to a numeric input when the driver reports no GPUs', async () => {
     mocks.listVectorIndexGPUs.mockResolvedValue([])
     await render()
@@ -196,7 +220,7 @@ describe('VectorIndexSettings — render', () => {
     const input = container.querySelector<HTMLInputElement>('input[aria-label="Embedder GPU device"]')
     expect(input).not.toBeNull()
     expect(input!.value).toBe('0')
-    expect(text()).toContain('No NVIDIA GPUs reported')
+    expect(text()).toContain('No GPUs reported')
     // No named dropdown is rendered in this mode.
     expect(findTrigger('Embedder GPU device')).toBeUndefined()
   })
@@ -315,6 +339,37 @@ describe('VectorIndexSettings — save flow', () => {
 
     const device = findTrigger('Embedder GPU device')
     expect(device!.disabled).toBe(true)
+  })
+
+  it('normalizes the device id to 0 when switching the provider to OpenVINO', async () => {
+    // The OpenVINO plugin surface accepts device 0 only; a CUDA config with
+    // device 1 must persist as openvino/0 so the embedder-creation path
+    // never sees a device id it would reject.
+    mocks.getConfig.mockResolvedValue(configPayload({ execution_provider: 'cuda', device_id: 1 }))
+    await render()
+    await flush()
+
+    await pickOption('Embedder execution provider', 'OpenVINO (Intel GPU)')
+    await waitForSave()
+
+    expect(mocks.updateVectorIndexSettings).toHaveBeenCalledWith({
+      execution_provider: 'openvino',
+      device_id: 0,
+    })
+  })
+
+  it('pins the device control under OpenVINO with the device-0 note', async () => {
+    await render()
+    await flush()
+
+    await pickOption('Embedder execution provider', 'OpenVINO (Intel GPU)')
+    await flush()
+
+    const device = findTrigger('Embedder GPU device')
+    expect(device).toBeDefined()
+    expect(device!.disabled).toBe(true)
+    expect(text()).toContain('OpenVINO always runs on device 0')
+    expect(text()).not.toContain('CPU ignores it')
   })
 
   it('flushes a pending debounced save on unmount', async () => {
@@ -453,6 +508,100 @@ describe('VectorIndexSettings — diagnostics', () => {
     const badge = container.querySelector('[data-testid="vector-cuda-verified-badge"]')
     expect(badge).not.toBeNull()
     expect(badge!.textContent).toContain('CUDA not verified by driver probe')
+  })
+
+  it('renders the fallback reason on an OpenVINO→CPU fallback (mirrors the CUDA case)', async () => {
+    useVectorIndexStore.setState({
+      status: statusWith({
+        requested_execution_provider: 'openvino',
+        execution_provider: 'cpu',
+        provider_fallback_reason: 'OpenVINO execution provider plugin not found',
+      }),
+    })
+    await render()
+    await flush()
+
+    const provider = container.querySelector('[data-testid="vector-diagnostics-provider"]')
+    expect(provider).not.toBeNull()
+    expect(provider!.textContent).toContain('OpenVINO')
+    expect(provider!.textContent).toContain('CPU')
+
+    const reason = container.querySelector('[data-testid="vector-fallback-reason"]')
+    expect(reason).not.toBeNull()
+    expect(reason!.textContent).toContain('OpenVINO execution provider plugin not found')
+    // No device badge on a CPU embedder.
+    expect(container.querySelector('[data-testid="vector-ov-device-badge"]')).toBeNull()
+  })
+
+  it('treats Auto resolving to OpenVINO as a success — no fallback UI', async () => {
+    useVectorIndexStore.setState({
+      status: statusWith({
+        requested_execution_provider: 'auto',
+        execution_provider: 'openvino',
+      }),
+    })
+    await render()
+    await flush()
+
+    const provider = container.querySelector('[data-testid="vector-diagnostics-provider"]')
+    expect(provider).not.toBeNull()
+    expect(provider!.textContent).toContain('Auto')
+    expect(provider!.textContent).toContain('OpenVINO')
+
+    expect(container.querySelector('[data-testid="vector-fallback-reason"]')).toBeNull()
+    expect(container.querySelector('[data-testid="vector-auto-cpu-note"]')).toBeNull()
+    expect(text()).not.toContain('Fell back')
+    expect(text()).not.toContain('unknown reason')
+  })
+
+  it('renders the ov_device badge with the Intel-GPU verdict', async () => {
+    useVectorIndexStore.setState({
+      status: statusWith({
+        requested_execution_provider: 'openvino',
+        execution_provider: 'openvino',
+        ov_device: 'gpu',
+      }),
+    })
+    await render()
+    await flush()
+
+    const badge = container.querySelector('[data-testid="vector-ov-device-badge"]')
+    expect(badge).not.toBeNull()
+    expect(badge!.textContent).toContain('Intel GPU verified')
+    // Honored request → no fallback reason block.
+    expect(container.querySelector('[data-testid="vector-fallback-reason"]')).toBeNull()
+  })
+
+  it('renders the ov_device badge as a warning when the probe saw no GPU activity', async () => {
+    useVectorIndexStore.setState({
+      status: statusWith({
+        requested_execution_provider: 'openvino',
+        execution_provider: 'openvino',
+        ov_device: 'cpu',
+      }),
+    })
+    await render()
+    await flush()
+
+    const badge = container.querySelector('[data-testid="vector-ov-device-badge"]')
+    expect(badge).not.toBeNull()
+    expect(badge!.textContent).toContain('No Intel GPU activity')
+  })
+
+  it('renders no ov_device badge when the probe did not answer (unverified is not cpu)', async () => {
+    useVectorIndexStore.setState({
+      status: statusWith({
+        requested_execution_provider: 'openvino',
+        execution_provider: 'openvino',
+        // ov_device absent: xpu-smi missing/failed/timed out — "unverified,
+        // not negative"; a missing verdict must never read as "cpu".
+      }),
+    })
+    await render()
+    await flush()
+
+    expect(container.querySelector('[data-testid="vector-ov-device-badge"]')).toBeNull()
+    expect(text()).not.toContain('No Intel GPU activity')
   })
 
   it('degrades to a muted note when no embedder is running', async () => {

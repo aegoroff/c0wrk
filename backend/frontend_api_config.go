@@ -588,13 +588,13 @@ func (f *FrontendAPI) UpdateVectorIndexSettings(settings VectorIndexSettingsResp
 	// mirrors the load-time validate() wording so the user gets the same
 	// actionable guidance in the settings UI as on startup.
 	switch settings.ExecutionProvider {
-	case config.VectorIndexProviderAuto, config.VectorIndexProviderCPU, config.VectorIndexProviderCUDA:
+	case config.VectorIndexProviderAuto, config.VectorIndexProviderCPU, config.VectorIndexProviderCUDA, config.VectorIndexProviderOpenVINO:
 		// valid
 	default:
 		return fmt.Errorf(
-			"vector_index.execution_provider %q is not valid; must be one of: %s, %s, %s",
+			"vector_index.execution_provider %q is not valid; must be one of: %s, %s, %s, %s",
 			settings.ExecutionProvider,
-			config.VectorIndexProviderAuto, config.VectorIndexProviderCPU, config.VectorIndexProviderCUDA,
+			config.VectorIndexProviderAuto, config.VectorIndexProviderCPU, config.VectorIndexProviderCUDA, config.VectorIndexProviderOpenVINO,
 		)
 	}
 	if settings.DeviceID < 0 {

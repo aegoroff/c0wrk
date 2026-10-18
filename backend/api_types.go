@@ -717,29 +717,40 @@ type ToolInfo struct {
 // written once (embedder creation outcome) and never mutated afterwards, so the
 // values stay consistent across all subsequent status emissions.
 type VectorEmbedderInfo struct {
-	// EffectiveProvider is the provider inference actually runs on: "cpu" or
-	// "cuda" — "auto" is resolved at embedder creation and never leaks here.
+	// EffectiveProvider is the provider inference actually runs on: "cpu",
+	// "cuda" or "openvino" — "auto" is resolved at embedder creation and
+	// never leaks here.
 	EffectiveProvider string
 
 	// RequestedProvider is the config value passed to the embedder:
-	// "auto" | "cpu" | "cuda". Diverges from EffectiveProvider for every
-	// "auto" request (auto is resolved to the winner at creation —
-	// auto→cuda is a success, auto→cpu is Auto's expected degradation)
-	// and for an explicit "cuda" degrading to CPU after init failure —
-	// only the latter is a fallback, and only that path sets
-	// FallbackReason.
+	// "auto" | "cpu" | "cuda" | "openvino". Diverges from
+	// EffectiveProvider for every "auto" request (auto is resolved to the
+	// winner at creation — auto→cuda and auto→openvino are successes,
+	// auto→cpu is Auto's expected degradation) and for an explicit
+	// "cuda"/"openvino" degrading to CPU after init failure — only the
+	// latter is a fallback, and only that path sets FallbackReason.
 	RequestedProvider string
 
-	// FallbackReason carries why an explicit "cuda" request degraded to
-	// the CPU provider (CUDA init failure text). Empty otherwise — the
-	// "auto" degradation cause is WARN-logged at startup and is not part
-	// of the status payload. Surfaced in the status for diagnostics.
+	// FallbackReason carries why an explicit "cuda" or "openvino" request
+	// degraded to the CPU provider (provider init failure text). Empty
+	// otherwise — the "auto" degradation cause is WARN-logged at startup
+	// and is not part of the status payload. Surfaced in the status for
+	// diagnostics.
 	FallbackReason string
 
 	// CUDAVerified is the external nvidia-smi verdict — true when the driver
 	// lists this process among CUDA compute apps. Nil when the probe did not
 	// run (CPU embedder, embedder unavailable, probe skipped).
 	CUDAVerified *bool
+
+	// OVDevice is the external xpu-smi verdict of the device class the
+	// OpenVINO provider actually drives: "gpu" when sustained inference
+	// moved the Intel GPU's compute-utilization counter, "cpu" when the
+	// probe ran and saw no GPU activity (the plugin picked a CPU device).
+	// Empty when unverified — no probe ran (non-openvino embedder,
+	// embedder unavailable) or xpu-smi could not answer (absent, failed,
+	// timed out); a missing verdict is never reported as "cpu".
+	OVDevice string
 
 	// DeviceID is the ONNX device index the embedder was created with
 	// (vector_index.device_id). Paired with the provider fields so a future
@@ -760,7 +771,7 @@ type VectorEmbedderInfo struct {
 // DeviceID, so the provider fields carry the populated/not-populated signal.
 func (i VectorEmbedderInfo) IsZero() bool {
 	return i.EffectiveProvider == "" && i.RequestedProvider == "" &&
-		i.FallbackReason == "" && i.CUDAVerified == nil && i.DeviceID == 0
+		i.FallbackReason == "" && i.CUDAVerified == nil && i.OVDevice == "" && i.DeviceID == 0
 }
 
 // VectorIndexStatus describes the current state of the vector index for the frontend.
@@ -775,20 +786,22 @@ type VectorIndexStatus struct {
 	Indices      []string `json:"indices"` // e.g. ["vector", "lexical"
 
 	// ExecutionProvider is the ONNX Runtime execution provider the embedder
-	// effectively runs on: "cpu" or "cuda" — never "auto" ("auto" is resolved
-	// once, at embedder creation; the winner is reported here). Empty when no
-	// embedder exists (model files missing or creation failed). Comparing it
-	// with RequestedExecutionProvider classifies the outcome (ADR-045): an
-	// explicit "cuda" landing on "cpu" is a fallback; an "auto" request always
-	// diverges (it is resolved to a winner), so auto→cuda is a success and
-	// auto→cpu is Auto's expected degradation.
+	// effectively runs on: "cpu", "cuda" or "openvino" — never "auto"
+	// ("auto" is resolved once, at embedder creation; the winner is
+	// reported here). Empty when no embedder exists (model files missing
+	// or creation failed). Comparing it with RequestedExecutionProvider
+	// classifies the outcome (ADR-045): an explicit "cuda"/"openvino"
+	// landing on "cpu" is a fallback; an "auto" request always diverges
+	// (it is resolved to a winner), so auto→cuda and auto→openvino are
+	// successes and auto→cpu is Auto's expected degradation.
 	ExecutionProvider string `json:"execution_provider,omitempty"`
 
-	// RequestedExecutionProvider is the config value (auto|cpu|cuda) the
-	// embedder was created with. Diverges from ExecutionProvider for every
-	// "auto" request (auto is resolved to the winner) and for an explicit
-	// "cuda" degrading to CPU after init failure (WARN + runtime_error
-	// toast) — only the latter is a fallback.
+	// RequestedExecutionProvider is the config value (auto|cpu|cuda|
+	// openvino) the embedder was created with. Diverges from
+	// ExecutionProvider for every "auto" request (auto is resolved to the
+	// winner) and for an explicit "cuda"/"openvino" degrading to CPU after
+	// init failure (WARN + runtime_error toast) — only the latter is a
+	// fallback.
 	RequestedExecutionProvider string `json:"requested_execution_provider,omitempty"`
 
 	// CUDAVerified is the external nvidia-smi verdict, set only when the
@@ -799,11 +812,20 @@ type VectorIndexStatus struct {
 	// embedder never initialized).
 	CUDAVerified *bool `json:"cuda_verified,omitempty"`
 
-	// ProviderFallbackReason explains why an explicit "cuda" request
-	// degraded to the CPU provider (CUDA init failure text). Empty when the
-	// requested provider was honored — and empty on the auto→cpu
-	// degradation path, whose concrete cause is WARN-logged at startup and
-	// does not travel in the status payload.
+	// OVDevice is the external xpu-smi verdict of the device class the
+	// OpenVINO provider actually drives, set only when the effective
+	// provider is "openvino": "gpu" = sustained inference moved the Intel
+	// GPU's compute-utilization counter; "cpu" = the probe ran and saw no
+	// GPU activity. Empty when unverified — no probe ran (non-openvino
+	// embedder, embedder unavailable) or xpu-smi could not answer (absent,
+	// failed, timed out); a missing verdict is never reported as "cpu".
+	OVDevice string `json:"ov_device,omitempty"`
+
+	// ProviderFallbackReason explains why an explicit "cuda" or "openvino"
+	// request degraded to the CPU provider (provider init failure text).
+	// Empty when the requested provider was honored — and empty on the
+	// auto→cpu degradation path, whose concrete cause is WARN-logged at
+	// startup and does not travel in the status payload.
 	ProviderFallbackReason string `json:"provider_fallback_reason,omitempty"`
 
 	// DeviceID is the ONNX device index the running embedder was created
@@ -854,14 +876,20 @@ type SearchRequest struct {
 	Mode        string   `json:"mode"`
 }
 
-// GPUDeviceResponse describes one GPU visible to the NVIDIA driver, for the
-// vector-index settings UI (populating the execution-provider device picker).
-// It mirrors embedding.GPUDevice as a plain DTO rather than re-exporting the
-// SDK type through the Wails bindings, keeping the frontend contract owned
-// by this package.
+// GPUDeviceResponse describes one GPU visible to a driver stack, for the
+// vector-index settings UI (populating the execution-provider device
+// picker). It mirrors embedding.GPUDevice as a plain DTO rather than
+// re-exporting the SDK type through the Wails bindings, keeping the
+// frontend contract owned by this package.
 type GPUDeviceResponse struct {
 	Index int    `json:"index"`
 	Name  string `json:"name"`
+	// Provider names the execution provider the device belongs to —
+	// "cuda" for nvidia-smi-enumerated devices, "openvino" for Intel
+	// devices enumerated through vulkaninfo. The picker's device index is
+	// scoped to the provider: the same index 0 under "cuda" and "openvino"
+	// names different hardware.
+	Provider string `json:"provider"`
 }
 
 // OptimizePromptResponse holds the result of prompt optimization for the frontend.

@@ -103,6 +103,15 @@ const fixtureListDevicesWindowsCUDA = "Available devices:\n" +
 const fixtureListDevicesVulkanHost = "Available devices:\n" +
 	"  GPU0: Intel Arc A770 Graphics (16256 MiB, 15872 MiB free)\n"
 
+// fixtureListDevicesLinuxVulkanARL is `llama-server --list-devices`, stdout,
+// CAPTURED from the project's live Linux Vulkan host (Arrow Lake iGPU, pinned
+// fork runtime b10735, 2026-10-18) — unlike the constructed shapes above, this
+// one is exactly what a real Xe2 iGPU machine answers. The Mesa description
+// carries no "Arc" brand: the parenthesized generation code is the token the
+// GPU-family classifier reads.
+const fixtureListDevicesLinuxVulkanARL = "Available devices:\n" +
+	"  Vulkan0: Intel(R) Graphics (ARL) (72035 MiB, 64832 MiB free)\n"
+
 // hostRAM128GiB is this project's reference machine: 128 GiB, exactly what
 // `sysctl hw.memsize` reports and exactly what the runtime's own `CPU` device
 // row agrees with (131072 MiB).
@@ -198,6 +207,18 @@ func TestParseDeviceListingCapturedFixtures(t *testing.T) {
 			wantDevices: []DeviceMemory{{
 				Name: "GPU0", Description: "Intel Arc A770 Graphics",
 				TotalMiB: 16256, FreeMiB: 15872,
+			}},
+		},
+		{
+			// The captured live Linux Vulkan host: the parenthesized generation
+			// code must survive into Description — it is the token the
+			// GPU-family classifier and the #192 guard read downstream.
+			name:   "linux vulkan ARL host, captured",
+			out:    fixtureListDevicesLinuxVulkanARL,
+			wantOK: true,
+			wantDevices: []DeviceMemory{{
+				Name: "Vulkan0", Description: "Intel(R) Graphics (ARL)",
+				TotalMiB: 72035, FreeMiB: 64832,
 			}},
 		},
 		{
