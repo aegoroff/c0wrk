@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -160,7 +161,15 @@ func TestSpawnOSServerKeepsTheChildsStdinAlive(t *testing.T) {
 	if !errors.As(waitErr, &exitErr) {
 		t.Fatalf("the child did not die from the kill: %v", waitErr)
 	}
-	if exitErr.ExitCode() != -1 && exitErr.ExitCode() != 42 && !strings.Contains(strings.ToLower(exitErr.String()), "terminated") {
-		t.Fatalf("the child died from something other than the stop: %v", waitErr)
+	// Kill closes stdin before terminating the process, so the helper can
+	// either observe EOF and exit with 42 or be killed by the OS. Go reports
+	// a signal exit as -1 on Unix; on Windows Process.Kill calls
+	// TerminateProcess with exit code 1 instead.
+	killExitCode := -1
+	if runtime.GOOS == "windows" {
+		killExitCode = 1
+	}
+	if got := exitErr.ExitCode(); got != killExitCode && got != 42 {
+		t.Errorf("spawnOSServer child after Kill on %s: exit code = %d (%v), want %d (killed) or 42 (stdin EOF)", runtime.GOOS, got, waitErr, killExitCode)
 	}
 }
