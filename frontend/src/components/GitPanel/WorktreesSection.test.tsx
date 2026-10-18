@@ -17,6 +17,7 @@ function renderSection(
   deleteBusyPath: string | null = null,
   draftSelect = false,
   draftBlockedReason?: (w: GitWorktree) => string | null,
+  isPinnedWorktree?: (w: GitWorktree) => boolean,
 ): void {
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -32,6 +33,7 @@ function renderSection(
         deleteBusyPath={deleteBusyPath}
         draftSelect={draftSelect}
         draftBlockedReason={draftBlockedReason}
+        isPinnedWorktree={isPinnedWorktree}
       />,
     )
   })
@@ -306,5 +308,77 @@ describe('WorktreesSection — draft-mode selection (list variant)', () => {
       row.click()
     })
     expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('WorktreesSection — session pin (manage mode)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  const sessionTree = () =>
+    makeWorktree({
+      path: '/w/proj/.worktrees/s-1',
+      name: 's-1',
+      branch: 'feat/x',
+      is_focus: true,
+    })
+  const otherTree = () =>
+    makeWorktree({
+      path: '/w/proj/.worktrees/s-2',
+      name: 's-2',
+      branch: 'feat/y',
+      is_focus: false,
+    })
+  const pinFirst = (w: GitWorktree) => w.name === 's-1'
+
+  it('renders a lock instead of the focus check on the session tree and offers no delete there', () => {
+    renderSection([sessionTree(), otherTree()], vi.fn(), null, vi.fn(), null, false, undefined, pinFirst)
+
+    const pinnedRow = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-1"]')!
+    expect(pinnedRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(pinnedRow.querySelector('[aria-label="Pinned to this session"]')).not.toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-trash2')).toBeNull()
+    expect(pinnedRow.title).toBe('Worktree s-1 — pinned to this session (feat/x)')
+
+    // A foreign managed tree keeps the delete action (and no pin lock).
+    const otherRow = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-2"]')!
+    expect(otherRow.querySelector('svg.lucide-lock')).toBeNull()
+    expect(otherRow.querySelector('svg.lucide-trash2')).not.toBeNull()
+  })
+
+  it('marks the pin with a lock while the focus check sits on the row the panel is focused on', () => {
+    const focusedOther = { ...otherTree(), is_focus: true }
+    renderSection([sessionTree(), focusedOther], vi.fn(), null, vi.fn(), null, false, undefined, pinFirst)
+
+    const pinnedRow = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-1"]')!
+    expect(pinnedRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-check')).toBeNull()
+
+    const focusedRow = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-2"]')!
+    expect(focusedRow.querySelector('svg.lucide-check')).not.toBeNull()
+    expect(focusedRow.querySelector('[aria-label="Focused"]')).not.toBeNull()
+  })
+
+  it('keeps the pinned row selectable — focus switching stays allowed', () => {
+    const onSelect = vi.fn()
+    renderSection([sessionTree()], onSelect, null, vi.fn(), null, false, undefined, pinFirst)
+
+    const pinnedRow = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-1"]')!
+    expect(pinnedRow.getAttribute('aria-disabled')).toBeNull()
+    act(() => {
+      pinnedRow.click()
+    })
+    expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it('never applies the pin in draft mode — the check/delete semantics stay untouched', () => {
+    renderSection([sessionTree()], vi.fn(), null, vi.fn(), null, true, undefined, pinFirst)
+
+    const row = container!.querySelector<HTMLElement>('[data-path="/w/proj/.worktrees/s-1"]')!
+    expect(row.querySelector('svg.lucide-lock')).toBeNull()
+    // Draft rows keep the delete affordance (a stale tree can be pruned mid-draft).
+    expect(row.querySelector('svg.lucide-trash2')).not.toBeNull()
   })
 })

@@ -11,7 +11,7 @@ Shared hover-overlay primitives for list-row actions: `ItemAction` is one icon b
 - `frontend/src/components/layout/SessionListItem.tsx` — session rows for both surfaces: `SessionSelector` (dropdown, CODE mode) and `SessionList` (flat, CHAT mode); the `variant` prop selects the outer element (`dropdown` → `DropdownMenuItem`, `flat` → `div[role=button]`); actions: Promote to project (only when the row's `project_id` is `__no_project__` AND the caller wired `onPromote` — CODE-mode selectors pass no callback, busy-gated with a promote-specific `disabledReason`), Pin/Unpin, Fork (busy-gated), Rename, Archive/Unarchive, Delete
 - `frontend/src/components/layout/SessionGroupedList.tsx` — worktree branch rows of the CODE-mode grouped session selector's Worktrees section: the overlay's children are four nested **registered** `DropdownMenuItem`s (see the nested-items shape under Hover overlay mechanics); actions: New session in this worktree (+), Pin/Unpin group (the GROUP-level pin — `pinnedGroupsStore`, persisted per project; a pinned branch floats above the unpinned groups of its section via `buildSessionGroups`' `pinnedBranches` ordering, member sessions' own pins untouched; the pinned row also carries an always-visible `Pin` badge before the branch name, mirroring the per-session pinned-row badge), Archive group, Delete group
 - `frontend/src/components/layout/SessionSelector.tsx` — archived branch rows of the same selector's Archived section: the same nested-items shape with a THREE-action overlay — Pin/Unpin group (the same GROUP-level pin, keyed by the branch name in both sections), Restore (unarchive) group, Delete group
-- `frontend/src/components/GitPanel/LocalBranchRow.tsx` — local branch rows (Push, Merge, Rebase, Rename, Delete)
+- `frontend/src/components/GitPanel/LocalBranchRow.tsx` — local branch rows (Push, Merge, Rebase, Rename, Delete); the session-pinned branch (managed worktree, ADR-080) renders NO Delete action at all and a disabled Rename — see [session-worktrees.md](../session-worktrees.md)
 - `frontend/src/components/GitPanel/RemoteBranchRow.tsx` — remote branch rows (Delete on remote)
 - `frontend/src/components/settings/ThemeMenuItem.tsx` — theme menu rows (Delete theme; predefined themes render no actions)
 - `frontend/src/components/chat/BookmarksPanel.tsx` — bookmark rows (Rename, Delete)
@@ -35,7 +35,7 @@ A disabled button (`pointer-events-none`) never receives pointer events, so its 
 | Session rows (dropdown + flat) | `SessionListItem.tsx` | Promote to project (No Project rows only, busy-gated), Pin/Unpin, Fork (busy-gated), Rename, Archive/Unarchive, Delete |
 | Worktree branch rows (grouped session selector) | `SessionGroupedList.tsx` | New session in this worktree (+), Pin/Unpin group, Archive group, Delete group |
 | Archived branch rows (Archived section) | `SessionSelector.tsx` | Pin/Unpin group, Restore group (no confirmation), Delete group (always confirms) |
-| Local branch rows | `LocalBranchRow.tsx` | Push, Merge, Rebase, Rename, Delete |
+| Local branch rows | `LocalBranchRow.tsx` | Push, Merge, Rebase, Rename, Delete (Delete absent and Rename disabled on the session-pinned branch — managed worktree pin, ADR-080) |
 | Remote branch rows | `RemoteBranchRow.tsx` | Delete on remote |
 | Theme menu rows | `ThemeMenuItem.tsx` | Delete theme |
 | Bookmark rows | `BookmarksPanel.tsx` | Rename, Delete |

@@ -36,7 +36,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch draft — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch draft — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management; in manage mode both surfaces render the ACTIVE managed session's pin (`frontend/src/hooks/useSessionWorktreePin.ts`) — a lock instead of the check on the pinned branch and the session's own tree row, no delete affordance on either, and a disabled Rename on the pinned branch (see the focus model's pin-rendering bullet)
 - `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the draft commit's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside (not inside) the locked workspace trigger
 
 ## Core Types
@@ -365,6 +365,43 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   checking out the pin itself stays allowed, and the local checkout and
   external trees keep normal checkout. Switching a managed tree off its pin
   would desynchronize the immutable binding and break restore/recreate.
+- The pin is rendered, not just enforced: while the ACTIVE session is
+  managed-worktree-bound, `BranchDropdown` and `BranchPicker` derive the pin
+  from the session's `workspace_binding` (`useSessionWorktreePin` — the
+  session tree is matched by `session_id`, stored `workspace_path`, or
+  managed `worktree_name`, covering shared trees and non-canonical stored
+  paths) and mark the pinned branch row and the session's own tree row with
+  a LOCK instead of the focus/current checkmark — the check stays a
+  mutable-status marker (Git-panel focus, focused tree's checked-out
+  branch) and may sit on a different row when the focus was moved. The
+  locked rows offer NO delete action (the pinned branch cannot be deleted
+  while the session's tree holds it; deleting the session's own tree from
+  inside the session is never a valid move), the pinned branch row's
+  Rename action is disabled with a pinned reason (the branch name is part
+  of the immutable binding), and the pinned branch row is a no-op click
+  regardless of `is_current`. Focus switching stays allowed on
+  every row, the locked ones included; other sessions' managed trees keep
+  their delete affordance. The pin props are dropped in draft mode —
+  `Choose Branch` selects a workspace for a NEW session and no session pin
+  exists there. This is a UI reflection of the server-side refusal above,
+  never a second enforcement layer.
+- The managed-FOCUS refusal is rendered up front too: the same hook exposes
+  a `branchSwitchBlockedReason` gate that keys on the FOCUSED tree (any
+  session's — the focus can rest on another session's tree while a local
+  session is active), not on the active session's binding. While the focus
+  sits on a managed session tree, every off-pin branch row in
+  `BranchDropdown` and `BranchPicker` (local AND remote checkouts) dims
+  with that reason as its tooltip, the click is a no-op, and the row keeps
+  its tab stop with `aria-disabled` so keyboard users reach the
+  explanation; `NewBranchSection`'s in-place creation path is disabled with
+  the same reason. Not gated: the rows' hover actions (push, merge, rebase,
+  rename, delete — none is focus-scoped), the Worktrees section's focus
+  switching, and `NewBranchSection`'s "Worktree" path (it births a fresh
+  tree and never touches the focused one). In draft mode the gate is absent
+  — rows record an intent and nothing is checked out. The gate is a
+  pre-emptive mirror of the same server-side refusal (a stale focus
+  snapshot can still hit the live backend answer), never a second
+  enforcement layer.
 - Focus is UI state on the backend because the RPCs resolve it server-side;
   it never retargets execution (ADR-080's `GitPanelTarget` separation).
   `GetGitStatus` follows the focus root the same way (containment accepts

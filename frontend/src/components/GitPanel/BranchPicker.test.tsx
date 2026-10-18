@@ -38,9 +38,11 @@ vi.mock('@/lib/gitFocus', () => focusMocks)
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { BranchPicker } from './BranchPicker'
 import { focusWorktree } from '@/lib/gitFocus'
+import { MANAGED_FOCUS_BLOCKED_REASON } from '@/hooks/useSessionWorktreePin'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import { useProjectStore } from '@/stores/projectStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { GitWorktree } from '@/types/models'
 
 let container: HTMLDivElement
@@ -70,6 +72,8 @@ beforeEach(() => {
   useGitPanelStore.getState().reset()
   // Branch operations record their outcome against the ACTIVE project.
   useProjectStore.setState({ activeProjectId: 'p1' })
+  // The session pin (managed worktree) starts unset — no active session.
+  useSessionStore.setState({ sessions: null, activeSessionId: null })
   useGitPanelStore.getState().openBranchPicker()
   useGitPanelStore.setState({
     branch: { name: 'main', upstream: '', ahead: 0, behind: 0 },
@@ -1156,5 +1160,247 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
     expect(useGitPanelStore.getState().branchPickerMode).toBe('switch')
+  })
+})
+
+describe('BranchPicker — managed session pin (manage mode only)', () => {
+  /** Arm an active session bound to a managed worktree on feat/x (tree s-1). */
+  function armManagedSession(): void {
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: 's-1',
+          project_id: 'p1',
+          name: 'Session',
+          created_at: '',
+          last_active_at: '',
+          archived: false,
+          pinned: false,
+          active: false,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          model: 'm',
+          family: 'f',
+          has_unfinished_task: false,
+          workspace_binding: {
+            kind: 'managed_worktree',
+            workspace_path: '/repo/.worktrees/s-1',
+            worktree_name: 's-1',
+            branch: 'feat/x',
+          },
+        },
+      ],
+      activeSessionId: 's-1',
+    })
+  }
+
+  function armGitLists(): void {
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: true, kind: 'local', upstream: '' },
+      { name: 'feat/x', is_current: false, kind: 'local', upstream: '' },
+    ])
+    gitMocks.listProjectWorktrees.mockResolvedValue([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-1', name: 's-1', kind: 'managed',
+        branch: 'feat/x', head: 'b', managed: true, pinned: true,
+        is_focus: true, session_id: 's-1', session_name: 'Session',
+      },
+      {
+        path: '/repo/.worktrees/s-2', name: 's-2', kind: 'managed',
+        branch: 'feat/y', head: 'c', managed: true, pinned: true,
+        is_focus: false, session_id: 's-2', session_name: 'Other',
+      },
+    ] satisfies GitWorktree[])
+  }
+
+  it('manage mode: lock instead of the check on the pinned branch, no delete there', async () => {
+    armManagedSession()
+    armGitLists()
+    renderPicker()
+    await flush()
+
+    const pinnedRow = branchRow('feat/x')!
+    expect(pinnedRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(pinnedRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(pinnedRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(0)
+    // The pinned row is a click no-op, but it stays in the tab order (the
+    // explaining tooltip must be keyboard-reachable) and announces the inert
+    // primary action.
+    expect(pinnedRow.getAttribute('tabindex')).toBe('0')
+    expect(pinnedRow.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('manage mode: lock on the session worktree row without a delete; foreign trees keep theirs', async () => {
+    armManagedSession()
+    armGitLists()
+    renderPicker()
+    await flush()
+
+    const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]')) as HTMLElement[]
+    const ownRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-1')!
+    const otherRow = rows.find((r) => r.getAttribute('data-path') === '/repo/.worktrees/s-2')!
+
+    expect(ownRow.querySelector('svg.lucide-lock')).not.toBeNull()
+    expect(ownRow.querySelector('svg.lucide-check')).toBeNull()
+    expect(ownRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(0)
+    expect(otherRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(1)
+  })
+
+  it('draft mode: no pin rendering even with a managed session active', async () => {
+    armManagedSession()
+    armGitLists()
+    useSessionDraftStore.getState().startDraft('p1')
+    act(() => {
+      useGitPanelStore.getState().openBranchPicker('draft')
+    })
+    renderPicker()
+    await flush()
+
+    // Draft rows are selection targets: no session lock anywhere, and the
+    // worktree rows keep their delete affordance (draft-mode contract).
+    expect(body().querySelector('svg.lucide-lock')).toBeNull()
+    const ownRow = Array.from(body().querySelectorAll('[data-testid="worktree-row"]')).find(
+      (r) => r.getAttribute('data-path') === '/repo/.worktrees/s-1',
+    ) as HTMLElement
+    expect(ownRow.querySelectorAll('button svg.lucide-trash2')).toHaveLength(1)
+  })
+})
+
+describe('BranchPicker — managed-focus gate (manage mode only, ADR-080)', () => {
+  /**
+   * Branch lists with a managed tree IN FOCUS on feat/y (another session's
+   * tree — the gate follows the focus, so no session needs arming): the
+   * backend refuses CheckoutBranch / CheckoutRemoteBranch / in-place
+   * CreateBranch there for every branch except feat/y itself.
+   */
+  function armManagedFocusLists(): void {
+    gitMocks.getBranches.mockResolvedValue([
+      { name: 'main', is_current: false, kind: 'local', upstream: '' },
+      { name: 'feat/y', is_current: true, kind: 'local', upstream: '' },
+      { name: 'origin/feat/r', is_current: false, kind: 'remote', upstream: '' },
+    ])
+    gitMocks.listProjectWorktrees.mockResolvedValue([
+      {
+        path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
+        managed: false, pinned: false, is_focus: false,
+      },
+      {
+        path: '/repo/.worktrees/s-2', name: 's-2', kind: 'managed',
+        branch: 'feat/y', head: 'c', managed: true, pinned: true,
+        is_focus: true, session_id: 's-2', session_name: 'Other',
+      },
+    ] satisfies GitWorktree[])
+  }
+
+  function newButton(): HTMLButtonElement {
+    return allButtons().find((b) => b.textContent?.includes('New'))!
+  }
+
+  function branchNameInput(): HTMLInputElement {
+    return body().querySelector('input[placeholder="branch-name"]') as HTMLInputElement
+  }
+
+  it('manage mode: off-pin rows dim with the reason and refuse the checkout in place', async () => {
+    armManagedFocusLists()
+    renderPicker()
+    await flush()
+
+    const offPin = branchRow('main')!
+    expect(offPin.getAttribute('aria-disabled')).toBe('true')
+    expect(offPin.title).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+    expect(offPin.className).toContain('opacity-50')
+
+    act(() => {
+      offPin.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    // The refusal never reaches the server; the picker stays open.
+    expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
+    expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
+  })
+
+  it('manage mode: in-place New-branch is disabled with the refusal as its tooltip', async () => {
+    armManagedFocusLists()
+    renderPicker()
+    await flush()
+
+    act(() => {
+      setInputValue(branchNameInput(), 'feat/new')
+    })
+    const btn = newButton()
+    expect(btn.disabled).toBe(true)
+    expect(btn.title).toBe(MANAGED_FOCUS_BLOCKED_REASON)
+
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+  })
+
+  it('manage mode: the Worktree path of New-branch stays available (it never touches the focus)', async () => {
+    armManagedFocusLists()
+    renderPicker()
+    await flush()
+
+    act(() => {
+      const box = body().querySelector('input[type="checkbox"]') as HTMLInputElement
+      box.click()
+    })
+    act(() => {
+      setInputValue(branchNameInput(), 'feat/wt')
+    })
+    const btn = newButton()
+    expect(btn.disabled).toBe(false)
+
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(gitMocks.createBranchInWorktree).toHaveBeenCalledWith('feat/wt', '')
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
+  })
+
+  it('draft mode: the gate is absent — rows stay selectable and New-branch records the draft', async () => {
+    armManagedFocusLists()
+    useSessionDraftStore.getState().startDraft('p1')
+    act(() => {
+      useGitPanelStore.getState().openBranchPicker('draft')
+    })
+    renderPicker()
+    await flush()
+
+    // Draft rows record an intent; nothing is checked out, so the focus pin
+    // has nothing to refuse — no gating anywhere. (`main` itself is draft-
+    // blocked by the OTHER rule — the main checkout holds it — so the probe
+    // is a remote row whose local twin is free.) Under the manage-mode gate
+    // this row would carry aria-disabled + the refusal; here it is clean.
+    const row = branchRow('origin/feat/r')!
+    expect(row.getAttribute('aria-disabled')).toBeNull()
+    expect(row.title).not.toBe(MANAGED_FOCUS_BLOCKED_REASON)
+
+    act(() => {
+      setInputValue(branchNameInput(), 'feat/draft')
+    })
+    const btn = newButton()
+    expect(btn.disabled).toBe(false)
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flush()
+
+    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+      kind: 'branch',
+      branch: 'feat/draft',
+      createBranch: true,
+      startPoint: '',
+    })
+    expect(gitMocks.createBranch).not.toHaveBeenCalled()
   })
 })
