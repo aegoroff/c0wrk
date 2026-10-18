@@ -6,6 +6,7 @@ import (
 
 	"github.com/v0lka/c0wrk/core/e2s"
 	"github.com/v0lka/c0wrk/core/vectorindex"
+	"github.com/v0lka/sp4rk/tools/builtins/websearch"
 )
 
 // defaultProtectedTools is the default list of tools whose output is always preserved during pruning.
@@ -330,6 +331,12 @@ func ApplyDefaults(cfg *Config) {
 	// Search defaults
 	if cfg.Search.Provider == "" {
 		cfg.Search.Provider = "tavily"
+	}
+	// SearXNG default instance URL (the upstream docker-compose default). An
+	// operator who only sets provider: searxng gets a working local-instance
+	// default; an explicit search.base_url always wins.
+	if strings.EqualFold(cfg.Search.Provider, "searxng") && strings.TrimSpace(cfg.Search.BaseURL) == "" {
+		cfg.Search.BaseURL = websearch.DefaultSearxngBaseURL
 	}
 	// Normalize to lowercase for defense-in-depth. The search tool registration
 	// in core/tools/builtin_registration.go also lowercases at consumption time,

@@ -51,10 +51,10 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-type SearchPayload = { provider: string; api_key: string }
+type SearchPayload = { provider: string; api_key: string; base_url?: string }
 
 async function renderSearchSettings(search: SearchPayload) {
-  spies.getConfig.mockResolvedValue({ search })
+  spies.getConfig.mockResolvedValue({ search: { base_url: '', ...search } })
   await act(async () => {
     root.render(<SearchSettings />)
   })
@@ -64,6 +64,13 @@ async function renderSearchSettings(search: SearchPayload) {
 function apiKeyInput(): HTMLInputElement {
   const input = container.querySelector('input[type="password"]')
   if (!input) throw new Error('api key input not found')
+  return input as HTMLInputElement
+}
+
+/** The SearXNG instance-URL input (only rendered for the searxng provider). */
+function searxngBaseUrlInput(): HTMLInputElement {
+  const input = container.querySelector('[data-testid="searxng-base-url"]')
+  if (!input) throw new Error('searxng base url input not found')
   return input as HTMLInputElement
 }
 
@@ -121,6 +128,7 @@ describe('SearchSettings — explicit-commit debounced save', () => {
     expect(spies.updateSearchSettings).toHaveBeenCalledWith({
       provider: 'tavily',
       api_key: 'sk-test',
+      base_url: '',
     })
   })
 
@@ -141,6 +149,7 @@ describe('SearchSettings — explicit-commit debounced save', () => {
     expect(spies.updateSearchSettings).toHaveBeenCalledWith({
       provider: 'tavily',
       api_key: 'sk-test',
+      base_url: '',
     })
   })
 
@@ -197,6 +206,7 @@ describe('SearchSettings — explicit-commit debounced save', () => {
     expect(spies.updateSearchSettings).toHaveBeenCalledWith({
       provider: 'tavily',
       api_key: 'sk-test',
+      base_url: '',
     })
 
     // The abandoned timer must not produce a duplicate save afterwards.
@@ -216,6 +226,92 @@ describe('SearchSettings — explicit-commit debounced save', () => {
       await vi.advanceTimersByTimeAsync(500)
     })
     expect(spies.updateSearchSettings).not.toHaveBeenCalled()
+  })
+})
+
+describe('SearchSettings — SearXNG instance URL', () => {
+  /** Blur + focus pair for the explicit-commit inputs (see the sibling helper). */
+  function blurInput(input: HTMLInputElement) {
+    act(() => {
+      input.focus()
+    })
+    act(() => {
+      input.blur()
+    })
+  }
+
+  it('renders the instance-URL input only for the searxng provider', async () => {
+    await renderSearchSettings({ provider: 'searxng', api_key: '', base_url: 'http://10.0.0.5:8888' })
+    expect(searxngBaseUrlInput().value).toBe('http://10.0.0.5:8888')
+
+    // The panel remounts per render call in this suite; assert the absence
+    // for a key-bearing provider with a fresh mount.
+    container.remove()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    await renderSearchSettings({ provider: 'tavily', api_key: '' })
+    expect(() => searxngBaseUrlInput()).toThrow()
+  })
+
+  it('saves the instance URL only after the explicit commit (blur), through the 500 ms debounce', async () => {
+    await renderSearchSettings({ provider: 'searxng', api_key: '', base_url: '' })
+
+    typeInto(searxngBaseUrlInput(), 'http://10.0.0.5:8888')
+    // Keystrokes never schedule a save — a half-typed URL must not be
+    // autosaved and rejected by the backend validation mid-typing.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(spies.updateSearchSettings).not.toHaveBeenCalled()
+
+    blurInput(searxngBaseUrlInput())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    expect(spies.updateSearchSettings).toHaveBeenCalledTimes(1)
+    expect(spies.updateSearchSettings).toHaveBeenCalledWith({
+      provider: 'searxng',
+      api_key: '',
+      base_url: 'http://10.0.0.5:8888',
+    })
+  })
+
+  it('never persists an uncommitted half-typed instance URL on unmount', async () => {
+    await renderSearchSettings({ provider: 'searxng', api_key: '', base_url: '' })
+
+    const input = searxngBaseUrlInput()
+    act(() => {
+      input.focus()
+    })
+    typeInto(input, 'http://10.0.0.')
+    expect(spies.updateSearchSettings).not.toHaveBeenCalled()
+
+    act(() => {
+      root.unmount()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    expect(spies.updateSearchSettings).not.toHaveBeenCalled()
+  })
+})
+
+describe('SearchSettings — provider guidance copy', () => {
+  it('warns when the best-effort DuckDuckGo provider is selected', async () => {
+    await renderSearchSettings({ provider: 'duckduckgo', api_key: '' })
+    const text = container.textContent ?? ''
+    expect(text).toContain('best-effort')
+    expect(text).toContain('anti-bot')
+    expect(text).toContain('API-backed provider')
+  })
+
+  it('states the API-backed recommendation without the DDG warning for API providers', async () => {
+    await renderSearchSettings({ provider: 'tavily', api_key: '' })
+    const text = container.textContent ?? ''
+    // The recommendation is always present...
+    expect(text).toContain('Recommended: an API-backed provider')
+    // ...but the DDG-specific warning only renders for duckduckgo.
+    expect(text).not.toContain('best-effort scraper')
   })
 })
 

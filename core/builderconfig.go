@@ -628,6 +628,7 @@ type BuilderCapabilitiesConfig struct {
 type BuilderSearchConfig struct {
 	Provider string
 	APIKey   string // raw value (may contain ${ENV_VAR})
+	BaseURL  string // SearXNG instance URL; raw value (may contain ${ENV_VAR}); only used by the searxng provider
 }
 
 // ---------------------------------------------------------------------------

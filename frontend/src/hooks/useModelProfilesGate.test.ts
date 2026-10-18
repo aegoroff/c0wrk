@@ -40,7 +40,7 @@ function makeConfig(loaded: boolean, model_profiles?: ConfigModelProfilesRespons
     log_level: 'info',
     config_errors: [],
     llm: {} as ConfigResponse['llm'],
-    search: { provider: '', api_key: '' },
+    search: { provider: '', api_key: '', base_url: '' },
     proxy: {} as ConfigResponse['proxy'],
     ...(model_profiles ? { model_profiles } : {}),
   }

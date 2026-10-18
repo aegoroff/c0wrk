@@ -493,6 +493,7 @@ export interface ConfigLLMResponse {
 export interface ConfigSearchResp {
   provider: string
   api_key: string
+  base_url: string
 }
 
 /**
@@ -736,6 +737,7 @@ export interface ModelConfigRequest {
 export interface SearchSettingsRequest {
   provider: string
   api_key: string
+  base_url: string
 }
 
 export interface ProxySettingsResponse {

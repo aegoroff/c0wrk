@@ -21,7 +21,7 @@ type appBuilder interface {
 	RebuildRouter(*core.BuilderConfig) error
 	RebuildProxy(context.Context, *core.BuilderConfig) error
 	UpdateModelOverrides(*core.BuilderConfig)
-	UpdateSearchTool(*core.BuilderConfig)
+	UpdateSearchTool(*core.BuilderConfig) error
 	UpdateSecurityPolicies(*core.BuilderConfig)
 	UpdateCapabilities(*core.BuilderConfig)
 	UpdateShellBlocklist(*core.BuilderConfig) error

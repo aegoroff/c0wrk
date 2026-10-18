@@ -35,7 +35,7 @@ function makeConfig(loaded: boolean, experimentalEnabled: boolean): ConfigRespon
     log_level: 'info',
     config_errors: [],
     llm: {} as ConfigResponse['llm'],
-    search: { provider: '', api_key: '' },
+    search: { provider: '', api_key: '', base_url: '' },
     proxy: {} as ConfigResponse['proxy'],
     experimental: { enabled: experimentalEnabled },
   }

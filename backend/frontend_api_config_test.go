@@ -30,6 +30,7 @@ import (
 	"github.com/v0lka/sp4rk/llm"
 	"github.com/v0lka/sp4rk/skills"
 	sdktools "github.com/v0lka/sp4rk/tools"
+	"github.com/v0lka/sp4rk/tools/builtins/websearch"
 	_ "modernc.org/sqlite"
 )
 
@@ -212,10 +213,11 @@ func (m *mockBuilder) RebuildProxyCtx() context.Context {
 	defer m.mu.Unlock()
 	return m.rebuildProxyCtx
 }
-func (m *mockBuilder) UpdateSearchTool(_ *core.BuilderConfig) {
+func (m *mockBuilder) UpdateSearchTool(_ *core.BuilderConfig) error {
 	m.mu.Lock()
 	m.updateSearchToolCalls++
 	m.mu.Unlock()
+	return nil
 }
 func (m *mockBuilder) UpdateSecurityPolicies(cfg *core.BuilderConfig) {
 	m.mu.Lock()
@@ -1528,6 +1530,48 @@ func TestUpdateSearchSettings_PersistsAndRebuilds(t *testing.T) {
 	}
 	if f.config.Search.Provider != "exa" {
 		t.Errorf("provider = %q, want exa", f.config.Search.Provider)
+	}
+}
+
+// TestUpdateSearchSettings_SearxngSeedsDefaultBaseURL verifies that selecting
+// the searxng provider with an empty instance URL seeds the sensible
+// local-instance default (mirroring config.ApplyDefaults), rebuilds the web
+// search tool, and serves the value back through GetConfig.
+func TestUpdateSearchSettings_SearxngSeedsDefaultBaseURL(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	err := f.UpdateSearchSettings(SearchSettingsRequest{Provider: "searxng", BaseURL: ""})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.updateSearchToolCalls != 1 {
+		t.Errorf("UpdateSearchTool called %d times, want 1", mock.updateSearchToolCalls)
+	}
+	if got := f.config.Search.BaseURL; got != websearch.DefaultSearxngBaseURL {
+		t.Errorf("base_url = %q, want the default %q", got, websearch.DefaultSearxngBaseURL)
+	}
+	if got := f.GetConfig().Search.BaseURL; got != websearch.DefaultSearxngBaseURL {
+		t.Errorf("GetConfig().search.base_url = %q, want the default %q", got, websearch.DefaultSearxngBaseURL)
+	}
+}
+
+// TestUpdateSearchSettings_SearxngInvalidBaseURLRejected verifies a malformed
+// instance URL is rejected BEFORE any mutation or rebuild: the error names
+// search.base_url, the in-memory config is untouched, and the web search tool
+// is not rebuilt.
+func TestUpdateSearchSettings_SearxngInvalidBaseURLRejected(t *testing.T) {
+	f, mock, _ := newTestAPI(t)
+	err := f.UpdateSearchSettings(SearchSettingsRequest{Provider: "searxng", BaseURL: "not a url"})
+	if err == nil {
+		t.Fatal("expected an error for a malformed searxng base_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "search.base_url") {
+		t.Errorf("error = %q, want it to name search.base_url", err.Error())
+	}
+	if mock.updateSearchToolCalls != 0 {
+		t.Errorf("UpdateSearchTool called %d times, want 0 (validation must precede the rebuild)", mock.updateSearchToolCalls)
+	}
+	if f.config.Search.Provider != "tavily" || f.config.Search.BaseURL != "" {
+		t.Errorf("config mutated on a rejected request: provider=%q base_url=%q, want tavily/empty", f.config.Search.Provider, f.config.Search.BaseURL)
 	}
 }
 

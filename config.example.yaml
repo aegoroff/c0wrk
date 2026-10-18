@@ -1054,9 +1054,24 @@ security:
 # ---------------------------------------------------------------------------
 # Web Search
 # ---------------------------------------------------------------------------
+# Recommended: an API-backed provider — "brave", "tavily", or "exa". All
+# three have free tiers, no anti-bot rate limits, and give reliable organic
+# results (see docs/search-providers.md for API keys and provider guidance).
+#
+# Alternative: "searxng" — a self-hosted SearXNG instance, the ToS-clean
+# fully-self-hosted path (set search.base_url; the instance must enable JSON
+# output: settings.yml → search.formats: [html, json]).
+#
+# "duckduckgo" is a best-effort HTML scraper with no official API: DuckDuckGo
+# applies per-IP anti-bot rate limiting (HTTP 202 anomaly challenges), so it
+# WILL fail intermittently with an explicit rate-limit error. Use it only as
+# a fallback.
 search:
-  provider: "tavily" # Web search provider
+  provider: "tavily" # tavily | brave | exa | searxng | duckduckgo (default: tavily)
   api_key: "${TAVILY_API_KEY}"
+  # base_url is the SearXNG instance URL — only used when provider: searxng.
+  # Defaults to the local docker-compose instance when omitted.
+  # base_url: "http://127.0.0.1:8888"
 
 # ---------------------------------------------------------------------------
 # Tool Output Limits

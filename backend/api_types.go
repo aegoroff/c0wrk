@@ -149,6 +149,7 @@ type ConfigProviderFull struct {
 type ConfigSearchResp struct {
 	Provider string `json:"provider"`
 	APIKey   string `json:"api_key"`
+	BaseURL  string `json:"base_url"`
 }
 
 // VectorIndexSettingsResponse holds the vector-index embedding settings for
@@ -377,6 +378,7 @@ type ModelConfigRequest struct {
 type SearchSettingsRequest struct {
 	Provider string `json:"provider"`
 	APIKey   string `json:"api_key"`
+	BaseURL  string `json:"base_url"`
 }
 
 // ProxySettingsResponse holds proxy settings for the frontend.

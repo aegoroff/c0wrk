@@ -18,6 +18,7 @@ import (
 	coretools "github.com/v0lka/c0wrk/core/tools"
 	"github.com/v0lka/sp4rk/llm"
 	sdktools "github.com/v0lka/sp4rk/tools"
+	"github.com/v0lka/sp4rk/tools/builtins/websearch"
 )
 
 // maskedAPIKey is the placeholder returned for configured API keys in the UI.
@@ -40,6 +41,7 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		Search: ConfigSearchResp{
 			Provider: f.config.Search.Provider,
 			APIKey:   maskAPIKey(f.config.Search.APIKey),
+			BaseURL:  f.config.Search.BaseURL,
 		},
 		VectorIndex: VectorIndexSettingsResponse{
 			ExecutionProvider: f.config.VectorIndex.ExecutionProvider,
@@ -530,7 +532,24 @@ func (f *FrontendAPI) UpdateSearchSettings(settings SearchSettingsRequest) error
 		return errors.New("config not initialized")
 	}
 
+	// Validate BEFORE any mutation: a rejected request must leave both the
+	// in-memory config and the YAML file untouched (the file stays loadable,
+	// so a restart cannot brick the app on a bad value). The error text
+	// mirrors the load-time validate() wording so the user gets the same
+	// actionable guidance in the settings UI as on startup.
+	provider := strings.ToLower(settings.Provider)
+	baseURL := strings.TrimSpace(settings.BaseURL)
+	if provider == "searxng" && baseURL == "" {
+		// Sensible default: the local SearXNG instance (the upstream
+		// docker-compose default), mirroring config.ApplyDefaults.
+		baseURL = websearch.DefaultSearxngBaseURL
+	}
+	if err := config.ValidateSearchBaseURL(provider, baseURL); err != nil {
+		return err
+	}
+
 	f.config.Search.Provider = settings.Provider
+	f.config.Search.BaseURL = baseURL
 	// Only update API key if it's not the masked placeholder
 	if settings.APIKey != "" && settings.APIKey != maskedAPIKey {
 		f.config.Search.APIKey = settings.APIKey
@@ -542,7 +561,9 @@ func (f *FrontendAPI) UpdateSearchSettings(settings SearchSettingsRequest) error
 
 	// Rebuild web search tool via the backend builder.
 	if b := f.builder(); b != nil {
-		b.UpdateSearchTool(f.toBuilderConfigLocked())
+		if err := b.UpdateSearchTool(f.toBuilderConfigLocked()); err != nil {
+			return err
+		}
 	}
 
 	return nil

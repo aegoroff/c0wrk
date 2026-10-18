@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,9 +41,12 @@ type BuiltinToolsConfig struct {
 	BashShellInvocation *sdktools.ShellInvocation
 	PoshShellInvocation *sdktools.ShellInvocation
 
-	// Search provider configuration.
+	// Search provider configuration. SearchAPIKey and SearchBaseURL carry
+	// EXPANDED values (${ENV_VAR} patterns already resolved by the caller —
+	// see BuilderConfig.ExpandEnvVars).
 	SearchProvider string
 	SearchAPIKey   string
+	SearchBaseURL  string
 	SearchTimeout  time.Duration
 
 	// HTTPClient is an optional proxy-configured client for web tools.
@@ -129,8 +133,12 @@ func RegisterBuiltinTools(registry *ToolRegistry, cfg BuiltinToolsConfig) error 
 	registry.Register(builtins.NewWebFetchToolWithClient(cfg.WebFetchLimits, cfg.HTTPClient))
 
 	// Web search (optional)
-	if provider := CreateSearchProviderWithClient(cfg.SearchProvider, cfg.SearchAPIKey, cfg.SearchTimeout, cfg.HTTPClient); provider != nil {
-		registry.Register(websearch.NewTool(provider, cfg.WebSearchLimits))
+	searchProvider, err := CreateSearchProviderWithClient(cfg.SearchProvider, cfg.SearchAPIKey, cfg.SearchBaseURL, cfg.SearchTimeout, cfg.HTTPClient)
+	if err != nil {
+		return err
+	}
+	if searchProvider != nil {
+		registry.Register(websearch.NewTool(searchProvider, cfg.WebSearchLimits))
 	}
 
 	// Glob and ripgrep. An explicitly customized glob config goes through the
@@ -223,46 +231,81 @@ func RegisterBuiltinTools(registry *ToolRegistry, cfg BuiltinToolsConfig) error 
 }
 
 // CreateSearchProvider creates a search provider based on the configured provider name.
-// Returns nil if the provider requires an API key but none is configured.
-func CreateSearchProvider(providerName, apiKey string, timeout time.Duration) websearch.SearchProvider {
-	return CreateSearchProviderWithClient(providerName, apiKey, timeout, nil)
+// Returns a nil provider if the provider requires an API key but none is configured,
+// and an explicit error when the provider configuration is invalid (e.g. the
+// SearXNG instance URL is missing or malformed).
+func CreateSearchProvider(providerName, apiKey, baseURL string, timeout time.Duration) (websearch.SearchProvider, error) {
+	return CreateSearchProviderWithClient(providerName, apiKey, baseURL, timeout, nil)
 }
 
 // CreateSearchProviderWithClient creates a search provider with an optional HTTP client.
-// Returns nil if the provider requires an API key but none is configured.
+// Returns a nil provider (and no error) if the provider requires an API key but none is
+// configured — the web_search tool then simply stays unregistered. Returns an explicit
+// error when the provider IS configured but its configuration is invalid, so a broken
+// search setup can never degrade into a silently missing tool.
 // Provider name matching is case-insensitive; unrecognized names fall back to tavily.
-func CreateSearchProviderWithClient(providerName, apiKey string, timeout time.Duration, client *http.Client) websearch.SearchProvider {
+func CreateSearchProviderWithClient(providerName, apiKey, baseURL string, timeout time.Duration, client *http.Client) (websearch.SearchProvider, error) {
 	switch strings.ToLower(providerName) {
 	case "tavily", "":
 		if apiKey == "" {
-			return nil
+			return nil, nil
 		}
-		return websearch.NewTavilyProviderWithClient(apiKey, timeout, client)
+		return websearch.NewTavilyProviderWithClient(apiKey, timeout, client), nil
 	case "brave":
 		if apiKey == "" {
-			return nil
+			return nil, nil
 		}
-		return websearch.NewBraveProviderWithClient(apiKey, timeout, client)
+		return websearch.NewBraveProviderWithClient(apiKey, timeout, client), nil
 	case "exa":
 		if apiKey == "" {
-			return nil
+			return nil, nil
 		}
-		return websearch.NewExaProviderWithClient(apiKey, timeout, client)
+		return websearch.NewExaProviderWithClient(apiKey, timeout, client), nil
 	case "duckduckgo":
-		return websearch.NewDuckDuckGoProviderWithClient(timeout, client)
+		return websearch.NewDuckDuckGoProviderWithClient(timeout, client), nil
+	case "searxng":
+		// A self-hosted SearXNG instance is mandatory configuration, unlike
+		// the API keys above: a silently missing web_search tool would hide a
+		// broken setup, so a missing/invalid instance URL is an explicit
+		// error. (backend/config seeds and validates search.base_url too;
+		// this is the consumption-time gate for values that reach the builder
+		// through paths bypassing the config load — after ${VAR} expansion.)
+		if err := validateSearxngBaseURL(baseURL); err != nil {
+			return nil, err
+		}
+		return websearch.NewSearXNGProviderWithClient(baseURL, timeout, client), nil
 	default:
 		// Unrecognized provider name — treat as tavily.
 		if apiKey == "" {
-			return nil
+			return nil, nil
 		}
-		return websearch.NewTavilyProviderWithClient(apiKey, timeout, client)
+		return websearch.NewTavilyProviderWithClient(apiKey, timeout, client), nil
 	}
+}
+
+// validateSearxngBaseURL checks an EXPANDED SearXNG instance URL: it must be
+// set and parse as an absolute http(s) URL with a host.
+func validateSearxngBaseURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("search.provider searxng requires search.base_url (the SearXNG instance URL, e.g. %s)", websearch.DefaultSearxngBaseURL)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("search.base_url %q is not a valid URL: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("search.base_url %q must be an absolute http(s) URL, got scheme %q", raw, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("search.base_url %q must be an absolute http(s) URL with a host", raw)
+	}
+	return nil
 }
 
 // UpdateSearchTool replaces or removes the web_search tool in the registry
 // based on the given search configuration.
-func UpdateSearchTool(registry *ToolRegistry, providerName, apiKey string, limits builtins.WebSearchLimits) {
-	UpdateSearchToolWithClient(registry, providerName, apiKey, limits, nil)
+func UpdateSearchTool(registry *ToolRegistry, providerName, apiKey, baseURL string, limits builtins.WebSearchLimits) error {
+	return UpdateSearchToolWithClient(registry, providerName, apiKey, baseURL, limits, nil)
 }
 
 // UpdateShellTool re-registers the shell-execution tool (bash_exec on Unix,
@@ -285,13 +328,20 @@ func UpdateShellTool(registry *ToolRegistry, blocklist []string, timeouts builti
 }
 
 // UpdateSearchToolWithClient replaces or removes the web_search tool in the registry
-// with an optional HTTP client for proxy support.
-func UpdateSearchToolWithClient(registry *ToolRegistry, providerName, apiKey string, limits builtins.WebSearchLimits, client *http.Client) {
-	if provider := CreateSearchProviderWithClient(providerName, apiKey, limits.Timeout, client); provider != nil {
+// with an optional HTTP client for proxy support. An invalid provider
+// configuration (e.g. a missing SearXNG instance URL) is an error and leaves
+// the previously registered tool in place.
+func UpdateSearchToolWithClient(registry *ToolRegistry, providerName, apiKey, baseURL string, limits builtins.WebSearchLimits, client *http.Client) error {
+	provider, err := CreateSearchProviderWithClient(providerName, apiKey, baseURL, limits.Timeout, client)
+	if err != nil {
+		return fmt.Errorf("web_search provider: %w", err)
+	}
+	if provider != nil {
 		registry.Register(websearch.NewTool(provider, limits))
 	} else {
 		registry.Unregister("web_search")
 	}
+	return nil
 }
 
 // UpdateWebFetchTool replaces the web_fetch tool in the registry with an optional HTTP client.
