@@ -3,7 +3,7 @@
 // contracts: the read is fail-open (transport failure → null, never a throw
 // into a render path) while the toggle throws (a rejected write must surface).
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 const mockApp: Record<string, (...args: unknown[]) => Promise<unknown>> = {}
 
@@ -14,7 +14,7 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { parseWebAccessInfo, getWebAccessInfo, setWebAccessEnabled } from '@/api/webAccess'
+import { parseWebAccessInfo, getWebAccessInfo, setWebAccessEnabled, webAccessLogin } from '@/api/webAccess'
 import { logger } from '@/lib/logger'
 
 const validInfo = {
@@ -109,5 +109,55 @@ describe('setWebAccessEnabled', () => {
     mockApp.SetWebAccessEnabled = vi.fn().mockRejectedValue(new Error('denied'))
     await expect(setWebAccessEnabled(false)).rejects.toThrow('denied')
     expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('webAccessLogin', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubFetch(impl: () => Promise<Response>): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(impl)
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('posts the token to /api/login and resolves on 200', async () => {
+    const fetchMock = stubFetch(async () => new Response(null, { status: 200 }))
+    await expect(webAccessLogin('tok')).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledWith('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'tok' }),
+    })
+  })
+
+  it('surfaces an actionable message on a wrong token (401)', async () => {
+    stubFetch(async () => new Response(JSON.stringify({ error: 'authentication failed' }), { status: 401 }))
+    await expect(webAccessLogin('bad')).rejects.toThrow(/Wrong token/)
+  })
+
+  it('honors Retry-After on the rate limit (429)', async () => {
+    stubFetch(async () => new Response(null, { status: 429, headers: { 'Retry-After': '7' } }))
+    await expect(webAccessLogin('tok')).rejects.toThrow(/try again in 7s/)
+  })
+
+  it('falls back to a generic minute on a 429 without Retry-After', async () => {
+    stubFetch(async () => new Response(null, { status: 429 }))
+    await expect(webAccessLogin('tok')).rejects.toThrow(/try again in a minute/)
+  })
+
+  it('reports a transport failure as an actionable message', async () => {
+    stubFetch(async () => {
+      throw new TypeError('Failed to fetch')
+    })
+    await expect(webAccessLogin('tok')).rejects.toThrow(/Cannot reach the app/)
+    expect(logger.warn).toHaveBeenCalled()
+  })
+
+  it('names an unexpected status instead of guessing', async () => {
+    stubFetch(async () => new Response(null, { status: 503 }))
+    await expect(webAccessLogin('tok')).rejects.toThrow(/HTTP 503/)
   })
 })

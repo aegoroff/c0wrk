@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { WebAccessGate } from './components/webaccess/WebAccessGate'
 import { registerLanguages } from './lib/hljsLanguages'
 import '@xterm/xterm/css/xterm.css'
 import './index.css'
@@ -89,7 +90,9 @@ if (!root) throw new Error('Root element not found')
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <WebAccessGate>
+        <App />
+      </WebAccessGate>
     </ErrorBoundary>
   </React.StrictMode>,
 )

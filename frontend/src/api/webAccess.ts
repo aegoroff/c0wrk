@@ -84,3 +84,44 @@ export async function setWebAccessEnabled(enabled: boolean): Promise<void> {
     throw err
   }
 }
+
+/**
+ * Exchange the per-launch token for the session cookie (POST /api/login).
+ *
+ * This is a sidecar REST endpoint, NOT a FrontendAPI RPC: it runs before any
+ * session exists (that is its whole purpose), so it fetches the serving
+ * origin directly instead of going through the RPC dispatch — which would
+ * itself 401 without a cookie. The browser attaches the returned HttpOnly
+ * cookie to subsequent fetches/WS upgrades automatically (same-origin).
+ *
+ * Resolves once the cookie is set (the caller reloads the page so every
+ * store, the transport probe and the websocket start authenticated).
+ * Rejects with an operator-actionable message otherwise: 401 wrong token,
+ * 429 rate limited (with the server's Retry-After), or a transport failure.
+ */
+export async function webAccessLogin(token: string): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+  } catch (err) {
+    logger.warn('[web-access] login transport failure', err)
+    throw new Error('Cannot reach the app — is the desktop instance still running?')
+  }
+  if (res.ok) return
+  if (res.status === 401) {
+    throw new Error('Wrong token — copy it from Settings → Web Access in the desktop app.')
+  }
+  if (res.status === 429) {
+    const retry = Number(res.headers.get('Retry-After'))
+    throw new Error(
+      Number.isFinite(retry) && retry > 0
+        ? `Too many attempts — try again in ${Math.ceil(retry)}s.`
+        : 'Too many attempts — try again in a minute.',
+    )
+  }
+  throw new Error(`Login failed (HTTP ${res.status}).`)
+}

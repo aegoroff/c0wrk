@@ -46,6 +46,8 @@ type TransportResolution = TransportMode | 'pending'
 interface TransportInfo {
   transport?: unknown
   ws?: unknown
+  /** Whether the browser already holds a valid session cookie. */
+  authenticated?: unknown
 }
 
 function detectInitialTransport(): TransportResolution {
@@ -60,6 +62,11 @@ function detectInitialTransport(): TransportResolution {
 
 let transportMode: TransportResolution = detectInitialTransport()
 let webWsPath = '/ws'
+/** Web-transport session state from the bootstrap probe: true once the origin
+ *  answered `authenticated:true`, false when it answered without a session,
+ *  null while pending or outside the web transport. The login gate consumes
+ *  this through `webAuthRequired()`. */
+let webAuthed: boolean | null = null
 let detectionPromise: Promise<TransportMode> | null = null
 
 /** Ask the origin whether the web-access sidecar serves this page. Never rejects. */
@@ -71,6 +78,10 @@ async function detectWebTransport(): Promise<TransportMode> {
     const info = (await res.json()) as TransportInfo
     if (info.transport !== 'web' || typeof info.ws !== 'string' || info.ws === '') return 'none'
     webWsPath = info.ws
+    // Fail closed: an absent/odd `authenticated` field reads as "must log in".
+    // A wrong guess self-corrects — the login POST works regardless, and the
+    // page reloads once the cookie is set.
+    webAuthed = info.authenticated === true
     return 'web'
   } catch {
     // No sidecar on this origin (bare dev server, static preview) — the
@@ -105,6 +116,45 @@ export function transportDetection(): Promise<TransportMode> {
  *  has long settled. */
 export function isWebTransport(): boolean {
   return transportMode === 'web'
+}
+
+// --- Web transport: login gating ----------------------------------------------
+//
+// The sidecar authenticates by an HttpOnly session cookie exchanged for the
+// per-launch token (POST /api/login). A fresh browser tab has no cookie, so
+// every RPC would 401 and the events websocket would refuse the upgrade —
+// the SPA must show the token gate INSTEAD of booting into that. Two signals
+// feed the gate: the bootstrap probe's `authenticated` field (resolved once
+// per page load) and a live 401 from any RPC (the app restarted and minted a
+// new per-launch secret under an already-open tab).
+
+/** Resolves once the transport probe settled: true when this page is served
+ *  by the web-access sidecar WITHOUT a valid session — the token gate must
+ *  take over. False for every other transport and for an authenticated tab. */
+export async function webAuthRequired(): Promise<boolean> {
+  const mode = await ensureTransportDetection()
+  return mode === 'web' && webAuthed !== true
+}
+
+const webAuthRequiredListeners = new Set<() => void>()
+
+/** Subscribe to the mid-session 401 signal (expired/rotated session cookie).
+ *  Returns an unsubscribe function. Listeners never throw into the RPC path. */
+export function onWebAuthRequired(callback: () => void): () => void {
+  webAuthRequiredListeners.add(callback)
+  return () => {
+    webAuthRequiredListeners.delete(callback)
+  }
+}
+
+function notifyWebAuthRequired(): void {
+  for (const callback of Array.from(webAuthRequiredListeners)) {
+    try {
+      callback()
+    } catch (err) {
+      logger.warn('[auth] web-auth listener threw', err)
+    }
+  }
 }
 
 declare global {
@@ -224,6 +274,13 @@ async function webRpc(method: string, args: unknown[]): Promise<unknown> {
     }
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      // The session cookie is missing or no longer valid (fresh tab, or the
+      // app restarted and minted a new per-launch secret). The login gate
+      // listens for this and takes over the screen; the caller still sees
+      // the rejection below — handlers keep their existing error paths.
+      notifyWebAuthRequired()
+    }
     const msg =
       typeof payload === 'object' && payload !== null && typeof (payload as { error?: unknown }).error === 'string'
         ? (payload as { error: string }).error

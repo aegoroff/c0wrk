@@ -614,3 +614,54 @@ describe('desktop transport stays on the Wails runtime', () => {
     expect(open).not.toHaveBeenCalled()
   })
 })
+
+describe('web transport login gating', () => {
+  it('reports no gate when the probe answers authenticated:true', async () => {
+    respondTransport({ transport: 'web', ws: '/ws', authenticated: true })
+    runtime = await freshRuntime()
+    await expect(runtime.webAuthRequired()).resolves.toBe(false)
+  })
+
+  it('gates a fresh tab: the field is absent or explicitly false', async () => {
+    respondTransport({ transport: 'web', ws: '/ws' })
+    runtime = await freshRuntime()
+    await expect(runtime.webAuthRequired()).resolves.toBe(true)
+
+    respondTransport({ transport: 'web', ws: '/ws', authenticated: false })
+    runtime = await freshRuntime()
+    await expect(runtime.webAuthRequired()).resolves.toBe(true)
+  })
+
+  it('never gates the wails transport and never asks the network', async () => {
+    installWailsGlobals()
+    runtime = await freshRuntime()
+    await expect(runtime.webAuthRequired()).resolves.toBe(false)
+    expect(fetchCalls).toHaveLength(0)
+  })
+
+  it('a 401 RPC fires the mid-session signal and still rejects the call', async () => {
+    runtime = await bootedRuntime()
+    const signals: number[] = []
+    const unsubscribe = runtime.onWebAuthRequired(() => signals.push(1))
+
+    respondWebApp(async () => jsonResponse({ error: 'authentication required' }, 401))
+    await expect(runtime.getApp().Foo()).rejects.toThrow('authentication required')
+    expect(signals).toEqual([1])
+
+    // The unsubscribe works: no listener, no signal — and the rejection
+    // contract is unchanged either way.
+    unsubscribe()
+    await expect(runtime.getApp().Foo()).rejects.toThrow('authentication required')
+    expect(signals).toEqual([1])
+  })
+
+  it('a non-401 RPC failure never fires the signal', async () => {
+    runtime = await bootedRuntime()
+    const signals: number[] = []
+    runtime.onWebAuthRequired(() => signals.push(1))
+
+    respondWebApp(async () => jsonResponse({ error: 'boom' }, 500))
+    await expect(runtime.getApp().Foo()).rejects.toThrow('boom')
+    expect(signals).toEqual([])
+  })
+})
