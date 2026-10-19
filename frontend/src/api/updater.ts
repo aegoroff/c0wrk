@@ -116,6 +116,27 @@ export async function getUpdateSettings(): Promise<UpdateSettings> {
   }
 }
 
+/** Return the update-check result cached by the most recent backend check
+ *  (CheckForUpdates or the startup background check), or null when nothing is
+ *  pending. Pulled once after the frontend mounts (and retried on
+ *  backend:ready) so an update:available event that raced the event
+ *  subscription during startup is never lost — the update toast is driven
+ *  from the authoritative cached state, not only from the transient event. */
+export async function getLastUpdateCheck(): Promise<UpdateInfo | null> {
+  try {
+    const app = getApp()
+    const result = await app.GetLastUpdateCheck()
+    if (!result) return null
+    if (!isUpdateInfoData(result)) {
+      throw new Error('Invalid last update check response from backend')
+    }
+    return result
+  } catch (err) {
+    logger.error('Failed to get last update check:', err)
+    throw err
+  }
+}
+
 /** Persist the auto-check preference to config.yaml (updates.auto_check) and
  *  return the resolved settings. An explicit false is honoured by the backend
  *  (never reset to the default). The master enable/disable switch

@@ -174,6 +174,8 @@ export function GetIsGitRepo():Promise<boolean>;
 
 export function GetLastActiveProjectID():Promise<string>;
 
+export function GetLastUpdateCheck():Promise<backend.UpdateInfo>;
+
 export function GetLogLevel():Promise<string>;
 
 export function GetMCPMentionableServers():Promise<Array<backend.MCPMentionableServer>>;

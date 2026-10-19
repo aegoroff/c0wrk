@@ -62,6 +62,14 @@ type UpdateProgress struct {
 // bound.
 const downloadTimeout = 10 * time.Minute
 
+// updaterStartProbeDelay bounds the post-Start liveness probe in ApplyUpdate.
+// A healthy staged updater is guaranteed to still be running this long (its
+// first action is waiting for the quitting app), so an exit inside the window
+// proves the child was killed before it could do anything (macOS amfid
+// asynchronously SIGKILLs an exec whose signature does not validate outside
+// the original bundle) and the quit must be aborted.
+const updaterStartProbeDelay = 1 * time.Second
+
 // autoCheckEnabled reports whether automatic background checks are enabled,
 // reading updates.auto_check from config.yaml. Defaults to true when unset
 // (nil pointer), matching the ApplyDefaults convention.
@@ -212,6 +220,39 @@ func (f *FrontendAPI) CheckForUpdates() (*UpdateInfo, error) {
 	return info, nil
 }
 
+// GetLastUpdateCheck returns the update-check result cached by the most
+// recent CheckForUpdates / RunBackgroundUpdateCheck call in this session, or
+// nil when no check has run (or the latest check found nothing / the operator
+// gate is off).
+//
+// Why this exists: the startup auto-check emits update:available roughly a
+// second after the backend becomes ready — exactly when the frontend may not
+// have subscribed to global events yet, so the event (and with it the update
+// toast) is silently lost. The backend keeps the authoritative cached result
+// (checkAndCache), so the frontend can pull it once after mounting and on
+// backend:ready, making the toast independent of event-delivery timing.
+func (f *FrontendAPI) GetLastUpdateCheck() (*UpdateInfo, error) {
+	f.seedAcquire()
+	if !f.operatorUpdateCheckEnabled() {
+		return nil, nil
+	}
+	f.updateMu.Lock()
+	result := f.lastCheckResult
+	f.updateMu.Unlock()
+	if result == nil || !result.Available {
+		return nil, nil
+	}
+	return &UpdateInfo{
+		Available:      result.Available,
+		CurrentVersion: result.CurrentVersion,
+		LatestVersion:  result.LatestVersion,
+		ReleaseNotes:   result.ReleaseNotes,
+		PublishedAt:    result.PublishedAt,
+		HTMLURL:        result.HTMLURL,
+		AssetName:      result.AssetName,
+	}, nil
+}
+
 // DownloadUpdate fetches and integrity-verifies the release archive selected by
 // the most recent CheckForUpdates into the update-staging directory. Progress
 // is streamed as update:progress events. Emits update:downloaded on success or
@@ -316,18 +357,55 @@ func (f *FrontendAPI) ApplyUpdate() error {
 	f.log().Info("launching self-update re-exec",
 		"updater", updaterPath, "pid", pid, "target", target)
 
+	// The updater's own diagnostics (slog on stderr, ApplySelfUpdate errors
+	// from main.go) previously went to /dev/null: cmd.Stdout/Stderr were nil,
+	// so a failing self-update left NO trace and could not be diagnosed after
+	// the fact. Capture both streams in a file inside the staging dir — it
+	// survives until cleanupStaging (success) or the 24h-gated reap, giving
+	// every failed attempt a readable record.
+	updaterLogPath := filepath.Join(stagingDir, "updater-output.log")
+	updaterLog, err := os.Create(updaterLogPath)
+	if err != nil {
+		f.emitUpdateError("create updater log: " + err.Error())
+		return err
+	}
+	defer func() { _ = updaterLog.Close() }()
+
 	// Launch the staging updater detached so it survives this process's exit.
 	// The updater polls the parent PID until it dies, then swaps + relaunches.
 	// context.Background() is intentional: the app context is cancelled on the
 	// graceful quit that follows, which would kill a CommandContext tied to it.
 	cmd := exec.CommandContext(context.Background(), updaterPath, args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = updaterLog
+	cmd.Stderr = updaterLog
 	cmd.Stdin = nil
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		f.emitUpdateError("launch updater: " + err.Error())
 		return err
+	}
+
+	// Detect an updater that died the moment it was exec'd. On macOS the exec
+	// kill is ASYNCHRONOUS: amfid validates the binary after Start() returns
+	// and SIGKILLs the process (e.g. an ad-hoc signature that only validates
+	// inside the original .app bundle), so a plain Start() success proves
+	// nothing. Wait briefly for the child to exit: a healthy updater is
+	// guaranteed to still be alive here (its first action is waiting for THIS
+	// process to quit, which has not happened yet), so an exit inside the
+	// probe window means the update will never happen — abort the quit and
+	// tell the user instead of silently closing the app.
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	select {
+	case waitErr := <-waitCh:
+		msg := fmt.Sprintf("the staged updater exited immediately without applying the update (%v); its output is at %s", waitErr, updaterLogPath)
+		f.log().Error("self-update aborted: staged updater died before the swap", "error", waitErr, "log", updaterLogPath)
+		f.emitUpdateError(msg)
+		return errors.New(msg)
+	case <-time.After(updaterStartProbeDelay):
+		// Still running: healthy. The Wait goroutine keeps blocking until the
+		// process exits (it outlives this app's quit by design); this app is
+		// about to exit anyway, so no goroutine leak needs handling.
 	}
 
 	// Coordinated quit: let the frontend/Wails shut down gracefully so the
