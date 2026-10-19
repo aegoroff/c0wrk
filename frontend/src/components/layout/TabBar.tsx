@@ -1,7 +1,6 @@
 import { useCallback } from 'react'
-import { Plus, Settings, X } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useSettingsStore } from '@/stores/settingsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useTabStore, useTabs, useActiveTabId, type Tab } from '@/stores/tabStore'
@@ -32,7 +31,6 @@ export interface TabBarProps {
 export function TabBar({ controller }: TabBarProps) {
   const tabs = useTabs()
   const activeTabId = useActiveTabId()
-  const openSettings = useSettingsStore((s) => s.openSettings)
 
   const handleClose = useCallback(
     (id: string) => {
@@ -159,15 +157,6 @@ export function TabBar({ controller }: TabBarProps) {
           <Plus className="size-4" />
         </Button>
       </div>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        onClick={() => openSettings()}
-        aria-label="Settings"
-        title="Settings"
-      >
-        <Settings className="size-4" />
-      </Button>
     </div>
   )
 }

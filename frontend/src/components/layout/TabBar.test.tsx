@@ -17,7 +17,6 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
-import { useSettingsStore } from '@/stores/settingsStore'
 import type { TabController } from '@/hooks/useTabController'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
 
@@ -139,7 +138,6 @@ beforeEach(() => {
   useSessionStore.setState({ sessions: [SESS], activeSessionId: SESS.id })
   useChatStore.setState({ taskActive: {}, paused: {}, unfinishedTaskStatus: {} })
   useActiveSessionsStore.setState({ pendingOverride: {} })
-  useSettingsStore.setState({ open: false, activeTab: 'general' })
 })
 
 afterEach(() => {
@@ -293,16 +291,6 @@ describe('TabBar', () => {
     expect(controller.createAndActivate).toHaveBeenCalledWith()
     expect(controller.activate).not.toHaveBeenCalled()
     expect(controller.writeBack).not.toHaveBeenCalled()
-  })
-
-  it('opens Settings on the default tab (same as the sidebar gear before tabs)', () => {
-    renderBar()
-    act(() => {
-      buttonByLabel('Settings').click()
-    })
-    const settings = useSettingsStore.getState()
-    expect(settings.open).toBe(true)
-    expect(settings.activeTab).toBe('general')
   })
 
   it('paints the session status dot from the single shared derivation', () => {
