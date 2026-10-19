@@ -10,7 +10,7 @@ ADR-085's decision 1 enumerated the `tabsEnabled` flag's display scope as "the t
 
 ## Decision
 
-The sidebar header's Settings gear is unconditional: `frontend/src/components/layout/SidebarHeader.tsx` renders the gear in BOTH `tabsEnabled` states (opening Settings on the default tab, exactly as before tabs), and `frontend/src/components/layout/TabBar.tsx` carries no Settings button. The flag's gate narrows to what remains: the tab bar's rendering (`AppLayout`) and the notification-click routing branch (`useNotificationClicks`). This narrows ADR-085 decision 1's enumeration — the parenthetical gear handoff no longer applies; every other ADR-085 decision (always-live tab layer, single activation engine, snapshot slices, per-project file viewer) is unchanged and untouched.
+The sidebar header's Settings gear is unconditional: `frontend/src/components/layout/SidebarHeader.tsx` renders the gear in BOTH `tabsEnabled` states (opening Settings on the default tab, exactly as before tabs), and `frontend/src/components/layout/TabBar.tsx` carries no Settings button. The flag's gate narrows to what remains: the tab bar's rendering (`AppLayout`), the tab-cycling hotkeys' flag early-return (`useTabHotkeys` — with the flag off the cycling combos stay inert, an affordance of the visible bar), and the notification-click routing branch (`useNotificationClicks`). This narrows ADR-085 decision 1's enumeration — the parenthetical gear handoff no longer applies; every other ADR-085 decision (always-live tab layer, single activation engine, snapshot slices, per-project file viewer) is unchanged and untouched.
 
 ## Consequences
 
