@@ -199,6 +199,10 @@ func mainImpl() int {
 	// the FrontendAPI init derives the Settings RPC's running-policy snapshot
 	// from the same fact the wails.Run options below consume.
 	app.SetWebviewGpuStderrObserved(stderrObserved)
+	// NVIDIA Wayland explicit sync breaks GTK3's mixed GL/shm surface under
+	// the accelerated policy (fatal protocol error before DomReady); must be
+	// set before wails.Run initializes GTK/EGL.
+	desktop.ApplyNvidiaExplicitSyncWorkaround(slog.Default())
 	// Arm the Linux DMABUF-failure watchdog (issue #34) after crash capture —
 	// the stderr offset snapshot only makes sense once fd 1/2 are redirected —
 	// and before wails.Run, whose webview must not render first. Nil off Linux
