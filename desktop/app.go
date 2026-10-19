@@ -1027,6 +1027,10 @@ func (a *App) startWebAccessLocked(log *slog.Logger) (*webaccess.Server, error) 
 		Static:   a.webAccessStatic,
 		CSP:      CSPMiddleware(),
 		Logger:   log,
+		// The browser-side twin of wireWailsEventListeners: an authenticated
+		// tab resolves the whitelisted HITL response events through the same
+		// App handlers the Wails runtime path uses (desktop/webaccess_inbound.go).
+		WSInbound: a.webWSInboundDispatcher(log),
 	})
 	if err != nil {
 		return nil, err

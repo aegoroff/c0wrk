@@ -279,14 +279,18 @@ batching, no reshaping, order preserved**:
 - The frames are authenticated and same-origin: the `/ws` upgrade requires the
   session cookie (exchanged for the per-launch token via `POST /api/login`) and
   an exact same-origin `Origin` header.
-- The web client CONSUMES events only. Inbound WebSocket frames are read and
-  discarded (the desktop mount wires no inbound handler), so the
-  [Frontend-to-Backend Events](#frontend-to-backend-events) above do **not**
-  reach the backend from a browser tab — UI→backend over the web is RPC-only.
-  HITL answers carried by events (`tool_confirm_response`, `ask_user_response`,
-  `step_limit_response`, `plan_approval_response`) have no web-reachable path
-  today; goal proposals are the exception — their RPC path
-  (`ConfirmGoal`/`CancelGoal`) resolves from a web tab.
+- The inbound bridge is a whitelist: an authenticated tab SENDS the same
+  `{name,args}` envelope in reverse, and the mount (`webWSInboundDispatcher`,
+  `desktop/webaccess_inbound.go`) resolves exactly the seven
+  [Frontend-to-Backend Events](#frontend-to-backend-events) — the five HITL
+  responses plus `goal_proposal_response`/`goal_suggestion_response` — through
+  the same desktop handlers the Wails event listeners use (one authorization
+  decision, two transports). Every other name drops at Debug and the
+  connection survives; `EmitSessionEvent` stays denylisted on the RPC surface,
+  so a tab still cannot forge arbitrary events into the bus. Two clients
+  racing one action inherit first-responder-wins: the loser's backend lookup
+  warns, and its UI self-corrects through the persisted-message resolution
+  events both clients already observe.
 
 ## Event Handling Pattern (Frontend)
 

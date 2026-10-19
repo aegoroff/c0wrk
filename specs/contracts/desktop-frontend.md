@@ -5,7 +5,7 @@
 Frontend communicates with Go exclusively through its transport bridge — no direct Go imports. Two channels: RPC (request/response) and Events (push notifications). There are two transports for the same bundle:
 
 - **Wails IPC** (the desktop webview) — the primary, always-on channel: generated bindings over `*backend.FrontendAPI` for RPC, Wails events for push.
-- **Web sidecar** (opt-in, `web_access.enabled`) — a browser tab served by the loopback web-access sidecar ([ADR-090](../decisions/090-browser-web-access.md), [../domains/web-access.md](../domains/web-access.md)): the same `FrontendAPI` surface dispatched by reflection over `POST /api/rpc/<Method>`, the same event stream bridged over the `/ws` WebSocket as `{name,args}` frames. The web client consumes events; UI→backend over the web is RPC-only (inbound WebSocket frames are discarded).
+- **Web sidecar** (opt-in, `web_access.enabled`) — a browser tab served by the loopback web-access sidecar ([ADR-090](../decisions/090-browser-web-access.md), [../domains/web-access.md](../domains/web-access.md)): the same `FrontendAPI` surface dispatched by reflection over `POST /api/rpc/<Method>`, the same event stream bridged over the `/ws` WebSocket as `{name,args}` frames — and the same frames accepted inbound through a fixed whitelist (`desktop/webaccess_inbound.go`): exactly the seven frontend→backend HITL events resolve, through the same desktop handlers the Wails listeners use; every other inbound frame drops.
 
 Sidecar control RPCs (`GetWebAccessInfo`/`SetWebAccessEnabled`) live on `desktop.App`, deliberately OFF the reflection-dispatched `FrontendAPI` surface, so a browser tab can neither read the credential state nor flip the switch that feeds it.
 

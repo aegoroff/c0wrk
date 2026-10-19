@@ -31,6 +31,8 @@ The requirement that shaped this decision: **attach the web surface maximally si
 
 7. **Browser-native gaps are handled by feature-detect + gating; attachments are the one additive backend edit.** The web client detects desktop-only affordances (native file and directory dialogs) and gates the corresponding UI instead of reimplementing them. Where the web surface genuinely needs new backend capability — file attachments, where a browser hands over bytes rather than a local path — a new `AttachFileContent` method is added to the backend attachment surface. This is the deliberate, recorded exception to "zero backend edits".
 
+8. **The inbound WebSocket bridge is a fixed whitelist (amendment closing the stage-1 HITL gap).** Stage 1 shipped with inbound frames discarded — HITL answers from a tab were view-only. Closing that gap does NOT reopen a generic forge path: the mount wires `Options.WSInbound` to a desktop-owned dispatcher (`desktop/webaccess_inbound.go`) that resolves exactly the seven frontend→backend HITL response events through the same `desktop/event_handlers.go` handlers the Wails event listeners use — one authorization decision, two transports. A tab holds webview trust (decision 2's cookie boundary), so resolving a pending HITL action is an authorized operation; every other frame drops at Debug (network input must not write unbounded log lines), `EmitSessionEvent` stays denylisted so arbitrary events still cannot be forged into the trusted bus, and a judge flood is self-bounded (the handler acts only on a live pending entry). Frontend code needs no change: `runtime.ts`'s `emit()` already sent the symmetric `{name,args}` frames.
+
 ## Consequences
 
 Positive:
