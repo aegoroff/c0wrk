@@ -4,6 +4,8 @@
 
 Events are the real-time communication channel from backend to frontend during task execution. They enable live UI updates without polling.
 
+Two transports deliver the same stream: Wails IPC (the desktop webview, always on) and — opt-in, `web_access.enabled` — the web-access sidecar's WebSocket for a browser tab ([ADR-090](../decisions/090-browser-web-access.md); see [Web Transport](#web-transport-web-access-sidecar) below).
+
 ## Global Events
 
 Payloads are emitted as-is (no wrapping object) unless shown as `{...}`.
@@ -248,6 +250,44 @@ a direct per-event `EventsOn` registration so individually-emitted events still
 arrive. Batched events are never also emitted individually, so a handler fires
 exactly once per event.
 
+## Web Transport (web-access sidecar)
+
+When the web-access sidecar is enabled ([ADR-090](../decisions/090-browser-web-access.md),
+[../domains/web-access.md](../domains/web-access.md)), a browser tab receives the
+same event stream over the sidecar's `/ws` WebSocket instead of Wails
+`EventsEmit`. The `eventTap` seam in `(*App).emit` hands every dispatch to the
+sidecar; the server marshals one JSON frame per emit call — **no sidecar-side
+batching, no reshaping, order preserved**:
+
+```json
+{ "name": "session:<id>:<type>", "args": [<payload>] }
+```
+
+- `args` is `null` when the event carried no data; the shim normalizes it to `[]`.
+- Desktop-side batched flushes still travel as their own
+  `c0wrk:events:batch` frames carrying the standard envelope (see
+  [Event Batching](#event-batching-session-events)) — batching happens upstream
+  of `emit`, so both transports observe the identical stream; the shim unwraps
+  the envelope through the same `dispatchEnvelope` path it uses for the Wails
+  batch listener, and single (unbatched) events dispatch directly through the
+  per-event fan-out.
+- Delivery is at-most-once per connection: each client has a bounded outbox
+  (1024 frames) drained by its own writer goroutine; overflow drops the client
+  (Warn + close) and the shim reconnects with exponential backoff (500 ms
+  doubling to 30 s, reset on open), re-syncing its own state. There is no
+  replay or resume.
+- The frames are authenticated and same-origin: the `/ws` upgrade requires the
+  session cookie (exchanged for the per-launch token via `POST /api/login`) and
+  an exact same-origin `Origin` header.
+- The web client CONSUMES events only. Inbound WebSocket frames are read and
+  discarded (the desktop mount wires no inbound handler), so the
+  [Frontend-to-Backend Events](#frontend-to-backend-events) above do **not**
+  reach the backend from a browser tab — UI→backend over the web is RPC-only.
+  HITL answers carried by events (`tool_confirm_response`, `ask_user_response`,
+  `step_limit_response`, `plan_approval_response`) have no web-reachable path
+  today; goal proposals are the exception — their RPC path
+  (`ConfirmGoal`/`CancelGoal`) resolves from a web tab.
+
 ## Event Handling Pattern (Frontend)
 
 ```
@@ -288,3 +328,4 @@ assistant_done event (once):
 - Modified payload: update Go struct + TS interface + type guard + handler logic
 - Removed event: remove emitter method + remove TS type + remove handler subscription
 - Renamed event: update BOTH Go event name constant AND all frontend `EventsOn` calls
+- Web transport: a new or renamed event flows to browser tabs automatically through the `eventTap` in `(*App).emit` — nothing to register. Payloads must stay JSON-marshalable: an unmarshalable payload is dropped for web clients only (Warn logged, the Wails dispatch is untouched). The same stream semantics apply on both transports; do not add a transport-specific event

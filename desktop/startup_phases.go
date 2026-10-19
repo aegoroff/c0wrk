@@ -923,6 +923,11 @@ func (a *App) buildFrontendAPI(
 	startTime time.Time,
 ) {
 	a.frontendAPI().Lifecycle().Init(cfg)
+	// Capture the desktop's own handle on the live config + its path: the
+	// web-access control RPCs (App-owned, ADR-090) flip and persist the
+	// desktop-owned web_access section through it. The same pointer Init
+	// stores, so a toggle is visible to the shared live config immediately.
+	a.setConfigRef(cfg.Config, cfg.ConfigPath)
 	log.Info("startup phase complete", "phase", "frontend_api", "elapsed_ms", time.Since(startTime).Milliseconds())
 
 	a.frontendAPI().Lifecycle().SetConfigLoadState(configLoadErrors)
@@ -1525,5 +1530,60 @@ func (a *App) stopEmbeddedLLM(ctx context.Context) {
 	}
 	if err := stop(ctx); err != nil {
 		a.log().Error("failed to stop the embedded LLM server during shutdown", "error", err)
+	}
+}
+
+// initWebAccess mounts the browser web-access sidecar (ADR-090) when the
+// web_access section is enabled. This is the feature's startup mount point,
+// by the initChatGPTAuth pattern: a cheap phase helper after buildFrontendAPI
+// (the dispatch target must be wired) and after emitBackendReady (the mount
+// must not delay or reorder the readiness contract). Everything concrete is
+// assembled HERE — the live FrontendAPI as the reflection dispatch target,
+// the SPA tree main.go handed over, the CSP middleware, the resolved config
+// section — and handed to internal/webaccess, which knows nothing about
+// Wails or the desktop layer.
+//
+// Failure is fail-soft and LOUD: a sidecar that cannot start (config drift a
+// reload normalized away, a squatted explicit port) logs at Error and leaves
+// the app fully usable desktop-side — the web feature degrades, the desktop
+// app must not. The section stays enabled, so the next launch retries.
+func (a *App) initWebAccess(cfg *config.Config, log *slog.Logger) {
+	if a.frontendAPI() == nil || cfg == nil || !cfg.WebAccess.Enabled {
+		return
+	}
+	startTime := time.Now()
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+	srv, err := a.startWebAccessLocked(log)
+	if err != nil {
+		log.Error("web access sidecar failed to start; continuing without it", "error", err)
+		return
+	}
+	logWebAccessReady(log, srv)
+	log.Info("startup phase complete", "phase", "web_access",
+		"elapsed_ms", time.Since(startTime).Milliseconds())
+}
+
+// stopWebAccess stops the sidecar during Shutdown, releasing the loopback
+// listener and every browser WebSocket before the heavier teardown steps run
+// (the judge drain and the store closes), so a connected tab sees its event
+// stream end while the app is still winding down — not mid-flight against a
+// half-closed backend. It runs behind webAccessMu so it cannot interleave
+// with a concurrent SetWebAccessEnabled transition.
+//
+// The stop is bounded by webAccessStopBudget (~3s) rather than the caller's
+// context alone: a quit must never hang on a sidecar, and the budget is what
+// converts a wedged graceful Shutdown into Server.Stop's force close (the
+// same contract as stopEmbeddedLLM, sized for a stateless listener instead
+// of gigabytes of weights). A failure is logged, never fatal — quitting must
+// not be blocked by a listener that refuses to die, and Server.Stop still
+// force-closes what the graceful phase could not finish.
+func (a *App) stopWebAccess(ctx context.Context) {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+	sctx, cancel := context.WithTimeout(ctx, webAccessStopBudget)
+	defer cancel()
+	if err := a.stopWebAccessLocked(sctx); err != nil {
+		a.log().Error("failed to stop the web access sidecar during shutdown", "error", err)
 	}
 }

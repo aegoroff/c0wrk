@@ -19,6 +19,7 @@ const { runtimeMock } = vi.hoisted(() => ({
     onSessionEvent: vi.fn(() => () => {}),
     reportDroppedEvent: vi.fn(),
     getApp: vi.fn(),
+    isWebTransport: vi.fn(() => false),
   },
 }))
 

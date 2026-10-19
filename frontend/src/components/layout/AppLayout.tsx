@@ -12,7 +12,7 @@ import { BonsaiProfileBanner } from '@/components/chat/BonsaiProfileBanner'
 import { StatusBar } from '@/components/layout/StatusBar'
 import { FileViewerPanel } from '@/components/fileViewer/FileViewerPanel'
 import { createFloatingViewerOutsideHandler } from './floatingViewerOutside'
-import { getApp, isWailsReady, subscribe } from '@/api/runtime'
+import { getApp, hasWailsRuntime, isWailsReady, subscribe } from '@/api/runtime'
 import { logger } from '@/lib/logger'
 
 // --- Constants ---
@@ -105,7 +105,7 @@ export function AppLayout() {
 
     if (isWailsReady()) {
       attach()
-    } else if (typeof window !== 'undefined' && window.runtime) {
+    } else if (hasWailsRuntime()) {
       // Wails bridge present but not fully ready — attach on backend:ready.
       unsubReady = subscribe('backend:ready', () => {
         unsubReady?.()

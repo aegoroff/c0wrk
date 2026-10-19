@@ -16,6 +16,7 @@ const { statusMock } = vi.hoisted(() => ({ statusMock: vi.fn() }))
 vi.mock('@/api/runtime', () => ({
   subscribe: vi.fn(() => () => {}), emit: vi.fn(), onGlobalEvent: vi.fn(() => () => {}),
   onSessionEvent: vi.fn(() => () => {}), reportDroppedEvent: vi.fn(), getApp: vi.fn(),
+  isWebTransport: vi.fn(() => false),
 }))
 vi.mock('@/api/config', () => ({ getConfig: vi.fn().mockResolvedValue({ loaded: true, llm: { all_models: [], default_model: '', models_ready: true } }) }))
 vi.mock('@/api/prompt', () => ({ optimizePrompt: vi.fn() }))

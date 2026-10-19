@@ -73,6 +73,7 @@ vi.mock('./floatingViewerOutside', () => ({
 vi.mock('@/api/runtime', () => ({
   getApp: () => ({ PersistWindowBounds: () => Promise.resolve() }),
   isWailsReady: () => false,
+  hasWailsRuntime: () => false,
   subscribe: () => () => {},
 }))
 vi.mock('@/lib/logger', () => ({ logger: { warn: () => {} } }))

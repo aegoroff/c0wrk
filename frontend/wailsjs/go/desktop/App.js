@@ -38,6 +38,10 @@ export function ArchiveSession(arg1) {
   return window['go']['desktop']['App']['ArchiveSession'](arg1);
 }
 
+export function AttachFileContent(arg1, arg2, arg3, arg4) {
+  return window['go']['desktop']['App']['AttachFileContent'](arg1, arg2, arg3, arg4);
+}
+
 export function AttachFiles(arg1, arg2) {
   return window['go']['desktop']['App']['AttachFiles'](arg1, arg2);
 }
@@ -470,6 +474,10 @@ export function GetVectorIndexStatus() {
   return window['go']['desktop']['App']['GetVectorIndexStatus']();
 }
 
+export function GetWebAccessInfo() {
+  return window['go']['desktop']['App']['GetWebAccessInfo']();
+}
+
 export function GetWebviewGpuPolicy() {
   return window['go']['desktop']['App']['GetWebviewGpuPolicy']();
 }
@@ -816,6 +824,14 @@ export function SetUpdateSettings(arg1) {
 
 export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
+}
+
+export function SetWebAccessEnabled(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessEnabled'](arg1);
+}
+
+export function SetWebAccessStaticFS(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessStaticFS'](arg1);
 }
 
 export function SetWebviewGpuPolicy(arg1) {

@@ -34,10 +34,11 @@ vi.mock('@/api/runtime', () => ({
       registry.set(event, arr.filter((c) => c !== cb))
     }
   },
+  isWebTransport: () => false,
 }))
 
 vi.mock('@/hooks/useStageAttachments', () => ({
-  useStageAttachments: () => ({ stageAttachmentPaths: stageSpy }),
+  useStageAttachments: () => ({ stageAttachmentPaths: stageSpy, stageAttachmentFiles: stageSpy }),
 }))
 
 import { useFileDrop } from '@/hooks/useFileDrop'

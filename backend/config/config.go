@@ -119,6 +119,16 @@ type Config struct {
 	// timestamp of the last check) is persisted to update_state.json, not to
 	// this file; see core/updater/state.go and config.UpdateStatePath.
 	Updates UpdatesConfig `yaml:"updates"`
+
+	// WebAccess configures the browser web-access sidecar (ADR-090): a
+	// loopback-only HTTP/WebSocket server that mirrors the desktop UI into a
+	// browser window. Default off — an absent section (or enabled: false)
+	// starts nothing and the app behaves exactly as before the section
+	// existed. The struct is pure data: it knows nothing about the webaccess
+	// package. Load problems are fail-soft (warning + reset to the safe
+	// default state, see web_access.go); Save refuses to persist an unsafe
+	// enabled state. See specs/decisions/090-browser-web-access.md.
+	WebAccess WebAccessConfig `yaml:"web_access"`
 }
 
 // UpdatesConfig controls the self-update subsystem. Both toggles are
@@ -3131,6 +3141,13 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	// always valid.
 	shellExecWarnings := normalizeShellExec(&cfg)
 
+	// Validate the web_access section in place (fail-soft: an enabled section
+	// with a non-loopback bind or an out-of-range port is warned about and
+	// reset to the safe default state — the sidecar stays off). Must run
+	// after ApplyDefaults (which seeds the default bind) and before validate,
+	// so the persisted shape is always valid. See web_access.go / ADR-090.
+	webAccessWarnings := normalizeWebAccess(&cfg)
+
 	// Validate the MCP per-server timeout durations (fail-soft: invalid entries
 	// are warned about and left untouched — the config→builder adapter resolves
 	// them to the engine default at build time). Must run after ApplyDefaults
@@ -3158,6 +3175,7 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	// Warnings collected before validation, in a deterministic order.
 	warnings := autonomyWarnings
 	warnings = append(warnings, shellExecWarnings...)
+	warnings = append(warnings, webAccessWarnings...)
 	warnings = append(warnings, mcpWarnings...)
 	warnings = append(warnings, mcpModeWarnings...)
 	warnings = append(warnings, capWarnings...)
@@ -3175,6 +3193,14 @@ func LoadWithResult(path string) (*LoadResult, error) {
 
 // Save writes the configuration to a YAML file atomically.
 func Save(cfg *Config, path string) error {
+	// Fail-closed web_access gate: refuse to persist an enabled section with
+	// a non-loopback bind or an out-of-range port. The load path heals such a
+	// state (normalizeWebAccess resets it), so hitting this means an in-memory
+	// mutation tried to persist a section the sidecar must never run with.
+	// See web_access.go / ADR-090.
+	if err := validateWebAccessForSave(cfg); err != nil {
+		return fmt.Errorf("refusing to save config: %w", err)
+	}
 	// Marshal the config as-is: the execute blocklist is empty by default
 	// and purely user-authored, so there is no derived view to maintain —
 	// what is stored is what is written.

@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { CopyButton } from './CopyButton'
-import { clipboardSetText, emit } from '@/api/runtime'
+import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
 
 // Copy must go through the native Wails runtime, NOT navigator.clipboard
@@ -14,6 +14,7 @@ import { saveMessageAsMarkdown } from '@/api/files'
 vi.mock('@/api/runtime', () => ({
   clipboardSetText: vi.fn().mockResolvedValue(true),
   emit: vi.fn(),
+  isWebTransport: vi.fn(() => false),
 }))
 
 vi.mock('@/api/files', () => ({
@@ -177,5 +178,71 @@ describe('CopyButton', () => {
       expect.objectContaining({ message: 'Failed to save message to file' }),
     )
     expect(container.textContent).not.toContain('Saved')
+  })
+})
+
+describe('CopyButton in web transport (no native save dialog)', () => {
+  let container: HTMLElement
+  let root: Root
+  const createObjectURL = vi.fn<(obj: Blob) => string>(() => 'blob:mock-url')
+  const revokeObjectURL = vi.fn<(url: string) => void>(() => {})
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // jsdom implements neither object-URL primitive; stub both so the anchor
+    // download path runs end-to-end.
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    vi.mocked(isWebTransport).mockReturnValue(true)
+
+    container = document.createElement('div')
+    document.body.replaceChildren(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    releaseShift()
+    act(() => {
+      window.dispatchEvent(new Event('blur'))
+    })
+    act(() => root.unmount())
+    vi.mocked(isWebTransport).mockReturnValue(false)
+    vi.clearAllMocks()
+    vi.useRealTimers()
+  })
+
+  const render = (props: React.ComponentProps<typeof CopyButton>) =>
+    act(() => {
+      root.render(<CopyButton {...props} />)
+    })
+
+  it('Shift+click hands the browser an anchor download and never calls the save RPC', async () => {
+    render({ text: 'markdown body' })
+    pressShift()
+
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(saveMessageAsMarkdown).not.toHaveBeenCalled()
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    const blob = createObjectURL.mock.calls[0]?.[0]
+    expect(await blob?.text()).toBe('markdown body')
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    expect(container.textContent).toContain('Saved')
+  })
+
+  it('the plain click still copies through the shared transport clipboard', async () => {
+    render({ text: 'copy me' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(clipboardSetText).toHaveBeenCalledWith('copy me')
   })
 })

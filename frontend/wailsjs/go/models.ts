@@ -2881,6 +2881,26 @@ export namespace desktop {
 	
 	
 	
+	export class WebAccessInfo {
+	    enabled: boolean;
+	    running: boolean;
+	    url: string;
+	    port: number;
+	    token: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WebAccessInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.running = source["running"];
+	        this.url = source["url"];
+	        this.port = source["port"];
+	        this.token = source["token"];
+	    }
+	}
 	export class wailsLogAdapter {
 	
 	

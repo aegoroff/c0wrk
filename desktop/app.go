@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
+	"net"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,9 +18,11 @@ import (
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/v0lka/c0wrk/backend"
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/logger"
 	"github.com/v0lka/c0wrk/backend/session"
 	"github.com/v0lka/c0wrk/core/markitdown"
+	"github.com/v0lka/c0wrk/internal/webaccess"
 )
 
 // App holds the Wails application state and exposes methods to the frontend.
@@ -100,6 +106,65 @@ type App struct {
 	// lets tests inject a fake event sink so phase helpers can be exercised
 	// without a live Wails runtime (W-19/W-23). Production wiring keeps it nil.
 	wailsEmit func(eventName string, optionalData ...any)
+
+	// eventTap, when non-nil, observes every a.emit call alongside the Wails
+	// dispatch — the single, web-agnostic seam a side transport uses to
+	// receive exactly the events the webview receives. It knows nothing about
+	// sockets, browsers, or any concrete consumer: the mount point hands it a
+	// plain func. A nil tap (the default until a side transport mounts)
+	// leaves emit byte-for-byte unchanged. The tap must never block, alter,
+	// or fail the emit.
+	//
+	// It is an atomic pointer rather than a plain field on purpose: unlike
+	// wailsEmit (written only before event producers start), the web-access
+	// mount registers — and hot-restart swaps — the tap from the Startup
+	// goroutine AFTER buildFrontendAPI has started the session watchers and
+	// the emitBackendReady dispatch, while Wails binding goroutines may
+	// already be serving RPCs whose event paths read the tap. The Load/Store
+	// pair is the happens-before edge that keeps the late registration and
+	// the concurrent readers race-free. Set it through setEventTap.
+	eventTap atomic.Pointer[func(name string, args []interface{})]
+
+	// ── Web access sidecar (internal/webaccess, ADR-090) ─────────────────
+	//
+	// webAccess is the live sidecar; nil while it is not running. Atomic
+	// pointer for the same reason as eventTap: startup mounts it, Shutdown
+	// and SetWebAccessEnabled stop it, and GetWebAccessInfo reads it — all
+	// from different goroutines (OnStartup, the platform main goroutine,
+	// Wails binding dispatch). The pointer swap is the only synchronization
+	// the handle needs; lifecycle TRANSITIONS are serialized by webAccessMu
+	// so a toggle can never interleave with a shutdown stop.
+	webAccess atomic.Pointer[webaccess.Server]
+
+	// webAccessMu serializes sidecar lifecycle transitions (startup mount,
+	// Shutdown stop, SetWebAccessEnabled toggle) so two of them can never
+	// interleave into a half-torn-down server or a leaked listener. It guards
+	// the start/stop critical sections only — not the handle reads, which
+	// ride the atomic pointer above.
+	webAccessMu sync.Mutex
+
+	// webAccessStatic is the SPA asset tree the sidecar serves at /. Wired
+	// from main.go via SetWebAccessStaticFS strictly before wails.Run begins
+	// (the webviewGpuWatchdog publishing contract), so a plain field is
+	// safely published. Nil (never wired — tests, a stripped embed) degrades
+	// the sidecar to API+WS only: the static route 404s, everything else
+	// keeps working.
+	webAccessStatic fs.FS
+
+	// liveConfig and liveConfigPath are the desktop's own handle on the live
+	// config object and its on-disk path, captured in buildFrontendAPI.
+	// liveConfig is the SAME pointer FrontendAPI.Init seeds (f.config =
+	// cfg.Config) — the shared live config the backend mutates in place
+	// under its configMu. Desktop NEVER reads or writes backend-owned
+	// sections through it; it is kept solely so the desktop-owned
+	// web_access section can be flipped and persisted by SetWebAccessEnabled
+	// without a backend edit. Writes are serialized between themselves by
+	// webAccessMu (the toggle path); a concurrent backend save can only ever
+	// READ the section it persists — the one-word window this seam accepts,
+	// documented at SetWebAccessEnabled. Guarded by stateMu like the rest of
+	// the lifecycle state.
+	liveConfig     *config.Config
+	liveConfigPath string
 
 	// batcherPtr holds the lazily-created event batcher that sits between the
 	// session-event producers and the raw transport (a.emit). It coalesces
@@ -646,10 +711,27 @@ func (a *App) log() *slog.Logger {
 	return slog.Default()
 }
 
+// setEventTap installs (fn != nil) or removes (fn == nil) the side event tap.
+// See the eventTap field comment for why it is an atomic swap rather than a
+// plain store: the web-access mount registers the tap after event producers
+// are live, while RPC goroutines may already be emitting.
+func (a *App) setEventTap(fn func(name string, args []interface{})) {
+	if fn == nil {
+		a.eventTap.Store(nil)
+		return
+	}
+	a.eventTap.Store(&fn)
+}
+
 // emit dispatches a Wails event. Tests can inject a fake bus by setting
 // a.wailsEmit; production code uses wailsRuntime.EventsEmit. Callers must not
 // invoke this before Startup binds a.wailsCtx() (or before a.wailsEmit is set in tests).
+// When a.eventTap is set, every dispatch is also observed by the tap (see the
+// field comment); the tap never alters, blocks, or fails the Wails dispatch.
 func (a *App) emit(eventName string, optionalData ...any) {
+	if tap := a.eventTap.Load(); tap != nil {
+		(*tap)(eventName, optionalData)
+	}
 	if a.wailsEmit != nil {
 		a.wailsEmit(eventName, optionalData...)
 		return
@@ -780,4 +862,208 @@ func (a *App) resolvePendingMessage(sessionID, role, matchField, matchValue stri
 		return nil
 	}
 	return fa.ResolvePendingMessage(sessionID, role, matchField, matchValue, extra)
+}
+
+// ── Web access sidecar: mount, teardown, control RPCs (ADR-090) ──────────
+//
+// Everything the browser sidecar needs from the app lives at THIS seam: the
+// mount builds webaccess.Options from the live FrontendAPI (the reflection
+// dispatch target), the SPA tree handed over by main.go, the CSP middleware,
+// and the resolved config section — and owns the sidecar handle for its whole
+// lifetime. The backend never learns the sidecar exists: `backend` and `core`
+// hold no webaccess reference, and these control RPCs are methods on App (not
+// on the embedded *FrontendAPI), so the reflection dispatcher — which sees
+// exactly the FrontendAPI method surface — can never reach them. A browser
+// tab cannot read the credential state or flip the switch that feeds it.
+
+// webAccessStopBudget bounds one sidecar stop (Shutdown and the disable
+// toggle). Deliberately small: the sidecar holds no durable state — a Stop is
+// a listener close plus a WebSocket fan-out abort — so unlike the embedded
+// LLM's 30 s stop there is nothing here worth making a quit wait for. On
+// expiry Server.Stop force-closes what a graceful Shutdown could not finish.
+const webAccessStopBudget = 3 * time.Second
+
+// setConfigRef captures the desktop's handle on the live config object and
+// its path (buildFrontendAPI, Startup goroutine). See the liveConfig field
+// comment for the ownership discipline.
+func (a *App) setConfigRef(cfg *config.Config, path string) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.liveConfig = cfg
+	a.liveConfigPath = path
+}
+
+// configRef returns the captured live config and path (either may be empty on
+// a Startup that never reached buildFrontendAPI).
+func (a *App) configRef() (cfg *config.Config, path string) {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.liveConfig, a.liveConfigPath
+}
+
+// SetWebAccessStaticFS stores the SPA asset tree the sidecar serves. Exported
+// for main.go by the same precedent as SetWebviewGpuWatchdog: internal startup
+// plumbing rides the Wails binding surface so the process-level wiring can
+// hand over a value only it holds (the embedded asset tree). Call it strictly
+// before wails.Run — the plain-field publishing contract in the field comment.
+func (a *App) SetWebAccessStaticFS(static fs.FS) {
+	a.webAccessStatic = static
+}
+
+// WebAccessInfo is the GetWebAccessInfo payload: the Settings section's whole
+// view of the sidecar.
+type WebAccessInfo struct {
+	// Enabled mirrors the persisted web_access.enabled switch — the operator's
+	// intent, not the runtime state.
+	Enabled bool `json:"enabled"`
+	// Running reports whether the sidecar is live in THIS process.
+	Running bool `json:"running"`
+	// URL is the loopback URL a browser opens (scheme + resolved host:port).
+	// Empty while the sidecar is not running (port 0 resolves only at bind).
+	URL string `json:"url"`
+	// Port is the resolved listen port; 0 while not running.
+	Port int `json:"port"`
+	// Token is the credential a browser pastes at the login screen: the
+	// effective per-launch token while running, else the configured token
+	// (empty when the next launch would mint a fresh per-launch one). This is
+	// the ONLY channel the token leaves the sidecar through — it is never
+	// logged and never reaches the web dispatch surface.
+	Token string `json:"token"`
+}
+
+// GetWebAccessInfo reports the sidecar state for Settings → Web Access.
+// Desktop-only by construction: it is an App method, so the web reflection
+// surface (the FrontendAPI methods) cannot serve it back to a browser tab.
+func (a *App) GetWebAccessInfo() WebAccessInfo {
+	info := WebAccessInfo{}
+	if cfg, _ := a.configRef(); cfg != nil {
+		info.Enabled = cfg.WebAccess.Enabled
+	}
+	if srv := a.webAccess.Load(); srv != nil {
+		info.Running = true
+		if addr, ok := srv.Addr(); ok {
+			info.URL = "http://" + addr
+			if _, port, perr := net.SplitHostPort(addr); perr == nil {
+				info.Port, _ = strconv.Atoi(port)
+			}
+		}
+		info.Token = srv.AuthToken()
+	} else if cfg, _ := a.configRef(); cfg != nil {
+		// Not running: the configured token is what the next launch would
+		// use (an empty value means a fresh per-launch token).
+		info.Token = cfg.WebAccess.Token
+	}
+	return info
+}
+
+// SetWebAccessEnabled persists the web_access.enabled switch and applies it
+// live: enabling starts the sidecar, disabling stops it. A request matching
+// the current state is a no-op, and a failed disk write rolls the in-memory
+// flip back so a rejected toggle is indistinguishable from a rejected
+// request (the SetModelProfilesEnabled contract).
+//
+// Locking discipline: webAccessMu serializes the whole transition — config
+// flip, persist, start/stop — against the startup mount and the Shutdown
+// stop, so a toggle can never race a teardown into a leaked listener. The
+// config mutation itself deliberately does NOT take FrontendAPI's unexported
+// configMu (desktop cannot; that is the zero-backend-edit constraint):
+// desktop is the sole WRITER of the web_access section (backend code never
+// touches it at runtime), and a concurrent backend config save can only READ
+// the section it persists wholesale — the accepted one-word window of this
+// desktop-owned seam.
+func (a *App) SetWebAccessEnabled(on bool) error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	if cfg.WebAccess.Enabled == on {
+		return nil
+	}
+
+	prev := cfg.WebAccess
+	cfg.WebAccess.Enabled = on
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess = prev
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+
+	if on {
+		srv, err := a.startWebAccessLocked(a.log())
+		if err != nil {
+			// The persisted switch stays on (operator intent; the next
+			// launch retries) but the failure must be visible now.
+			return fmt.Errorf("web access enabled, but the sidecar failed to start: %w", err)
+		}
+		logWebAccessReady(a.log(), srv)
+		return nil
+	}
+
+	sctx, cancel := context.WithTimeout(context.Background(), webAccessStopBudget)
+	defer cancel()
+	if err := a.stopWebAccessLocked(sctx); err != nil {
+		return fmt.Errorf("web access disabled, but the sidecar stop failed: %w", err)
+	}
+	return nil
+}
+
+// startWebAccessLocked constructs and starts the sidecar and publishes the
+// handle + event tap. Callers must hold webAccessMu. Idempotent on a live
+// server: it returns the running one so a startup mount and a toggle can
+// never double-bind.
+func (a *App) startWebAccessLocked(log *slog.Logger) (*webaccess.Server, error) {
+	if cur := a.webAccess.Load(); cur != nil {
+		return cur, nil
+	}
+	cfg, _ := a.configRef()
+	if cfg == nil {
+		return nil, errors.New("config not initialized")
+	}
+	srv, err := webaccess.New(webaccess.Options{
+		Config:   cfg.WebAccess,
+		Dispatch: a.frontendAPI(),
+		Static:   a.webAccessStatic,
+		CSP:      CSPMiddleware(),
+		Logger:   log,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := srv.Start(context.Background()); err != nil {
+		return nil, err
+	}
+	// Publish the handle before the tap: once events fan out, a concurrent
+	// GetWebAccessInfo must already see Running.
+	a.webAccess.Store(srv)
+	a.setEventTap(srv.EventTap())
+	return srv, nil
+}
+
+// stopWebAccessLocked detaches and stops the live sidecar. Callers must hold
+// webAccessMu. The handle and tap are cleared BEFORE the stop so events stop
+// flowing to a dying server and a concurrent toggle sees "not running"
+// immediately; the stop itself is idempotent (Server.Stop is once-guarded).
+// A nil handle is a no-op.
+func (a *App) stopWebAccessLocked(ctx context.Context) error {
+	srv := a.webAccess.Load()
+	if srv == nil {
+		return nil
+	}
+	a.webAccess.Store(nil)
+	a.setEventTap(nil)
+	return srv.Stop(ctx)
+}
+
+// logWebAccessReady records the sidecar's URL at Info. The auth token is
+// deliberately NOT part of the record — it is app-secret material (the
+// Settings section reveals it on demand); the log only names where a browser
+// connects and that a credential exists.
+func logWebAccessReady(log *slog.Logger, srv *webaccess.Server) {
+	addr, ok := srv.Addr()
+	if !ok {
+		addr = "(unresolved)"
+	}
+	log.Info("web access sidecar ready", "url", "http://"+addr, "token", "(hidden — see Settings → Web Access)")
 }

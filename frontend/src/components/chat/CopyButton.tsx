@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Copy, Check, Save } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { clipboardSetText, emit } from '@/api/runtime'
+import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
 import { useShiftHeld } from '@/hooks/useShiftHeld'
 import { logger } from '@/lib/logger'
@@ -62,6 +62,21 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
   }, [text, flashFeedback])
 
   const handleSave = useCallback(() => {
+    if (isWebTransport()) {
+      // Web transport: there is no native save dialog — hand the browser a
+      // plain anchor download instead (the trivially-replaceable native
+      // dialog from the roadmap). A revoked object URL after the click is
+      // safe: the download has already been handed to the browser.
+      const blob = new Blob([text], { type: 'text/markdown' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = 'message.md'
+      anchor.click()
+      URL.revokeObjectURL(url)
+      flashFeedback('saved')
+      return
+    }
     saveMessageAsMarkdown(text)
       .then((path) => {
         // An empty path means the user cancelled the native dialog — no

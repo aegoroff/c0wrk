@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   listFontFamilies: vi.fn(),
   getWebviewGpuPolicy: vi.fn(),
   setWebviewGpuPolicy: vi.fn(),
+  getWebAccessInfo: vi.fn(),
+  setWebAccessEnabled: vi.fn(),
 }))
 
 vi.mock('@/api/config', () => ({
@@ -40,6 +42,14 @@ vi.mock('@/api/fonts', () => ({
 vi.mock('@/api/webview', () => ({
   getWebviewGpuPolicy: mocks.getWebviewGpuPolicy,
   setWebviewGpuPolicy: mocks.setWebviewGpuPolicy,
+}))
+
+// WebAccessSettings (General tab) reads the sidecar state on mount; without
+// the mock it would hit the real Wails runtime boundary and log a transport
+// error per render.
+vi.mock('@/api/webAccess', () => ({
+  getWebAccessInfo: mocks.getWebAccessInfo,
+  setWebAccessEnabled: mocks.setWebAccessEnabled,
 }))
 
 // The Capabilities tab mounts CapabilitiesSettings (Subagents + Skills
@@ -117,6 +127,10 @@ beforeEach(() => {
     restart_required: false,
     linux_only: true,
   })
+  // WebAccessSettings reads the sidecar state on mount; null = sidecar
+  // unavailable, which the section renders as its quiet off state.
+  mocks.getWebAccessInfo.mockResolvedValue(null)
+  mocks.setWebAccessEnabled.mockResolvedValue(undefined)
   useSettingsStore.setState({ open: false, activeTab: 'general' })
   container = document.createElement('div')
   document.body.appendChild(container)

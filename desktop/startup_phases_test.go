@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -511,6 +513,70 @@ func TestEmit_NoOpWhenCtxNilAndNoFake(t *testing.T) {
 		attrs: map[string]string{"event": "ev:test"},
 	})
 	a.emit("ev:test", "p1") // must not panic
+}
+
+func TestEmit_EventTapReceivesEveryDispatchAlongsideWails(t *testing.T) {
+	a := &App{}
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+
+	type tapCall struct {
+		name string
+		args []interface{}
+	}
+	var (
+		mu   sync.Mutex
+		taps []tapCall
+	)
+	a.setEventTap(func(name string, args []interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		taps = append(taps, tapCall{name: name, args: args})
+	})
+
+	a.emit("ev:test", "p1", 2)
+	a.emit("ev:bare")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(taps) != 2 {
+		t.Fatalf("expected 2 tap calls, got %d", len(taps))
+	}
+	if taps[0].name != "ev:test" {
+		t.Errorf("tap[0] name = %q, want ev:test", taps[0].name)
+	}
+	if !reflect.DeepEqual(taps[0].args, []interface{}{"p1", 2}) {
+		t.Errorf("tap[0] args = %#v, want [p1 2]", taps[0].args)
+	}
+	if taps[1].name != "ev:bare" || taps[1].args != nil {
+		t.Errorf("tap[1] = (%q, %#v), want the bare no-args event", taps[1].name, taps[1].args)
+	}
+	// The tap is an observer only: the Wails dispatch is untouched.
+	if events := rec.snapshot(); len(events) != 2 {
+		t.Fatalf("wails dispatch count = %d, want 2", len(events))
+	}
+}
+
+func TestEmit_EventTapFiresWhenWailsDispatchIsDropped(t *testing.T) {
+	// The tap rides alongside the dispatch: it observes the emit call even
+	// when the Wails side drops it (nil runtime), and the drop diagnostic
+	// is unchanged.
+	a := &App{}
+	injectExpectedDiagnostics(t, a, diagnosticExpectation{
+		level: slog.LevelWarn, message: "emit called with nil ctx, event dropped",
+		attrs: map[string]string{"event": "ev:dropped"},
+	})
+	var taps atomic.Int32
+	a.setEventTap(func(name string, args []interface{}) {
+		if name != "ev:dropped" || len(args) != 1 || args[0] != "x" {
+			t.Errorf("unexpected tap payload: %q %#v", name, args)
+		}
+		taps.Add(1)
+	})
+	a.emit("ev:dropped", "x") // must not panic
+	if taps.Load() != 1 {
+		t.Fatalf("tap calls = %d, want 1", taps.Load())
+	}
 }
 
 func TestBuildUIEmitFunc_SessionRenamedEmitsGlobal(t *testing.T) {

@@ -11,7 +11,7 @@ import { FolderPlus, Trash2, Loader2, AlertTriangle } from 'lucide-react'
 import { useWorkDirsStore } from '@/stores/workDirsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { onGlobalEvent } from '@/api/runtime'
+import { isWebTransport, onGlobalEvent } from '@/api/runtime'
 import { pickDirectory } from '@/api/projects'
 import type { WorkDirectoryRecord, WorkDirScope } from '@/api/workdirs'
 
@@ -332,7 +332,17 @@ export function WorkDirsModal() {
               {/* Add flow */}
               <div className="mt-3 pt-3 border-t border-border">
                 {!pendingPath ? (
-                  <Button variant="outline" size="sm" onClick={handlePick} title="Pick a directory to add">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePick}
+                    title={
+                      isWebTransport()
+                        ? 'Adding a work directory needs the desktop app (native folder dialog)'
+                        : 'Pick a directory to add'
+                    }
+                    disabled={isWebTransport()}
+                  >
                     <FolderPlus className="size-4" />
                     Add directory
                   </Button>

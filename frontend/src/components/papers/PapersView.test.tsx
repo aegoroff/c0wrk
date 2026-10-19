@@ -27,7 +27,10 @@ import { useProjectStore } from '@/stores/projectStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { PAPER_TAB_PREFIX } from '@/stores/paperStore'
 
-const { sendMock } = vi.hoisted(() => ({ sendMock: vi.fn() }))
+const { sendMock, isWebTransportMock } = vi.hoisted(() => ({
+  sendMock: vi.fn(),
+  isWebTransportMock: vi.fn(() => false),
+}))
 
 // Radix popper positioning (the study-mode combobox menu) observes the
 // trigger/content with ResizeObserver, which jsdom does not provide.
@@ -41,6 +44,9 @@ vi.stubGlobal(
 )
 vi.mock('@/hooks/useMessageSender', () => ({
   useMessageSender: () => ({ send: sendMock, cancel: vi.fn(), isProcessing: false }),
+}))
+vi.mock('@/api/runtime', () => ({
+  isWebTransport: isWebTransportMock,
 }))
 vi.mock('@/api/papers', () => ({
   getPapers: vi.fn(),
@@ -146,6 +152,7 @@ async function pickStudyMode(optionLabel: string) {
 beforeEach(() => {
   sendMock.mockReset()
   sendMock.mockResolvedValue(undefined)
+  isWebTransportMock.mockReturnValue(false)
   vi.mocked(setPaperPinned).mockClear()
   vi.mocked(pickStudyDocument).mockReset()
   vi.mocked(pickStudyDocument).mockResolvedValue(null)
@@ -792,5 +799,43 @@ describe('PapersView — multi-select comparison', () => {
       '2 selected',
     )
     expect(usePaperStore.getState().error).toContain('Failed to dispatch')
+  })
+})
+
+describe('PapersView document-pick gating across transports', () => {
+  beforeEach(() => {
+    isWebTransportMock.mockReturnValue(false)
+    sendMock.mockReset()
+    sendMock.mockResolvedValue(undefined)
+    vi.mocked(pickStudyDocument).mockReset()
+    vi.mocked(pickStudyDocument).mockResolvedValue(null)
+    usePaperStore.getState().reset()
+    useFileViewerStore.setState({ openTabs: [], activeFile: null, files: {} })
+    useProjectStore.setState({ projects: null, activeProjectId: 'p1', lastRealProjectId: 'p1' })
+  })
+
+  afterEach(async () => {
+    if (activeRoot) {
+      await act(async () => {
+        activeRoot!.unmount()
+      })
+      activeRoot = null
+    }
+    isWebTransportMock.mockReturnValue(false)
+  })
+
+  it('shows the pick button in the wails transport (native dialog available)', async () => {
+    const container = await render()
+    expect(container.querySelector('[data-testid="papers-invoke-pick"]')).not.toBeNull()
+  })
+
+  it('hides the pick button in the web transport; the typed reference still studies', async () => {
+    isWebTransportMock.mockReturnValue(true)
+    const container = await render()
+
+    expect(container.querySelector('[data-testid="papers-invoke-pick"]')).toBeNull()
+    // The typed-reference gesture (no native dialog involved) remains.
+    expect(container.querySelector('[data-testid="papers-invoke-study"]')).not.toBeNull()
+    expect(pickStudyDocument).not.toHaveBeenCalled()
   })
 })

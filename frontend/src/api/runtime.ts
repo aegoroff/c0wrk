@@ -1,4 +1,8 @@
-// Wails runtime wrapper — single access point for window.go and window.runtime
+// Transport shim — the single access point for the desktop (Wails) runtime
+// bindings (`window.go` / `window.runtime`) and for the browser transport
+// used when this same bundle is served by the web-access sidecar (ADR-090).
+// Every `window.go`/`window.runtime` access in the frontend lives here; the
+// test/wailsAccessInvariant scan enforces it project-wide.
 
 import type { GlobalEventKey, GlobalEventMap, SessionEventKey, SessionEventMap } from '@/types/events'
 import { logger } from '@/lib/logger'
@@ -20,7 +24,89 @@ export function reportDroppedEvent(event: string, data: unknown): void {
 // callback, focuses the window, and emits `notification_clicked`. Keeping a
 // second optional path here would split the bookkeeping in two.
 
-// Extend Window to include Wails runtime bindings
+// --- Transport detection -----------------------------------------------------
+//
+// Three states, resolved once per page load:
+//   - 'wails': the Wails runtime bindings are injected (desktop webview).
+//     Detected synchronously — Wails injects them before any bundle code runs.
+//   - 'web':   served by the web-access sidecar over plain HTTP (ADR-090).
+//     Detected by asking the origin: GET /api/transport answers
+//     `{transport:"web", ws:"/ws", authenticated:...}`. RPCs dispatch to
+//     POST /api/rpc/<Method>, events arrive over the WebSocket named by `ws`.
+//   - 'none':  neither (plain `make dev-frontend` browser session, vitest,
+//     SSR). RPC wrappers throw the legacy errors, event helpers no-op —
+//     exactly the pre-web-transport behavior.
+
+export type TransportMode = 'wails' | 'web' | 'none'
+
+/** Resolved transport, or 'pending' while the sidecar probe is in flight. */
+type TransportResolution = TransportMode | 'pending'
+
+/** Bootstrap answer of the web-access sidecar (GET /api/transport). */
+interface TransportInfo {
+  transport?: unknown
+  ws?: unknown
+}
+
+function detectInitialTransport(): TransportResolution {
+  if (typeof window === 'undefined') return 'none'
+  // Wails injects the runtime and the generated bindings together, before any
+  // bundle code runs. A runtime without bindings (unit-test fakes, a webview
+  // caught mid-injection) is still the desktop transport: every wrapper below
+  // keeps its legacy window.runtime-keyed behavior in that state.
+  if (window.go?.desktop?.App || window.runtime) return 'wails'
+  return 'pending'
+}
+
+let transportMode: TransportResolution = detectInitialTransport()
+let webWsPath = '/ws'
+let detectionPromise: Promise<TransportMode> | null = null
+
+/** Ask the origin whether the web-access sidecar serves this page. Never rejects. */
+async function detectWebTransport(): Promise<TransportMode> {
+  if (typeof fetch !== 'function') return 'none'
+  try {
+    const res = await fetch('/api/transport', { headers: { Accept: 'application/json' } })
+    if (!res.ok) return 'none'
+    const info = (await res.json()) as TransportInfo
+    if (info.transport !== 'web' || typeof info.ws !== 'string' || info.ws === '') return 'none'
+    webWsPath = info.ws
+    return 'web'
+  } catch {
+    // No sidecar on this origin (bare dev server, static preview) — the
+    // plain browser session. Debug-level: this is the common dev case, not
+    // a problem worth surfacing.
+    return 'none'
+  }
+}
+
+function ensureTransportDetection(): Promise<TransportMode> {
+  if (transportMode !== 'pending') return Promise.resolve(transportMode)
+  if (!detectionPromise) {
+    detectionPromise = detectWebTransport().then((mode) => {
+      transportMode = mode
+      if (mode === 'web') connectWS()
+      return mode
+    })
+  }
+  return detectionPromise
+}
+
+/** Resolves once the transport is known: 'wails' | 'web' | 'none'. */
+export function transportDetection(): Promise<TransportMode> {
+  return ensureTransportDetection()
+}
+
+/** True when this page talks to the backend over the web-access sidecar.
+ *
+ *  Synchronous and conservative: false until the probe settles, so callers
+ *  gating desktop-only affordances never take the web branch early. By the
+ *  time the UI is interactive (the first `backend:ready` event) the probe
+ *  has long settled. */
+export function isWebTransport(): boolean {
+  return transportMode === 'web'
+}
+
 declare global {
   interface Window {
     go: {
@@ -45,6 +131,16 @@ export function isWailsReady(): boolean {
   return typeof window !== 'undefined' && !!window.runtime && !!window.go?.desktop?.App
 }
 
+/** Check if the raw Wails runtime surface exists (possibly pre-bindings).
+ *
+ *  Broader than `isWailsReady`: true as soon as `window.runtime` is injected,
+ *  even before the generated App bindings are. Callers use it to defer work
+ *  until `backend:ready` fires instead of probing `window.runtime` directly —
+ *  window access lives in this module only. */
+export function hasWailsRuntime(): boolean {
+  return typeof window !== 'undefined' && !!window.runtime
+}
+
 /** Get the Wails runtime; throws if not ready */
 export function getRuntime(): {
   EventsOn(eventName: string, callback: (...data: unknown[]) => void): () => void
@@ -61,17 +157,80 @@ export function getRuntime(): {
 }
 
 /**
- * Get the desktop App RPC proxy; throws if not ready.
- * Returns `any` because Wails generates method bindings dynamically at
- * build time — there is no static type for the full App API surface.
+ * Get the desktop App RPC proxy; throws if no transport can serve RPCs.
+ * In the desktop transport this is the Wails-generated bindings object; in
+ * the web transport it is an equivalent Proxy dispatching every method to
+ * the sidecar (see below). Returns `any` because neither surface is static:
+ * Wails generates method bindings dynamically at build time and the web
+ * proxy mirrors whatever the backend reflection dispatcher exposes.
  * Each API module (api/*.ts) wraps calls with runtime validation.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getApp(): any {
-  if (typeof window === 'undefined' || !window.go?.desktop?.App) {
-    throw new Error('Wails App bindings are not available')
+  if (typeof window !== 'undefined' && window.go?.desktop?.App) {
+    return window.go.desktop.App
   }
-  return window.go.desktop.App
+  if (transportMode === 'web') return getWebApp()
+  throw new Error('Wails App bindings are not available')
+}
+
+// --- Web transport: RPC over the sidecar --------------------------------------
+//
+// The browser calls the SAME FrontendAPI surface the Wails bindings call:
+// POST /api/rpc/<Method> carries the positional arguments as a JSON array and
+// answers with the JSON result — or `{error}` with a non-200 status, the
+// uniform envelope internal/webaccess documents ("the browser shim rejects
+// its Promise with the `error` string"). Return conventions mirror Wails:
+// () → null, (T) → T, (T, error) → T, multi-value → array.
+
+/** One stable function per method name — `getApp().Foo === getApp().Foo`. */
+const webAppMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
+
+function getWebApp(): unknown {
+  const target: Record<string, never> = {}
+  return new Proxy(target, {
+    get(_target, prop) {
+      if (typeof prop !== 'string') return undefined
+      let fn = webAppMethods.get(prop)
+      if (!fn) {
+        fn = (...args: unknown[]) => webRpc(prop, args)
+        webAppMethods.set(prop, fn)
+      }
+      return fn
+    },
+  })
+}
+
+/** Dispatch one RPC over the sidecar's reflection endpoint. */
+async function webRpc(method: string, args: unknown[]): Promise<unknown> {
+  let res: Response
+  try {
+    res = await fetch(`/api/rpc/${encodeURIComponent(method)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+  } catch (err) {
+    logger.warn(`[rpc] ${method} transport error`, err)
+    throw new Error(`RPC ${method} failed: transport unreachable`)
+  }
+  const text = await res.text()
+  let payload: unknown
+  if (text !== '') {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = undefined
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      typeof payload === 'object' && payload !== null && typeof (payload as { error?: unknown }).error === 'string'
+        ? (payload as { error: string }).error
+        : `RPC ${method} failed with status ${res.status}`
+    throw new Error(msg)
+  }
+  return payload
 }
 
 /**
@@ -115,42 +274,163 @@ function dispatchBatchedEvent(name: string, args: unknown[]): void {
   }
 }
 
+/**
+ * Unwrap one batch envelope into the per-event fan-out. Shared by BOTH
+ * transports: the desktop envelope listener (below) and the web websocket
+ * router (below) normalize their wire envelopes into this single path, so
+ * per-event semantics (order, payload, null filtering) are transport-agnostic.
+ */
+function dispatchEnvelope(envelope: unknown): void {
+  const env = envelope as BatchEnvelope | undefined
+  if (!env || !Array.isArray(env.events)) {
+    logger.warn('[events] dropped malformed batch envelope', envelope)
+    return
+  }
+  for (const entry of env.events) {
+    if (!entry || typeof entry.name !== 'string') continue
+    dispatchBatchedEvent(entry.name, entry.args ?? [])
+  }
+}
+
 /** Install the single envelope listener the first time anything subscribes. */
 function installBatchListener(): void {
   if (batchListenerInstalled) return
   if (typeof window === 'undefined' || !window.runtime) return
   batchListenerInstalled = true
   window.runtime.EventsOn(EVENT_BATCH_NAME, (...data: unknown[]) => {
-    const envelope = data[0] as BatchEnvelope | undefined
-    if (!envelope || !Array.isArray(envelope.events)) {
-      logger.warn('[events] dropped malformed batch envelope', envelope)
-      return
-    }
-    for (const entry of envelope.events) {
-      if (!entry || typeof entry.name !== 'string') continue
-      dispatchBatchedEvent(entry.name, entry.args ?? [])
-    }
+    dispatchEnvelope(data[0])
   })
 }
 
-/** Subscribe to a Wails event; returns an unsubscribe function */
-export function subscribe(eventName: string, callback: (...data: unknown[]) => void): () => void {
-  if (typeof window === 'undefined' || !window.runtime) {
-    // No-op unsubscribe so hooks can subscribe unconditionally without
-    // throwing in environments where the Wails runtime is absent (vitest, SSR).
-    return () => {}
-  }
-  const rt = getRuntime()
+// --- Web transport: events over the sidecar websocket --------------------------
+//
+// The sidecar fans the desktop eventTap out to every connected client — there
+// is no per-client subscription state, so a reconnect simply re-attaches to
+// the firehose and this module's fan-out registry (batchListeners) survives
+// untouched. Frames are `{name, args}` envelopes:
+//   - a batched flush arrives as {name: EVENT_BATCH_NAME,
+//     args: [{events: [{name, args}, ...]}]} and unwraps through
+//     dispatchEnvelope — the exact path the desktop envelope listener uses;
+//   - an individually-emitted event arrives as {name, args} and dispatches
+//     directly through dispatchBatchedEvent.
 
-  // Register in the fan-out registry so events delivered inside a
-  // c0wrk:events:batch envelope reach this callback, and make sure the single
-  // envelope listener exists.
+const WS_RECONNECT_BASE_MS = 500
+const WS_RECONNECT_MAX_MS = 30_000
+
+let ws: WebSocket | null = null
+let wsAttempts = 0
+let wsEmitDropWarned = false
+
+function connectWS(): void {
+  if (ws || typeof WebSocket !== 'function' || typeof location === 'undefined') return
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  let sock: WebSocket
+  try {
+    sock = new WebSocket(`${scheme}//${location.host}${webWsPath}`)
+  } catch (err) {
+    // Construction only fails on an invalid URL — the advertised ws path is
+    // broken; retrying cannot fix a static path, so do not loop.
+    logger.warn('[events] websocket construction failed', err)
+    return
+  }
+  ws = sock
+  sock.onopen = () => {
+    wsAttempts = 0
+    wsEmitDropWarned = false
+  }
+  sock.onmessage = (ev: MessageEvent) => handleWSFrame(ev.data)
+  sock.onclose = () => {
+    if (ws !== sock) return
+    ws = null
+    scheduleWSReconnect()
+  }
+}
+
+/** Exponential backoff, reset by every successful open. Deterministic (no
+ *  jitter) so tests can pin the exact schedule on virtual time. */
+function scheduleWSReconnect(): void {
+  const delay = Math.min(WS_RECONNECT_BASE_MS * 2 ** wsAttempts, WS_RECONNECT_MAX_MS)
+  wsAttempts++
+  setTimeout(() => {
+    if (ws === null) connectWS()
+  }, delay)
+}
+
+/** Normalize one WS frame into the dispatchBatchedEvent fan-out. */
+function handleWSFrame(raw: unknown): void {
+  let msg: unknown
+  try {
+    msg = JSON.parse(typeof raw === 'string' ? raw : String(raw))
+  } catch {
+    logger.warn('[events] dropped malformed websocket frame (not JSON)', raw)
+    return
+  }
+  if (typeof msg !== 'object' || msg === null || typeof (msg as { name?: unknown }).name !== 'string') {
+    logger.warn('[events] dropped malformed websocket frame (no event name)', msg)
+    return
+  }
+  const { name } = msg as { name: string }
+  const rawArgs = (msg as { args?: unknown }).args
+  const args = Array.isArray(rawArgs) ? rawArgs : []
+  if (name === EVENT_BATCH_NAME) {
+    dispatchEnvelope(args[0])
+    return
+  }
+  dispatchBatchedEvent(name, args)
+}
+
+/** Send a UI→backend event over the websocket as a `{name, args}` frame —
+ *  the symmetric shape of the server→client envelope. */
+function webEmit(eventName: string, data?: unknown): void {
+  const frame = JSON.stringify({ name: eventName, args: data !== undefined ? [data] : [] })
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(frame)
+    return
+  }
+  // Not connected (bootstrapping or mid-reconnect): drop. The sidecar keeps
+  // no inbound queue, so a buffered frame would arrive arbitrarily late;
+  // warn once per outage instead of once per drop.
+  if (!wsEmitDropWarned) {
+    wsEmitDropWarned = true
+    logger.warn(`[events] dropped "${eventName}" — websocket not connected`)
+  }
+}
+
+/** Subscribe to a backend event; returns an unsubscribe function. */
+export function subscribe(eventName: string, callback: (...data: unknown[]) => void): () => void {
+  // Register in the fan-out registry FIRST: it is the one dispatch path that
+  // exists in every transport (the desktop envelope listener and the web
+  // websocket router both fan out through it), so a subscription made while
+  // the transport probe is still in flight starts receiving as soon as the
+  // events flow, in either mode.
   let handlers = batchListeners.get(eventName)
   if (!handlers) {
     handlers = new Set()
     batchListeners.set(eventName, handlers)
   }
   handlers.add(callback)
+
+  if (transportMode === 'web') {
+    // The websocket router delivers everything — batched flushes and
+    // individually-emitted events alike — and there is no Wails runtime to
+    // register with. The registry entry above is the whole subscription.
+    return () => {
+      handlers?.delete(callback)
+    }
+  }
+
+  if (typeof window === 'undefined' || !window.runtime) {
+    // No-op unsubscribe so hooks can subscribe unconditionally without
+    // throwing in environments where the Wails runtime is absent (vitest, SSR).
+    // The registry entry stays: harmless when nothing dispatches ('none'),
+    // correct when the probe later settles 'web'.
+    return () => {
+      handlers?.delete(callback)
+    }
+  }
+  const rt = getRuntime()
+
+  // Make sure the single envelope listener exists.
   installBatchListener()
 
   // Also register directly with the Wails runtime: individually-emitted events
@@ -164,8 +444,12 @@ export function subscribe(eventName: string, callback: (...data: unknown[]) => v
   }
 }
 
-/** Emit a Wails event */
+/** Emit a backend event (UI→backend direction). */
 export function emit(eventName: string, data?: unknown): void {
+  if (transportMode === 'web') {
+    webEmit(eventName, data)
+    return
+  }
   const rt = getRuntime()
   if (data !== undefined) {
     rt.EventsEmit(eventName, data)
@@ -184,7 +468,21 @@ export function emit(eventName: string, data?: unknown): void {
  *  clipboard writes triggered from context-menu item clicks. The native
  *  runtime writes through Go and is unaffected by those restrictions, so it
  *  works consistently for every entry. */
-export function clipboardSetText(text: string): Promise<boolean> {
+export async function clipboardSetText(text: string): Promise<boolean> {
+  if (transportMode === 'web') {
+    // Browser clipboard. The webview restrictions the native path exists to
+    // dodge (non-secure origin, WKWebView transient activation) do not apply
+    // to a normal browser page driven by a user gesture. Failure → false,
+    // mirroring the Wails ClipboardSetText contract (never throws to callers).
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard) return false
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch (err) {
+      logger.warn('[clipboard] write failed (web transport)', err)
+      return false
+    }
+  }
   const rt = getRuntime()
   return rt.ClipboardSetText(text)
 }
@@ -197,6 +495,7 @@ export function clipboardSetText(text: string): Promise<boolean> {
  *  jsdom without `window.runtime`. A throw would turn a decorative update
  *  into a render-time failure. */
 export function setWindowTitle(title: string): void {
+  if (transportMode === 'web') return // a browser tab is not the desktop window
   if (typeof window === 'undefined' || !window.runtime) return
   getRuntime().WindowSetTitle(title)
 }
@@ -214,6 +513,12 @@ export function setWindowTitle(title: string): void {
  *  absent (vitest, SSR), mirroring `setWindowTitle`: a diagnostics call made
  *  from an error path must never itself turn into a failure. */
 export function logError(message: string): void {
+  if (transportMode === 'web') {
+    // A browser tab has no Go process log to reach — the persisted channel
+    // here is the browser console (devtools).
+    console.error(message)
+    return
+  }
   if (typeof window === 'undefined' || !window.runtime) return
   getRuntime().LogError(message)
 }
@@ -228,6 +533,13 @@ export function logError(message: string): void {
  *  the default protocol handler on Windows — so external links open in the
  *  system browser consistently across all three platforms. */
 export function openExternalURL(url: string): void {
+  if (transportMode === 'web') {
+    // The sidecar cannot open OS browser windows from inside a tab; the
+    // browser's own popup mechanism is the transport-correct equivalent.
+    // noopener keeps the opened page from reaching back into this one.
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return
+  }
   const rt = getRuntime()
   rt.BrowserOpenURL(url)
 }
@@ -294,3 +606,10 @@ export async function confirmExit(): Promise<void> {
   const app = getApp()
   await app.ConfirmExit()
 }
+
+// Kick off web-transport detection once per page load. A Wails page resolved
+// synchronously above (its bindings are injected before any bundle code runs),
+// so this network ask only happens on a plain browser page; it settles
+// 'none' — silently — when no sidecar serves this origin. The promise never
+// rejects, so the floating kick cannot turn into an unhandled rejection.
+void ensureTransportDetection()

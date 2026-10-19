@@ -9,14 +9,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
-const { pickDirectoryMock, createProjectMock } = vi.hoisted(() => ({
+const { pickDirectoryMock, createProjectMock, isWebTransportMock } = vi.hoisted(() => ({
   pickDirectoryMock: vi.fn<() => Promise<string>>(),
   createProjectMock: vi.fn<(name: string, path: string) => Promise<{ id: string }>>(),
+  isWebTransportMock: vi.fn(() => false),
 }))
 
 vi.mock('@/api/projects', () => ({
   pickDirectory: pickDirectoryMock,
   createProject: createProjectMock,
+}))
+
+vi.mock('@/api/runtime', () => ({
+  isWebTransport: isWebTransportMock,
 }))
 
 vi.mock('@/hooks/useProjectSwitchState', () => ({
@@ -43,6 +48,7 @@ describe('CreateProjectDialog', () => {
   beforeEach(() => {
     pickDirectoryMock.mockReset()
     createProjectMock.mockReset()
+    isWebTransportMock.mockReturnValue(false)
     container = document.createElement('div')
     document.body.replaceChildren(container)
     root = createRoot(container)
@@ -112,5 +118,24 @@ describe('CreateProjectDialog', () => {
     })
 
     expect(dialogEl()?.querySelector('p.truncate')).not.toBeNull()
+  })
+
+  it('shows the native directory browser in the wails transport', async () => {
+    isWebTransportMock.mockReturnValue(false)
+    await renderOpen()
+
+    expect(findButton('Choose directory')).not.toBeUndefined()
+    expect(dialogEl()?.textContent).not.toContain('Type the workspace directory path')
+  })
+
+  it('hides the native directory browser in the web transport (manual entry only)', async () => {
+    isWebTransportMock.mockReturnValue(true)
+    await renderOpen()
+
+    expect(findButton('Choose directory')).toBeUndefined()
+    // The manual path entry stays usable — the hint explains the missing
+    // native browser instead.
+    expect(dialogEl()?.textContent).toContain('Type the workspace directory path')
+    expect(pickDirectoryMock).not.toHaveBeenCalled()
   })
 })

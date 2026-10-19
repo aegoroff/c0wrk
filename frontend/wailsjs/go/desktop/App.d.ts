@@ -7,6 +7,7 @@ import {workspace} from '../models';
 import {config} from '../models';
 import {desktop} from '../models';
 import {review} from '../models';
+import {fs} from '../models';
 
 export function AbortMerge():Promise<void>;
 
@@ -25,6 +26,8 @@ export function AppendToGitignore(arg1:string):Promise<void>;
 export function ApplyUpdate():Promise<void>;
 
 export function ArchiveSession(arg1:string):Promise<void>;
+
+export function AttachFileContent(arg1:string,arg2:string,arg3:string,arg4:Array<number>):Promise<Array<session.AttachmentInfo>>;
 
 export function AttachFiles(arg1:string,arg2:Array<string>):Promise<Array<session.AttachmentInfo>>;
 
@@ -242,6 +245,8 @@ export function GetUpdateSettings():Promise<backend.UpdateSettings>;
 
 export function GetVectorIndexStatus():Promise<backend.VectorIndexStatus>;
 
+export function GetWebAccessInfo():Promise<desktop.WebAccessInfo>;
+
 export function GetWebviewGpuPolicy():Promise<backend.WebviewGpuPolicyInfo>;
 
 export function HardenGitRepo(arg1:string):Promise<void>;
@@ -415,6 +420,10 @@ export function SetReviewStatus(arg1:string,arg2:string):Promise<void>;
 export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
+
+export function SetWebAccessEnabled(arg1:boolean):Promise<void>;
+
+export function SetWebAccessStaticFS(arg1:fs.FS):Promise<void>;
 
 export function SetWebviewGpuPolicy(arg1:string):Promise<backend.WebviewGpuPolicyInfo>;
 

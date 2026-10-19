@@ -52,8 +52,10 @@ vi.mock('@/api/themes', async (importOriginal) => {
 // needed. Delete buttons are located by `button[title="Delete theme"]`.
 
 const emitSpy = vi.hoisted(() => vi.fn())
+const isWebTransportMock = vi.hoisted(() => vi.fn(() => false))
 vi.mock('@/api/runtime', () => ({
   emit: emitSpy,
+  isWebTransport: isWebTransportMock,
 }))
 
 import { pickAndImportThemes, deleteTheme } from '@/api/themes'
@@ -72,6 +74,7 @@ beforeEach(() => {
   themeApi.outcomes = null
   themeApi.deleted = []
   emitSpy.mockClear()
+  isWebTransportMock.mockReturnValue(false)
   vi.mocked(pickAndImportThemes).mockClear()
   vi.mocked(deleteTheme).mockClear()
   act(() => {
@@ -343,5 +346,55 @@ describe('ThemeSelector import', () => {
       'runtime_error',
       expect.objectContaining({ message: 'Failed to import theme' }),
     )
+  })
+})
+
+describe('ThemeSelector import gating across transports', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    isWebTransportMock.mockReturnValue(false)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+    document.body.innerHTML = ''
+    isWebTransportMock.mockReturnValue(false)
+  })
+
+  function renderSelector() {
+    act(() => {
+      root.render(<ThemeSelector />)
+    })
+  }
+
+  function importButton(): HTMLButtonElement {
+    const el = container.querySelector<HTMLButtonElement>('button[aria-label="Import theme"]')
+    expect(el).not.toBeNull()
+    return el!
+  }
+
+  it('the import button is enabled in the wails transport (native picker available)', () => {
+    isWebTransportMock.mockReturnValue(false)
+    renderSelector()
+    expect(importButton().disabled).toBe(false)
+  })
+
+  it('the import button is disabled in the web transport (native picker only)', () => {
+    isWebTransportMock.mockReturnValue(true)
+    renderSelector()
+    const button = importButton()
+    expect(button.disabled).toBe(true)
+    expect(button.title).toContain('desktop app')
+    // The disabled gesture can never reach the picker RPC.
+    button.click()
+    expect(vi.mocked(pickAndImportThemes)).not.toHaveBeenCalled()
   })
 })

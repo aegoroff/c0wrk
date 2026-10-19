@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { createProject, pickDirectory } from '@/api/projects'
+import { isWebTransport } from '@/api/runtime'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
@@ -77,13 +78,26 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
         <div className="min-w-0 space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium text-foreground">Directory</label>
-            <Button variant="outline" size="sm" className="gap-1.5 w-full justify-start" onClick={handlePickDir}>
-              <FolderOpen className="size-4" />
-              {externalPath ? 'Change directory' : 'Choose directory'}
-            </Button>
+            {!isWebTransport() && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 w-full justify-start"
+                onClick={handlePickDir}
+              >
+                <FolderOpen className="size-4" />
+                {externalPath ? 'Change directory' : 'Choose directory'}
+              </Button>
+            )}
             {externalPath && (
               <p className="truncate font-mono text-xs text-muted-foreground" title={externalPath}>
                 {externalPath}
+              </p>
+            )}
+            {isWebTransport() && (
+              <p className="text-xs text-muted-foreground">
+                Type the workspace directory path — the native folder browser
+                is only available in the desktop app.
               </p>
             )}
           </div>

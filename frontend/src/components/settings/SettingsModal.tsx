@@ -18,6 +18,7 @@ import { SoundSettings } from './SoundSettings'
 import { SystemNotificationSettings } from './SystemNotificationSettings'
 import { PromptSuggestionsSettings } from './PromptSuggestionsSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
+import { WebAccessSettings } from './WebAccessSettings'
 import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 import { LLMSettings } from './LLMSettings'
 import { ModelProfilesSettings } from './ModelProfilesSettings'
@@ -283,6 +284,9 @@ export function SettingsModal() {
                   HTTP Proxy
                 </h3>
                 <ProxySettings />
+              </div>
+              <div className="border-t border-border pt-4">
+                <WebAccessSettings />
               </div>
               <div className="border-t border-border pt-4">
                 <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
