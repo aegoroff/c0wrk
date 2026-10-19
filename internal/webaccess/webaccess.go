@@ -109,6 +109,17 @@ type Options struct {
 	// exported methods are reachable, minus the denylist (dispatch.go).
 	// Required.
 	Dispatch any
+	// ExtraDispatch is a SECONDARY reflection target, consulted only when
+	// Dispatch has no such method. It exists for the few App-level (desktop)
+	// capabilities the web surface must mirror — today GetPendingActions, the
+	// HITL reconciliation sweep the session switch fires — which live on the
+	// App and cannot move to FrontendAPI. The desktop layer opts in through a
+	// MINIMAL adapter struct (never the App itself: its control RPCs —
+	// SetWebAccessEnabled, EmitSessionEvent and friends — must stay
+	// unreachable from the web). The denylist applies to the union; the
+	// surface contract test pins the extra set exactly. Optional; a non-nil
+	// interface holding a nil pointer fails closed in New.
+	ExtraDispatch any
 	// Static is the SPA asset tree served at /. Optional: nil disables the
 	// static route (everything else keeps working). Static is served WITHOUT
 	// authentication — the app shell carries no data.
@@ -130,11 +141,12 @@ type Options struct {
 // Server is the running sidecar core. Construct with New; serve with Start;
 // stop with Stop. A Server is safe for concurrent use.
 type Server struct {
-	cfg      config.WebAccessConfig
-	dispatch any
-	static   fs.FS
-	csp      func(http.Handler) http.Handler
-	log      *slog.Logger
+	cfg           config.WebAccessConfig
+	dispatch      any
+	extraDispatch any
+	static        fs.FS
+	csp           func(http.Handler) http.Handler
+	log           *slog.Logger
 
 	authToken    string // effective auth token (configured or per-launch)
 	sessionToken string // per-launch cookie secret, revealed only via login
@@ -174,6 +186,11 @@ func New(opts Options) (*Server, error) {
 	if v := reflect.ValueOf(opts.Dispatch); v.Kind() == reflect.Pointer && v.IsNil() {
 		return nil, errors.New("webaccess: Dispatch target is a nil pointer")
 	}
+	// Same fail-closed rule for the optional extra surface: an explicitly
+	// provided but nil extra target is a wiring bug, not an empty feature.
+	if v := reflect.ValueOf(opts.ExtraDispatch); v.IsValid() && v.Kind() == reflect.Pointer && v.IsNil() {
+		return nil, errors.New("webaccess: ExtraDispatch target is a nil pointer")
+	}
 
 	log := opts.Logger
 	if log == nil {
@@ -198,17 +215,18 @@ func New(opts Options) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:          opts.Config,
-		dispatch:     opts.Dispatch,
-		static:       opts.Static,
-		csp:          opts.CSP,
-		log:          log,
-		authToken:    authToken,
-		sessionToken: sessionToken,
-		limiter:      newLoginLimiter(loginMaxAttempts, loginWindow),
-		stopped:      make(chan struct{}),
-		wsConns:      make(map[*WSConn]struct{}),
-		wsInbound:    opts.WSInbound,
+		cfg:           opts.Config,
+		dispatch:      opts.Dispatch,
+		extraDispatch: opts.ExtraDispatch,
+		static:        opts.Static,
+		csp:           opts.CSP,
+		log:           log,
+		authToken:     authToken,
+		sessionToken:  sessionToken,
+		limiter:       newLoginLimiter(loginMaxAttempts, loginWindow),
+		stopped:       make(chan struct{}),
+		wsConns:       make(map[*WSConn]struct{}),
+		wsInbound:     opts.WSInbound,
 	}
 	s.handler = s.buildHandler()
 	return s, nil

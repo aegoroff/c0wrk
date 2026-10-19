@@ -107,7 +107,7 @@ function respondTransport(body: unknown, status = 200): void {
 
 function respondWebApp(handler: (method: string, body: unknown) => Promise<Response>): void {
   fetchResponder = async (url, init) => {
-    if (url === '/api/transport') return jsonResponse({ transport: 'web', ws: '/ws' })
+    if (url === '/api/transport') return jsonResponse({ transport: 'web', ws: '/ws', authenticated: true })
     if (url.startsWith('/api/rpc/')) {
       return await handler(url.slice('/api/rpc/'.length), JSON.parse(String(init?.body ?? '[]')) as unknown)
     }
@@ -156,7 +156,11 @@ beforeEach(async () => {
   FakeWebSocket.instances = []
   vi.stubGlobal('WebSocket', FakeWebSocket)
   installFetch()
-  respondTransport({ transport: 'web', ws: '/ws' })
+  // The default bootstrap answers authenticated:true — the connected-tab
+  // case, where the transport also opens its event socket. Unauthenticated
+  // probes must NOT open a socket (see the login-gating suite); the default
+  // keeps the long-standing socket expectations meaningful.
+  respondTransport({ transport: 'web', ws: '/ws', authenticated: true })
   loggerWarn = vi.mocked(logger.warn)
   loggerWarn.mockClear()
 })
@@ -254,7 +258,7 @@ describe('transport detection', () => {
     const seen: unknown[] = []
     const unsubscribe = runtime.subscribe('backend:ready', (...data) => seen.push(data))
 
-    resolveTransport(jsonResponse({ transport: 'web', ws: '/ws' }))
+    resolveTransport(jsonResponse({ transport: 'web', ws: '/ws', authenticated: true }))
     expect(await runtime.transportDetection()).toBe('web')
     const sock = webSocket()
 
@@ -328,7 +332,7 @@ describe('web RPC round-trip', () => {
 
   it('rejects with a transport error when fetch itself fails', async () => {
     fetchResponder = async (url) => {
-      if (url === '/api/transport') return jsonResponse({ transport: 'web', ws: '/ws' })
+      if (url === '/api/transport') return jsonResponse({ transport: 'web', ws: '/ws', authenticated: true })
       throw new TypeError('network died')
     }
     const app = runtime.getApp()
@@ -630,6 +634,33 @@ describe('web transport login gating', () => {
     respondTransport({ transport: 'web', ws: '/ws', authenticated: false })
     runtime = await freshRuntime()
     await expect(runtime.webAuthRequired()).resolves.toBe(true)
+  })
+
+  it('does not open the event socket for an unauthenticated tab', async () => {
+    // A pre-auth upgrade attempt can only 401-loop against the sidecar;
+    // login reloads the page, so the post-auth probe reconnects instead.
+    respondTransport({ transport: 'web', ws: '/ws', authenticated: false })
+    runtime = await bootedRuntime()
+
+    expect(runtime.isWebTransport()).toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('exposes the synchronous transport snapshot while the probe is in flight', async () => {
+    let resolveTransport!: (r: Response) => void
+    fetchResponder = () =>
+      new Promise<Response>((resolve) => {
+        resolveTransport = resolve
+      })
+    runtime = await freshRuntime()
+    // The gate consumes this synchronously: the app must not mount while
+    // the transport is unresolved (a mount-time RPC would beat the probe
+    // and crash on the absent bindings).
+    expect(runtime.transportSnapshot()).toBe('pending')
+
+    resolveTransport(jsonResponse({ transport: 'web', ws: '/ws', authenticated: true }))
+    expect(await runtime.transportDetection()).toBe('web')
+    expect(runtime.transportSnapshot()).toBe('web')
   })
 
   it('never gates the wails transport and never asks the network', async () => {

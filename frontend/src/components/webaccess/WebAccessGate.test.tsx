@@ -14,10 +14,11 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { ReactNode } from 'react'
 
-const { webAuthRequiredMock, loginMock, authListeners } = vi.hoisted(() => ({
+const { webAuthRequiredMock, loginMock, authListeners, transportSnapshotMock } = vi.hoisted(() => ({
   webAuthRequiredMock: vi.fn<() => Promise<boolean>>(),
   loginMock: vi.fn<(token: string) => Promise<void>>(),
   authListeners: new Set<() => void>(),
+  transportSnapshotMock: vi.fn<() => 'wails' | 'web' | 'none' | 'pending'>(),
 }))
 
 vi.mock('@/api/runtime', () => ({
@@ -28,6 +29,7 @@ vi.mock('@/api/runtime', () => ({
       authListeners.delete(callback)
     }
   },
+  transportSnapshot: transportSnapshotMock,
 }))
 
 vi.mock('@/api/webAccess', () => ({
@@ -86,6 +88,9 @@ describe('WebAccessGate', () => {
     root = createRoot(container)
     authListeners.clear()
     webAuthRequiredMock.mockReset().mockResolvedValue(false)
+    // Default: probe unresolved — the gate must hold the app on the spinner
+    // (the load-bearing 'checking' state) until webAuthRequired settles.
+    transportSnapshotMock.mockReset().mockReturnValue('pending')
     loginMock.mockReset().mockResolvedValue(undefined)
     reloadSpy.mockReset()
   })
@@ -113,6 +118,48 @@ describe('WebAccessGate', () => {
     expect(document.querySelector('[data-testid="app"]')).not.toBeNull()
     expect(document.querySelector('input[aria-label="Access token"]')).toBeNull()
     expect(webAuthRequiredMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('mounts the app synchronously when the transport is already wails', () => {
+    // The desktop window never waits: the initial state callable reads the
+    // 'wails' snapshot and renders children on the very first render, with
+    // no probe round trip and no spinner flash.
+    transportSnapshotMock.mockReturnValue('wails')
+    act(() => {
+      root.render(<WebAccessGate><div data-testid="app">app</div></WebAccessGate>)
+    })
+    expect(document.querySelector('[data-testid="app"]')).not.toBeNull()
+    expect(document.querySelector('.animate-spin')).toBeNull()
+  })
+
+  it('holds the app on the probe spinner while the transport is unresolved', async () => {
+    // THE regression this gate exists for: a mount-time RPC that beats the
+    // web-transport probe throws "Wails App bindings are not available" and
+    // kills App.tsx's one-shot startup safety nets — the tab strands on the
+    // splash forever. The app must not mount until the probe settles.
+    transportSnapshotMock.mockReturnValue('pending')
+    let resolveAuth!: (value: boolean) => void
+    webAuthRequiredMock.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        resolveAuth = resolve
+      }),
+    )
+    await act(async () => {
+      root.render(<WebAccessGate><div data-testid="app">app</div></WebAccessGate>)
+      await Promise.resolve()
+    })
+
+    expect(document.querySelector('[data-testid="app"]')).toBeNull()
+    expect(document.querySelector('.animate-spin')).not.toBeNull()
+    expect(document.querySelector('input[aria-label="Access token"]')).toBeNull()
+
+    // Settling to "web, no session" swaps the hold screen for the login form.
+    await act(async () => {
+      resolveAuth(true)
+      await Promise.resolve()
+    })
+    expect(document.querySelector('.animate-spin')).toBeNull()
+    expect(findInput()).not.toBeNull()
   })
 
   it('replaces the app with the token form when the probe reports no session', async () => {

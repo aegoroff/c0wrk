@@ -82,6 +82,10 @@ async function detectWebTransport(): Promise<TransportMode> {
     // A wrong guess self-corrects — the login POST works regardless, and the
     // page reloads once the cookie is set.
     webAuthed = info.authenticated === true
+    // A pre-auth tab holds no session cookie: upgrade attempts would only
+    // 401-loop against the sidecar. Login always reloads the page, so the
+    // fresh probe reconnects the socket authenticated.
+    if (webAuthed) connectWS()
     return 'web'
   } catch {
     // No sidecar on this origin (bare dev server, static preview) — the
@@ -96,7 +100,8 @@ function ensureTransportDetection(): Promise<TransportMode> {
   if (!detectionPromise) {
     detectionPromise = detectWebTransport().then((mode) => {
       transportMode = mode
-      if (mode === 'web') connectWS()
+      // The event socket connects inside detectWebTransport — and only for
+      // an authenticated answer — so nothing to do for 'web' here.
       return mode
     })
   }
@@ -106,6 +111,18 @@ function ensureTransportDetection(): Promise<TransportMode> {
 /** Resolves once the transport is known: 'wails' | 'web' | 'none'. */
 export function transportDetection(): Promise<TransportMode> {
   return ensureTransportDetection()
+}
+
+/** Synchronous snapshot of the transport resolution ('pending' while the
+ *  web-transport probe is in flight). The login gate consumes this to avoid
+ *  mounting the app before `getApp()` can answer: on the web transport the
+ *  probe is an async round trip, and a mount-time RPC that beats it would
+ *  throw "Wails App bindings are not available" — killing App.tsx's one-shot
+ *  startup safety nets and stranding the UI on the splash forever. Desktop
+ *  windows resolve 'wails' synchronously (bindings are injected before the
+ *  bundle runs) and never wait. */
+export function transportSnapshot(): TransportMode | 'pending' {
+  return transportMode
 }
 
 /** True when this page talks to the backend over the web-access sidecar.

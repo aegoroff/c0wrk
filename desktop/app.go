@@ -868,13 +868,16 @@ func (a *App) resolvePendingMessage(sessionID, role, matchField, matchValue stri
 //
 // Everything the browser sidecar needs from the app lives at THIS seam: the
 // mount builds webaccess.Options from the live FrontendAPI (the reflection
-// dispatch target), the SPA tree handed over by main.go, the CSP middleware,
-// and the resolved config section — and owns the sidecar handle for its whole
-// lifetime. The backend never learns the sidecar exists: `backend` and `core`
-// hold no webaccess reference, and these control RPCs are methods on App (not
-// on the embedded *FrontendAPI), so the reflection dispatcher — which sees
-// exactly the FrontendAPI method surface — can never reach them. A browser
-// tab cannot read the credential state or flip the switch that feeds it.
+// dispatch target), the opted-in App-level extra surface behind the minimal
+// adapter (webaccess_extra.go — currently only GetPendingActions), the SPA
+// tree handed over by main.go, the CSP middleware, and the resolved config
+// section — and owns the sidecar handle for its whole lifetime. The backend
+// never learns the sidecar exists: `backend` and `core` hold no webaccess
+// reference, and these control RPCs are methods on App (not on the embedded
+// *FrontendAPI), so the reflection dispatcher — which sees the FrontendAPI
+// surface plus the adapter's explicit method set, never the App itself — can
+// never reach them. A browser tab cannot read the credential state or flip
+// the switch that feeds it.
 
 // webAccessStopBudget bounds one sidecar stop (Shutdown and the disable
 // toggle). Deliberately small: the sidecar holds no durable state — a Stop is
@@ -1024,9 +1027,12 @@ func (a *App) startWebAccessLocked(log *slog.Logger) (*webaccess.Server, error) 
 	srv, err := webaccess.New(webaccess.Options{
 		Config:   cfg.WebAccess,
 		Dispatch: a.frontendAPI(),
-		Static:   a.webAccessStatic,
-		CSP:      CSPMiddleware(),
-		Logger:   log,
+		// App-level methods the mirrored UI needs, behind the minimal
+		// adapter (desktop/webaccess_extra.go) — never the App itself.
+		ExtraDispatch: &webExtraSurface{app: a},
+		Static:        a.webAccessStatic,
+		CSP:           CSPMiddleware(),
+		Logger:        log,
 		// The browser-side twin of wireWailsEventListeners: an authenticated
 		// tab resolves the whitelisted HITL response events through the same
 		// App handlers the Wails runtime path uses (desktop/webaccess_inbound.go).

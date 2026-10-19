@@ -20,23 +20,36 @@
 // has to learn about "auth arrived late".
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { onWebAuthRequired, webAuthRequired } from '@/api/runtime'
+import { onWebAuthRequired, transportSnapshot, webAuthRequired } from '@/api/runtime'
 import { webAccessLogin } from '@/api/webAccess'
 import { reloadPage } from '@/lib/reload'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
 type GateState =
-  /** Probe still in flight — render children (the app's splash) as today. */
+  /** Transport probe still in flight — hold the app back (see below). */
   | 'checking'
   /** No gate needed: wails/none transport, or an authenticated web tab. */
   | 'open'
   /** Web transport without a session — show the token form. */
   | 'locked'
 
-/** Render `children` except when the web transport demands a login. */
+/**
+ * Render `children` except when the web transport demands a login — or while
+ * the transport itself is still unknown. The 'checking' hold is load-bearing:
+ * the web-transport probe is an async round trip, and mounting the app before
+ * it settles makes every mount-time RPC call `getApp()` while the transport
+ * is 'pending' — the shim throws "Wails App bindings are not available", the
+ * callers' one-shot startup paths (App.tsx's RPC safety net that lifts the
+ * splash phase) die without a retry, and the tab strands on an empty splash
+ * forever. The desktop window is immune — Wails injects its bindings before
+ * the bundle runs, so `transportSnapshot()` reads 'wails' synchronously and
+ * the app mounts on the very first render with zero added delay.
+ */
 export function WebAccessGate({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<GateState>('checking')
+  const [state, setState] = useState<GateState>(() =>
+    transportSnapshot() === 'wails' ? 'open' : 'checking',
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -52,8 +65,21 @@ export function WebAccessGate({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  if (state === 'checking') return <TransportProbeSplash />
   if (state === 'locked') return <WebAccessLogin />
   return <>{children}</>
+}
+
+/** The hold screen shown while the transport probe settles. Deliberately the
+ *  same visual language as App's splash (token-only styling, zoom-safe
+ *  percentage/`inset-0` sizing): on the web transport this is a few-ms
+ *  round trip, so a distinct UI would only flash. */
+function TransportProbeSplash() {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background">
+      <div className="size-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+    </div>
+  )
 }
 
 /** The token form. Full-screen, zoom-safe (percentage sizing only — the UI

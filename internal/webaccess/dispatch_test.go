@@ -192,3 +192,82 @@ func TestDispatchedMethodPanicIsIsolated(t *testing.T) {
 		t.Fatalf("post-panic status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// ── extra surface (Options.ExtraDispatch) ─────────────────────────────────
+//
+// The desktop mount passes a MINIMAL adapter (webaccess_extra.go at runtime)
+// as a secondary reflection target for App-level capabilities the mirrored
+// UI needs — today GetPendingActions. These tests pin the mechanism with
+// stubs: fallback resolution, primary-first shadowing, the denylist
+// governing the UNION, and the fail-closed nil-pointer validation.
+
+// extraPrimary stands in for the FrontendAPI surface.
+type extraPrimary struct{}
+
+func (extraPrimary) PrimaryOnly() string { return "primary" }
+func (extraPrimary) Clash() string       { return "primary-wins" }
+
+// extraTarget stands in for the desktop adapter.
+type extraTarget struct{}
+
+func (extraTarget) ExtraOnly() string { return "extra" }
+func (extraTarget) Clash() string     { return "extra-shadowed" }
+
+func TestExtraSurfaceResolvesMethodsThePrimaryLacks(t *testing.T) {
+	srv := mustNew(t, newTestOptions(extraPrimary{}, func(o *Options) {
+		o.ExtraDispatch = extraTarget{}
+	}))
+
+	if !srv.Dispatchable("ExtraOnly") {
+		t.Fatal("an extra-surface method must be dispatchable")
+	}
+	status, body := rpcEcho(t, srv, "ExtraOnly", ``)
+	if status != http.StatusOK || body != "\"extra\"\n" {
+		t.Fatalf("wire call = (%d, %q), want (200, %q)", status, body, "\"extra\"\n")
+	}
+	if !srv.Dispatchable("PrimaryOnly") {
+		t.Fatal("the primary surface must keep working alongside the extra one")
+	}
+	if srv.Dispatchable("NoSuch") {
+		t.Fatal("unknown methods must stay undispatchable")
+	}
+}
+
+func TestPrimarySurfaceShadowsExtraOnNameClash(t *testing.T) {
+	srv := mustNew(t, newTestOptions(extraPrimary{}, func(o *Options) {
+		o.ExtraDispatch = extraTarget{}
+	}))
+	status, body := rpcEcho(t, srv, "Clash", ``)
+	if status != http.StatusOK || body != "\"primary-wins\"\n" {
+		t.Fatalf("clash = (%d, %q), want the primary resolution to win", status, body)
+	}
+}
+
+func TestDenylistGovernsTheExtraSurfaceToo(t *testing.T) {
+	// deniedTarget (above) actually defines the denylisted methods; used as
+	// the EXTRA target it must still be refused — the denylist precedes
+	// reflection on the union of both surfaces.
+	srv := mustNew(t, newTestOptions(extraPrimary{}, func(o *Options) {
+		o.ExtraDispatch = deniedTarget{}
+	}))
+	if srv.Dispatchable("EmitSessionEvent") {
+		t.Fatal("a denylisted name must not become dispatchable via the extra surface")
+	}
+	status, _ := rpcEcho(t, srv, "EmitSessionEvent", `[]`)
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+}
+
+func TestNewFailsClosedOnNilPointerExtraDispatch(t *testing.T) {
+	_, err := New(newTestOptions(extraPrimary{}, func(o *Options) {
+		o.ExtraDispatch = (*extraTarget)(nil)
+	}))
+	if err == nil || !strings.Contains(err.Error(), "ExtraDispatch") {
+		t.Fatalf("err = %v, want the explicit ExtraDispatch nil-pointer failure", err)
+	}
+	// An absent extra surface stays valid (it is optional).
+	if _, err := New(newTestOptions(extraPrimary{}, nil)); err != nil {
+		t.Fatalf("New without ExtraDispatch: %v", err)
+	}
+}

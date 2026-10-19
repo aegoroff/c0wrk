@@ -60,6 +60,25 @@ var methodNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // errType is the reflection handle for the error interface.
 var errType = reflect.TypeOf((*error)(nil)).Elem()
 
+// resolveMethod finds method on the primary dispatch target, falling back to
+// the extra surface (web-only App-level capabilities the desktop layer opted
+// into through a minimal adapter — see Options.ExtraDispatch). The denylist
+// is applied by the callers BEFORE resolution, so it governs the union.
+// Returns the zero Value when neither target exposes the method.
+func (s *Server) resolveMethod(method string) reflect.Value {
+	if m := reflect.ValueOf(s.dispatch).MethodByName(method); m.IsValid() {
+		return m
+	}
+	if v := reflect.ValueOf(s.extraDispatch); v.IsValid() {
+		if v.Kind() != reflect.Pointer || !v.IsNil() {
+			if m := v.MethodByName(method); m.IsValid() {
+				return m
+			}
+		}
+	}
+	return reflect.Value{}
+}
+
 // errBodyTooLarge marks an oversize request body (→ HTTP 413).
 var errBodyTooLarge = errors.New("request body too large")
 
@@ -110,7 +129,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, reason)
 		return
 	}
-	m := reflect.ValueOf(s.dispatch).MethodByName(method)
+	m := s.resolveMethod(method)
 	if !m.IsValid() {
 		// MethodByName never resolves unexported methods, so an invalid
 		// value means "not part of the surface".
@@ -225,13 +244,13 @@ func decodeArgs(body []byte) ([]json.RawMessage, error) {
 }
 
 // Dispatchable reports whether method is callable over the web transport:
-// exported on the dispatch target and not denylisted. Exported for the
-// surface contract test.
+// exported on the dispatch target (or the opted-in extra surface) and not
+// denylisted. Exported for the surface contract test.
 func (s *Server) Dispatchable(method string) bool {
 	if _, denied := deniedMethods[method]; denied {
 		return false
 	}
-	return reflect.ValueOf(s.dispatch).MethodByName(method).IsValid()
+	return s.resolveMethod(method).IsValid()
 }
 
 // recoverWrap turns any panic in the wrapped handler into a 500 envelope.
