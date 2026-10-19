@@ -2,6 +2,12 @@
 
 All notable changes to **c0wrk**. Dates follow the tag date.
 
+## v0.12.1 — 2026-10-19
+
+### Fixed
+- **Self-update on macOS no longer fails silently** ([7941670b](https://github.com/v0lka/c0wrk/commit/7941670b)) — the staged updater was a bare copy of the bundle executable whose embedded signature is sealed against the original `.app` context, so on recent macOS `amfid` asynchronously SIGKILLs it at exec: `cmd.Start()` still reports success, the app quits, and the update silently never happens (the v0.11.0 → v0.12.0 cycle failed exactly this way). `copyExecutable` now re-signs the staging copy ad-hoc (`codesign --force --sign -`) so it validates as a standalone binary — the bytes stay the SHA256-verified release's own, so the integrity gate is unchanged. `ApplyUpdate` also captures the updater's stdout/stderr into `<staging>/updater-output.log` and waits `updaterStartProbeDelay` after `Start`: a healthy updater is guaranteed to still be alive inside that window (it waits for this process to quit first), so an exit there proves the child was killed before doing anything and aborts the quit with an `update:error` instead of silently closing the app. See [ADR-023](./specs/decisions/023-auto-update.md).
+- **The startup update toast survives a lost `update:available` event** ([7941670b](https://github.com/v0lka/c0wrk/commit/7941670b)) — the auto-check's event could race the frontend's event subscription and the toast was silently lost. A new `GetLastUpdateCheck` RPC returns the backend's cached check result (nil when nothing is pending or the operator gate is off), pulled by `useUpdateChecker` on mount and on `backend:ready`, so the toast is driven from the authoritative cached state rather than event timing. See [desktop-frontend.md](./specs/contracts/desktop-frontend.md).
+
 ## v0.12.0 — 2026-10-19
 
 ### Added
