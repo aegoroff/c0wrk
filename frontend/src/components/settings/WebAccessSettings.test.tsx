@@ -7,12 +7,14 @@ import { createRoot, type Root } from 'react-dom/client'
 const mocks = vi.hoisted(() => ({
   getWebAccessInfo: vi.fn(),
   setWebAccessEnabled: vi.fn(),
+  setWebAccessConnection: vi.fn(),
   clipboardSetText: vi.fn(),
 }))
 
 vi.mock('@/api/webAccess', () => ({
   getWebAccessInfo: mocks.getWebAccessInfo,
   setWebAccessEnabled: mocks.setWebAccessEnabled,
+  setWebAccessConnection: mocks.setWebAccessConnection,
 }))
 
 vi.mock('@/api/runtime', () => ({
@@ -75,6 +77,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.getWebAccessInfo.mockResolvedValue(offInfo)
   mocks.setWebAccessEnabled.mockResolvedValue(undefined)
+  mocks.setWebAccessConnection.mockResolvedValue(undefined)
   mocks.clipboardSetText.mockResolvedValue(true)
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -179,5 +182,91 @@ describe('WebAccessSettings', () => {
     expect(byTestId('web-access-token-row')).toBeNull()
     expect(byTestId('web-access-warning')?.textContent).toContain('full control')
     expect(byTestId('web-access-status')?.textContent).toContain('not running')
+  })
+})
+
+describe('WebAccessSettings pin (fixed port & token)', () => {
+  function pinPort(): HTMLInputElement {
+    const el = byTestId('web-access-pin-port')
+    if (!(el instanceof HTMLInputElement)) throw new Error('pin port input not found')
+    return el
+  }
+  function pinToken(): HTMLInputElement {
+    const el = byTestId('web-access-pin-token')
+    if (!(el instanceof HTMLInputElement)) throw new Error('pin token input not found')
+    return el
+  }
+  function typeInto(input: HTMLInputElement, value: string): void {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      if (setter) setter.call(input, value)
+      else input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  beforeEach(() => {
+    mocks.getWebAccessInfo.mockResolvedValue({
+      ...runningInfo,
+      configuredPort: 0,
+      tokenPinned: false,
+    })
+  })
+
+  it('applies the drafts: port and token travel, state re-reads, draft clears', async () => {
+    render()
+    await flush()
+    typeInto(pinPort(), '9000')
+    typeInto(pinToken(), ' fixed-secret ')
+    clickButton('web-access-pin-apply')
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith(9000, 'fixed-secret')
+    // The authoritative state is re-read after the apply.
+    expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
+    // A typed secret never lingers on screen.
+    expect(pinToken().value).toBe('')
+  })
+
+  it('empty drafts mean auto port + ephemeral token (the zero values)', async () => {
+    render()
+    await flush()
+    clickButton('web-access-pin-apply')
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith(0, '')
+  })
+
+  it('seeds the port draft from the persisted pin', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({ ...runningInfo, configuredPort: 8765 })
+    render()
+    await flush()
+    expect(pinPort().value).toBe('8765')
+  })
+
+  it('refuses an out-of-range port locally without calling the RPC', async () => {
+    render()
+    await flush()
+    typeInto(pinPort(), '70000')
+    clickButton('web-access-pin-apply')
+    await flush()
+    expect(byTestId('web-access-pin-error')?.textContent).toContain('1–65535')
+    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+  })
+
+  it('surfaces the backend failure message (including the rollback case)', async () => {
+    mocks.setWebAccessConnection.mockRejectedValue(
+      new Error('web access connection not applied: the previous settings were restored'),
+    )
+    render()
+    await flush()
+    typeInto(pinPort(), '9000')
+    clickButton('web-access-pin-apply')
+    await flush()
+    expect(byTestId('web-access-pin-error')?.textContent).toContain('previous settings were restored')
+  })
+
+  it('the token draft is a password field', async () => {
+    render()
+    await flush()
+    expect(pinToken().type).toBe('password')
   })
 })

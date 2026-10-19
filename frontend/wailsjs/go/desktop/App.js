@@ -826,6 +826,10 @@ export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
 }
 
+export function SetWebAccessConnection(arg1, arg2) {
+  return window['go']['desktop']['App']['SetWebAccessConnection'](arg1, arg2);
+}
+
 export function SetWebAccessEnabled(arg1) {
   return window['go']['desktop']['App']['SetWebAccessEnabled'](arg1);
 }

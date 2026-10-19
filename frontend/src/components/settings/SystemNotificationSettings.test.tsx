@@ -12,7 +12,9 @@ const mocks = vi.hoisted(() => ({
   checkNotificationAuthorization: vi.fn(),
   initSystemNotifications: vi.fn(),
   showTestNotification: vi.fn(),
+  ensureNotificationPermission: vi.fn(),
   isWailsReady: vi.fn(),
+  isWebTransport: vi.fn(),
   send: vi.fn(),
   getBannerTimeout: vi.fn(),
   setBannerTimeout: vi.fn(),
@@ -26,6 +28,7 @@ vi.mock('@/api/notifications', async (importOriginal) => {
     checkNotificationAuthorization: mocks.checkNotificationAuthorization,
     initSystemNotifications: mocks.initSystemNotifications,
     showTestNotification: mocks.showTestNotification,
+    ensureNotificationPermission: mocks.ensureNotificationPermission,
   }
 })
 
@@ -38,6 +41,7 @@ vi.mock('@/lib/systemNotifications', () => ({
 
 vi.mock('@/api/runtime', () => ({
   isWailsReady: mocks.isWailsReady,
+  isWebTransport: mocks.isWebTransport,
 }))
 
 vi.mock('@/api/config', () => ({
@@ -80,6 +84,8 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.isWailsReady.mockReturnValue(true)
+  mocks.isWebTransport.mockReturnValue(false)
+  mocks.ensureNotificationPermission.mockResolvedValue(true)
   mocks.checkNotificationAuthorization.mockResolvedValue(true)
   mocks.initSystemNotifications.mockResolvedValue(undefined)
   mocks.showTestNotification.mockResolvedValue(undefined)
@@ -304,5 +310,33 @@ describe('banner lifetime control', () => {
     await flush()
 
     expect(bannerTimeoutButtons().length).toBeGreaterThan(0)
+  })
+})
+
+describe('SystemNotificationSettings web transport', () => {
+  it('the toggle-on click requests the browser permission before the preview', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.ensureNotificationPermission.mockResolvedValue(true)
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+    // The gesture ordering contract: permission first, preview after.
+    expect(mocks.ensureNotificationPermission).toHaveBeenCalledTimes(1)
+    expect(mocks.initSystemNotifications).toHaveBeenCalledTimes(1)
+    expect(mocks.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('a denied permission renders the browser-specific hint (not the macOS one)', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    render()
+    await flush()
+    expect(hintText()).toContain('browser')
+    expect(hintText()).not.toContain('macOS')
+    expect(testButton()).toBeNull()
   })
 })

@@ -11,6 +11,7 @@ import { ConfigWarningBanner } from './ConfigWarningBanner'
 import { LogLevelSelector } from './LogLevelSelector'
 import { ThemeSelector } from './ThemeSelector'
 import { TabsSettings } from './TabsSettings'
+import { isWebTransport } from '@/api/runtime'
 import { UIScaleSelector } from './UIScaleSelector'
 import { FontSettings } from './FontSettings'
 import { ProxySettings } from './ProxySettings'
@@ -285,9 +286,15 @@ export function SettingsModal() {
                 </h3>
                 <ProxySettings />
               </div>
-              <div className="border-t border-border pt-4">
-                <WebAccessSettings />
-              </div>
+              {/* Web Access is a DESKTOP-window control: in the web transport
+                  the control RPCs are unreachable from a tab (ADR-090
+                  isolation), so the section would only ever render its
+                  "Status unavailable" state — hidden outright. */}
+              {!isWebTransport() && (
+                <div className="border-t border-border pt-4">
+                  <WebAccessSettings />
+                </div>
+              )}
               <div className="border-t border-border pt-4">
                 <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
                   <Database className="h-4 w-4 text-muted-foreground" />
@@ -311,10 +318,15 @@ export function SettingsModal() {
               </div>
               {/* Tabs sits last on the tab: a master switch that reshapes the
                   whole workspace reads best after the pure appearance knobs
-                  (theme / scale / fonts) above it. */}
-              <div className="border-t border-border pt-4">
-                <TabsSettings />
-              </div>
+                  (theme / scale / fonts) above it. Hidden in the web
+                  transport: the browser owns the tabs there, and the gate
+                  forces tabsEnabled off — a switch the user could only fight
+                  has no place in the settings. */}
+              {!isWebTransport() && (
+                <div className="border-t border-border pt-4">
+                  <TabsSettings />
+                </div>
+              )}
             </div>
           </TabsContent>
 

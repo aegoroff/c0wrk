@@ -18,10 +18,19 @@
 // A successful login sets the cookie and reloads the page, so every store,
 // the transport probe and the websocket boot authenticated — no code path
 // has to learn about "auth arrived late".
+//
+// Web-mode workspace adaptation: a browser tab lives in the BROWSER's tab
+// strip, so the app's own workspace tab bar is forced off (uiStore.tabsEnabled
+// → false) before the app mounts — the tab layer degenerates to its documented
+// "exactly one tab" special case, and every reader (the bar, the hotkeys, the
+// notification-click routing) agrees because they all read the store. The
+// Settings switch is hidden in the web transport too, so the forced value
+// cannot be fought mid-session; the persisted copy heals on the next boot.
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { onWebAuthRequired, transportSnapshot, webAuthRequired } from '@/api/runtime'
 import { webAccessLogin } from '@/api/webAccess'
+import { useUIStore } from '@/stores/uiStore'
 import { reloadPage } from '@/lib/reload'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -54,7 +63,14 @@ export function WebAccessGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false
     void webAuthRequired().then((required) => {
-      if (!cancelled) setState(required ? 'locked' : 'open')
+      if (cancelled) return
+      // Web transport ⇒ no in-app tab bar (the browser owns the tabs). Runs
+      // BEFORE the app mounts: webAuthRequired only resolves once the
+      // transport probe settled, and the 'checking' hold keeps the app from
+      // mounting until this handler ran — so every tabsEnabled reader boots
+      // with the forced value.
+      if (transportSnapshot() === 'web') useUIStore.getState().setTabsEnabled(false)
+      setState(required ? 'locked' : 'open')
     })
     // A mid-session 401 (rotated per-launch token) locks the screen no
     // matter what the initial probe said.

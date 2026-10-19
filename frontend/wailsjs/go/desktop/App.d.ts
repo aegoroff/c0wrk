@@ -421,6 +421,8 @@ export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
 
+export function SetWebAccessConnection(arg1:number,arg2:string):Promise<void>;
+
 export function SetWebAccessEnabled(arg1:boolean):Promise<void>;
 
 export function SetWebAccessStaticFS(arg1:fs.FS):Promise<void>;

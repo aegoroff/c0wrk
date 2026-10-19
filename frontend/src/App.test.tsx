@@ -56,6 +56,9 @@ vi.mock('@/api/runtime', () => ({
   subscribe: vi.fn(() => () => {}),
   onGlobalEvent: vi.fn(() => () => {}),
   isWailsReady: vi.fn(() => false),
+  // lib/systemNotifications' transport guard reads this; the real lib runs
+  // here (only its init is fire-and-forget), so the export must exist.
+  isWebTransport: vi.fn(() => false),
 }))
 vi.mock('@/api/projects', () => ({ listProjects: vi.fn().mockResolvedValue([]) }))
 // The App mount also fires two more RPC paths that must stay quiet here:

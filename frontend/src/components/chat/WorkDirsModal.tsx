@@ -277,7 +277,13 @@ export function WorkDirsModal() {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[640px] max-h-[calc(var(--ui-vh)*0.8)] flex flex-col overflow-hidden">
+      <DialogContent
+        className="sm:max-w-[640px] max-h-[calc(var(--ui-vh)*0.8)] flex flex-col overflow-hidden"
+        // No DialogDescription in this modal; opt out explicitly so Radix
+        // does not warn about the missing description (and does not point
+        // aria-describedby at a non-existent node).
+        aria-describedby={undefined}
+      >
         <DialogHeader>
           <DialogTitle>Working Directories</DialogTitle>
         </DialogHeader>

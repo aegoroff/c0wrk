@@ -23,13 +23,21 @@ export interface WebAccessInfo {
   readonly url: string
   /** The resolved listen port; 0 while not running. */
   readonly port: number
+  /** The PERSISTED port pin: 0 = auto (a free port every start),
+   *  1–65535 = pinned. Absent on an older payload → 0. */
+  readonly configuredPort: number
   /** The browser login credential ('' when none applies yet). */
   readonly token: string
+  /** Whether a static token is persisted in config.yaml (a credential that
+   *  survives restarts) as opposed to the ephemeral per-launch secret. */
+  readonly tokenPinned: boolean
 }
 
 /** Boundary validator for the GetWebAccessInfo payload — the envelope must be
  *  fully valid or the whole read is rejected (`null`); the section renders its
- *  unavailable state instead of guessing. */
+ *  unavailable state instead of guessing. `configured_port`/`token_pinned`
+ *  default to the unpinned shape when absent: the pin UI and the backend ship
+ *  in one binary, so tolerance only serves stale fixtures. */
 export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
@@ -41,7 +49,12 @@ export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
     running: r.running,
     url: r.url,
     port: r.port,
+    configuredPort:
+      typeof r.configured_port === 'number' && Number.isFinite(r.configured_port)
+        ? r.configured_port
+        : 0,
     token: r.token,
+    tokenPinned: r.token_pinned === true,
   }
 }
 
@@ -81,6 +94,24 @@ export async function setWebAccessEnabled(enabled: boolean): Promise<void> {
     await app.SetWebAccessEnabled(enabled)
   } catch (err) {
     logger.error('Failed to set web access enabled:', err)
+    throw err
+  }
+}
+
+/**
+ * Pin the port and token (Settings → Web Access): persists both to
+ * config.yaml AND applies them live — a running sidecar hot-restarts onto
+ * the new connection settings, so every open tab must re-login afterwards.
+ * Port 0 = auto; an empty token = ephemeral per-launch secret. Throws on
+ * failure — the section surfaces the message (including the "previous
+ * settings were restored" rollback case) instead of guessing the state.
+ */
+export async function setWebAccessConnection(port: number, token: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.SetWebAccessConnection(port, token)
+  } catch (err) {
+    logger.error('Failed to set web access connection:', err)
     throw err
   }
 }

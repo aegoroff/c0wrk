@@ -52,6 +52,18 @@ vi.mock('@/api/webAccess', () => ({
   setWebAccessEnabled: mocks.setWebAccessEnabled,
 }))
 
+// isWebTransport branches (the Web Access and Tabs blocks hide in the web
+// transport) read this mutable flag; every other runtime export stays real.
+const runtimeState = vi.hoisted(() => ({ web: false }))
+
+vi.mock('@/api/runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/runtime')>()
+  return {
+    ...actual,
+    isWebTransport: () => runtimeState.web,
+  }
+})
+
 // The Capabilities tab mounts CapabilitiesSettings (Subagents + Skills
 // catalogs + capabilities modes) and, inside it, MCPSettings (status, tools,
 // server configs). Only the functions those components actually call are
@@ -131,6 +143,7 @@ beforeEach(() => {
   // unavailable, which the section renders as its quiet off state.
   mocks.getWebAccessInfo.mockResolvedValue(null)
   mocks.setWebAccessEnabled.mockResolvedValue(undefined)
+  runtimeState.web = false
   useSettingsStore.setState({ open: false, activeTab: 'general' })
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -666,5 +679,38 @@ describe('SettingsModal Capabilities tab', () => {
     expect(buttonLabels).not.toContain('Delete')
     // MCP management stays available in its own subsection.
     expect(buttonLabels).toContain('Add Server')
+  })
+})
+
+describe('SettingsModal web transport', () => {
+  beforeEach(() => {
+    runtimeState.web = true
+  })
+
+  afterEach(() => {
+    runtimeState.web = false
+  })
+
+  it('hides the Web Access block on the General tab (control RPCs are unreachable from a tab)', async () => {
+    useSettingsStore.setState({ open: true, activeTab: 'general' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    const spans = Array.from(document.body.querySelectorAll('span'))
+    expect(spans.some((s) => s.textContent === 'Web Access')).toBe(false)
+    expect(document.body.querySelector('[data-testid="web-access-settings"]')).toBeNull()
+  })
+
+  it('hides the Tabs block on the Appearance tab (the browser owns the tabs)', async () => {
+    useSettingsStore.setState({ open: true, activeTab: 'appearance' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    const spans = Array.from(document.body.querySelectorAll('span'))
+    expect(spans.some((s) => s.textContent === 'Tabs')).toBe(false)
   })
 })

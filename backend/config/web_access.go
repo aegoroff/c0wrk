@@ -98,6 +98,14 @@ func validateWebAccessPort(port int) error {
 	return nil
 }
 
+// ValidateWebAccessPort is the exported form of the section's port rule, for
+// callers outside the package that mutate the web_access section at runtime
+// (desktop's SetWebAccessConnection) and want the exact same message the
+// load/save paths produce: 0 = auto, 1–65535 pinned, anything else rejected.
+func ValidateWebAccessPort(port int) error {
+	return validateWebAccessPort(port)
+}
+
 // defaultWebAccessState is the canonical default section state the fail-soft
 // load path resets an invalid section to: disabled, loopback bind, auto port,
 // ephemeral token. Resetting to THIS state (rather than the bare zero value)

@@ -531,8 +531,11 @@ describe('web capability helpers', () => {
     expect(open).toHaveBeenCalledWith('https://example.com', '_blank', 'noopener,noreferrer')
   })
 
-  it('setWindowTitle is a no-op in the browser', () => {
-    expect(() => runtime.setWindowTitle('irrelevant')).not.toThrow()
+  it('setWindowTitle mirrors the title into document.title', () => {
+    // The browser tab strip is the web transport's title bar: the same
+    // "c0wrk - Project: Session" template lands in the tab label.
+    runtime.setWindowTitle('c0wrk - MyProject: Refactor auth')
+    expect(document.title).toBe('c0wrk - MyProject: Refactor auth')
   })
 
   it('logError lands in the browser console', () => {
@@ -694,5 +697,20 @@ describe('web transport login gating', () => {
     respondWebApp(async () => jsonResponse({ error: 'boom' }, 500))
     await expect(runtime.getApp().Foo()).rejects.toThrow('boom')
     expect(signals).toEqual([])
+  })
+})
+
+describe('emitLocalEvent', () => {
+  it('feeds the local listener registry without touching any transport', async () => {
+    runtime = await bootedRuntime()
+    const seen: unknown[] = []
+    const unsubscribe = runtime.subscribe('local-test', (...args: unknown[]) => seen.push(args))
+    runtime.emitLocalEvent('local-test', { a: 1 })
+    runtime.emitLocalEvent('local-test')
+    unsubscribe()
+    runtime.emitLocalEvent('local-test', { a: 2 })
+    expect(seen).toEqual([[{ a: 1 }], []])
+    // Nothing traveled: no RPC, no websocket frame.
+    expect(fetchCalls.filter((c) => c.url !== '/api/transport')).toEqual([])
   })
 })

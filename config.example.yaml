@@ -2095,10 +2095,14 @@ notifications:
 #
 #   token (default empty)   — static token the sidecar authenticates browser
 #                            requests with. Empty = ephemeral per-launch: a
-#                            fresh token is generated at every start and
-#                            handed to the browser tab the app opens, so no
+#                            fresh token is generated at every start, so no
 #                            secret is persisted in this file. Set a value
-#                            only if you need to reconnect to a known URL.
+#                            (or pin the port) to keep a stable URL and
+#                            credential across restarts — most easily from
+#                            the app: Settings → Web Access → "Fixed port &
+#                            token". A pinned token is a durable credential
+#                            in this file; a short one (< 16 chars) draws a
+#                            warning when the sidecar starts.
 #
 # web_access:
 #   enabled: false

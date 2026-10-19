@@ -380,7 +380,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 		t.Fatal("sidecar did not mount")
 	}
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection"} {
 		if srv.Dispatchable(method) {
 			t.Errorf("%s is dispatchable over the web surface — the control RPC leaked into the reflection target", method)
 		}
@@ -389,7 +389,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 	ts := newWebAccessHTTPTest(t, srv)
 	client := loginWebAccessClient(t, ts.URL, srv.AuthToken())
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection"} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 			ts.URL+"/api/rpc/"+method, strings.NewReader("[]"))
 		if err != nil {

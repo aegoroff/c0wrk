@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Check, Copy, Eye, EyeOff, MonitorSmartphone } from 'lucide-react'
-import { getWebAccessInfo, setWebAccessEnabled, type WebAccessInfo } from '@/api/webAccess'
+import { AlertTriangle, Check, Copy, Eye, EyeOff, MonitorSmartphone, Pin } from 'lucide-react'
+import {
+  getWebAccessInfo,
+  setWebAccessConnection,
+  setWebAccessEnabled,
+  type WebAccessInfo,
+} from '@/api/webAccess'
 import { clipboardSetText } from '@/api/runtime'
 import { logger } from '@/lib/logger'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 import { Toggle } from './ModelProfilesControls'
 
 /**
@@ -25,6 +32,14 @@ export function WebAccessSettings() {
   const [revealed, setRevealed] = useState(false)
   const [copiedKey, setCopiedKey] = useState<'' | 'url' | 'token'>('')
   const copyTimer = useRef<number | null>(null)
+  // The pin drafts. The port mirrors the persisted pin (empty = auto); the
+  // token is deliberately NEVER prefilled — it is live-secret material, the
+  // row above reveals it on demand, and the draft only ever carries what the
+  // operator just typed.
+  const [portDraft, setPortDraft] = useState('')
+  const [tokenDraft, setTokenDraft] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
+  const [pinError, setPinError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -35,6 +50,12 @@ export function WebAccessSettings() {
       cancelled = true
     }
   }, [])
+
+  // Seed the port draft once the authoritative read lands (0 = auto = empty).
+  useEffect(() => {
+    const pin = info?.configuredPort ?? 0
+    setPortDraft(pin > 0 ? String(pin) : '')
+  }, [info?.configuredPort])
 
   // A new credential invalidates any reveal: after a start/restart the token
   // on screen must never be a stale one shown in the clear.
@@ -84,6 +105,35 @@ export function WebAccessSettings() {
       logger.error('Failed to copy to clipboard:', err)
     }
   }, [])
+
+  /** Apply the pin drafts: port '' = auto (0), token '' = ephemeral ('').
+   *  The RPC persists AND hot-restarts the sidecar; the authoritative state
+   *  is re-read, and the token draft is always cleared — a typed secret must
+   *  not linger on screen after it traveled. */
+  const handlePin = useCallback(async () => {
+    if (!info) return
+    const trimmedPort = portDraft.trim()
+    let port = 0
+    if (trimmedPort !== '') {
+      port = Number(trimmedPort)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        setPinError('Port must be empty (auto) or a whole number 1–65535.')
+        return
+      }
+    }
+    setPinBusy(true)
+    setPinError(null)
+    try {
+      await setWebAccessConnection(port, tokenDraft.trim())
+      const fresh = await getWebAccessInfo()
+      if (fresh) setInfo(fresh)
+      setTokenDraft('')
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Failed to apply the connection settings.')
+    } finally {
+      setPinBusy(false)
+    }
+  }, [info, portDraft, tokenDraft])
 
   const statusLine = (() => {
     if (!info) return 'Status unavailable — the desktop bridge did not answer.'
@@ -152,6 +202,60 @@ export function WebAccessSettings() {
           >
             {copiedKey === 'token' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
           </button>
+        </div>
+      )}
+
+      {info !== null && (
+        <div className="flex flex-col gap-1.5 pl-12" data-testid="web-access-pin-block">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <Pin className="size-3" />
+            Fixed port &amp; token
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              data-testid="web-access-pin-port"
+              type="text"
+              inputMode="numeric"
+              value={portDraft}
+              onChange={(e) => setPortDraft(e.target.value)}
+              placeholder="Port — auto"
+              aria-label="Fixed port (empty = auto)"
+              disabled={pinBusy}
+              className="h-7 w-32 text-xs"
+              autoComplete="off"
+            />
+            <Input
+              data-testid="web-access-pin-token"
+              type="password"
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              placeholder={info.tokenPinned ? 'Token pinned — empty keeps it' : 'Token — empty = per-launch'}
+              aria-label="Fixed token (empty = ephemeral per-launch)"
+              disabled={pinBusy}
+              className="h-7 w-56 text-xs"
+              autoComplete="off"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-testid="web-access-pin-apply"
+              onClick={() => void handlePin()}
+              disabled={pinBusy}
+              className="h-7 text-xs"
+            >
+              {pinBusy ? 'Applying…' : 'Apply'}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Persisted in config.yaml and applied immediately — a running sidecar restarts onto the
+            new connection, so open browser tabs must sign in again.
+          </p>
+          {pinError !== null && (
+            <p className="text-xs text-destructive" role="alert" data-testid="web-access-pin-error">
+              {pinError}
+            </p>
+          )}
         </div>
       )}
 

@@ -14,7 +14,7 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { parseWebAccessInfo, getWebAccessInfo, setWebAccessEnabled, webAccessLogin } from '@/api/webAccess'
+import { parseWebAccessInfo, getWebAccessInfo, setWebAccessEnabled, setWebAccessConnection, webAccessLogin } from '@/api/webAccess'
 import { logger } from '@/lib/logger'
 
 const validInfo = {
@@ -22,22 +22,54 @@ const validInfo = {
   running: true,
   url: 'http://127.0.0.1:8765',
   port: 8765,
+  configured_port: 8765,
   token: 'per-launch-token',
+  token_pinned: false,
 }
 
 describe('parseWebAccessInfo', () => {
+  const parsedValid = {
+    enabled: true,
+    running: true,
+    url: 'http://127.0.0.1:8765',
+    port: 8765,
+    configuredPort: 8765,
+    token: 'per-launch-token',
+    tokenPinned: false,
+  }
+
   it('accepts a fully valid payload', () => {
-    expect(parseWebAccessInfo(validInfo)).toEqual(validInfo)
+    expect(parseWebAccessInfo(validInfo)).toEqual(parsedValid)
   })
 
   it('accepts the not-running shape (empty url, zero port)', () => {
-    expect(parseWebAccessInfo({ ...validInfo, running: false, url: '', port: 0, token: '' })).toEqual({
-      ...validInfo,
+    expect(
+      parseWebAccessInfo({ ...validInfo, running: false, url: '', port: 0, configured_port: 0, token: '' }),
+    ).toEqual({
+      ...parsedValid,
       running: false,
       url: '',
       port: 0,
+      configuredPort: 0,
       token: '',
     })
+  })
+
+  it('maps the snake_case pin fields', () => {
+    expect(
+      parseWebAccessInfo({ ...validInfo, configured_port: 9000, token_pinned: true }),
+    ).toEqual({ ...parsedValid, configuredPort: 9000, tokenPinned: true })
+  })
+
+  it('defaults the pin fields when absent (stale fixture tolerance)', () => {
+    const legacy = {
+      enabled: true,
+      running: true,
+      url: 'http://127.0.0.1:8765',
+      port: 8765,
+      token: 'tok',
+    }
+    expect(parseWebAccessInfo(legacy)).toEqual({ ...legacy, configuredPort: 0, tokenPinned: false })
   })
 
   it('rejects non-objects and null', () => {
@@ -58,7 +90,7 @@ describe('parseWebAccessInfo', () => {
     ]) {
       if ('extra' in bad) {
         // Extra fields are tolerated — only known fields are validated.
-        expect(parseWebAccessInfo(bad)).toEqual(validInfo)
+        expect(parseWebAccessInfo(bad)).toEqual(parseWebAccessInfo(validInfo))
       } else {
         expect(parseWebAccessInfo(bad)).toBeNull()
       }
@@ -74,7 +106,7 @@ describe('getWebAccessInfo', () => {
 
   it('returns the parsed payload on success', async () => {
     mockApp.GetWebAccessInfo = vi.fn().mockResolvedValue(validInfo)
-    await expect(getWebAccessInfo()).resolves.toEqual(validInfo)
+    await expect(getWebAccessInfo()).resolves.toEqual(parseWebAccessInfo(validInfo))
     expect(mockApp.GetWebAccessInfo).toHaveBeenCalledTimes(1)
   })
 
@@ -108,6 +140,32 @@ describe('setWebAccessEnabled', () => {
   it('rethrows on failure (a rejected toggle must surface)', async () => {
     mockApp.SetWebAccessEnabled = vi.fn().mockRejectedValue(new Error('denied'))
     await expect(setWebAccessEnabled(false)).rejects.toThrow('denied')
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('setWebAccessConnection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    for (const key of Object.keys(mockApp)) delete mockApp[key]
+  })
+
+  it('passes the port and token through and resolves on success', async () => {
+    mockApp.SetWebAccessConnection = vi.fn().mockResolvedValue(undefined)
+    await expect(setWebAccessConnection(9000, 'fixed-secret')).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessConnection).toHaveBeenCalledWith(9000, 'fixed-secret')
+    // The auto/ephemeral shape travels as the zero values.
+    await setWebAccessConnection(0, '')
+    expect(mockApp.SetWebAccessConnection).toHaveBeenLastCalledWith(0, '')
+  })
+
+  it('rethrows on failure (including the rollback message must surface)', async () => {
+    mockApp.SetWebAccessConnection = vi.fn().mockRejectedValue(
+      new Error('web access connection not applied: the sidecar failed to start with the new settings'),
+    )
+    await expect(setWebAccessConnection(70000, '')).rejects.toThrow(
+      'web access connection not applied',
+    )
     expect(logger.error).toHaveBeenCalled()
   })
 })

@@ -2886,7 +2886,9 @@ export namespace desktop {
 	    running: boolean;
 	    url: string;
 	    port: number;
+	    configured_port: number;
 	    token: string;
+	    token_pinned: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new WebAccessInfo(source);
@@ -2898,7 +2900,9 @@ export namespace desktop {
 	        this.running = source["running"];
 	        this.url = source["url"];
 	        this.port = source["port"];
+	        this.configured_port = source["configured_port"];
 	        this.token = source["token"];
+	        this.token_pinned = source["token_pinned"];
 	    }
 	}
 	export class wailsLogAdapter {

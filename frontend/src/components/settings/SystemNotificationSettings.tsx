@@ -13,7 +13,8 @@ import {
   setNotificationBannerTimeout,
 } from '@/api/config'
 import { sendSystemNotification } from '@/lib/systemNotifications'
-import { isWailsReady } from '@/api/runtime'
+import { ensureNotificationPermission } from '@/api/notifications'
+import { isWailsReady, isWebTransport } from '@/api/runtime'
 import { isLinuxHost } from '@/lib/platform'
 import { logger } from '@/lib/logger'
 
@@ -85,10 +86,11 @@ export function SystemNotificationSettings() {
 
   // One authorization read per mount. Fail-open (a transport error resolves
   // to granted inside checkNotificationAuthorization), so the hint only ever
-  // appears for a genuine macOS denial. Without the Wails runtime (vitest,
+  // appears for a genuine denial — a macOS one on the desktop, a blocked
+  // site permission in the web transport. Without any transport (vitest,
   // dev-frontend) the section stays in the neutral granted state.
   useEffect(() => {
-    if (!isWailsReady()) return
+    if (!isWailsReady() && !isWebTransport()) return
     let cancelled = false
     void checkNotificationAuthorization().then((granted) => {
       if (!cancelled) setPermission(granted ? 'granted' : 'denied')
@@ -103,25 +105,35 @@ export function SystemNotificationSettings() {
     if (!next) return
     // Fire-and-forget init (idempotent on both sides — App.tsx already ran
     // it at startup, this is the retry/first-touch path) + an immediate
-    // preview banner so the user can confirm the channel works. With a
-    // denied OS authorization the send lands nowhere; the muted hint is
+    // preview banner so the user can confirm the channel works. In the web
+    // transport this click is ALSO the permission gesture: the toggle-on
+    // click requests the browser's notification permission before the
+    // preview, so a granted prompt lands with the confirmation banner.
+    // With a denied authorization the send lands nowhere; the muted hint is
     // what surfaces that case, so the preview is skipped there.
     void initSystemNotifications().catch(() => {})
-    if (permission !== 'denied') {
-      void sendSystemNotification({
-        kind: 'success',
-        title: 'c0wrk — System notifications enabled',
-        body: 'You will see notifications like this when tasks finish or need your input.',
+    void ensureNotificationPermission()
+      .then((granted) => {
+        setPermission(granted ? 'granted' : 'denied')
+        if (granted && permission !== 'denied') {
+          void sendSystemNotification({
+            kind: 'success',
+            title: 'c0wrk — System notifications enabled',
+            body: 'You will see notifications like this when tasks finish or need your input.',
+          })
+        }
       })
-    }
+      .catch(() => {})
   }
 
-  // The test button uses the Go-authored banner (ShowTestNotification): it
-  // demonstrates click routing too — activating it focuses the window via the
-  // Go callback without navigating anywhere.
+  // The test button uses the platform banner (Go-authored ShowTestNotification
+  // on the desktop; the browser Notification API in the web transport): it
+  // demonstrates click routing too — activating it focuses the window/tab
+  // without navigating anywhere. A web denial flips the section to its hint.
   const handleTest = (): void => {
     void showTestNotification().catch((err) => {
       logger.warn('[system-notifications] test notification failed', err)
+      if (isWebTransport()) setPermission('denied')
     })
   }
 
@@ -170,7 +182,9 @@ export function SystemNotificationSettings() {
           className="text-xs text-muted-foreground pl-12"
           data-testid="notification-permission-hint"
         >
-          Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts
+          {isWebTransport()
+            ? 'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts'
+            : 'Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts'}
         </p>
       ) : (
         enabled && (

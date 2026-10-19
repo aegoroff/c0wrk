@@ -532,6 +532,19 @@ export function emit(eventName: string, data?: unknown): void {
   }
 }
 
+/** Synthesize one backend-shaped event into the LOCAL listener registry —
+ *  without touching any transport (nothing is sent to the backend).
+ *
+ *  This is the web notification click's bridge: a browser Notification
+ *  activation replays the same `notification_clicked` event the Go callback
+ *  emits on the desktop (desktop/notifications.go), so the downstream path —
+ *  the `isNotificationClickedData` guard and useNotificationClicks'
+ *  navigation — is byte-identical in both transports instead of growing a
+ *  second, web-only routing entry point. */
+export function emitLocalEvent(eventName: string, data?: unknown): void {
+  dispatchBatchedEvent(eventName, data !== undefined ? [data] : [])
+}
+
 /** Copy text to the system clipboard via the native Wails runtime.
  *
  *  Use this INSTEAD of `navigator.clipboard.writeText`. The Web Clipboard API
@@ -563,13 +576,21 @@ export async function clipboardSetText(text: string): Promise<boolean> {
 
 /** Set the native window title.
  *
+ *  In the web transport the title IS the browser tab label: the same string
+ *  is written to `document.title`, so `useWindowTitle`'s
+ *  "c0wrk - Project: Session" template lands in the tab strip exactly as it
+ *  lands in the desktop title bar.
+ *
  *  Unlike the other wrappers here this one NO-OPS when the runtime is absent
  *  instead of throwing, mirroring `subscribe`: the title is a purely cosmetic
  *  side effect driven from a `useEffect`, and every hook test runs under
  *  jsdom without `window.runtime`. A throw would turn a decorative update
  *  into a render-time failure. */
 export function setWindowTitle(title: string): void {
-  if (transportMode === 'web') return // a browser tab is not the desktop window
+  if (transportMode === 'web') {
+    if (typeof document !== 'undefined') document.title = title
+    return
+  }
   if (typeof window === 'undefined' || !window.runtime) return
   getRuntime().WindowSetTitle(title)
 }

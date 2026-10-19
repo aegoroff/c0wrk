@@ -926,12 +926,20 @@ type WebAccessInfo struct {
 	URL string `json:"url"`
 	// Port is the resolved listen port; 0 while not running.
 	Port int `json:"port"`
+	// ConfiguredPort is the PERSISTED web_access.port — the pin, not the
+	// runtime state: 0 = auto (a free port is picked at every start),
+	// 1–65535 = the operator-pinned port every start must bind.
+	ConfiguredPort int `json:"configured_port"`
 	// Token is the credential a browser pastes at the login screen: the
 	// effective per-launch token while running, else the configured token
 	// (empty when the next launch would mint a fresh per-launch one). This is
 	// the ONLY channel the token leaves the sidecar through — it is never
 	// logged and never reaches the web dispatch surface.
 	Token string `json:"token"`
+	// TokenPinned reports whether a static token is persisted in config.yaml
+	// (a credential that survives restarts) as opposed to the default
+	// ephemeral per-launch secret.
+	TokenPinned bool `json:"token_pinned"`
 }
 
 // GetWebAccessInfo reports the sidecar state for Settings → Web Access.
@@ -941,6 +949,8 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 	info := WebAccessInfo{}
 	if cfg, _ := a.configRef(); cfg != nil {
 		info.Enabled = cfg.WebAccess.Enabled
+		info.ConfiguredPort = cfg.WebAccess.Port
+		info.TokenPinned = cfg.WebAccess.Token != ""
 	}
 	if srv := a.webAccess.Load(); srv != nil {
 		info.Running = true
@@ -1010,6 +1020,80 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 		return fmt.Errorf("web access disabled, but the sidecar stop failed: %w", err)
 	}
 	return nil
+}
+
+// SetWebAccessConnection persists the pinned port and token (Settings → Web
+// Access) and applies them live: a running sidecar is hot-restarted onto the
+// new connection settings. Port 0 = auto (a free port at every start),
+// 1–65535 = pinned; an empty token = ephemeral per-launch secret, a non-empty
+// one = a static credential persisted in config.yaml that survives restarts.
+// A request matching the current pin is a no-op.
+//
+// Failure ordering mirrors the toggle's honesty rules: the config write is
+// rolled back if persisting fails, and if the RESTART with the new settings
+// fails (e.g. the pinned port is already taken) the previous pin is restored,
+// persisted, and the sidecar is brought back on it — the caller gets an error
+// explaining both, and the app is never left silently without a sidecar it
+// had before the call. Locking discipline: webAccessMu, exactly like
+// SetWebAccessEnabled (see its comment for the desktop-owned config seam).
+func (a *App) SetWebAccessConnection(port int, token string) error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	if err := config.ValidateWebAccessPort(port); err != nil {
+		return err
+	}
+	token = strings.TrimSpace(token)
+
+	if cfg.WebAccess.Port == port && cfg.WebAccess.Token == token {
+		return nil
+	}
+
+	prev := cfg.WebAccess
+	wasRunning := a.webAccess.Load() != nil
+	cfg.WebAccess.Port = port
+	cfg.WebAccess.Token = token
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess = prev
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+	if !wasRunning {
+		return nil
+	}
+
+	// Hot-restart onto the new pin. The stop's error is deliberately not
+	// fatal here: the start below needs the listener gone, and a failed stop
+	// surfaces through the start failure (the old socket still holds the
+	// port) — the rollback path then restores the previous pin.
+	sctx, cancel := context.WithTimeout(context.Background(), webAccessStopBudget)
+	defer cancel()
+	_ = a.stopWebAccessLocked(sctx)
+	srv, err := a.startWebAccessLocked(a.log())
+	if err == nil {
+		logWebAccessReady(a.log(), srv)
+		return nil
+	}
+
+	// The new pin does not serve. Restore the previous one on disk and bring
+	// the sidecar back up on it; both failures are named to the caller.
+	cfg.WebAccess = prev
+	if saveErr := config.Save(cfg, cfgPath); saveErr != nil {
+		a.log().Error("web access: failed to persist the rolled-back connection settings", "err", saveErr)
+	}
+	restored, restartErr := a.startWebAccessLocked(a.log())
+	if restartErr != nil {
+		return fmt.Errorf(
+			"web access connection not applied: the sidecar failed to start with the new settings (%w) and could not be restored on the previous ones (%w) — it will retry on the next launch",
+			err, restartErr)
+	}
+	logWebAccessReady(a.log(), restored)
+	return fmt.Errorf(
+		"web access connection not applied: the sidecar failed to start with the new settings (%w); the previous settings were restored and the sidecar is running again",
+		err)
 }
 
 // startWebAccessLocked constructs and starts the sidecar and publishes the
