@@ -426,7 +426,11 @@ export function useChatEvents(sessionId: string | null): void {
     // --- message_received ---
     // The backend emits this after persisting every user message (normal
     // send, nudge-resume, live interjection) to ALL surfaces watching the
-    // session. The surface that sent the message already rendered its
+    // session. The event text is the RAW user input (pre-preprocessing) —
+    // byte-identical to the optimistic card and the persisted DB row; the
+    // orchestrator-facing dispatch text may be the processed form (mention
+    // refs stripped), so a content-equality dedup only holds against the raw
+    // form. The surface that sent the message already rendered its
     // optimistic card (useMessageSender before the RPC; useReviewActions for
     // a review submit), so its event is the delivery echo — dropped by
     // shouldAddReceivedUserMessage. Every OTHER surface watching the session

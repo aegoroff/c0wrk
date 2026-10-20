@@ -496,7 +496,16 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, a
 	// session-scoped auxiliary working directories (best-effort: never blocks).
 	f.autoAddPromptWorkDirs(id, text)
 
-	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
+	// The manager's task dispatch consumes the PREPROCESSED text (mention
+	// refs stripped, @file refs resolved — what the orchestrator and the LLM
+	// must see), but the message_received echo it emits must carry the RAW
+	// input: the user row persisted below stores Content: text and the
+	// sending surface's optimistic card renders the raw form, so the
+	// useChatEvents dedup compares the echo against the raw text. Without
+	// this, any message whose preprocessing actually changed the text (a
+	// leading "/skill" mention, an @file ref) renders twice on the sending
+	// surface: the optimistic card plus a ref-less duplicate from the echo.
+	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, session.WithEchoText(text))
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

@@ -456,9 +456,13 @@ export interface MemoryReadData {
 /**
  * A user message was persisted for this session (normal send, nudge-resume,
  * live interjection). Emitted as a dedicated `message_received` session
- * event. The surface that sent the message already rendered its optimistic
- * card and dedupes this echo (useChatEvents); every other surface watching
- * the session has no optimistic copy and renders the card from this event.
+ * event. `text` is the RAW user input (pre-preprocessing) — byte-identical to
+ * the sending surface's optimistic card and to the persisted DB row, both of
+ * which hold the unprocessed form; the orchestrator-facing dispatch text may
+ * be the processed form (mention refs stripped, @file refs resolved). The
+ * surface that sent the message already rendered its optimistic card and
+ * dedupes this echo (useChatEvents); every other surface watching the session
+ * has no optimistic copy and renders the card from this event.
  */
 export interface MessageReceivedData {
   readonly session_id: string
