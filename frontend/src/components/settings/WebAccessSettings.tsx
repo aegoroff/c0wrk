@@ -21,8 +21,9 @@ import {
   setWebAccessEnabled,
   type WebAccessInfo,
 } from '@/api/webAccess'
-import { clipboardSetText } from '@/api/runtime'
+import { clipboardSetText, emit } from '@/api/runtime'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 import { Input } from '@/components/ui/input'
 import { Toggle } from './ModelProfilesControls'
 
@@ -143,14 +144,21 @@ export function WebAccessSettings() {
   )
 
   const handleCopy = useCallback(async (key: 'url' | 'token', text: string) => {
-    try {
-      await clipboardSetText(text)
-      setCopiedKey(key)
-      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
-      copyTimer.current = window.setTimeout(() => setCopiedKey(''), 1600)
-    } catch (err) {
-      logger.error('Failed to copy to clipboard:', err)
+    // `clipboardSetText` reports the verdict as a boolean — `false` (or a
+    // rejection, folded in defensively) is a failed copy: log it, toast it,
+    // and never flash the success state.
+    const ok = await clipboardSetText(text).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy to clipboard')
+      emit('runtime_error', {
+        id: generateUUID(),
+        message: 'Failed to copy to clipboard',
+      })
+      return
     }
+    setCopiedKey(key)
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => setCopiedKey(''), 1600)
   }, [])
 
   /** Commit the address draft (Enter or focus loss): the local pattern

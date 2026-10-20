@@ -597,16 +597,70 @@ export async function clipboardSetText(text: string): Promise<boolean> {
     // to a normal browser page driven by a user gesture. Failure → false,
     // mirroring the Wails ClipboardSetText contract (never throws to callers).
     try {
-      if (typeof navigator === 'undefined' || !navigator.clipboard) return false
-      await navigator.clipboard.writeText(text)
-      return true
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(text)
+        return true
+      }
     } catch (err) {
       logger.warn('[clipboard] write failed (web transport)', err)
-      return false
     }
+    // The async Clipboard API is missing (older browsers, insecure origins)
+    // or refused the write — degrade to the legacy execCommand path instead
+    // of reporting a bare failure.
+    const copied = legacyClipboardCopy(text)
+    if (!copied) logger.warn('[clipboard] legacy execCommand copy failed (web transport)')
+    return copied
   }
   const rt = getRuntime()
   return rt.ClipboardSetText(text)
+}
+
+/** One legacy clipboard write via `document.execCommand('copy')`.
+ *
+ *  Fallback for contexts without a working `navigator.clipboard`: a hidden
+ *  readonly `<textarea>` carrying the text is selected and the deprecated
+ *  synchronous copy command is invoked. Best-effort by contract — reports
+ *  `true` only when the command itself reported success, restores the user's
+ *  selection and removes the node on every exit path, and never throws (a
+ *  missing DOM or a failing command simply yields `false`; the caller logs). */
+function legacyClipboardCopy(text: string): boolean {
+  if (typeof document === 'undefined' || !document.body) return false
+  const selection = typeof document.getSelection === 'function' ? document.getSelection() : null
+  const savedRanges: Range[] = []
+  if (selection) {
+    for (let i = 0; i < selection.rangeCount; i += 1) {
+      savedRanges.push(selection.getRangeAt(i).cloneRange())
+    }
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.readOnly = true
+  // Rendered but invisible and inert: `display:none` would make the
+  // programmatic selection a no-op on some engines, and the textarea must
+  // stay out of the layout and the pointer's way.
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  try {
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+    return document.execCommand('copy') === true
+  } catch {
+    return false
+  } finally {
+    try {
+      textarea.remove()
+      // Restore whatever the user had selected before the hidden textarea
+      // stole the selection.
+      if (selection) {
+        selection.removeAllRanges()
+        for (const range of savedRanges) selection.addRange(range)
+      }
+    } catch {
+      // Best-effort restoration — never mask the copy result.
+    }
+  }
 }
 
 /** Set the native window title.

@@ -11,7 +11,9 @@
 //     into the same dispatchBatchedEvent fan-out the desktop uses;
 //   - the websocket reconnects with exponential backoff (pinned on virtual
 //     time, no jitter by design);
-//   - the capability helpers degrade to their browser equivalents.
+//   - the capability helpers degrade to their browser equivalents (clipboard
+//     writes fall back to the legacy hidden-textarea execCommand path when
+//     the async Clipboard API is missing or refuses the write).
 // The desktop-transport regression coverage (batch envelope fan-out) lives in
 // runtime.test.ts and must stay untouched.
 
@@ -150,6 +152,16 @@ function webSocket(): FakeWebSocket {
   return sock
 }
 
+/** jsdom does not implement `document.execCommand` — the property does not
+ *  even exist — so the legacy-copy tests install their own verdict stub.
+ *  Cleanup happens in the top-level afterEach (the jsdom document is shared
+ *  across the whole file). */
+function installExecCommand(impl: () => boolean): ReturnType<typeof vi.fn> {
+  const stub = vi.fn(impl)
+  Object.defineProperty(document, 'execCommand', { value: stub, configurable: true, writable: true })
+  return stub
+}
+
 let loggerWarn: ReturnType<typeof vi.fn>
 
 beforeEach(async () => {
@@ -172,6 +184,7 @@ afterEach(() => {
   delete (window as unknown as Record<string, unknown>).go
   delete (window as unknown as Record<string, unknown>).runtime
   Reflect.deleteProperty(navigator, 'clipboard')
+  Reflect.deleteProperty(document, 'execCommand')
 })
 
 describe('transport detection', () => {
@@ -579,19 +592,115 @@ describe('web capability helpers', () => {
   it('clipboardSetText writes through navigator.clipboard and reports success', async () => {
     const writeText = vi.fn(async () => undefined)
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const execCommand = installExecCommand(() => true)
     await expect(runtime.clipboardSetText('hello')).resolves.toBe(true)
     expect(writeText).toHaveBeenCalledWith('hello')
+    // The async API succeeded — the legacy fallback must stay untouched and
+    // leave no staging node behind.
+    expect(execCommand).not.toHaveBeenCalled()
+    expect(document.body.querySelectorAll('textarea')).toHaveLength(0)
   })
 
-  it('clipboardSetText reports false on rejection and on a missing clipboard API', async () => {
+  it('clipboardSetText falls back to the hidden-textarea execCommand path when navigator.clipboard is missing', async () => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+    const during: HTMLTextAreaElement[] = []
+    const execCommand = installExecCommand(() => {
+      const el = document.body.querySelector<HTMLTextAreaElement>('textarea')
+      if (el) during.push(el)
+      return true
+    })
+    await expect(runtime.clipboardSetText('legacy text')).resolves.toBe(true)
+
+    expect(execCommand).toHaveBeenCalledTimes(1)
+    expect(during).toHaveLength(1)
+    const staged = during[0]
+    if (!staged) throw new Error('no staging textarea existed during the copy')
+    // The staging node carries the text, is readonly, and is invisible and
+    // inert (fixed-position, zero opacity, no pointer events).
+    expect(staged.value).toBe('legacy text')
+    expect(staged.readOnly).toBe(true)
+    expect(staged.style.position).toBe('fixed')
+    expect(staged.style.opacity).toBe('0')
+    expect(staged.style.pointerEvents).toBe('none')
+    // The staging node is removed again afterwards.
+    expect(document.body.querySelectorAll('textarea')).toHaveLength(0)
+  })
+
+  it('clipboardSetText reports the execCommand verdict — false when the legacy copy fails', async () => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+    installExecCommand(() => false)
+    await expect(runtime.clipboardSetText('x')).resolves.toBe(false)
+    expect(loggerWarn).toHaveBeenCalledWith('[clipboard] legacy execCommand copy failed (web transport)')
+    expect(document.body.querySelectorAll('textarea')).toHaveLength(0)
+  })
+
+  it('clipboardSetText falls back when writeText rejects, preserving the write-failure warning', async () => {
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: async () => Promise.reject(new DOMException('denied', 'NotAllowedError')) },
       configurable: true,
     })
-    await expect(runtime.clipboardSetText('x')).resolves.toBe(false)
+    const execCommand = installExecCommand(() => true)
+    await expect(runtime.clipboardSetText('denied-then-legacy')).resolves.toBe(true)
 
+    expect(execCommand).toHaveBeenCalledTimes(1)
+    expect(loggerWarn).toHaveBeenCalledWith('[clipboard] write failed (web transport)', expect.anything())
+    expect(document.body.querySelectorAll('textarea')).toHaveLength(0)
+  })
+
+  it('clipboardSetText restores the user selection after a legacy copy', async () => {
     Reflect.deleteProperty(navigator, 'clipboard')
+    installExecCommand(() => true)
+    const target = document.createElement('div')
+    target.textContent = 'user selected text'
+    document.body.appendChild(target)
+    const selection = document.getSelection()
+    if (!selection) throw new Error('jsdom selection unavailable')
+    const range = document.createRange()
+    range.selectNodeContents(target)
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    try {
+      await expect(runtime.clipboardSetText('x')).resolves.toBe(true)
+      // The hidden textarea stole the selection mid-copy; the user's range is
+      // back afterwards.
+      expect(selection.rangeCount).toBe(1)
+      expect(selection.toString()).toBe('user selected text')
+    } finally {
+      selection.removeAllRanges()
+      target.remove()
+    }
+  })
+
+  it('clipboardSetText reports false without a document — there is no fallback surface', async () => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+    vi.stubGlobal('document', undefined)
     await expect(runtime.clipboardSetText('x')).resolves.toBe(false)
+    expect(loggerWarn).toHaveBeenCalledWith('[clipboard] legacy execCommand copy failed (web transport)')
+  })
+
+  it('clipboardSetText never throws — execCommand failures resolve to false', async () => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+    installExecCommand(() => {
+      throw new Error('execCommand exploded')
+    })
+    await expect(runtime.clipboardSetText('x')).resolves.toBe(false)
+    expect(document.body.querySelectorAll('textarea')).toHaveLength(0)
+    expect(loggerWarn).toHaveBeenCalledWith('[clipboard] legacy execCommand copy failed (web transport)')
+  })
+
+  it('clipboardSetText never throws — a synchronously-throwing writeText degrades to the fallback', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: {
+        writeText: () => {
+          throw new TypeError('sync throw')
+        },
+      },
+      configurable: true,
+    })
+    const execCommand = installExecCommand(() => true)
+    await expect(runtime.clipboardSetText('x')).resolves.toBe(true)
+    expect(execCommand).toHaveBeenCalledTimes(1)
   })
 
   it('openExternalURL opens a new browser tab with noopener', () => {

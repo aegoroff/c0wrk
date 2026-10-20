@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Copy, Check, Save } from 'lucide-react'
+import { Copy, Check, Save, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
@@ -16,7 +16,7 @@ interface CopyButtonProps {
 }
 
 /** Which success state the button is flashing, if any. */
-type Feedback = 'copied' | 'saved' | null
+type Feedback = 'copied' | 'saved' | 'failed' | null
 
 /**
  * CopyButton — small, low-contrast copy-to-clipboard control.
@@ -55,10 +55,15 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
     // rules) — that was the root cause of the message copy buttons needing
     // several clicks to register. See `clipboardSetText` in @/api/runtime.
     clipboardSetText(text)
-      .then(() => flashFeedback('copied'))
+      .then((ok) => {
+        // `false` is a failed copy (see `clipboardSetText`) — it must never
+        // render the success state.
+        flashFeedback(ok ? 'copied' : 'failed')
+      })
       .catch(() => {
-        // Clipboard write can fail (permissions / unsupported environment);
-        // fail silently rather than disrupting the chat UX.
+        // `clipboardSetText` resolves instead of throwing; this is a safety
+        // net — fail with the same visible signal rather than silently.
+        flashFeedback('failed')
       })
   }, [text, flashFeedback])
 
@@ -96,8 +101,17 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
   }, [text, flashFeedback])
 
   const currentLabel =
-    feedback === 'copied' ? 'Copied' : feedback === 'saved' ? 'Saved' : shiftHeld ? 'Save' : label
-  const Icon = feedback !== null ? Check : shiftHeld ? Save : Copy
+    feedback === 'copied'
+      ? 'Copied'
+      : feedback === 'saved'
+        ? 'Saved'
+        : feedback === 'failed'
+          ? 'Failed'
+          : shiftHeld
+            ? 'Save'
+            : label
+  const Icon =
+    feedback === 'failed' ? X : feedback !== null ? Check : shiftHeld ? Save : Copy
 
   return (
     <button
@@ -110,7 +124,12 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
       title={currentLabel}
       aria-label={currentLabel}
     >
-      <Icon className={cn('h-3.5 w-3.5', feedback !== null && 'text-success')} />
+      <Icon
+        className={cn(
+          'h-3.5 w-3.5',
+          feedback === 'failed' ? 'text-destructive' : feedback !== null && 'text-success',
+        )}
+      />
       <span>{currentLabel}</span>
     </button>
   )

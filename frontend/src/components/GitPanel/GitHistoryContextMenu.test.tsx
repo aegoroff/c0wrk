@@ -189,6 +189,29 @@ describe('GitHistoryContextMenu — Copy', () => {
     await flush()
     expect(runtimeMocks.clipboardSetText).toHaveBeenCalledWith('abc1234')
   })
+
+  it('toasts and logs when the SHA copy reports false — no silent success', async () => {
+    renderMenu({ refs: [] })
+    runtimeMocks.clipboardSetText.mockResolvedValue(false)
+    clickItem('Copy')
+    await flush()
+    expect(runtimeMocks.clipboardSetText).toHaveBeenCalledWith('abc1234')
+    expect(runtimeMocks.emit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy commit SHA' }),
+    )
+  })
+
+  it('treats a clipboard write rejection as failure too (the defensive catch folds it to false)', async () => {
+    renderMenu({ refs: [] })
+    runtimeMocks.clipboardSetText.mockRejectedValue(new Error('bridge exploded'))
+    clickItem('Copy')
+    await flush()
+    expect(runtimeMocks.emit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy commit SHA' }),
+    )
+  })
 })
 
 describe('GitHistoryContextMenu — Create › Branch', () => {
@@ -361,6 +384,20 @@ describe('GitHistoryContextMenu — Tag submenu', () => {
     clickItemDeep('Copy')
     await flush()
     expect(runtimeMocks.clipboardSetText).toHaveBeenCalledWith('v1.0')
+  })
+
+  it('toasts and logs when the tag-name copy reports false', async () => {
+    renderMenu({ refs: ['tag: v1.0'] })
+    runtimeMocks.clipboardSetText.mockResolvedValue(false)
+    hoverSubTrigger('Tag')
+    hoverSubTrigger('v1.0')
+    clickItemDeep('Copy')
+    await flush()
+    expect(runtimeMocks.clipboardSetText).toHaveBeenCalledWith('v1.0')
+    expect(runtimeMocks.emit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy tag name' }),
+    )
   })
 
   it('deletes a local tag from the per-tag submenu', async () => {

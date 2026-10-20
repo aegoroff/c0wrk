@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   regenerateWebAccessToken: vi.fn(),
   setWebAccessToken: vi.fn(),
   clipboardSetText: vi.fn(),
+  emit: vi.fn(),
 }))
 
 // The RPC wrappers are mocked; parseWebAccessAddress and parseWebAccessToken
@@ -27,6 +28,7 @@ vi.mock('@/api/webAccess', async (importOriginal) => ({
 
 vi.mock('@/api/runtime', () => ({
   clipboardSetText: mocks.clipboardSetText,
+  emit: mocks.emit,
 }))
 
 vi.mock('@/lib/logger', () => ({
@@ -34,6 +36,7 @@ vi.mock('@/lib/logger', () => ({
 }))
 
 import { WebAccessSettings } from './WebAccessSettings'
+import { logger } from '@/lib/logger'
 
 const runningInfo = {
   enabled: true,
@@ -202,6 +205,24 @@ describe('WebAccessSettings', () => {
     clickButton('web-access-copy-token')
     await flush()
     expect(mocks.clipboardSetText).toHaveBeenCalledWith(runningInfo.token)
+  })
+
+  it('toasts and logs on a false clipboard verdict instead of flashing the success state', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    mocks.clipboardSetText.mockResolvedValue(false)
+    render()
+    await flush()
+    clickButton('web-access-copy-url')
+    await flush()
+    expect(mocks.clipboardSetText).toHaveBeenCalledWith(runningInfo.url)
+    // The copy affordance never flips to the success Check icon...
+    expect(byTestId('web-access-copy-url')?.querySelector('svg.lucide-check')).toBeNull()
+    // ...the failure is logged and surfaced as a runtime_error toast.
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Failed to copy to clipboard')
+    expect(mocks.emit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy to clipboard' }),
+    )
   })
 
   it('enabling calls the toggle RPC and adopts the re-read authoritative state', async () => {

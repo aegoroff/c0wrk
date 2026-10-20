@@ -44,6 +44,9 @@ describe('CopyButton', () => {
 
   beforeEach(() => {
     vi.useFakeTimers()
+    // Pin the success verdict explicitly: the failure tests below override it,
+    // and this per-test setup keeps that override from leaking across tests.
+    vi.mocked(clipboardSetText).mockResolvedValue(true)
     // Set the Web Clipboard API to undefined to prove the native path is taken.
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -104,6 +107,44 @@ describe('CopyButton', () => {
     })
     expect(container.textContent).toContain('Copy')
     expect(container.textContent).not.toContain('Copied')
+  })
+
+  it('flashes "Failed" with a destructive icon instead of "Copied" when the clipboard write reports false', async () => {
+    vi.mocked(clipboardSetText).mockResolvedValue(false)
+    render({ text: 'answer text' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(clipboardSetText).toHaveBeenCalledTimes(1)
+    expect(clipboardSetText).toHaveBeenCalledWith('answer text')
+    // A false verdict must never render the success state...
+    expect(container.textContent).not.toContain('Copied')
+    // ...the failure signal is the "Failed" label plus the red X icon.
+    expect(container.textContent).toContain('Failed')
+    expect(button.getAttribute('aria-label')).toBe('Failed')
+    const icon = button.querySelector('svg')
+    expect(icon?.getAttribute('class')).toContain('text-destructive')
+    expect(icon?.getAttribute('class')).not.toContain('text-success')
+    // The failure flash is bounded like the success flash: back to idle after 2s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+    expect(container.textContent).not.toContain('Failed')
+    expect(container.textContent).toContain('Copy')
+  })
+
+  it('flashes "Failed" when the clipboard write rejects (the defensive catch path)', async () => {
+    vi.mocked(clipboardSetText).mockRejectedValue(new Error('transport exploded'))
+    render({ text: 'answer text' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(container.textContent).not.toContain('Copied')
+    expect(container.textContent).toContain('Failed')
   })
 
   it('morphs into "Save" while Shift is held and back on release', () => {

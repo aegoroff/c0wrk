@@ -59,7 +59,15 @@ vi.mock('@/stores/fileViewerStore', () => ({
   useFileViewerStore: { getState: () => fileViewerMock },
 }))
 
+// The false-verdict clipboard tests below deliberately drive the menu's
+// failure path; mock the logger so the expected errors don't pollute the
+// vitest output.
+vi.mock('@/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
+}))
+
 import { FileTreeContextMenu } from './FileTreeContextMenu'
+import { logger } from '@/lib/logger'
 import {
   STUDY_PAPER_SKILL,
   buildStudyPrompt,
@@ -171,6 +179,42 @@ describe('FileTreeContextMenu — clipboard', () => {
 
     expect(clipboardSetText).toHaveBeenCalledWith('/ws/src')
     expect(eventsEmit).not.toHaveBeenCalled()
+  })
+
+  it('Copy Path surfaces a runtime_error toast and logs when the clipboard write reports false', async () => {
+    clipboardSetText.mockResolvedValue(false)
+    renderMenu(dirEntry, '/ws')
+
+    await act(async () => {
+      menuItem('Copy Path').click()
+      await Promise.resolve()
+    })
+
+    expect(clipboardSetText).toHaveBeenCalledWith('/ws/src')
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy path to clipboard' }),
+    )
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Failed to copy path to clipboard')
+  })
+
+  it('Copy Relative Path surfaces a runtime_error toast and logs when the clipboard write reports false', async () => {
+    clipboardSetText.mockResolvedValue(false)
+    renderMenu(dirEntry, '/ws')
+
+    await act(async () => {
+      menuItem('Copy Relative Path').click()
+      await Promise.resolve()
+    })
+
+    expect(clipboardSetText).toHaveBeenCalledWith('src')
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy relative path to clipboard' }),
+    )
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith(
+      'Failed to copy relative path to clipboard',
+    )
   })
 })
 
