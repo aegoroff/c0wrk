@@ -195,6 +195,16 @@ func (c *Capture) RemoveMarker() {
 	_ = os.Remove(c.markerPath)
 }
 
+// Banner prefixes bracketing every run in stderr.log. Exported so readers of
+// the capture (the webview GPU post-mortem) can split the append-only file
+// into runs without duplicating the wording.
+const (
+	// RunBannerPrefix opens a run's segment (written by Install).
+	RunBannerPrefix = "=== c0wrk-desktop pid="
+	// ExitBannerPrefix closes a run that reached a clean exit (LogExit).
+	ExitBannerPrefix = "=== c0wrk-desktop exit code="
+)
+
 // LogExit writes the final exit banner with the process exit code and
 // uptime, giving every run a closing bracket that pairs with the startup
 // banner. Call it in main right before os.Exit. Nil-tolerant.
@@ -202,7 +212,7 @@ func (c *Capture) LogExit(code int) {
 	if c == nil {
 		return
 	}
-	c.writeLine("=== c0wrk-desktop exit code=" + strconv.Itoa(code) +
+	c.writeLine(ExitBannerPrefix + strconv.Itoa(code) +
 		" uptime=" + time.Since(c.startedAt).Round(time.Second).String() +
 		" at=" + time.Now().Format(time.RFC3339) + " ===")
 	_ = c.file.Sync()
@@ -228,7 +238,7 @@ func ForceExit(code int) {
 // OS crash reports and let multiple runs be told apart in the append-only
 // file.
 func (c *Capture) writeBanner() {
-	c.writeLine("=== c0wrk-desktop pid=" + strconv.Itoa(os.Getpid()) +
+	c.writeLine(RunBannerPrefix + strconv.Itoa(os.Getpid()) +
 		" version=" + version.Version + " commit=" + version.GitCommit +
 		" start=" + c.startedAt.Format(time.RFC3339) + " ===")
 }
