@@ -1192,3 +1192,57 @@ describe('step context tokens (per-step context_fill used/max totals)', () => {
     expect(useChatStore.getState()).toBe(before)
   })
 })
+
+describe('historyLoaded marker (the ChatArea history-loading spinner)', () => {
+  beforeEach(() => {
+    useChatStore.setState({ historyLoaded: new Set<string>() })
+  })
+
+  it('markHistoryLoaded marks a session settled (success or failure both call it)', () => {
+    useChatStore.getState().markHistoryLoaded('hl-sess-1')
+    expect(useChatStore.getState().historyLoaded.has('hl-sess-1')).toBe(true)
+  })
+
+  it('markHistoryLoaded is idempotent (re-mark keeps state identity — React #185)', () => {
+    useChatStore.getState().markHistoryLoaded('hl-sess-1')
+    const before = useChatStore.getState()
+    useChatStore.getState().markHistoryLoaded('hl-sess-1')
+    expect(useChatStore.getState()).toBe(before)
+  })
+
+  it('keeps other sessions isolated', () => {
+    useChatStore.getState().markHistoryLoaded('hl-sess-1')
+    expect(useChatStore.getState().historyLoaded.has('hl-sess-2')).toBe(false)
+  })
+
+  it('dropSessions removes the deleted sessions\' markers and keeps the rest', () => {
+    const store = useChatStore.getState()
+    store.markHistoryLoaded('hl-sess-1')
+    store.markHistoryLoaded('hl-sess-2')
+    store.markHistoryLoaded('hl-sess-3')
+    useChatStore.getState().dropSessions(['hl-sess-1', 'hl-sess-3'])
+    const loaded = useChatStore.getState().historyLoaded
+    expect(loaded.has('hl-sess-1')).toBe(false)
+    expect(loaded.has('hl-sess-3')).toBe(false)
+    expect(loaded.has('hl-sess-2')).toBe(true)
+  })
+
+  it('dropSessions copies the Set once for a whole batch (no per-id churn)', () => {
+    const store = useChatStore.getState()
+    store.markHistoryLoaded('hl-sess-1')
+    store.markHistoryLoaded('hl-sess-2')
+    const before = useChatStore.getState().historyLoaded
+    useChatStore.getState().dropSessions(['hl-sess-1', 'hl-sess-2'])
+    const after = useChatStore.getState().historyLoaded
+    expect(after).not.toBe(before)
+    expect(after.size).toBe(0)
+  })
+
+  it('dropSessions with no marked sessions preserves state identity', () => {
+    const store = useChatStore.getState()
+    store.markHistoryLoaded('hl-sess-1')
+    const before = useChatStore.getState()
+    useChatStore.getState().dropSessions(['unknown-a', 'unknown-b'])
+    expect(useChatStore.getState()).toBe(before)
+  })
+})

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useMemo } from 'react'
-import { useChatStore, useSessionMessages, useSessionWorkUnits } from '@/stores/chatStore'
+import { useChatStore, useSessionMessages, useSessionWorkUnits, useSessionHistoryLoaded } from '@/stores/chatStore'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
 import { groupMessages, stabilizeDisplayItems } from '@/lib/chatUtils'
 import { reloadSessionHistory } from '@/lib/sessionHistoryReload'
@@ -21,7 +21,7 @@ import { ChatInput } from './ChatInput'
 import { ArchivedBanner } from './ArchivedBanner'
 import { ScrollProvider } from './ScrollContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { MessageCircle } from 'lucide-react'
+import { Loader2, MessageCircle } from 'lucide-react'
 import { logger } from '@/lib/logger'
 
 export function ChatArea() {
@@ -49,6 +49,11 @@ export function ChatArea() {
   // completed/interrupted). Boolean coercion keeps the selector referentially
   // stable (undefined -> false).
   const isTaskActive = useChatStore(s => activeSessionId ? (s.taskActive[activeSessionId] ?? false) : false)
+  // Whether the active session's persisted-history load has settled (the
+  // shared loader marks it in a finally — success and failure alike).
+  // Primitive selector, referentially stable. Lets the empty-session branch
+  // tell "still loading" (spinner) from "genuinely empty" (placeholder icon).
+  const historyLoaded = useSessionHistoryLoaded(activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
   // Baseline for transcript stabilization (see the displayItems memo below):
   // the previous committed item tree, reused for identity-stable items.
@@ -165,11 +170,20 @@ export function ChatArea() {
   const inputShell = isArchived ? <ArchivedBanner sessionId={activeSessionId} /> : <ChatInput />
 
   if (!hasContent) {
+    // History (GetSessionHistory + reconcile) still in flight with nothing to
+    // show: spin in place of the empty-session icon so a cold start and a
+    // session switch A→B don't flash the "empty session" placeholder. The
+    // marker settles on BOTH resolve and reject (loader's finally), so a
+    // failed load stops the spin and the error card explains the empty chat;
+    // a resync re-run never reaches this branch while content is on screen.
+    const historyInFlight = !historyLoaded
     return (
       <div className="flex flex-1 flex-col">
         <div className="flex-1 flex items-center justify-center text-muted-foreground">
           <div className="flex flex-col items-center gap-3">
-            <MessageCircle className="h-12 w-12 opacity-20" />
+            {historyInFlight
+              ? <Loader2 className="size-8 animate-spin opacity-30" aria-label="Loading session history" />
+              : <MessageCircle className="h-12 w-12 opacity-20" />}
           </div>
         </div>
         <ErrorBoundary fallback={<div className="text-xs text-destructive p-2">Panel error</div>}>

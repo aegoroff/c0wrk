@@ -14,6 +14,7 @@ import { InlineRenameInput } from "@/components/ui/InlineRenameInput";
 import {
   ArchiveRestore,
   ChevronDown,
+  Loader2,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -196,6 +197,18 @@ export function SessionSelector() {
               onSearchChange={setSearch}
             />
             {showSearch && <DropdownMenuSeparator />}
+
+            {sessions === null && (
+              // Same "not yet loaded" sentinel the sidebar's SessionList
+              // reads (initial value + resetForProjectSwitch): while the
+              // list is in flight the menu shows a loading row instead of
+              // an empty body; a genuinely empty list (`[]`) renders as
+              // before.
+              <div role="status" aria-label="Loading sessions" className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+                <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+                Loading sessions…
+              </div>
+            )}
 
             {sessionListGrouped ? (
               <SessionGroupedList

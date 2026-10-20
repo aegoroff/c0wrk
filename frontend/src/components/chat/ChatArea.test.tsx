@@ -42,14 +42,26 @@ vi.mock('@/stores/sessionStore', async () => {
   }
 })
 
-// --- chatStore: ChatArea only reads streamingText (undefined) + messages ([]) ---
+// --- chatStore ---
+// ChatArea reads streamingText (undefined) + messages ([]) + the
+// history-loaded marker. `chatAreaState` stands in for the chatStore state the
+// spinner branch depends on: `historyLoaded` mirrors the historyLoaded marker
+// (the real store is set by the loader's finally), `messages` stands in for
+// useSessionMessages. Both are mutated by tests; a flip needs an explicit
+// re-render in act (the mock has no subscriptions).
+const chatAreaState = vi.hoisted(() => ({
+  historyLoaded: true,
+  messages: [] as unknown[],
+}))
+
 vi.mock('@/stores/chatStore', () => ({
   useChatStore: Object.assign(
     () => undefined,
-    { getState: () => ({ addMessage: vi.fn(), mergeHistoryMessages: mergeSpy, setTaskActive: vi.fn(), workUnitStatus: {}, scrollPositions: {}, saveScrollPosition: vi.fn(), clearScrollPosition: vi.fn() }) },
+    { getState: () => ({ addMessage: vi.fn(), mergeHistoryMessages: mergeSpy, setTaskActive: vi.fn(), workUnitStatus: {}, scrollPositions: {}, saveScrollPosition: vi.fn(), clearScrollPosition: vi.fn(), markHistoryLoaded: vi.fn() }) },
   ),
-  useSessionMessages: () => [],
+  useSessionMessages: () => chatAreaState.messages,
   useSessionWorkUnits: () => ({}),
+  useSessionHistoryLoaded: () => chatAreaState.historyLoaded,
   selectSessionMessages: () => [],
 }))
 
@@ -124,6 +136,8 @@ describe('ChatArea archived-session input swap', () => {
     document.body.innerHTML = ''
     root = null
     mergeSpy.mockClear()
+    chatAreaState.historyLoaded = true
+    chatAreaState.messages = []
     useSessionStore.setState({ sessions: null, activeSessionId: null })
   })
 
@@ -199,5 +213,69 @@ describe('ChatArea archived-session input swap', () => {
     const merged = calls[calls.length - 1]![1] as Array<{ type: string; content: string }>
     expect(merged.some((m) => m.content === 'Uncommitted changes detected in this repository.')).toBe(false)
     expect(merged.some((m) => m.type === 'user' && m.content === 'do the thing')).toBe(true)
+  })
+})
+
+describe('ChatArea history-loading spinner', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    root = null
+    mergeSpy.mockClear()
+    // Default this describe to "history in flight, nothing on screen yet" —
+    // the cold-start / switched-to-unloaded-session state.
+    chatAreaState.historyLoaded = false
+    chatAreaState.messages = []
+    useSessionStore.setState({ sessions: null, activeSessionId: null })
+  })
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount()
+    })
+    root = null
+  })
+
+  it('spins instead of the empty-session icon while the history load is in flight', async () => {
+    // No content in the store and the historyLoaded marker unset (the shared
+    // loader has not settled): the empty-session placeholder must not flash —
+    // a spinner takes its place, the rest of the shell is untouched.
+    useSessionStore.setState({ sessions: [session({ archived: false })], activeSessionId: 's1' })
+    const container = render(<ChatArea />)
+    await flushEffects()
+
+    expect(container.querySelector('[aria-label="Loading session history"]')).not.toBeNull()
+    expect(container.querySelector('svg.h-12')).toBeNull()
+    expect(container.querySelector('[data-testid="chat-input-stub"]')).not.toBeNull()
+  })
+
+  it('settles to the empty-session placeholder once the load marker is set', async () => {
+    useSessionStore.setState({ sessions: [session({ archived: false })], activeSessionId: 's1' })
+    const container = render(<ChatArea />)
+    await flushEffects()
+    expect(container.querySelector('[aria-label="Loading session history"]')).not.toBeNull()
+
+    // The loader's finally marks the session loaded (an empty history
+    // resolved — this is the "genuinely empty session" outcome) and the real
+    // store notifies subscribers; the mock has none, so re-render explicitly.
+    act(() => {
+      chatAreaState.historyLoaded = true
+      root!.render(<ChatArea />)
+    })
+    await flushEffects()
+
+    expect(container.querySelector('[aria-label="Loading session history"]')).toBeNull()
+    expect(container.querySelector('svg.h-12')).not.toBeNull()
+  })
+
+  it('shows the placeholder immediately for an already-loaded empty session', async () => {
+    // Returning to a session whose load has settled (or a session whose
+    // history resolved earlier in this mount): no spinner, no flash.
+    chatAreaState.historyLoaded = true
+    useSessionStore.setState({ sessions: [session({ archived: false })], activeSessionId: 's1' })
+    const container = render(<ChatArea />)
+    await flushEffects()
+
+    expect(container.querySelector('[aria-label="Loading session history"]')).toBeNull()
+    expect(container.querySelector('svg.h-12')).not.toBeNull()
   })
 })

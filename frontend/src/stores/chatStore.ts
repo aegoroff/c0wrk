@@ -123,6 +123,16 @@ interface ChatState {
   // pinned to the newest content.
   // Cleared when the session is deleted.
   scrollPositions: Record<string, { scrollTop: number; scrollHeight: number }>
+  // Sessions whose persisted-history load has SETTLED — success OR failure
+  // (both mean "no longer in flight"). Written by markHistoryLoaded from the
+  // shared loader (lib/sessionHistoryReload) once GetSessionHistory +
+  // reconcile resolve or reject; ChatArea renders the history-loading spinner
+  // only while the active session has neither content nor this marker, so a
+  // cold start and a session switch A→B don't flash the empty-session
+  // placeholder. Cleared per session by dropSessions (session deletion). A
+  // session absent from the set is "never loaded"; a cancelled load leaves it
+  // that way (its snapshot never reached the store).
+  historyLoaded: Set<string>
 }
 
 interface ChatActions {
@@ -161,6 +171,10 @@ interface ChatActions {
   saveScrollPosition: (sessionId: string, position: { scrollTop: number; scrollHeight: number }) => void
   /** Forget the session's saved scroll position (session deletion). */
   clearScrollPosition: (sessionId: string) => void
+  /** Mark the session's persisted-history load as settled (success or
+   *  failure — both stop the ChatArea loading spinner). Idempotent: an
+   *  already-marked session keeps state identity. */
+  markHistoryLoaded: (sessionId: string) => void
 }
 
 // --- Helpers ---
@@ -235,6 +249,17 @@ export function useSessionWorkUnits(sessionId: string | null): Record<string, Wo
   return useChatStore(s => (sessionId ? s.workUnitStatus[sessionId] : undefined)) ?? EMPTY_WORK_UNIT_STATUS
 }
 
+/**
+ * Hook returning whether the session's persisted-history load has settled
+ * (success OR failure — the flag means "no longer in flight"; the shared
+ * loader marks it in a finally). True for a null session id (there is no
+ * history to wait for). Returns a primitive, so the selector is
+ * referentially stable (no per-render allocation — AGENTS.md).
+ */
+export function useSessionHistoryLoaded(sessionId: string | null): boolean {
+  return useChatStore(s => (sessionId ? s.historyLoaded.has(sessionId) : true))
+}
+
 // --- Store ---
 
 export const useChatStore = create<ChatState & ChatActions>((set) => ({
@@ -256,6 +281,7 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
   workUnitStatus: {},
   workUnitEventAt: {},
   scrollPositions: {},
+  historyLoaded: new Set<string>(),
 
   addMessage: (sessionId, message) => set((s) => {
     const sessionIndex = s.messages[sessionId] ?? {}
@@ -630,8 +656,33 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
         stepContextTokens = rest
       }
     }
-    if (stepContextFill === s.stepContextFill && stepContextTokens === s.stepContextTokens) return s
-    return { stepContextFill, stepContextTokens }
+    // Forget the deleted sessions' history-load markers in the same update
+    // (ONE Set copy for the whole batch): a recreated session with a reused
+    // id must start as "never loaded" again.
+    let historyLoaded = s.historyLoaded
+    let loadedDropped = false
+    for (const sessionId of sessionIds) {
+      if (historyLoaded.has(sessionId)) {
+        if (!loadedDropped) {
+          historyLoaded = new Set(historyLoaded)
+          loadedDropped = true
+        }
+        historyLoaded.delete(sessionId)
+      }
+    }
+    if (stepContextFill === s.stepContextFill && stepContextTokens === s.stepContextTokens && historyLoaded === s.historyLoaded) return s
+    return { stepContextFill, stepContextTokens, historyLoaded }
+  }),
+
+  // Settle the session's history-load marker (ChatArea spinner stop). Set
+  // add/delete are O(1); the Set is copied only on the first mark so an
+  // idempotent re-mark keeps state identity (React #185 — no gratuitous
+  // subscriber sweep).
+  markHistoryLoaded: (sessionId) => set((s) => {
+    if (s.historyLoaded.has(sessionId)) return s
+    const historyLoaded = new Set(s.historyLoaded)
+    historyLoaded.add(sessionId)
+    return { historyLoaded }
   }),
 
   // Merge partial token info into the session entry so event-driven updates

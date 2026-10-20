@@ -30,7 +30,7 @@ type SessionRow = {
 }
 const { sessionMocks } = vi.hoisted(() => ({
   sessionMocks: {
-    sessions: [] as SessionRow[],
+    sessions: null as SessionRow[] | null,
     activeSessionId: null as string | null,
     setActiveSessionId: vi.fn(),
     selectSession: vi.fn(),
@@ -81,6 +81,26 @@ beforeEach(() => {
 })
 
 describe('SessionList', () => {
+  it('renders the loading skeleton instead of the empty text while sessions are not loaded (null sentinel)', () => {
+    sessionMocks.sessions = null
+    const { container } = render(<SessionList />)
+
+    const status = container.querySelector('[role="status"]')
+    expect(status).not.toBeNull()
+    expect(status?.getAttribute('aria-label')).toBe('Loading sessions')
+    // Skeleton rows are pulsing placeholders, not the empty-state copy.
+    expect(status?.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0)
+    expect(container.textContent).not.toContain('No sessions yet')
+  })
+
+  it('keeps the "No sessions yet" empty state for a genuinely empty loaded list', () => {
+    sessionMocks.sessions = []
+    const { container } = render(<SessionList />)
+
+    expect(container.querySelector('[role="status"]')).toBeNull()
+    expect(container.textContent).toContain('No sessions yet')
+  })
+
   it('renders sessions from the store as flat rows', () => {
     sessionMocks.sessions = [
       makeSession({ id: 's1', name: 'Alpha' }),

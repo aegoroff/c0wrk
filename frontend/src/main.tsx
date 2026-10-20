@@ -96,3 +96,17 @@ ReactDOM.createRoot(root).render(
     </ErrorBoundary>
   </React.StrictMode>,
 )
+
+// Boot-loader handoff. index.html ships a static, CSS-only spinner inside
+// #root so the very first HTML paint — before the JS bundle executes —
+// already shows a centered loader styled like the app's own splash. Because
+// the loader (and its inline <style>) live inside the React container, the
+// first render clears them as React takes over, so the handoff to App's
+// splash produces no blank frame. The removal below is an idempotent
+// backstop scheduled on the first animation frame: by then the element is
+// already gone in the normal path and the null-safe lookup is a no-op, but
+// it still guarantees the static loader never outlives the mounted app (and
+// it keeps the spinner on screen if the bundle fails before mounting).
+requestAnimationFrame(() => {
+  document.getElementById('boot-loader')?.remove()
+})

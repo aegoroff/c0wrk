@@ -13,7 +13,10 @@
 // (ChatArea renders its error card; the resync logs and waits for the next
 // trigger). Everything after the merge is best-effort: runtime-status and
 // pending-action wrappers already resolve to null on failure, and the stale
-// resolution persist is fire-and-forget.
+// resolution persist is fire-and-forget. On BOTH outcomes the wrapper's
+// finally settles the chatStore historyLoaded marker, so the ChatArea
+// history-loading spinner never hangs — except for a cancelled attempt
+// (session switched mid-flight), whose snapshot never reached the store.
 
 import { getSessionHistory, getSessionRuntimeStatus, getPendingActions, resolveStalePrompt } from '@/api/chat'
 import { chatMessageToUI, isPersistableHistoryMessage, isLegacyReviewPromptRow, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from '@/lib/chatUtils'
@@ -45,12 +48,36 @@ export async function reloadSessionHistory(
   options: ReloadSessionHistoryOptions = {},
 ): Promise<void> {
   const isCancelled = options.isCancelled ?? (() => false)
-  // statusReadAt predates the snapshot: live events that mutate the activity
-  // label / streaming text after this point are fresher than the snapshot's
-  // phase, and reconcileRuntimeStatus skips overwriting them. loadStartedAt
-  // plays the same role for messages inside mergeHistoryMessages.
   const loadStartedAt = Date.now()
+  try {
+    await loadAndReconcile(sessionId, isCancelled, loadStartedAt)
+  } finally {
+    // Settle the ChatArea history-loading spinner on BOTH outcomes: resolve
+    // (content merged, or a genuinely empty session — the placeholder branch
+    // takes over) and reject (the caller's error card renders instead). A
+    // cancelled attempt — the user switched sessions mid-flight — deliberately
+    // leaves the marker unset: its snapshot never reached the store, so the
+    // next visit to the session spins until its own load settles.
+    if (!isCancelled()) useChatStore.getState().markHistoryLoaded(sessionId)
+  }
+}
 
+/**
+ * The load-and-reconcile body of {@link reloadSessionHistory}, kept as a
+ * separate function so the exported wrapper owns the single try/finally that
+ * settles the historyLoaded spinner marker on both resolve and reject.
+ *
+ * statusReadAt (stamped inside) predates the snapshot: live events that mutate
+ * the activity label / streaming text after this point are fresher than the
+ * snapshot's phase, and reconcileRuntimeStatus skips overwriting them.
+ * loadStartedAt (stamped by the wrapper, before the first await) plays the
+ * same role for messages inside mergeHistoryMessages.
+ */
+async function loadAndReconcile(
+  sessionId: string,
+  isCancelled: () => boolean,
+  loadStartedAt: number,
+): Promise<void> {
   const history = await getSessionHistory(sessionId)
   if (isCancelled()) return
 

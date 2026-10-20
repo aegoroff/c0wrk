@@ -56,6 +56,7 @@ beforeEach(() => {
     runtimeEventAt: {},
     taskActive: {},
     activityStatus: {},
+    historyLoaded: new Set<string>(),
   })
 })
 
@@ -144,5 +145,46 @@ describe('reloadSessionHistory', () => {
     await expect(reloadSessionHistory(SESSION)).rejects.toThrow('rpc down')
     // Nothing was written.
     expect(useChatStore.getState().messageOrder[SESSION]).toBeUndefined()
+  })
+
+  // --- historyLoaded marker (the ChatArea loading spinner) ---
+
+  it('marks the session history-loaded after a successful load', async () => {
+    vi.mocked(getSessionHistory).mockResolvedValue([row(1, 'user', 'hi')])
+
+    await reloadSessionHistory(SESSION)
+
+    expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(true)
+  })
+
+  it('marks the session history-loaded even when the history RPC rejects (the spinner must not hang)', async () => {
+    // The rejection still propagates to the caller (the error card), but the
+    // wrapper's finally settles the marker either way.
+    vi.mocked(getSessionHistory).mockRejectedValue(new Error('rpc down'))
+    await expect(reloadSessionHistory(SESSION)).rejects.toThrow('rpc down')
+
+    expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(true)
+  })
+
+  it('marks the session history-loaded for an empty history (the placeholder may take over)', async () => {
+    vi.mocked(getSessionHistory).mockResolvedValue([])
+
+    await reloadSessionHistory(SESSION)
+
+    expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(true)
+  })
+
+  it('does not mark a cancelled attempt (its snapshot never reached the store)', async () => {
+    let cancelled = false
+    vi.mocked(getSessionHistory).mockImplementation(async () => {
+      // The user switched sessions while the RPC was in flight.
+      cancelled = true
+      return [row(1, 'user', 'hi')]
+    })
+
+    await reloadSessionHistory(SESSION, { isCancelled: () => cancelled })
+
+    // The next visit to the session must spin until its own load settles.
+    expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(false)
   })
 })

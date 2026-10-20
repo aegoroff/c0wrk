@@ -21,6 +21,8 @@ const { messagesRef, EMPTY_WORK_UNITS, itemsCaptured, chatStoreFns, chatStoreSta
     addMessage: vi.fn(),
     mergeHistoryMessages: vi.fn(),
     setTaskActive: vi.fn(),
+    // The shared loader's finally settles the history-load marker.
+    markHistoryLoaded: vi.fn(),
     // ChatScrollManager saves the reading position on unmount.
     saveScrollPosition: vi.fn(),
   },
@@ -42,6 +44,9 @@ vi.mock('@/stores/chatStore', () => ({
   }),
   useSessionMessages: () => messagesRef.current,
   useSessionWorkUnits: () => EMPTY_WORK_UNITS,
+  // History-load marker: these tests mount with settled history (the
+  // stabilization suites exercise the content branch, not the spinner).
+  useSessionHistoryLoaded: () => true,
   selectSessionMessages: () => messagesRef.current,
 }))
 
