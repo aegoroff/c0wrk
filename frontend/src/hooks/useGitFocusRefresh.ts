@@ -11,20 +11,25 @@
 // due. In particular, repeated focus events within the min-interval still
 // send an RPC — the server silently skips the redundant fetch.
 //
-// Mount this hook ONCE at the app root (App.tsx), after runtime readiness:
-// the focus listener is armed only once the Wails bridge is live (either
-// the runtime is already available at mount, or the backend:ready event
-// fires). Cleanup always removes the listener, so an unmounted host never
-// fires refresh requests.
+// Mount this hook ONCE at the app root (App.tsx). The focus listener arms
+// through armWhenRuntimeReady — the shared readiness gate: on the desktop
+// the Wails bridge is detected synchronously and the listener attaches at
+// mount; a web-transport tab (ADR-090) attaches once the transport probe
+// resolves 'web'; the transportless 'none' environment never arms, because
+// before a serving transport exists the RPC is a guaranteed no-op and
+// focus events during the splash phase would be dead weight. (`backend:ready`
+// would NOT work as the arming signal: it is a desktop one-shot — emitted
+// once at startup, desktop/startup.go, right before the sidecar mounts —
+// and never replays, so a tab that joins later would stay disarmed
+// forever.) Cleanup always removes the listener, so an unmounted host
+// never fires refresh requests.
 
 import { useEffect } from 'react'
 import { requestRemoteRefresh } from '@/api/git'
-import { isWailsReady, subscribe } from '@/api/runtime'
+import { armWhenRuntimeReady } from '@/lib/armWhenRuntimeReady'
 
 export function useGitFocusRefresh(): void {
   useEffect(() => {
-    let attached = false
-
     const onFocus = (): void => {
       // Fire-and-forget: requestRemoteRefresh never rejects (errors are
       // swallowed inside the wrapper) and returns immediately — the fetch
@@ -32,29 +37,11 @@ export function useGitFocusRefresh(): void {
       void requestRemoteRefresh()
     }
 
-    const attach = (): void => {
-      if (attached) return
-      attached = true
+    return armWhenRuntimeReady(() => {
       window.addEventListener('focus', onFocus)
-    }
-
-    const detach = (): void => {
-      if (!attached) return
-      attached = false
-      window.removeEventListener('focus', onFocus)
-    }
-
-    // Arm only after runtime readiness: before the Wails bindings exist
-    // the RPC cannot run, so focus events during the splash phase would be
-    // guaranteed no-ops.
-    if (isWailsReady()) {
-      attach()
-      return detach
-    }
-    const offReady = subscribe('backend:ready', attach)
-    return () => {
-      offReady()
-      detach()
-    }
+      return () => {
+        window.removeEventListener('focus', onFocus)
+      }
+    })
   }, [])
 }

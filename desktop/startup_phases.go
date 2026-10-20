@@ -426,6 +426,23 @@ func (a *App) preloadProjectsAndSessions(projectMgr *project.Manager, sessStore 
 	return projects
 }
 
+// isTaskLifecycleEvent reports whether a session event marks a task
+// lifecycle transition that is session-list-visible state: activation
+// (task_started), a terminal state (task_complete, task_cancelled, error,
+// task_failed_resumable), or a cooperative pause/resume (session_paused,
+// session_resumed). Each one is mirrored into the global sessions:changed
+// push so every surface's session list refreshes behind its existing
+// debounced re-read instead of waiting for the 30s safety poll.
+func isTaskLifecycleEvent(eventType string) bool {
+	switch eventType {
+	case "task_started", "task_complete", "task_cancelled", "error",
+		"task_failed_resumable", "session_paused", "session_resumed":
+		return true
+	default:
+		return false
+	}
+}
+
 // buildUIEmitFunc returns the session-event emitter used by the orchestrator
 // and tool callbacks. It logs at debug level and forwards the typed
 // session.Event to the Wails frontend via a.emit so tests can substitute the
@@ -439,6 +456,17 @@ func (a *App) buildUIEmitFunc() func(session.Event) {
 		// event. Settlement/HITL events force an immediate flush.
 		a.emitBatchedEvent(eventName, []any{evt.Data},
 			sessionEventCoalesceKey(evt.SessionID, evt.Type, evt.Data), isImmediateFlushEvent(evt.Type), 0)
+		// Task lifecycle transitions move a session between running / paused /
+		// finished in every session list (sidebar, live-sessions radar), so
+		// mirror each one into the global sessions:changed push. Enqueued in
+		// the batcher's immediate-flush (barrier) class: the lifecycle event
+		// and the list-change push land together, in queue order, without
+		// waiting for the ~16ms tick. No payload, mirroring
+		// emitSessionsChanged: consumers re-read the authoritative list via
+		// ListSessions/ListAllSessions behind their debounces.
+		if isTaskLifecycleEvent(evt.Type) {
+			a.emitBatchedEvent(backend.EventSessionsChanged, nil, "", true, 0)
+		}
 		// session_renamed is a session-list metadata change (it mirrors the
 		// global project:renamed event). Re-emit it globally so the sidebar
 		// updates the title even when the renamed session is NOT the active

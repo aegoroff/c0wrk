@@ -894,6 +894,17 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText string, ac
 	session.cancel = cancel
 	session.mu.Unlock()
 
+	// Activation is committed: announce the task start. This single
+	// activation point covers the fresh, goal, E2S, and continue-interrupted
+	// dispatches below, so one emission announces every way a task can
+	// start. The desktop layer mirrors it into the global sessions:changed
+	// push (start-side lifecycle hook, EventTaskStarted) so every surface's
+	// session list shows the session running immediately. The resume path
+	// announces itself via task_resumed + session_resumed instead — do not
+	// emit task_started there too, or one resume would push the list-change
+	// signal twice.
+	m.emitFunc(Event{SessionID: id, Type: EventTaskStarted})
+
 	// Task-launch boundary: pin the autonomy posture this task will run under
 	// from the current Settings (covers the fresh, goal, E2S, and
 	// continue-interrupted dispatches below — they all run in this task's
@@ -1964,8 +1975,11 @@ type SessionRuntimeStatus struct {
 	// a reason) the strategies that would not shrink the dialogue. Fail-open:
 	// empty whenever the session or its orchestrator is not in memory — a status
 	// poll must never guess "disabled"; a pointless click simply reports the
-	// existing nothing_compacted outcome.
-	CompactionAvailability []core.CompactionAvailability `json:"compaction_availability"`
+	// existing nothing_compacted outcome. omitempty keeps the nil slice OFF the
+	// wire (no "compaction_availability":null): a null the frontend validator
+	// would have to tolerate is indistinguishable from "no prediction" anyway,
+	// so the absent field is the canonical fail-open shape.
+	CompactionAvailability []core.CompactionAvailability `json:"compaction_availability,omitempty"`
 	// Activity is the session's last user-facing activity label
 	// ("Thinking...", "Routing request...", "Generating response...", ...)
 	// tracked by the emitter. It lets the frontend replace the frozen

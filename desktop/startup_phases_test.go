@@ -644,6 +644,73 @@ func TestBuildUIEmitFunc_NonRenameEmitsOnlyScoped(t *testing.T) {
 	}
 }
 
+// TestBuildUIEmitFunc_TaskLifecycleEmitsSessionsChanged pins the task
+// lifecycle → sessions:changed mirror: every lifecycle transition (start,
+// terminal states, pause/resume) must emit its session-scoped event EXACTLY
+// ONCE (the scoped stream is not doubled) plus exactly ONE global
+// sessions:changed push, so every surface's session list refreshes behind
+// its existing debounced re-read instead of the 30s safety poll. Combined
+// with the manager-level TestSendMessage_TaskStartedEmittedOncePerTask
+// (one task_started per real activation, one terminal event per natural
+// termination) this yields exactly one sessions:changed per real lifecycle
+// transition.
+func TestBuildUIEmitFunc_TaskLifecycleEmitsSessionsChanged(t *testing.T) {
+	lifecycleTypes := []string{
+		"task_started", "task_complete", "task_cancelled", "error",
+		"task_failed_resumable", "session_paused", "session_resumed",
+	}
+	for _, eventType := range lifecycleTypes {
+		t.Run(eventType, func(t *testing.T) {
+			a := &App{}
+			rec := &emitRecorder{}
+			a.wailsEmit = rec.emit
+			emit := a.buildUIEmitFunc()
+
+			emit(session.Event{SessionID: "s1", Type: eventType})
+			a.flushEvents()
+
+			events := flattenEmittedBatches(t, rec.snapshot())
+			if len(events) != 2 {
+				t.Fatalf("expected 2 events (session-scoped + one sessions:changed), got %d: %+v", len(events), events)
+			}
+			// First: the session-scoped event, delivered exactly once.
+			if events[0].Name != "session:s1:"+eventType {
+				t.Errorf("events[0] name = %q, want session:s1:%s", events[0].Name, eventType)
+			}
+			// Second: exactly one global sessions:changed, no payload —
+			// consumers re-read the authoritative list.
+			if events[1].Name != backend.EventSessionsChanged {
+				t.Errorf("events[1] name = %q, want %q", events[1].Name, backend.EventSessionsChanged)
+			}
+			if len(events[1].Data) != 0 {
+				t.Errorf("sessions:changed payload = %+v, want none", events[1].Data)
+			}
+		})
+	}
+}
+
+// TestBuildUIEmitFunc_NonLifecycleEmitsNoSessionsChanged is the control for
+// the mirror: an event that carries no session-list-visible state must not
+// push sessions:changed, or every streaming tick would trigger a list
+// re-read on every surface.
+func TestBuildUIEmitFunc_NonLifecycleEmitsNoSessionsChanged(t *testing.T) {
+	a := &App{}
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+	emit := a.buildUIEmitFunc()
+
+	emit(session.Event{SessionID: "s1", Type: "finishing"})
+	a.flushEvents()
+
+	events := flattenEmittedBatches(t, rec.snapshot())
+	if len(events) != 1 {
+		t.Fatalf("expected only the session-scoped event, got %d: %+v", len(events), events)
+	}
+	if events[0].Name != "session:s1:finishing" {
+		t.Errorf("event name = %q, want session:s1:finishing", events[0].Name)
+	}
+}
+
 // --- temp-file fixtures helper ---
 
 func writeTempFile(t *testing.T, dir, name, content string) string {

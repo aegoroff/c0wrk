@@ -14,6 +14,23 @@ import (
 const (
 	EventStepLimit         = "step_limit"
 	EventStepLimitResponse = "step_limit_response"
+	// EventTaskStarted is emitted when a session task is ACTIVATED — the
+	// fresh, goal, E2S, and continue-interrupted dispatches all funnel
+	// through the single activation point in SendMessage, so one emission
+	// covers every way a task can start. It is the start-side counterpart of
+	// the terminal (task_complete / task_cancelled / error /
+	// task_failed_resumable) and pause/resume (session_paused /
+	// session_resumed) lifecycle events, each of which the desktop layer
+	// mirrors into the global sessions:changed push so every surface's
+	// session list (sidebar, live-sessions radar) sees the session turn
+	// running without waiting for the safety poll. The resume path announces
+	// itself through task_resumed + session_resumed instead — task_started
+	// is deliberately NOT emitted there, or one resume would push the
+	// list-change signal twice. No payload: the session-scoped envelope
+	// already names the session. Transient: never persisted (the durable
+	// task record is the task store's own row, and a persisted copy would
+	// render as a dead event_unknown card on reload).
+	EventTaskStarted = "task_started"
 	// EventAutonomyDecision carries an automatic (no-human) security decision
 	// taken under an automatic autonomy posture — silent
 	// (security.silent_mode) or assisted (a strict-judge DENY terminating a

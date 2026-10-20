@@ -181,6 +181,14 @@ Linux only: the resolver is deliberately never called on macOS/Windows because t
 - **Banner lifetime** (Linux only, shown while enabled) → a segmented selector over Default / 10s / 30s / 1m / Never, reading `GetNotificationBannerTimeout` on mount and writing `SetNotificationBannerTimeout` on click (see [Banner lifetime](#banner-lifetime)). The write is optimistic and rolls the selection back when the RPC rejects, so the control never shows a value the backend did not accept. Host detection is `navigator.platform`/`userAgent`; on macOS and Windows the control is absent.
 - **Test button** ("Send test notification", shown while enabled and authorized) → `showTestNotification()` — the platform banner demonstrating the full click round-trip (focus without navigation): the Go-authored banner on the desktop; in the web transport a browser Notification whose click focuses the tab and replays `notification_clicked` LOCALLY through `emitLocalEvent` (ADR-090, decision 11). When the browser permission is still `'default'`, the button's click IS the permission-request gesture; a denial from that click rejects the send and flips the section to the hint.
 
+## Web-transport permission contract
+
+The browser owns banner permission, and the only surfaces that may prompt for it are user gestures — the event pipeline is neither. Three rules (ADR-090, decision 11), all in `frontend/src/api/notifications.ts`:
+
+- **Grant surfaces** — the Settings master toggle and the Test button are the only paths that request `Notification.permission` (`ensureNotificationPermission`, both riding a real click gesture). The boot init only READS the permission; the per-event send path never prompts — a gestureless `requestPermission` is dismissed by most browsers, so trying it would be noise with no grant to show for it.
+- **Send path is granted-only and silent** — the per-event web send (`sendWebNotification`) requires `permission === 'granted'` and otherwise drops the banner WITHOUT an error and WITHOUT throwing into the lib's warn-and-swallow catch: the first dropped banner per app run logs ONE warn naming the current permission and the two grant surfaces; every later occurrence stays at `debug` (`logUngrantedPermission`, once-per-run flag). A burst of cued events against a `'default'`/`'denied'` permission therefore costs zero errors and at most one warn — never the per-event `'Notification permission is not granted'` rejection the earlier draft produced. The granted path is unchanged.
+- **Test button still asks** — `showTestNotification` (web branch) requests the permission through `ensureNotificationPermission()` BEFORE sending; a refusal (`'denied'`, or a dismissed prompt) rejects the send so the Settings section flips to its hint. That rejection is user-initiated (one click, one log line) and is not part of the event pipeline's budget.
+
 ## Diagnostics
 
 A banner that never appears has three very different causes that all used to look identical in the logs — like silence. These two lines tell them apart, both at `DEBUG`:
@@ -200,11 +208,13 @@ Two more lines bound the transport's health, once per run each: `system notifica
 - **Best-effort contract** — no failure path throws into the event pipeline. `sendSystemNotification` catches and logs at warn; init failure is logged and left enabled (individual sends fail softly).
 - **No Wails runtime** (vitest, SSR, `make dev-frontend`) — `isWailsReady()` gates init/send into silent no-ops; `getApp()` never throws.
 - **Authorization** — a denied macOS authorization makes init count as successful (logged at info); the denial surfaces through the Settings hint instead of an error.
+- **Web permission (ADR-090)** — the per-event web send never prompts and never throws on a missing grant: it drops the banner (debug per occurrence, one warn per app run — see [Web-transport permission contract](#web-transport-permission-contract)); only the Settings toggle and the Test button request the permission.
 
 ## Invariants
 
 - **Listener/cue coverage** — every session with a running backend task has a listener that cues BOTH channels: the active session via `useSoundEvents`, every watched background session via `useBackgroundSessionWatcher`. The switch-time corrector is `useTaskFlagRestore` alone; the snapshot refresh fires on mount, live-set changes, every project/session switch, and the visible-window safety poll (see [sound-notifications.md](sound-notifications.md) § Listener-coverage invariant — the same invariant covers both cues).
 - All banner runtime calls go through the Go bindings — never `window.runtime.SendNotification`.
+- The web-transport send path is granted-only: no permission prompt, no throw, at most ONE warn per app run; the Settings toggle and the Test button are the only permission-request gestures.
 - The Go click callback activates the window (reveal + raise + focus) before emitting, unconditionally.
 - A banner about the focused window's active session is suppressed (Telegram rule); the tone never is.
 - Exactly one `OnNotificationResponse` callback is registered per app run (init is memoized; a failed init is retried but never double-registers).

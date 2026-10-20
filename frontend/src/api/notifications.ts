@@ -68,7 +68,9 @@ export async function initSystemNotifications(): Promise<void> {
  * `notification_clicked` with the ids extracted from it on activation).
  * Web transport: a browser Notification whose click handler focuses the tab
  * and replays the same event locally. Rejects on failure (the lib wrapper
- * catches and downgrades to warn).
+ * catches and downgrades to warn); a missing browser permission is NOT a
+ * failure — the web send drops the banner silently instead (see
+ * `sendWebNotification`).
  */
 export async function sendSystemNotification(
   title: string,
@@ -100,22 +102,22 @@ function webNotificationsAvailable(): boolean {
  * useNotificationClicks routes the tab exactly as it routes the desktop
  * window. `tag` collapses per session, so a burst of events for one session
  * replaces the stale banner instead of stacking duplicates.
+ *
+ * Permission contract (ADR-090): the send path NEVER prompts — the grant
+ * gestures are the Settings master toggle and the Test button, and a
+ * gestureless requestPermission here would be dismissed by most browsers
+ * anyway. Without a granted permission the banner is dropped WITHOUT an
+ * error: `debug` per occurrence, ONE `warn` per app run
+ * (`logUngrantedPermission`), so a burst of cued events can never spam the
+ * console.
  */
 async function sendWebNotification(title: string, body: string, data: Record<string, string>): Promise<void> {
   if (!webNotificationsAvailable()) {
     throw new Error('This browser does not expose the Notification API.')
   }
-  if (Notification.permission === 'default') {
-    // Best-effort: without a user gesture most browsers dismiss this prompt,
-    // so the persisted "off→on" Settings click is the real grant path.
-    try {
-      await Notification.requestPermission()
-    } catch (err) {
-      logger.warn('[system-notifications] permission request failed', err)
-    }
-  }
   if (Notification.permission !== 'granted') {
-    throw new Error('Notification permission is not granted — allow notifications for this site.')
+    logUngrantedPermission()
+    return
   }
   const options: NotificationOptions & { data?: Record<string, string> } = { body }
   if (data.sessionId !== undefined) options.tag = `c0wrk:${data.sessionId}`
@@ -138,6 +140,34 @@ async function sendWebNotification(title: string, body: string, data: Record<str
     })
     notification.close()
   }
+}
+
+/** Whether the once-per-run permission warn has fired already. Session-scoped
+ *  on purpose: the first ungranted send explains the silence at warn, every
+ *  later occurrence stays at debug — a burst of cued events costs one line. */
+let permissionWarned = false
+
+/** Drop a banner because the browser permission is not granted: the FIRST
+ *  occurrence per app run warns (naming the current permission and the grant
+ *  surfaces), later ones only debug. Never throws — the send path is
+ *  best-effort and must not spam the event pipeline's log. */
+function logUngrantedPermission(): void {
+  if (permissionWarned) {
+    logger.debug(
+      `[system-notifications] banner skipped: notification permission is '${Notification.permission}'`,
+    )
+    return
+  }
+  permissionWarned = true
+  logger.warn(
+    `[system-notifications] notification permission is '${Notification.permission}' — banners stay silent until it is granted via the Settings toggle or the Test button`,
+  )
+}
+
+/** Test-only: clear the once-per-run permission warn so unit tests start
+ *  from a clean slate. */
+export function __resetPermissionWarnForTest(): void {
+  permissionWarned = false
 }
 
 /**
@@ -189,6 +219,13 @@ export async function checkNotificationAuthorization(): Promise<boolean> {
  *  a rejection the button logs (and flips the section's hint). */
 export async function showTestNotification(): Promise<void> {
   if (isWebTransport()) {
+    // The click IS the documented permission gesture (ADR-090, decision 11):
+    // request first, then send through the granted-only path. A refusal —
+    // a pre-existing 'denied' or a dismissed prompt — rejects so the
+    // Settings section flips to its hint.
+    if (!(await ensureNotificationPermission())) {
+      throw new Error('Notification permission is not granted — allow notifications for this site.')
+    }
     await sendWebNotification(
       'c0wrk — test notification',
       'Click routing works: activating this banner focuses the tab.',

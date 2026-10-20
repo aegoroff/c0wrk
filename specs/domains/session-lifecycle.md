@@ -350,6 +350,12 @@ User sends message
       ├─ After dispatch: persist original text to DB (preserves /skill and
       │   @file refs) with the authoritative classification — is_nudge: true
       │   for live interjections and nudge-resumes, absent for fresh tasks
+      ├─ On activation (single point in SendMessage, before the task
+      │   goroutine launches; covers the fresh, goal, E2S, and
+      │   continue-interrupted dispatches): emit task_started — the desktop
+      │   layer mirrors it into the global sessions:changed push (see the
+      │   task-lifecycle invariant below). The resume path announces itself
+      │   via task_resumed + session_resumed instead
       ├─ On success: persist result, emit task_complete
       └─ On failure: emit task_failed_resumable or error
 ```
@@ -1272,6 +1278,7 @@ type HandleResult struct {
 - The session list RPCs never filter archived sessions; every auto-selection path (backend fallback resolution, frontend restore) skips archived rows itself — an archived session is never auto-selected, even when it carries the freshest activity
 - The session list is refreshed by CONTENT, not by id list: `sessionStore.setSessions` no-ops only when the incoming rows are shallow-equal to the current ones (every field except the live `active` overlay, which no consumer reads). A reload that returns the same sessions still applies refreshed fields — notably `unfinished_task_status`/`has_unfinished_task`, which are the DB FALLBACK for the sidebar status dot and `isSessionBusy`. An id-only dedupe silently dropped such refreshes, leaving the sidebar's failure dot (and the busy flag) stale until an app restart
 - **One live mechanism drives every session-status dot.** The sidebar session row, the live-sessions radar badge, and its dropdown rows all derive their colour from ONE function, `deriveSessionStatus` (`lib/activeSessions.ts`) — priority pending > failed > active > paused > idle over `(taskActive, paused, hasPendingHITL, archived, unfinishedStatus)`. `unfinishedStatus` is the EFFECTIVE unfinished-task status: the live overlay `chatStore.unfinishedTaskStatus[sessionId]` when present, else the DB snapshot's `unfinished_task_status` (`effectiveUnfinishedStatus`). Lifecycle events write the overlay — `task_complete`/`task_cancelled`/`error`/`CancelUnfinishedTask` → `''`, `task_failed_resumable` → `'failed'`, `session_paused` → `'paused'`, and any activation via `setTaskActive(true)` pins it to `''` (a running session supersedes a stale DB status). Both DB snapshots (`sessionStore.sessions` for the sidebar, `activeSessionsStore.sessions` for the radar) are FALLBACKS only, consulted when chatStore holds no live knowledge of the session (a webview reload); the switch-time runtime reconcile re-seeds the overlay from the authoritative status, using the EXACT persisted value reported by `SessionRuntimeStatus.unfinished_task_status` (so an orphaned `in_progress` stays green rather than collapsing to `failed`, keeping a visited session consistent with an unvisited sibling). Consequently EVERY dot repaints live, without a list refresh, and the sidebar and radar can never disagree. The superseded per-store mirror `sessionStore.setUnfinishedTask` was removed.
+- **Task lifecycle refreshes every surface's session LIST, not just its dot.** Dot colour repaints live from the overlay (invariant above), but list membership, ordering (`last_active_at`), and the DB-snapshot fallback fields (`unfinished_task_status`, `has_unfinished_task`) move only when the list is re-read. The desktop emitter therefore mirrors every task lifecycle transition — `task_started`, `task_complete`, `task_cancelled`, `error`, `task_failed_resumable`, `session_paused`, `session_resumed` — into the global `sessions:changed` push through the event batcher's immediate-flush class (`buildUIEmitFunc`). `task_started` is emitted exactly once per activation at `SendMessage`'s single activation point (covering the fresh, goal, E2S, and continue-interrupted dispatches); the resume path announces itself via `task_resumed` + `session_resumed` and deliberately does NOT also emit `task_started`, so each transition yields exactly ONE push and the session-scoped stream is never doubled. Every surface's existing debounced re-reads (`useSessionLoader` 250 ms trailing debounce, `useActiveSessionsRefresh` 500 ms funnel into one shared `ListAllSessions`) converge within ≤500ms of a start/finish/pause/resume in ANY surface instead of waiting for the 30s safety poll.
 - **"Busy" = any non-idle derived status.** Both the row's Fork guard (`SessionListItem`) and the non-render `isSessionBusy` used by archive/delete confirmation treat `active`/`paused`/`failed` **and** `pending` as busy: a task blocked on a HITL prompt is still running (`taskActive` true, DB task `in_progress`), so Fork would be server-rejected and archiving/deleting it would cancel live work.
 - An optimistic fresh/nudge send or resume pins the live overlay to `''` via `setTaskActive(true)`; if the send/resume RPC is rejected, the caller restores the captured pre-send overlay value — passing `undefined` (the pre-send key was absent) DELETES the entry so the DB snapshot drives again, rather than fabricating a defined `''` that would mask a real unfinished task.
 - Every session-activating flow (list pick, New Session, fork, implicit create on send/paste/attach/terminal) persists `saved_session_id` immediately (`sessionStore.selectSession` → `SaveProjectActiveSession`, fire-and-forget, keyed under the session's owning project id); restore paths apply the persisted value via `setActiveSessionId` and never echo it back to the backend
@@ -1389,9 +1396,17 @@ type HandleResult struct {
   never duplicated.
   See [ADR-048](../decisions/048-unified-recovery-ledger.md).
 - `GetSessionRuntimeStatus(sessionID)` exposes `{active,
-  has_unfinished_task, unfinished_task_id, paused, activity, streaming, work_units}`; the frontend calls it after
+  has_unfinished_task, unfinished_task_id, paused, activity, streaming, work_units, compaction_availability?}`; the frontend calls it after
   every history load to reconcile UI state (running/paused flags, resume banner,
   stale step_limit prompts, work units) instead of defaulting to idle.
+  `compaction_availability` is the per-strategy manual-compaction prediction
+  for the session's current conversation history, and it FAILS OPEN on the
+  wire: the field is OMITTED entirely (never marshalled as JSON null — a nil
+  slice carries `omitempty`) whenever the session or its orchestrator is not
+  in memory, and the frontend validator admits absent/undefined/null/array
+  alike (null and absent fail OPEN the same way). A status poll for a
+  not-in-memory session is therefore a valid "no prediction" answer, not a
+  shape rejection that would reduce the whole runtime reconcile to "unknown".
   `work_units` is the durable ledger snapshot for the session's resumable task
   (`[{step_id, kind?, status, parent_id?}]`, `status` a durable unit status);
   before returning it, an in-flight unit (`pending`/`running`) on a task that is

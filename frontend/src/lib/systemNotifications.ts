@@ -169,7 +169,11 @@ export function classifyNotificationContent(
 // Notification API itself, so the SAME lib entry points serve both. The
 // availability guard below accepts either transport; the web branches live
 // behind the api layer so this module stays a pure event→content mapping
-// with toggle + best-effort semantics.
+// with toggle + best-effort semantics. The web permission contract also
+// lives behind that api boundary: the per-event send path never prompts and
+// never errors on a missing grant — it drops the banner silently (debug per
+// occurrence, one warn per app run), and only the Settings toggle and the
+// Test button (real user gestures) request the permission.
 
 /** True when SOME notification transport exists: the Go bindings (desktop
  *  webview) or the browser Notification API (web-access sidecar tab). False

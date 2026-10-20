@@ -112,10 +112,18 @@ const EventSessionsLoaded = "sessions:loaded"
 // that changes a session list: create (the RPC, the SwitchProject fallback
 // creation, and both managed-worktree creation paths), fork (plain and
 // managed), delete, archive/unarchive, pin/unpin, CHAT→project promotion,
-// and project deletion (which cascades its sessions). No payload — consumers
-// re-read the list via ListSessions/ListAllSessions, mirroring
-// EventWorkDirsChanged. Emitted through the shared f.emitEvent funnel
-// (backend/frontend_api_session.go emitSessionsChanged).
+// and project deletion (which cascades its sessions). Task lifecycle
+// transitions count as list-visible state too: the desktop emitter re-issues
+// this event for every task_started / task_complete / task_cancelled /
+// error / task_failed_resumable / session_paused / session_resumed it
+// forwards (desktop/startup_phases.go buildUIEmitFunc), so the live-sessions
+// radar and every sidebar refresh within their debounce window instead of on
+// the 30s safety poll. No payload — consumers re-read the list via
+// ListSessions/ListAllSessions, mirroring EventWorkDirsChanged. Emitted
+// through the shared f.emitEvent funnel
+// (backend/frontend_api_session.go emitSessionsChanged) and, for the task
+// lifecycle mirror, through the desktop event batcher's immediate-flush
+// class so it lands alongside the triggering session-scoped event.
 const EventSessionsChanged = "sessions:changed"
 
 // EventSessionEvent is the prefix for session-scoped orchestration events.

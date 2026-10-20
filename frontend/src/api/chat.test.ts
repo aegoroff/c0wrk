@@ -19,7 +19,8 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { getPendingActions, sendMessage, resumeTask } from '@/api/chat'
+import { logger } from '@/lib/logger'
+import { getPendingActions, sendMessage, resumeTask, getSessionRuntimeStatus } from '@/api/chat'
 
 describe('getPendingActions null-array normalization', () => {
   beforeEach(() => {
@@ -227,5 +228,76 @@ describe('resumeTask forwards model/reasoning overrides', () => {
     const args = calls[0]!
     expect(args[1]).toBe('')
     expect(args[2]).toBe('')
+  })
+})
+
+// GetSessionRuntimeStatus drives the session-load runtime reconcile: a shape
+// rejection turns into "unknown" and skips the reconcile entirely. Go's
+// encoding/json used to marshal the nil CompactionAvailability slice to JSON
+// null, so a session without an in-memory orchestrator sent
+// "compaction_availability":null and failed the whole poll — the exact
+// nil-slice story as getPendingActions above. The backend now omits the field
+// (omitempty), and the validator tolerates a legacy null in addition to
+// absent/undefined/array.
+describe('getSessionRuntimeStatus compaction_availability tolerance', () => {
+  const validBase = { active: false, has_unfinished_task: false }
+
+  beforeEach(() => {
+    delete mockApp.GetSessionRuntimeStatus
+    vi.mocked(logger.error).mockClear()
+  })
+
+  it('accepts compaction_availability: null (the legacy wire shape)', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() =>
+      Promise.resolve({ ...validBase, compaction_availability: null }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toBeNull()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('accepts an absent compaction_availability (the current wire shape)', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve({ ...validBase }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toBeUndefined()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('accepts a well-formed compaction_availability array', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() =>
+      Promise.resolve({
+        ...validBase,
+        compaction_availability: [
+          { strategy: 'sliding_window', available: true, reclaim_tokens: 1200, exact: true },
+          { strategy: 'llm_summary', available: false, reclaim_tokens: 0, exact: false },
+        ],
+      }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toHaveLength(2)
+    expect(result!.compaction_availability![0]!.strategy).toBe('sliding_window')
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('rejects a broken compaction_availability element and reports the shape error', async () => {
+    const payload = {
+      ...validBase,
+      // Missing available/reclaim_tokens/exact — isCompactionAvailability fails.
+      compaction_availability: [{ strategy: 'sliding_window' }],
+    }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(logger.error).toHaveBeenCalledWith('getSessionRuntimeStatus: unexpected response shape', payload)
   })
 })

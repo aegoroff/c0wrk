@@ -18,17 +18,22 @@
 //      — activeSessionsStore.refreshNow() then sweepPendingActions().
 //
 // Trigger discipline mirrors useGitFocusRefresh (mounted ONCE at the App root,
-// armed only after runtime readiness), plus two frontend-local gates: a
-// debounce collapses a trigger burst (a re-connect usually arrives together
-// with a focus/visibility pair) into one run, and a min-interval keeps
-// rapid-fire focus flicker from hammering the RPCs. Both gates are a
-// courtesy, not correctness: every loader is idempotent, and the backstop
-// paths (activeSessionsStore's 30s poll, the next focus) still catch up.
+// armed through the shared armWhenRuntimeReady gate: the desktop attaches at
+// mount, a web-transport tab attaches once transport detection resolves 'web',
+// 'none' never arms — `backend:ready` cannot be the signal because it is a
+// desktop one-shot that a late-joining browser tab never sees), plus two
+// frontend-local gates: a debounce collapses a trigger burst (a re-connect
+// usually arrives together with a focus/visibility pair) into one run, and a
+// min-interval keeps rapid-fire focus flicker from hammering the RPCs. Both
+// gates are a courtesy, not correctness: every loader is idempotent, and the
+// backstop paths (activeSessionsStore's 30s poll, the next focus) still catch
+// up.
 
 import { useEffect } from 'react'
-import { isWailsReady, onWSReconnected, subscribe } from '@/api/runtime'
+import { onWSReconnected } from '@/api/runtime'
 import { listSessions } from '@/api/sessions'
 import { reloadSessionHistory } from '@/lib/sessionHistoryReload'
+import { armWhenRuntimeReady } from '@/lib/armWhenRuntimeReady'
 import { logger } from '@/lib/logger'
 import { useActiveSessionsStore, sweepPendingActions } from '@/stores/activeSessionsStore'
 import { useProjectStore } from '@/stores/projectStore'
@@ -89,7 +94,6 @@ function runShallowResync(): void {
  */
 export function useShallowResync(): void {
   useEffect(() => {
-    let attached = false
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     let lastRunStartedAt = 0
 
@@ -110,36 +114,24 @@ export function useShallowResync(): void {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') schedule()
     }
 
-    const attach = (): void => {
-      if (attached) return
-      attached = true
+    // Arm the focus/visibility listeners through the shared readiness gate
+    // (useGitFocusRefresh pattern): before a serving transport exists the
+    // resync RPCs are guaranteed no-ops, so focus events during the splash
+    // phase would be dead weight. The WS re-connect trigger needs no arming —
+    // it only fires once the socket exists, which already implies readiness.
+    const offArmed = armWhenRuntimeReady(() => {
       window.addEventListener('focus', onFocus)
       document.addEventListener('visibilitychange', onVisibilityChange)
-    }
-    const detach = (): void => {
-      if (!attached) return
-      attached = false
-      window.removeEventListener('focus', onFocus)
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-    }
-
-    // Arm the focus/visibility listeners only after runtime readiness
-    // (useGitFocusRefresh pattern): before the bridge is live the resync
-    // RPCs are guaranteed no-ops, so focus events during the splash phase
-    // would be dead weight. The WS re-connect trigger needs no arming — it
-    // only fires once the socket exists, which already implies readiness.
-    let offReady: (() => void) | null = null
-    if (isWailsReady()) {
-      attach()
-    } else {
-      offReady = subscribe('backend:ready', attach)
-    }
+      return () => {
+        window.removeEventListener('focus', onFocus)
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
+    })
     const offWSReconnected = onWSReconnected(schedule)
 
     return () => {
       offWSReconnected()
-      offReady?.()
-      detach()
+      offArmed()
       if (debounceTimer !== null) clearTimeout(debounceTimer)
     }
   }, [])

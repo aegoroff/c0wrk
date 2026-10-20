@@ -1079,6 +1079,45 @@ func TestGetSessionRuntimeStatus_CompactionAvailability(t *testing.T) {
 	})
 }
 
+// TestSessionRuntimeStatus_NilCompactionAvailabilityNotOnWire pins the wire
+// contract for the fail-open shape: a nil CompactionAvailability (session not
+// in memory / no in-memory orchestrator) is OMITTED from the JSON, never
+// marshalled as null. A "compaction_availability":null on the wire failed the
+// frontend's response-shape guard, which reduced the whole status poll to
+// "unknown" and broke the session-load runtime reconcile for every
+// not-in-memory session (the validator only admitted absent/undefined/array).
+func TestSessionRuntimeStatus_NilCompactionAvailabilityNotOnWire(t *testing.T) {
+	t.Run("zero value omitted", func(t *testing.T) {
+		wire, err := json.Marshal(SessionRuntimeStatus{})
+		if err != nil {
+			t.Fatalf("json.Marshal(SessionRuntimeStatus{}): %v", err)
+		}
+		if strings.Contains(string(wire), `"compaction_availability"`) {
+			t.Errorf("zero-value status must omit compaction_availability entirely, got: %s", wire)
+		}
+	})
+	t.Run("no orchestrator → empty in memory, absent on the wire", func(t *testing.T) {
+		manager, _, _ := testManager(t)
+		manager.mu.Lock()
+		manager.sessions["sess-wire"] = &Session{ID: "sess-wire"}
+		manager.mu.Unlock()
+		status, err := manager.GetSessionRuntimeStatus("sess-wire")
+		if err != nil {
+			t.Fatalf("GetSessionRuntimeStatus failed: %v", err)
+		}
+		if len(status.CompactionAvailability) != 0 {
+			t.Fatalf("in-memory availability = %+v, want empty", status.CompactionAvailability)
+		}
+		wire, err := json.Marshal(status)
+		if err != nil {
+			t.Fatalf("json.Marshal(status): %v", err)
+		}
+		if strings.Contains(string(wire), `"compaction_availability":null`) {
+			t.Errorf("wire carries a null compaction_availability: %s", wire)
+		}
+	})
+}
+
 // TestFinishLiveLeftover_HeldWhileCompactingRequeues pins the no-loss
 // contract for live messages drained by an epilogue that races a manual
 // compaction: the follow-up send is rejected with ErrSessionCompacting, and

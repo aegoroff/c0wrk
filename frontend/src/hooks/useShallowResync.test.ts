@@ -1,9 +1,11 @@
 // Tests for useShallowResync — the app-root shallow resync triggers.
 //
 // Coverage: trigger wiring (WS re-connect, window focus, visibilitychange→
-// visible), readiness arming (useGitFocusRefresh pattern), the debounce +
-// min-interval gates, the three resync legs (session history, session list,
-// live-sessions snapshot + pending sweep), and the switch-race guards.
+// visible), readiness arming (armWhenRuntimeReady: synchronous Wails attach,
+// transport-detection attach on the web transport, no arm on 'none'), the
+// debounce + min-interval gates, the three resync legs (session history,
+// session list, live-sessions snapshot + pending sweep), and the switch-race
+// guards.
 
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -13,6 +15,7 @@ import { createRoot, type Root } from 'react-dom/client'
 // --- Mock the backend boundary so tests never touch a real transport/RPC ---
 const {
   isWailsReadyMock,
+  transportDetectionMock,
   subscribeMock,
   onWSReconnectedMock,
   listSessionsMock,
@@ -21,6 +24,7 @@ const {
   getPendingActionsMock,
 } = vi.hoisted(() => ({
   isWailsReadyMock: vi.fn((): boolean => false),
+  transportDetectionMock: vi.fn((): Promise<'wails' | 'web' | 'none'> => Promise.resolve('web')),
   subscribeMock: vi.fn((_name: string, _handler: () => void) => () => {}),
   onWSReconnectedMock: vi.fn((_cb: () => void) => () => {}),
   listSessionsMock: vi.fn((): Promise<unknown> => Promise.resolve([])),
@@ -31,6 +35,7 @@ const {
 
 vi.mock('@/api/runtime', () => ({
   isWailsReady: isWailsReadyMock,
+  transportDetection: transportDetectionMock,
   subscribe: subscribeMock,
   onWSReconnected: onWSReconnectedMock,
 }))
@@ -55,8 +60,6 @@ import { useChatStore } from '@/stores/chatStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import type { SessionInfo } from '@/types/models'
 
-/** Handlers captured from the runtime subscription mocks. */
-const readyHandlers = new Set<() => void>()
 let wsReconnectedHandler: (() => void) | null = null
 
 let root: Root | null = null
@@ -90,15 +93,24 @@ function unmountHook(): void {
 
 /** Let the fire-and-forget promise chains settle past the store writes. */
 async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve()
+}
+
+/** Let the transport probe settle — the web-transport arming signal. */
+async function settleTransport(): Promise<void> {
   await act(async () => {
-    for (let i = 0; i < 10; i++) await Promise.resolve()
+    await flushMicrotasks()
   })
 }
 
-function fireBackendReady(): void {
-  act(() => {
-    for (const handler of Array.from(readyHandlers)) handler()
+/** A probe promise the test resolves by hand (a tab that boots while the
+ *  sidecar probe is still in flight). */
+function pendingTransport(): { promise: Promise<'wails' | 'web' | 'none'>; resolve: (mode: 'wails' | 'web' | 'none') => void } {
+  let resolve!: (mode: 'wails' | 'web' | 'none') => void
+  const promise = new Promise<'wails' | 'web' | 'none'>((res) => {
+    resolve = res
   })
+  return { promise, resolve }
 }
 
 function fireWSReconnected(): void {
@@ -137,19 +149,14 @@ function makeSession(id: string, project_id: string): SessionInfo {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   isWailsReadyMock.mockClear()
-  subscribeMock.mockClear()
+  transportDetectionMock.mockClear()
   onWSReconnectedMock.mockClear()
   listSessionsMock.mockClear()
   listAllSessionsMock.mockClear()
   getSessionHistoryMock.mockClear()
   getPendingActionsMock.mockClear()
   isWailsReadyMock.mockReturnValue(false)
-  subscribeMock.mockImplementation((_name: string, handler: () => void) => {
-    readyHandlers.add(handler)
-    return () => {
-      readyHandlers.delete(handler)
-    }
-  })
+  transportDetectionMock.mockResolvedValue('web')
   onWSReconnectedMock.mockImplementation((cb: () => void) => {
     wsReconnectedHandler = cb
     return () => {
@@ -179,7 +186,6 @@ beforeEach(() => {
 afterEach(() => {
   unmountHook()
   vi.useRealTimers()
-  subscribeMock.mockReset()
   onWSReconnectedMock.mockReset()
   // The debounced resync timer dies with the fake timers; make sure a
   // store-level debounce cannot leak either.
@@ -187,13 +193,17 @@ afterEach(() => {
 })
 
 describe('useShallowResync', () => {
-  it('arms only after runtime readiness; the WS-reconnect trigger works before that', async () => {
+  it('arms only once the transport resolves; the WS-reconnect trigger works before that', async () => {
+    // A tab whose probe is still in flight: not armed yet.
+    const probe = pendingTransport()
+    transportDetectionMock.mockReturnValue(probe.promise)
     useSessionStore.setState({ activeSessionId: 's1' })
     useProjectStore.setState({ activeProjectId: 'p1' })
     renderHook()
 
-    // Armed but not listening yet: a focus event before backend:ready is a
-    // no-op (the RPCs would be guaranteed failures during the splash phase).
+    // Armed but not listening yet: a focus event before the transport
+    // resolves is a no-op (the RPCs would be guaranteed failures while the
+    // serving transport is unknown).
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
     await flushMicrotasks()
@@ -208,11 +218,16 @@ describe('useShallowResync', () => {
     expect(listSessionsMock).toHaveBeenCalledTimes(1)
     expect(listAllSessionsMock).toHaveBeenCalledTimes(1)
 
-    // backend:ready attaches the focus/visibility listeners.
-    expect(subscribeMock).toHaveBeenCalledWith('backend:ready', expect.any(Function))
+    // Transport detection resolving 'web' attaches the focus/visibility
+    // listeners (a `backend:ready` wait would leave a web tab disarmed
+    // forever — that event is a desktop one-shot, never replayed).
+    expect(transportDetectionMock).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      probe.resolve('web')
+      await flushMicrotasks()
+    })
     // Past the min-interval of the WS-triggered run, focus drives a new one.
     await vi.advanceTimersByTimeAsync(5600)
-    fireBackendReady()
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
     await flushMicrotasks()
@@ -224,12 +239,68 @@ describe('useShallowResync', () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     renderHook()
 
-    // No backend:ready subscription — the listeners attach immediately.
+    // No probe round trip — the listeners attach synchronously at mount.
+    expect(transportDetectionMock).not.toHaveBeenCalled()
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
     await flushMicrotasks()
     expect(getSessionHistoryMock).toHaveBeenCalledWith('s1')
-    expect(subscribeMock).not.toHaveBeenCalled()
+  })
+
+  it('web transport: focus and visibility coalesce into ONE debounced run, min-interval drops the rest', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    useProjectStore.setState({ activeProjectId: 'p1' })
+    renderHook()
+    await settleTransport()
+
+    // A focus + tab-visible burst (the typical return-to-tab pair) collapses
+    // into exactly one run behind the 400ms debounce.
+    fireFocus()
+    fireVisibilityChange('visible')
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(1)
+    expect(listSessionsMock).toHaveBeenCalledTimes(1)
+    expect(listAllSessionsMock).toHaveBeenCalledTimes(1)
+
+    // Another focus inside the 5s min-interval is dropped entirely.
+    await vi.advanceTimersByTimeAsync(500)
+    fireFocus()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(1)
+
+    // Past the min-interval the next focus runs again.
+    await vi.advanceTimersByTimeAsync(5600)
+    fireFocus()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('none transport: never arms — focus and visibility stay dead', async () => {
+    transportDetectionMock.mockResolvedValue('none')
+    useSessionStore.setState({ activeSessionId: 's1' })
+    useProjectStore.setState({ activeProjectId: 'p1' })
+    renderHook()
+    await settleTransport()
+
+    fireFocus()
+    fireVisibilityChange('visible')
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).not.toHaveBeenCalled()
+    expect(listSessionsMock).not.toHaveBeenCalled()
+    expect(listAllSessionsMock).not.toHaveBeenCalled()
+
+    // Still dead after arbitrarily long virtual time — 'none' is permanent
+    // for the page's lifetime.
+    await vi.advanceTimersByTimeAsync(60_000)
+    fireFocus()
+    fireVisibilityChange('visible')
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).not.toHaveBeenCalled()
   })
 
   it('focus runs all three resync legs and applies the session list', async () => {
@@ -237,7 +308,7 @@ describe('useShallowResync', () => {
     useProjectStore.setState({ activeProjectId: 'p1' })
     listSessionsMock.mockResolvedValue([makeSession('s1', 'p1')])
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
@@ -252,7 +323,7 @@ describe('useShallowResync', () => {
   it('visibilitychange to visible triggers; hidden does not', async () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireVisibilityChange('hidden')
     await vi.advanceTimersByTimeAsync(400)
@@ -269,7 +340,7 @@ describe('useShallowResync', () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     useProjectStore.setState({ activeProjectId: 'p1' })
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     fireFocus()
@@ -291,7 +362,7 @@ describe('useShallowResync', () => {
   it('drops triggers inside the min-interval after a run, and runs again after it', async () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
@@ -327,7 +398,7 @@ describe('useShallowResync', () => {
       ]
     })
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
@@ -345,7 +416,7 @@ describe('useShallowResync', () => {
       return [makeSession('stale', 'p1')]
     })
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
@@ -359,7 +430,7 @@ describe('useShallowResync', () => {
     useChatStore.setState({ taskActive: { bg: true } })
     listAllSessionsMock.mockResolvedValue([makeSession('bg', 'p1')])
     renderHook()
-    fireBackendReady()
+    await settleTransport()
 
     fireFocus()
     await vi.advanceTimersByTimeAsync(400)
@@ -371,13 +442,11 @@ describe('useShallowResync', () => {
     expect(getPendingActionsMock).toHaveBeenCalledWith('bg')
   })
 
-  it('unsubscribes everything and drops the pending timer on unmount', async () => {
+  it('detaches and drops the pending timer on unmount', async () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     renderHook()
-    fireBackendReady()
-
-    const readyUnsubs = subscribeMock.mock.results.filter((r) => r.type === 'return').length
-    expect(readyUnsubs).toBeGreaterThan(0)
+    await settleTransport()
+    expect(transportDetectionMock).toHaveBeenCalledTimes(1)
     const offWS = onWSReconnectedMock.mock.results[0]?.value as (() => void) | undefined
     expect(typeof offWS).toBe('function')
 

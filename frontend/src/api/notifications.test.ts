@@ -14,7 +14,9 @@ import {
   onNotificationClicked,
   checkNotificationAuthorization,
   ensureNotificationPermission,
+  __resetPermissionWarnForTest,
 } from './notifications'
+import { setLogLevel } from '@/lib/logger'
 
 // The web-transport branches (ADR-090) read isWebTransport and report clicks
 // through emitLocalEvent; both are hoisted spies so tests can flip the
@@ -64,9 +66,13 @@ function installApp(methods: Record<string, unknown>): void {
 }
 
 let consoleWarn: ReturnType<typeof vi.spyOn>
+let consoleError: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
+  // Scoped spies: expected diagnostics (deliberately exercised failure paths)
+  // are intercepted here and asserted per test, never silenced globally.
   consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
   delete (window as unknown as Record<string, unknown>).go
   delete (window as unknown as Record<string, unknown>).runtime
   runtimeMocks.web = false
@@ -74,10 +80,12 @@ beforeEach(() => {
   FakeNotification.permission = 'default'
   FakeNotification.requestPermission.mockReset()
   FakeNotification.instances = []
+  __resetPermissionWarnForTest()
 })
 
 afterEach(() => {
   consoleWarn.mockRestore()
+  consoleError.mockRestore()
   vi.unstubAllGlobals()
 })
 
@@ -199,24 +207,47 @@ describe('web transport notifications', () => {
     expect(banner.options.data).toEqual({ sessionId: 's1', projectId: 'p1' })
   })
 
-  it('send requests permission on default and sends once granted', async () => {
+  it('send never prompts on default and drops the banner (one warn, zero errors)', async () => {
     installWeb()
-    FakeNotification.requestPermission.mockImplementation(async () => {
-      FakeNotification.permission = 'granted'
-      return 'granted'
-    })
-    await sendSystemNotification('T', 'B', { sessionId: 's1' })
-    expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1)
-    expect(FakeNotification.instances).toHaveLength(1)
+    // The send path owns no gesture, so it no longer even tries
+    // requestPermission (most browsers dismiss a gestureless prompt anyway):
+    // the Settings toggle / Test button are the documented request paths.
+    // A dropped banner is logged once at warn, never at error.
+    await expect(sendSystemNotification('T', 'B', { sessionId: 's1' })).resolves.toBeUndefined()
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled()
+    expect(FakeNotification.instances).toHaveLength(0)
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("permission is 'default'"))
+    expect(consoleError).not.toHaveBeenCalled()
   })
 
-  it('send rejects with the actionable message when the permission is denied', async () => {
+  it('send drops the banner without an error when the permission is denied', async () => {
     installWeb()
     FakeNotification.permission = 'denied'
-    await expect(sendSystemNotification('T', 'B', { sessionId: 's1' })).rejects.toThrow(
-      'Notification permission is not granted',
-    )
+    await expect(sendSystemNotification('T', 'B', { sessionId: 's1' })).resolves.toBeUndefined()
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled()
     expect(FakeNotification.instances).toHaveLength(0)
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    expect(consoleError).not.toHaveBeenCalled()
+  })
+
+  it('the ungranted send warns once per run; later occurrences stay at debug', async () => {
+    installWeb()
+    FakeNotification.permission = 'denied'
+    await sendSystemNotification('T', 'B')
+    await sendSystemNotification('T', 'B')
+    // A burst of cued events costs exactly ONE warn — the once-per-run flag.
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    setLogLevel('debug')
+    const consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      await sendSystemNotification('T', 'B')
+      expect(consoleDebug).toHaveBeenCalledTimes(1)
+      expect(consoleWarn).toHaveBeenCalledTimes(1)
+    } finally {
+      consoleDebug.mockRestore()
+      setLogLevel('warn')
+    }
   })
 
   it('click focuses the tab, replays notification_clicked locally and closes', async () => {

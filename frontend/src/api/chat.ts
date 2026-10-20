@@ -215,7 +215,8 @@ export interface SessionRuntimeStatus {
    * Per-strategy manual-compaction prediction for the session's current
    * conversation history (see backend GetSessionRuntimeStatus): whether each
    * strategy would actually shrink the dialogue right now, plus its predicted
-   * reclaim. Absent/undefined (older backend, unknown session) fails OPEN: the
+   * reclaim. Absent/undefined/null (older backend, unknown session, or a
+   * session without an in-memory orchestrator) fails OPEN: the
    * compact menu shows every strategy clickable, and a pointless click reports
    * the existing nothing_compacted outcome.
    */
@@ -256,6 +257,7 @@ function isSessionRuntimeStatus(d: unknown): d is SessionRuntimeStatus {
       || typeof (d as Record<string, unknown>).unfinished_task_status === 'string')
     && (!('compaction_availability' in d)
       || (d as Record<string, unknown>).compaction_availability === undefined
+      || (d as Record<string, unknown>).compaction_availability === null
       || isArrayOf((d as Record<string, unknown>).compaction_availability, isCompactionAvailability))
     && (!('compacting' in d)
       || (d as Record<string, unknown>).compacting === undefined
