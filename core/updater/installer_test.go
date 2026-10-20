@@ -810,3 +810,42 @@ func spawnDeadPID(t *testing.T) int {
 	_ = cmd.Wait()
 	return pid
 }
+
+// TestCopyExecutableReSignsStagingCopy covers the macOS AMFI requirement: the
+// staging updater is a BARE copy of the bundle executable, and a bare copy
+// whose embedded signature is sealed against the original bundle context is
+// asynchronously SIGKILLed at exec on recent macOS (amfid "The signature on
+// the file is invalid") — the silent self-update failure of the v0.11.0 →
+// v0.12.0 cycle. copyExecutable must therefore hand back a copy whose
+// signature validates as a standalone binary. Verified with `codesign -v`,
+// the same check LaunchServices/amfid perform at exec time.
+//
+// Non-darwin platforms have no codesign and no AMFI: copyExecutable is a plain
+// copy there (covered by the platform installers' own tests).
+func TestCopyExecutableReSignsStagingCopy(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("codesign re-signing is darwin-only")
+	}
+	if _, err := exec.LookPath("codesign"); err != nil {
+		t.Skip("codesign not on PATH")
+	}
+	src, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	dir := t.TempDir()
+	dst := filepath.Join(dir, stagingUpdaterName())
+
+	got, err := copyExecutable(src, dst)
+	if err != nil {
+		t.Fatalf("copyExecutable() error = %v", err)
+	}
+	if got != dst {
+		t.Fatalf("copyExecutable() = %q, want %q", got, dst)
+	}
+
+	out, err := exec.CommandContext(context.Background(), "codesign", "-v", dst).CombinedOutput()
+	if err != nil {
+		t.Fatalf("re-signed staging copy fails codesign -v: %v (%s)", err, string(out))
+	}
+}

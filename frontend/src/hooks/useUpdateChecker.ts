@@ -24,19 +24,27 @@ import {
   onUpdateDownloaded,
   onUpdateError,
   getUpdateSettings,
+  getLastUpdateCheck,
 } from '@/api/updater'
 import { subscribe } from '@/api/runtime'
 import { useUpdateStore } from '@/stores/updateStore'
 import { logger } from '@/lib/logger'
 
 export function useUpdateChecker(): void {
-  // ── Load running version on mount ─────────────────────────────────────
+  // ── Load running version + recover a startup update:available ─────────
   // The running version is always loaded so the Settings panel and the toast
   // can show "you're on vX.Y.Z" regardless of whether an update is available.
   // The load is attempted on mount and, if it fails (e.g. the backend is still
   // starting), retried on `backend:ready` — mirroring useExperimentalFeatures —
   // so a transient startup race doesn't leave the version label empty for the
   // whole session.
+  //
+  // The same load path also pulls GetLastUpdateCheck: the backend's startup
+  // auto-check emits update:available ~1s after backend readiness, which can
+  // race this hook's event subscription — the event (and the update toast)
+  // would be silently lost. The backend caches the check result, so a pull
+  // after mount (and after backend:ready) recovers it regardless of event
+  // delivery timing.
   useEffect(() => {
     let cancelled = false
     let inFlight = false
@@ -73,9 +81,32 @@ export function useUpdateChecker(): void {
     load()
     const unsubscribe = subscribe('backend:ready', load)
 
+    // ── Pull the cached startup check result ────────────────────────────
+    // Independent of the version load (which may lag behind backend
+    // readiness): the update toast must surface even while the version label
+    // is still empty. A failure here is non-fatal — the manual check from the
+    // Settings panel still works.
+    const recoverStartupCheck = () => {
+      getLastUpdateCheck()
+        .then((info) => {
+          if (cancelled || !info) return
+          const { phase } = useUpdateStore.getState()
+          if (phase === 'downloading' || phase === 'downloaded') return
+          useUpdateStore.getState().onAvailable(info)
+        })
+        .catch(() => {
+          // Backend not ready yet or RPC failed — the backend:ready retry of
+          // the version load above covers the "not ready" case; a persistent
+          // failure is visible through a manual check.
+        })
+    }
+    recoverStartupCheck()
+    const unsubscribeReady = subscribe('backend:ready', recoverStartupCheck)
+
     return () => {
       cancelled = true
       unsubscribe?.()
+      unsubscribeReady?.()
     }
   }, [])
 

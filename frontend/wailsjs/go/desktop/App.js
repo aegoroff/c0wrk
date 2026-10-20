@@ -338,6 +338,10 @@ export function GetLastActiveProjectID() {
   return window['go']['desktop']['App']['GetLastActiveProjectID']();
 }
 
+export function GetLastUpdateCheck() {
+  return window['go']['desktop']['App']['GetLastUpdateCheck']();
+}
+
 export function GetLogLevel() {
   return window['go']['desktop']['App']['GetLogLevel']();
 }

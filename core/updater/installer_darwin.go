@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // findInstallRoot resolves the .app bundle enclosing the running executable on
@@ -79,9 +80,33 @@ func normalizedTempRoot() (string, error) {
 }
 
 // copyExecutable copies src to dst and marks it executable (Unix perms).
+//
+// The copy is then RE-SIGNED with an ad-hoc signature. The running binary's
+// embedded signature is sealed against its bundle context (the CodeDirectory's
+// special slots cover the bundle's Info.plist), so a bare copy outside the
+// .app bundle fails macOS's exec-time validation: on recent macOS releases
+// amfid rejects it with "The signature on the file is invalid" and SIGKILLs
+// the process the moment exec(2) runs. Because the kill is asynchronous, the
+// launching cmd.Start() still reports success and the self-update silently
+// never happens (observed on macOS 27: the whole flow "succeeds" — quit,
+// no swap, no relaunch). A fresh `codesign --force --sign -` on the copy
+// produces a self-contained ad-hoc signature that validates as a bare
+// executable, so the staged updater actually runs. This does not weaken the
+// update integrity gate (ADR-023): the copied bytes are the SHA256-verified
+// release's own bytes; only the signature wrapper is regenerated locally.
 func copyExecutable(src, dst string) (string, error) {
 	if err := copyFile(src, dst, 0o755); err != nil {
 		return "", fmt.Errorf("copy staging updater: %w", err)
+	}
+	// A bounded context (not the app's): the caller has none to pass, and a
+	// wedged codesign must not hang the apply path — a valid ad-hoc re-sign of
+	// a ~80 MB Mach-O completes in well under a second.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-", dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("re-sign staging updater (codesign): %w (%s)", err, string(out))
 	}
 	return dst, nil
 }
