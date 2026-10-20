@@ -2887,6 +2887,8 @@ export namespace desktop {
 	    url: string;
 	    port: number;
 	    configured_port: number;
+	    configured_bind: string;
+	    bind_is_loopback: boolean;
 	    token: string;
 	    token_pinned: boolean;
 	
@@ -2901,6 +2903,8 @@ export namespace desktop {
 	        this.url = source["url"];
 	        this.port = source["port"];
 	        this.configured_port = source["configured_port"];
+	        this.configured_bind = source["configured_bind"];
+	        this.bind_is_loopback = source["bind_is_loopback"];
 	        this.token = source["token"];
 	        this.token_pinned = source["token_pinned"];
 	    }
