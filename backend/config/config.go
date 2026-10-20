@@ -108,10 +108,11 @@ type Config struct {
 	E2S E2SConfig `yaml:"e2s"`
 
 	// Experimental gates features that are still under active development
-	// (currently the E2S execution mode) behind a single master switch. Model
-	// Profiles is NOT gated by this switch — it carries its own manual master
-	// toggle (model_profiles.enabled). When disabled, every gated feature is
-	// treated as off. Default: off.
+	// (currently the E2S execution mode, the embedded local model's frontend
+	// surfaces, and the browser web-access sidecar) behind a single master
+	// switch. Model Profiles is NOT gated by this switch — it carries its own
+	// manual master toggle (model_profiles.enabled). When disabled, every
+	// gated feature is treated as off. Default: off.
 	Experimental ExperimentalConfig `yaml:"experimental"`
 
 	// Updates configures the automatic "check for updates" subsystem that runs
@@ -2515,15 +2516,20 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 // behind a single master switch. It is all-or-nothing by design: there is no
 // per-feature toggle, so enabling it exposes every gated feature and
 // disabling it treats each as off. Currently gated: the E2S execution mode
-// (e2s.*) and the embedded local model's FRONTEND surfaces — the Settings
+// (e2s.*); the embedded local model's FRONTEND surfaces — the Settings
 // block and its entries in both model pickers are hidden while the switch is
-// off, while the backend keeps serving the subsystem's RPCs (ADR-068).
+// off, while the backend keeps serving the subsystem's RPCs (ADR-068); and
+// the browser web-access sidecar (web_access.*) — a COMPOUND gate, where the
+// sidecar mounts only while this switch AND web_access.enabled are both on,
+// and a mid-session flip of either switch is followed live (the sidecar is
+// mounted or stopped without an app restart).
 // Model Profiles (model_profiles.*) is NOT gated — it carries its own
 // manual master toggle.
 type ExperimentalConfig struct {
 	// Enabled is the master switch for the gated experimental features (the
-	// E2S execution mode and the embedded model's frontend surfaces). When
-	// false, every gated feature is treated as off regardless of its own
+	// E2S execution mode, the embedded model's frontend surfaces, and the
+	// web-access sidecar — the latter additionally requires web_access.enabled).
+	// When false, every gated feature is treated as off regardless of its own
 	// toggles. Default: false.
 	Enabled bool `yaml:"enabled"`
 }

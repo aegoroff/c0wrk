@@ -1057,6 +1057,66 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 	return nil
 }
 
+// applyExperimentalWebAccess is the desktop hook the backend invokes after a
+// successful experimental.enabled persist (UpdateExperimentalFeatures → the
+// OnExperimentalChanged FrontendAPIConfig seam, ADR-091): web access is an
+// experimental feature,
+// so its sidecar must follow the master gate LIVE instead of waiting for the
+// next launch. Opening the gate mounts the sidecar when the section's own
+// switch is on and nothing is running yet; closing it stops a running
+// sidecar (bounded by webAccessStopBudget, the SetWebAccessEnabled budget).
+// Everything else — gate open with the section off, gate closed with nothing
+// running, a repeated open over a live sidecar — is a no-op, which makes the
+// hook idempotent under repeated toggles onto the same value.
+//
+// The sidecar lifecycle decision reads the persisted config only: the
+// in-memory gate is already the post-toggle truth when this runs, and the
+// web_access section is desktop-owned (backend code never touches it at
+// runtime). Failure is fail-soft and LOUD exactly like the startup mount
+// (initWebAccess): a sidecar that cannot start logs at Error and leaves the
+// app fully usable desktop-side; the persisted switch stays on, so the next
+// launch or successful toggle retries.
+//
+// Locking discipline: webAccessMu serializes the whole transition against
+// the startup mount, the Shutdown stop and the control RPCs, so the hook can
+// never interleave with another lifecycle transition into a leaked listener.
+// No lock-order cycle exists with the backend: UpdateExperimentalFeatures
+// holds configMu while this takes webAccessMu, and desktop code never takes
+// configMu (the zero-backend-edit constraint documented at
+// SetWebAccessEnabled).
+func (a *App) applyExperimentalWebAccess(enabled bool) {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, _ := a.configRef()
+	if cfg == nil {
+		// A Startup that never reached buildFrontendAPI: nothing to mount,
+		// and no live config to read the section's own switch from.
+		return
+	}
+
+	switch {
+	case enabled && cfg.WebAccess.Enabled:
+		srv, err := a.startWebAccessLocked(a.log())
+		if err != nil {
+			a.log().Error("web access sidecar failed to start after the experimental gate opened; continuing without it", "error", err)
+			return
+		}
+		// Idempotent on a live server: a repeated open returns the running
+		// sidecar instead of double-binding, so this is quiet for that case.
+		logWebAccessReady(a.log(), srv)
+	case !enabled:
+		if a.webAccess.Load() == nil {
+			return
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), webAccessStopBudget)
+		defer cancel()
+		if err := a.stopWebAccessLocked(sctx); err != nil {
+			a.log().Error("web access sidecar failed to stop after the experimental gate closed", "error", err)
+		}
+	}
+}
+
 // SetWebAccessConnection persists the pinned bind and port (Settings →
 // Web Access: the single address field parses into these two) and applies
 // them live: a running sidecar is hot-restarted onto the new connection

@@ -34,8 +34,23 @@ import (
 
 // writeWebAccessConfig writes a loadable config.yaml (the smallest document
 // the loader accepts) with an optional web_access block, loads it through the
-// real pipeline, and returns the live config plus its path.
+// real pipeline, and returns the live config plus its path. The experimental
+// master gate (web access is an experimental feature, ADR-091) is OPEN —
+// these tests exercise the sidecar's own lifecycle, not the gate.
 func writeWebAccessConfig(t *testing.T, webAccess string) (cfg *config.Config, path string) {
+	t.Helper()
+	return writeWebAccessConfigDoc(t, "experimental:\n  enabled: true\n", webAccess)
+}
+
+// writeWebAccessConfigGate is writeWebAccessConfig with an explicit
+// experimental-section body (empty = the section is ABSENT — the loader's
+// default false, the closed gate), for tests of the gate itself.
+func writeWebAccessConfigGate(t *testing.T, experimental, webAccess string) (cfg *config.Config, path string) {
+	t.Helper()
+	return writeWebAccessConfigDoc(t, experimental, webAccess)
+}
+
+func writeWebAccessConfigDoc(t *testing.T, experimental, webAccess string) (cfg *config.Config, path string) {
 	t.Helper()
 	doc := `
 llm:
@@ -45,6 +60,9 @@ llm:
     models:
       - claude-3-haiku
 `
+	if experimental != "" {
+		doc += "\n" + experimental + "\n"
+	}
 	if webAccess != "" {
 		doc += "\n" + webAccess + "\n"
 	}

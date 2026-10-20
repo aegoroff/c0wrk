@@ -1736,6 +1736,12 @@ orchestration:
 #   - the embedded local model's frontend surfaces (the Settings → LLM block
 #     and its entries in both model pickers; a frontend-only gate — the
 #     backend keeps serving the subsystem's RPCs regardless)
+#   - the browser web-access sidecar (web_access.*) — a COMPOUND gate: the
+#     sidecar mounts only while this switch AND web_access.enabled are both
+#     on, and flipping either one mid-session mounts or stops the sidecar
+#     live, without an app restart. Upgrade note: a config that turned
+#     web_access on before this gate existed keeps its section, but the
+#     sidecar no longer mounts until experimental.enabled is turned on too.
 #
 # experimental:
 #   # Master switch. Default: false (gated features off).
@@ -2070,6 +2076,11 @@ notifications:
 # events into the browser tab it opens (ADR-090). OFF by default — with the
 # section absent (or enabled: false) no listener is created and the app
 # behaves exactly as before.
+#
+# The section is additionally gated by the experimental master switch
+# (experimental.enabled): the sidecar runs only while BOTH switches are on —
+# web_access.enabled alone is not enough. Flipping either switch mid-session
+# mounts or stops the sidecar live, without an app restart.
 #
 # Enabling this explicitly accepts full control of the running app from that
 # browser tab: the tab IS the desktop UI — anything the desktop app can do,

@@ -728,12 +728,36 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 	return nil
 }
 
+// runExperimentalChangedHook invokes the installed desktop hook. The hook
+// is written once, inside Init's seed critical section (the
+// FrontendAPIConfig seam, ADR-091) and before the seedPublished flag, so
+// every caller here has passed seedAcquire first and the plain read is
+// ordered after the install — no lock is needed. The hook itself runs
+// SYNCHRONOUSLY on the caller's goroutine — the same contract
+// SetWebAccessEnabled has on the desktop side — so the toggle RPC returns
+// only after the sidecar transition it caused landed (start errors are
+// already logged fail-soft by the hook, never fatal). There is no
+// lock-order cycle: UpdateExperimentalFeatures holds configMu while the
+// hook takes the desktop's webAccessMu, and no desktop path takes configMu
+// back (the web_access section is desktop-owned).
+func (f *FrontendAPI) runExperimentalChangedHook(enabled bool) {
+	if hook := f.onExperimentalChanged; hook != nil {
+		hook(enabled)
+	}
+}
+
 // UpdateExperimentalFeatures toggles the master experimental-features switch
 // at runtime. It persists the change and rebuilds the LLM router so the
 // gated features (the E2S execution mode — the embedded-model gate is
 // frontend-only and needs no rebuild) take effect for new sessions without
 // an app restart. Model Profiles is not gated by this switch, so this method
 // never touches its persisted master toggle (model_profiles.enabled).
+//
+// The desktop hook (OnExperimentalChanged) fires only on a SUCCESSFUL
+// persist: the sidecar's lifecycle follows persisted operator intent, so a
+// rejected disk write leaves the mount decision to the next successful
+// toggle or launch, even though the in-memory gate (what GetConfig serves)
+// already moved.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.seedAcquire()
 	f.configMu.Lock()
@@ -745,7 +769,9 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 
 	f.config.Experimental.Enabled = enabled
 
+	persisted := true
 	if err := f.persistConfig(); err != nil {
+		persisted = false
 		f.log().Warn("failed to persist experimental features toggle", "error", err)
 	}
 
@@ -767,6 +793,13 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		if mgr := app.Manager(); mgr != nil {
 			mgr.SetE2SSettings(builderCfg.E2S)
 		}
+	}
+
+	// The desktop hook fires LAST, only after the persist landed: the
+	// sidecar transition it drives is the visible consequence of the
+	// persisted gate, and a failed persist must not start (or stop) anything.
+	if persisted {
+		f.runExperimentalChangedHook(enabled)
 	}
 
 	return nil

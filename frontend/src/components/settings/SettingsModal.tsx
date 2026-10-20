@@ -91,9 +91,10 @@ export function SettingsModal() {
   const activeTab = useSettingsStore((s) => s.activeTab)
   const closeSettings = useSettingsStore((s) => s.closeSettings)
   const setActiveTab = useSettingsStore((s) => s.setActiveTab)
-  // The master experimental switch — the Session Statistics block on the
-  // General tab is part of its gate scope (read reactively, so flipping the
-  // switch in ExperimentalSettings hides/reveals the block without a reload).
+  // The master experimental switch — the Session Statistics and Web Access
+  // blocks on the General tab are part of its gate scope (read reactively, so
+  // flipping the switch in ExperimentalSettings hides/reveals the blocks
+  // without a reload).
   const experimentalEnabled = useExperimentalStore((s) => s.enabled)
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
   const [closeBlocked, setCloseBlocked] = useState(false)
@@ -286,11 +287,14 @@ export function SettingsModal() {
                 </h3>
                 <ProxySettings />
               </div>
-              {/* Web Access is a DESKTOP-window control: in the web transport
-                  the control RPCs are unreachable from a tab (ADR-090
-                  isolation), so the section would only ever render its
-                  "Status unavailable" state — hidden outright. */}
-              {!isWebTransport() && (
+              {/* Web Access is an experimental surface, gated on the master
+                  switch like Session Statistics — and a DESKTOP-window control:
+                  in the web transport the control RPCs are unreachable from a
+                  tab (ADR-090 isolation), so the section would only ever
+                  render its "Status unavailable" state. Gated here (not inside
+                  the component) so the border wrapper disappears with the
+                  block. */}
+              {experimentalEnabled && !isWebTransport() && (
                 <div className="border-t border-border pt-4">
                   <WebAccessSettings />
                 </div>

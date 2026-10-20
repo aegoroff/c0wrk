@@ -368,6 +368,16 @@ type FrontendAPI struct {
 	// quitApp triggers a graceful Wails quit (wailsRuntime.Quit). Used by
 	// ApplyUpdate after launching the self-update re-exec. Nil in tests.
 	quitApp func()
+	// onExperimentalChanged is the desktop hook invoked by
+	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate
+	// persist: the web-access sidecar mount follows the gate live instead of
+	// waiting for the next launch (ADR-091). Installed through the
+	// FrontendAPIConfig seam inside Init — alongside the other seed fields
+	// and before the seedPublished flag — so seedAcquire gives every toggle
+	// RPC the happens-before edge and no install can race a toggle already
+	// in flight. Nil (tests, backend-only builds) makes the toggle a pure
+	// config+router operation.
+	onExperimentalChanged func(enabled bool)
 
 	// builderOverride, when non-nil, replaces f.app.Builder() in the builder()
 	// accessor. Used by tests to substitute a fake appBuilder so config/MCP
@@ -437,6 +447,16 @@ type FrontendAPIConfig struct {
 	// so the updater process — which waits for the parent PID to die — can
 	// proceed while Wails Shutdown hooks still run. Nil in tests (no-op).
 	QuitApp func()
+	// OnExperimentalChanged is the desktop hook invoked by
+	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate persist
+	// (ADR-091): the web-access sidecar mount follows the master gate live
+	// instead of waiting for the next launch. It rides the same construction
+	// seam as AppCtx/QuitApp — wired by desktop inside buildFrontendAPI and
+	// consumed by Init together with the other seed fields, so the write is
+	// ordered before the seedPublished flag and every toggle RPC's
+	// seedAcquire sees it. Nil (tests, backend-only builds) keeps the toggle
+	// a pure config+router operation.
+	OnExperimentalChanged func(enabled bool)
 	// WebviewGpuStderrObserved mirrors what main.go resolved at launch: the
 	// crash capture installed successfully (and was not opted out of), so the
 	// DMABUF watchdog can see this run's stderr. The launch-policy formula
@@ -619,6 +639,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	f.emitEvent = cfg.EmitEvent
 	f.appCtx = cfg.AppCtx
 	f.quitApp = cfg.QuitApp
+	f.onExperimentalChanged = cfg.OnExperimentalChanged
 	// Wire the session-orchestrator factory's config source (the factory was
 	// closed over inside NewApplication, before this FrontendAPI existed) to a
 	// lock-respecting conversion. The factory runs on Wails call goroutines,

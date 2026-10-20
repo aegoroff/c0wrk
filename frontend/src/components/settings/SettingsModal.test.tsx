@@ -323,6 +323,75 @@ describe('SettingsModal General tab: session statistics display toggle', () => {
   })
 })
 
+describe('SettingsModal General tab: web access experimental gate', () => {
+  it('hides the Web Access block, border wrapper included, while the experimental switch is off', async () => {
+    // The block is an experimental surface (as well as a desktop-only one):
+    // with the master switch off (the store default) it must not render
+    // anywhere on the General tab — and its border-t wrapper must vanish with
+    // it, leaving no orphaned divider between its neighbors.
+    useExperimentalStore.setState({ enabled: false, loaded: true })
+    useSettingsStore.setState({ open: true, activeTab: 'general' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    // Match the exact header span rather than the whole text body, because
+    // the always-visible Experimental Features toggle description names the
+    // block too.
+    const spans = Array.from(document.body.querySelectorAll('span'))
+    expect(spans.some((s) => s.textContent === 'Web Access')).toBe(false)
+    expect(document.body.querySelector('[data-testid="web-access-settings"]')).toBeNull()
+
+    // The sections the block sits between must now be adjacent: no empty
+    // border wrapper left behind where the section used to be.
+    const h3s = Array.from(document.body.querySelectorAll('h3'))
+    const proxy = h3s.find((h) => h.textContent === 'HTTP Proxy')
+    const vector = h3s.find((h) => h.textContent === 'Vector Index')
+    expect(proxy).toBeDefined()
+    expect(vector).toBeDefined()
+    expect(proxy!.closest('div.border-t')!.nextElementSibling).toBe(vector!.closest('div.border-t'))
+  })
+
+  it('shows the Web Access block when the gate is on, and hides/shows it reactively without a remount', async () => {
+    // Gate on: the block renders as before, inside the conventional border-t
+    // section wrapper.
+    useExperimentalStore.setState({ enabled: true, loaded: true })
+    useSettingsStore.setState({ open: true, activeTab: 'general' })
+    act(() => {
+      root.render(<SettingsModal />)
+    })
+    await flush()
+
+    const spans = Array.from(document.body.querySelectorAll('span'))
+    const webAccessHeader = spans.find((s) => s.textContent === 'Web Access')
+    expect(webAccessHeader).toBeDefined()
+    expect(document.body.querySelector('[data-testid="web-access-settings"]')).not.toBeNull()
+    const section = webAccessHeader!.closest('div.border-t')
+    expect(section).not.toBeNull()
+    expect(section!.className).toContain('pt-4')
+
+    // Flipping the master switch reactively hides the block: the gate is read
+    // from the store inside SettingsModal, so no remount or reload is
+    // involved.
+    act(() => {
+      useExperimentalStore.setState({ enabled: false })
+    })
+    expect(document.body.querySelector('[data-testid="web-access-settings"]')).toBeNull()
+    expect(
+      Array.from(document.body.querySelectorAll('span')).some(
+        (s) => s.textContent === 'Web Access',
+      ),
+    ).toBe(false)
+
+    // And back on again, still without any reload in between.
+    act(() => {
+      useExperimentalStore.setState({ enabled: true })
+    })
+    expect(document.body.querySelector('[data-testid="web-access-settings"]')).not.toBeNull()
+  })
+})
+
 describe('SettingsModal General tab: prompt suggestions gate', () => {
   it('places the Prompt Suggestions section directly after System Notifications', async () => {
     useSettingsStore.setState({ open: true, activeTab: 'general' })
@@ -692,6 +761,10 @@ describe('SettingsModal web transport', () => {
   })
 
   it('hides the Web Access block on the General tab (control RPCs are unreachable from a tab)', async () => {
+    // Gate on: the block is an experimental surface too, so with the master
+    // switch off it would be hidden anyway — setting it on isolates the
+    // transport branch this test exists to pin.
+    useExperimentalStore.setState({ enabled: true, loaded: true })
     useSettingsStore.setState({ open: true, activeTab: 'general' })
     act(() => {
       root.render(<SettingsModal />)

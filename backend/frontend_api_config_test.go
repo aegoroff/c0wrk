@@ -1,9 +1,11 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -3961,6 +3963,82 @@ func TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled(t *testing.
 	}
 	if !persisted.ModelProfiles.Enabled {
 		t.Error("persisted ModelProfiles.Enabled = false after re-enabling experimental features, want true")
+	}
+}
+
+// TestUpdateExperimentalFeatures_InvokesHookAfterPersist verifies the desktop
+// hook contract (ADR-091): the hook carried through the FrontendAPIConfig
+// seam fires once per toggle, in both directions, and
+// strictly AFTER the persist landed — the sidecar transition it drives must
+// be the visible consequence of the persisted gate, never of an in-memory
+// flip that failed to reach disk.
+func TestUpdateExperimentalFeatures_InvokesHookAfterPersist(t *testing.T) {
+	f, _, cfgPath := newTestAPI(t)
+
+	var calls []bool
+	f.onExperimentalChanged = func(enabled bool) {
+		persisted, err := config.Load(cfgPath)
+		if err != nil {
+			t.Errorf("config.Load inside the hook: %v", err)
+			return
+		}
+		if persisted.Experimental.Enabled != enabled {
+			t.Errorf("hook fired before the persist landed: persisted experimental.enabled = %v, want %v",
+				persisted.Experimental.Enabled, enabled)
+		}
+		calls = append(calls, enabled)
+	}
+
+	if err := f.UpdateExperimentalFeatures(true); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
+	}
+	if err := f.UpdateExperimentalFeatures(false); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
+	}
+	if len(calls) != 2 || calls[0] != true || calls[1] != false {
+		t.Fatalf("hook calls = %v, want [true false] in order", calls)
+	}
+}
+
+// TestUpdateExperimentalFeatures_PersistFailureSkipsHook pins the negative
+// half of the hook contract: a rejected disk write must not fire the desktop
+// hook (the sidecar lifecycle follows PERSISTED operator intent), while the
+// in-memory gate still carries the toggle — the pre-existing contract the
+// Warn-instead-of-return behavior encodes. The Warn is intercepted at its
+// source (severity, message, payload) instead of leaking to the test output.
+func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	var logBuf bytes.Buffer
+	f.logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	hookRan := false
+	f.onExperimentalChanged = func(bool) { hookRan = true }
+
+	// Point the config at an unwritable path: the parent directory does not
+	// exist, so the atomic write fails and the persist is rejected.
+	f.configMu.Lock()
+	f.configPath = filepath.Join(f.configPath, "missing-dir", "config.yaml")
+	f.configMu.Unlock()
+
+	if err := f.UpdateExperimentalFeatures(true); err != nil {
+		t.Fatalf("a failed persist is warned, not returned: %v", err)
+	}
+	if hookRan {
+		t.Error("the desktop hook fired despite the failed persist — it must follow persisted intent only")
+	}
+	if !f.experimentalFeaturesEnabled() {
+		t.Error("in-memory gate should still carry the toggle after a failed persist (existing contract)")
+	}
+
+	// Exactly one intercepted WARN names the failed persist.
+	logs := logBuf.String()
+	if n := strings.Count(logs, "level=WARN"); n != 1 {
+		t.Fatalf("got %d WARN records, want exactly 1:\n%s", n, logs)
+	}
+	if !strings.Contains(logs, "failed to persist experimental features toggle") ||
+		!strings.Contains(logs, "no such file") {
+		t.Errorf("the WARN record must name the failed persist and its cause, got:\n%s", logs)
 	}
 }
 

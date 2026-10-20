@@ -10,6 +10,12 @@
 //     reads the resolved section at start.
 //   - Default OFF: an absent section — or `enabled: false` — starts nothing
 //     and the app behaves exactly as before the section existed.
+//   - Externally gated (compound with the experimental master switch): the
+//     section is pure data and starts nothing by itself — the sidecar mounts
+//     only while config.Experimental.Enabled is ALSO on, and the desktop
+//     layer follows a mid-session flip of either switch live (mount on
+//     open, bounded stop on close). web_access.enabled=true under a closed
+//     experimental gate simply stays unmounted.
 //   - Bind validity (stage 2): while enabled, bind must be a VALID address —
 //     an IP literal (loopback, the unspecified "0.0.0.0"/"::", or a specific
 //     IPv4/IPv6 address) or the "localhost" name. The stage-1 loopback-only

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted → Amended by [ADR-091](./091-web-access-experimental-gate.md) (the availability model only: the sidecar additionally mounts behind the master experimental gate — `experimental.enabled && web_access.enabled`, live-followed mid-session; the architecture and every other decision stand unchanged)
 
 ## Context
 

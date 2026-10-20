@@ -922,6 +922,15 @@ func (a *App) buildFrontendAPI(
 	log *slog.Logger,
 	startTime time.Time,
 ) {
+	// Wire the experimental-gate live-follow hook (ADR-091) through the
+	// FrontendAPIConfig seam before Init: the backend invokes it after a
+	// successful experimental.enabled persist, so the web-access sidecar
+	// mount follows the master gate mid-session — opening the gate mounts it
+	// (when the section's own switch is on), closing it stops a running
+	// sidecar — instead of waiting for the next launch. Init consumes the
+	// hook together with the other seed fields, so the install is ordered
+	// before the seed flag and can never race a toggle RPC.
+	cfg.OnExperimentalChanged = a.applyExperimentalWebAccess
 	a.frontendAPI().Lifecycle().Init(cfg)
 	// Capture the desktop's own handle on the live config + its path: the
 	// web-access control RPCs (App-owned, ADR-090) flip and persist the
@@ -1533,22 +1542,36 @@ func (a *App) stopEmbeddedLLM(ctx context.Context) {
 	}
 }
 
-// initWebAccess mounts the browser web-access sidecar (ADR-090) when the
-// web_access section is enabled. This is the feature's startup mount point,
-// by the initChatGPTAuth pattern: a cheap phase helper after buildFrontendAPI
-// (the dispatch target must be wired) and after emitBackendReady (the mount
-// must not delay or reorder the readiness contract). Everything concrete is
-// assembled HERE — the live FrontendAPI as the reflection dispatch target,
-// the SPA tree main.go handed over, the CSP middleware, the resolved config
-// section — and handed to internal/webaccess, which knows nothing about
-// Wails or the desktop layer.
+// initWebAccess mounts the browser web-access sidecar (ADR-090) when BOTH
+// gates are open: the feature's own web_access.enabled switch AND the master
+// experimental gate (experimental.enabled — web access is an experimental
+// feature, ADR-091). This is the feature's startup mount point, by the
+// initChatGPTAuth pattern: a cheap phase helper after buildFrontendAPI
+// (the dispatch target must be wired — it is also where the live-follow hook
+// applyExperimentalWebAccess installs through the FrontendAPIConfig seam) and after
+// emitBackendReady (the mount must not delay or reorder the readiness
+// contract). Everything concrete is assembled HERE — the live FrontendAPI as
+// the reflection dispatch target, the SPA tree main.go handed over, the CSP
+// middleware, the resolved config section — and handed to internal/webaccess,
+// which knows nothing about Wails or the desktop layer.
+//
+// A closed gate is a QUIET skip (Debug): an intentionally-off feature is not
+// a failure, and flagging every default-config launch at Error would be
+// noise; the live-follow of a mid-session gate change rides the desktop hook
+// instead of a restart.
 //
 // Failure is fail-soft and LOUD: a sidecar that cannot start (config drift a
 // reload normalized away, a squatted explicit port) logs at Error and leaves
 // the app fully usable desktop-side — the web feature degrades, the desktop
 // app must not. The section stays enabled, so the next launch retries.
 func (a *App) initWebAccess(cfg *config.Config, log *slog.Logger) {
-	if a.frontendAPI() == nil || cfg == nil || !cfg.WebAccess.Enabled {
+	if a.frontendAPI() == nil || cfg == nil {
+		return
+	}
+	if !cfg.Experimental.Enabled || !cfg.WebAccess.Enabled {
+		log.Debug("web access sidecar not mounted: gate closed",
+			"experimental_enabled", cfg.Experimental.Enabled,
+			"web_access_enabled", cfg.WebAccess.Enabled)
 		return
 	}
 	startTime := time.Now()
