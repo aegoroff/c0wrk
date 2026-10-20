@@ -274,6 +274,17 @@ llm:
 # planner `tuning:` overrides).
 #
 # embedded_llm:
+#   # The runtime family the embedded model runs on. One of:
+#   #   "auto"   — mtplx (MLX, Apple Silicon M-series, macOS 14+) on
+#   #              darwin/arm64; the pinned llama.cpp fork (Metal/CUDA/ROCm/
+#   #              Vulkan/CPU) everywhere else. The default.
+#   #   "mtplx"  — force the MLX engine (refused off darwin/arm64).
+#   #   "llama"  — force the llama.cpp fork.
+#   # A choice, not a record: install and removal preserve it. Under "mtplx"
+#   # the tuning keys that name llama-only knobs (offload, fit, kv_cache_type,
+#   # packing, ...) are refused at load.
+#   # Default: auto.
+#   engine: auto
 #   # True once runtime and weights are downloaded, SHA256-verified (fail-closed)
 #   # and recorded in the install manifest. Gates the generated provider entry.
 #   # Default: false.

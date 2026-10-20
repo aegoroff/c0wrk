@@ -79,8 +79,22 @@ function formatPlan(plan: EmbeddedLLMPlan): string {
     .join(' · ')
 }
 
+/** The human label for the runtime family on disk. "" is a pre-engine
+ *  install — the llama family is what could have written such a record. */
+function engineLabel(engine: string): string {
+  switch (engine) {
+    case 'mtplx':
+      return 'MLX (MTPLX)'
+    case 'llama':
+      return 'llama.cpp'
+    default:
+      return 'llama.cpp'
+  }
+}
+
 export function EmbeddedLLMInstallRecord({ status }: { status: EmbeddedLLMStatus }) {
   const items: { label: string; value: string; testId: string }[] = [
+    { label: 'Engine', value: engineLabel(status.engine), testId: 'embedded-llm-engine' },
     { label: 'Packing', value: status.packing || '—', testId: 'embedded-llm-packing' },
     { label: 'Backend', value: status.backend || '—', testId: 'embedded-llm-backend' },
     {
@@ -127,6 +141,22 @@ export function EmbeddedLLMInstallRecord({ status }: { status: EmbeddedLLMStatus
           </span>
         ))}
       </div>
+      {status.engine === 'mtplx' && (
+        // The MTPLX NOTICE attribution obligation (Apache-2.0 §4(d)): a product
+        // built on MTPLX says so inside the product, somewhere a user can see.
+        // This line is that statement.
+        <p className="text-xs text-muted-foreground" data-testid="embedded-llm-attribution">
+          Powered by MTPLX —{' '}
+          <a
+            href="https://github.com/youssofal/MTPLX"
+            target="_blank"
+            rel="noreferrer"
+            className="underline decoration-muted-foreground/40 underline-offset-2 hover:text-foreground"
+          >
+            github.com/youssofal/MTPLX
+          </a>
+        </p>
+      )}
       {status.guards.length > 0 && (
         <div
           className="flex flex-col gap-0.5"

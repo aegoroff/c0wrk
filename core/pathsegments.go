@@ -36,6 +36,12 @@ const EmbeddedRuntimesRelativePath = "runtimes"
 // from ever touching the embedding model (ADR-066, Alternatives Considered).
 const EmbeddedModelRelativePath = "models/bonsai-2-27b"
 
+// EmbeddedMLXModelRelativePath is the relative path, within the c0wrk default
+// agent directory, of the embedded-LLM MLX weight pack (the mtplx engine's
+// tree). It sits beside — never inside — the llama GGUF root, so a scoped
+// removal of one engine's weights can never take the other's.
+const EmbeddedMLXModelRelativePath = "models/bonsai-2-27b-mlx"
+
 // WorktreesRelativePath is the conventional relative path from a project
 // repository root to the app-managed session-worktree container
 // (<repo>/.worktrees/<name> per ADR-080). Shared between core/ (worktree

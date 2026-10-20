@@ -360,6 +360,7 @@ describe('#157 isEmbeddedLLMStatus fit_warning', () => {
     installing: false,
     loading: false,
     loaded: false,
+    engine: '',
     packing: 'PQ2_0',
     backend: 'cpu',
     port: 43211,
@@ -389,6 +390,7 @@ describe('#157 isEmbeddedLLMStatus fit_warning', () => {
     topology_probed_at: '',
     plan: {
       recorded: false,
+      engine: '',
       packing: '',
       kv_type: '',
       context_size: 0,

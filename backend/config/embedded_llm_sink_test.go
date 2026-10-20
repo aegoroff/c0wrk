@@ -204,7 +204,7 @@ func TestEmbeddedConfigSinkPreservesOperatorAutoUnload(t *testing.T) {
 // the contract, with both roots built by this package's path API.
 func TestEmbeddedLLMRemoveClearsProviderRecordEndToEnd(t *testing.T) {
 	agentDir := t.TempDir()
-	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir), EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestEmbeddedLLMRemoveClearsProviderRecordEndToEnd(t *testing.T) {
 // next load; see ApplyRemoved for why that must never be written to disk.
 func TestEmbeddedLLMRemoveWithNoOtherModelIsRefused(t *testing.T) {
 	agentDir := t.TempDir()
-	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir), EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}

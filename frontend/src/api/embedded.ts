@@ -131,8 +131,19 @@ export interface EmbeddedLLMStatus extends EmbeddedLLMStatusExtras {
   readonly loading: boolean
   /** A model is serving (a non-empty /v1/models answer). */
   readonly loaded: boolean
+  /** The runtime family on disk: "" (a pre-engine install, llama), "llama",
+   *  or "mtplx". The Settings label renders the engine first — it is the
+   *  difference a reader needs before the accelerator. */
+  readonly engine: string
+  /** The managed CPython under the mtplx engine (absent on the llama
+   *  family). */
+  readonly python_version?: string
+  /** The pinned Hugging Face revision of the mtplx weight pack (absent on
+   *  the llama family). */
+  readonly pack_revision?: string
   /** The ternary quantization on disk ("PQ2_0" | "PTQ1_0"), "" when not
-   *  installed. INFORMATIONAL — the effective packing the resolver chose. */
+   *  installed (always "" under the mtplx engine — its pack ships one
+   *  quantization). INFORMATIONAL — the effective packing the resolver chose. */
   readonly packing: string
   /** The accelerator the runtime was provisioned for ("metal", "cuda-12.4",
    *  …, "cpu"), "" when not installed. */
@@ -212,6 +223,11 @@ export function isEmbeddedLLMStatus(d: unknown): d is EmbeddedLLMStatus {
     typeof o.installing === 'boolean' &&
     typeof o.loading === 'boolean' &&
     typeof o.loaded === 'boolean' &&
+    typeof o.engine === 'string' &&
+    // Optional omitempty records stay valid when absent; a present one must
+    // be a string — the engine attribution renders them.
+    (o.python_version === undefined || typeof o.python_version === 'string') &&
+    (o.pack_revision === undefined || typeof o.pack_revision === 'string') &&
     typeof o.packing === 'string' &&
     typeof o.backend === 'string' &&
     typeof o.port === 'number' &&

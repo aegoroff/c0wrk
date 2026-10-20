@@ -46,6 +46,7 @@ const STATUS = {
   installing: false,
   loading: false,
   loaded: false,
+  engine: '',
   packing: 'PQ2_0',
   backend: 'metal',
   port: 43211,
@@ -75,6 +76,7 @@ const STATUS = {
   topology_probed_at: '',
   plan: {
     recorded: false,
+    engine: '',
     packing: '',
     kv_type: '',
     context_size: 0,
@@ -181,6 +183,7 @@ describe('isEmbeddedLLMStatus / getEmbeddedLLMStatus — the boundary guard', ()
           issue: 'PrismML-Eng/llama.cpp#222',
           applied: false,
           backend: 'cuda-12.8',
+          engine: '',
           packing: '',
           guidance: 'the CUDA 13.3 build is documented to segfault …',
         },

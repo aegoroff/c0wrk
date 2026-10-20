@@ -198,7 +198,7 @@ func embeddedTestManifest(port, contextSize int) embeddedllm.Manifest {
 func writeEmbeddedInstallTree(t *testing.T, agentDir string, manifest embeddedllm.Manifest) (embeddedllm.Layout, embeddedllm.Manifest) {
 	t.Helper()
 
-	layout, err := embeddedllm.NewLayout(config.RuntimesDir(agentDir), config.EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(config.RuntimesDir(agentDir), config.EmbeddedModelDir(agentDir), config.EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}

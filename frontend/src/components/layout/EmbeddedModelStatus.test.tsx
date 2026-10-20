@@ -106,6 +106,7 @@ function statusWith(overrides: Partial<EmbeddedLLMStatus> = {}): EmbeddedLLMStat
     installing: false,
     loading: false,
     loaded: false,
+    engine: '',
     packing: '',
     backend: '',
     port: 0,
