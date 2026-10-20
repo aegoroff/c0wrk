@@ -66,7 +66,7 @@ func TestWebAccess_AbsentSectionDefaultsOff(t *testing.T) {
 }
 
 func TestWebAccess_ValidSectionLoads(t *testing.T) {
-	// Every accepted loopback bind class rides the full pipeline warning-free.
+	// Every loopback bind class rides the full pipeline warning-free.
 	for _, bind := range []string{"127.0.0.1", "::1", "localhost", "127.8.8.8", "::ffff:127.0.0.1"} {
 		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
 web_access:
@@ -118,11 +118,44 @@ web_access:
 	}
 }
 
-func TestWebAccess_NonLoopbackBindFailsSoft(t *testing.T) {
-	// An explicit empty bind is NOT in this table: ApplyDefaults seeds it with
-	// the default before normalization, so `enabled: true` with no bind is the
-	// valid "default bind" shortcut, never a warning.
-	for _, bind := range []string{"0.0.0.0", "192.168.1.10", "example.com"} {
+func TestWebAccess_NonLoopbackBindLoadsWithWarning(t *testing.T) {
+	// Stage 2: a valid non-loopback bind is a deliberate LAN-exposed listener,
+	// not a validity problem — it loads ENABLED with exactly one
+	// network-exposure warning and its values preserved verbatim.
+	for _, bind := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5"} {
+		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  bind: "`+bind+`"
+  port: 8765
+  token: s3cret-token
+`))
+		if len(warnings) != 1 {
+			t.Fatalf("bind %q: expected exactly one load warning, got %v", bind, warnings)
+		}
+		if !strings.Contains(warnings[0], "web_access") ||
+			!strings.Contains(warnings[0], "not loopback") ||
+			!strings.Contains(warnings[0], "network-accessible") {
+			t.Errorf("bind %q: warning must name the section and the network exposure, got %q", bind, warnings[0])
+		}
+		if !cfg.WebAccess.Enabled {
+			t.Errorf("bind %q: a valid non-loopback section must stay enabled", bind)
+		}
+		if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+			t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
+		}
+	}
+}
+
+func TestWebAccess_InvalidBindFailsSoft(t *testing.T) {
+	// Only INVALID binds reset the section: unparseable literals and
+	// non-"localhost" hostnames. "0.0.0.0" and LAN IPs are valid since stage
+	// 2 (covered by TestWebAccess_NonLoopbackBindLoadsWithWarning). An
+	// explicit empty bind is NOT in this table: ApplyDefaults seeds it with
+	// the default before normalization, so `enabled: true` with no bind is
+	// the valid "default bind" shortcut, never a warning; the in-memory
+	// empty-bind reset is pinned by TestWebAccess_EmptyBindFailsSoftInMemory.
+	for _, bind := range []string{"garbage", "example.com", "localhost.localdomain", "127.0.0.1:8080"} {
 		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
 web_access:
   enabled: true
@@ -132,8 +165,8 @@ web_access:
 		if len(warnings) != 1 {
 			t.Fatalf("bind %q: expected exactly one load warning, got %v", bind, warnings)
 		}
-		if !strings.Contains(warnings[0], "web_access") || !strings.Contains(warnings[0], "loopback") {
-			t.Errorf("bind %q: warning must name the section and the reason, got %q", bind, warnings[0])
+		if !strings.Contains(warnings[0], "web_access") || !strings.Contains(warnings[0], "ignored") {
+			t.Errorf("bind %q: warning must name the section and the reset, got %q", bind, warnings[0])
 		}
 		// Reset to the safe default state: sidecar off, default bind, auto
 		// port, ephemeral token.
@@ -146,6 +179,24 @@ web_access:
 		if cfg.WebAccess.Port != 0 || cfg.WebAccess.Token != "" {
 			t.Errorf("bind %q: reset section carries port %d / token %q", bind, cfg.WebAccess.Port, cfg.WebAccess.Token)
 		}
+	}
+}
+
+func TestWebAccess_EmptyBindFailsSoftInMemory(t *testing.T) {
+	// The load pipeline never sees an empty bind (ApplyDefaults seeds the
+	// default first), but an in-memory mutation can produce one — and the
+	// fail-soft normalize contract must treat it as INVALID, not as a valid
+	// class: one warning and a reset to the safe default state.
+	cfg := &Config{WebAccess: WebAccessConfig{Enabled: true, Bind: "", Port: 8765}}
+	warnings := normalizeWebAccess(cfg)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one load warning, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0], "web_access") || !strings.Contains(warnings[0], "ignored") {
+		t.Errorf("warning must name the section and the reset, got %q", warnings[0])
+	}
+	if cfg.WebAccess != defaultWebAccessState() {
+		t.Errorf("empty-bind section must reset to the default state, got %+v", cfg.WebAccess)
 	}
 }
 
@@ -217,7 +268,8 @@ func TestWebAccess_SaveLoadRoundTrip(t *testing.T) {
 		t.Errorf("defaults round trip = %+v, want {Bind: %q}", loaded.Config.WebAccess, DefaultWebAccessBind)
 	}
 
-	// An enabled, valid section round-trips unchanged and warning-free.
+	// An enabled, valid loopback section round-trips unchanged and
+	// warning-free.
 	cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: "::1", Port: 8765, Token: "s3cret-token"}
 	if err := Save(cfg, path); err != nil {
 		t.Fatalf("Save (enabled): %v", err)
@@ -234,17 +286,52 @@ func TestWebAccess_SaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWebAccess_NonLoopbackBindSaveRoundTrip(t *testing.T) {
+	// A valid non-loopback bind is an operator decision, not a validity
+	// problem: it saves without error and re-loads with exactly the
+	// network-exposure warning, values intact.
+	for _, bind := range []string{"0.0.0.0", "192.168.1.10"} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		cfg := minimalValidConfig()
+		cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: bind, Port: 8765, Token: "s3cret-token"}
+		if err := Save(cfg, path); err != nil {
+			t.Fatalf("bind %q: Save must accept a valid non-loopback bind, got %v", bind, err)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("bind %q: accepted save must create the file: %v", bind, statErr)
+		}
+		loaded, err := LoadWithResult(path)
+		if err != nil {
+			t.Fatalf("bind %q: LoadWithResult: %v", bind, err)
+		}
+		if len(loaded.LoadErrors) != 1 {
+			t.Fatalf("bind %q: reload must carry exactly the loopback warning, got %v", bind, loaded.LoadErrors)
+		}
+		if !strings.Contains(loaded.LoadErrors[0], "not loopback") ||
+			!strings.Contains(loaded.LoadErrors[0], "network-accessible") {
+			t.Errorf("bind %q: reload warning must name the network exposure, got %q", bind, loaded.LoadErrors[0])
+		}
+		if loaded.Config.WebAccess != cfg.WebAccess {
+			t.Errorf("bind %q: round trip = %+v, want %+v", bind, loaded.Config.WebAccess, cfg.WebAccess)
+		}
+	}
+}
+
 func TestWebAccess_SaveRejectsUnsafeState(t *testing.T) {
-	// The load path heals an unsafe section before it can ever be re-saved,
-	// so these states are only reachable through in-memory mutation — and the
-	// save must refuse to make config.yaml their source. The empty-bind case
-	// is the in-memory counterpart of the (valid) omitted-key load shortcut.
+	// Fail-closed keys on VALIDITY (stage 2): the load path heals an invalid
+	// section before it can ever be re-saved, so these states are only
+	// reachable through in-memory mutation — and the save must refuse to make
+	// config.yaml their source. The empty-bind case is the in-memory
+	// counterpart of the (valid) omitted-key load shortcut. A valid
+	// non-loopback bind is NOT in this table: it saves (see
+	// TestWebAccess_NonLoopbackBindSaveRoundTrip).
 	cases := map[string]WebAccessConfig{
-		"non-loopback bind": {Enabled: true, Bind: "0.0.0.0"},
-		"lan bind":          {Enabled: true, Bind: "192.168.1.10", Port: 8765},
-		"empty bind":        {Enabled: true},
-		"negative port":     {Enabled: true, Bind: "127.0.0.1", Port: -1},
-		"port overflow":     {Enabled: true, Bind: "127.0.0.1", Port: 65536},
+		"garbage bind":  {Enabled: true, Bind: "not-an-ip"},
+		"hostname bind": {Enabled: true, Bind: "example.com"},
+		"empty bind":    {Enabled: true},
+		"negative port": {Enabled: true, Bind: "127.0.0.1", Port: -1},
+		"port overflow": {Enabled: true, Bind: "127.0.0.1", Port: 65536},
 	}
 	for name, wa := range cases {
 		dir := t.TempDir()
@@ -253,7 +340,7 @@ func TestWebAccess_SaveRejectsUnsafeState(t *testing.T) {
 		cfg.WebAccess = wa
 		err := Save(cfg, path)
 		if err == nil {
-			t.Errorf("%s: Save must refuse an unsafe enabled section", name)
+			t.Errorf("%s: Save must refuse an invalid enabled section", name)
 			continue
 		}
 		if !strings.Contains(err.Error(), "web_access") {
@@ -298,5 +385,67 @@ func TestIsLoopbackBind(t *testing.T) {
 		if IsLoopbackBind(bind) {
 			t.Errorf("IsLoopbackBind(%q) = true, want false", bind)
 		}
+	}
+}
+
+func TestIsValidWebAccessBind(t *testing.T) {
+	// Validity (stage 2) accepts EVERY IP literal — loopback, unspecified,
+	// specific IPv4/IPv6, IPv4-mapped — plus the one "localhost" name.
+	valid := []string{
+		"127.0.0.1",
+		"127.8.8.8",
+		"::1",
+		"::ffff:127.0.0.1",
+		"0.0.0.0",
+		"::",
+		"192.168.1.10",
+		"10.0.0.1",
+		"8.8.8.8",
+		"fd00::1",
+		"::ffff:192.168.1.10",
+		"localhost",
+	}
+	for _, bind := range valid {
+		if !IsValidWebAccessBind(bind) {
+			t.Errorf("IsValidWebAccessBind(%q) = false, want true", bind)
+		}
+	}
+	invalid := []string{
+		"",
+		"garbage",
+		"example.com",
+		"localhost.localdomain",
+		"127.0.0.1:8080", // the port is a separate field, not part of bind
+		" 127.0.0.1",     // whitespace is not an address
+	}
+	for _, bind := range invalid {
+		if IsValidWebAccessBind(bind) {
+			t.Errorf("IsValidWebAccessBind(%q) = true, want false", bind)
+		}
+	}
+}
+
+func TestValidateWebAccessBind(t *testing.T) {
+	// The exported mirror of the section rule: valid binds — loopback or not
+	// (loopback classification is a warning matter, IsLoopbackBind) — return
+	// nil; empty and unparseable values are rejected.
+	for _, bind := range []string{"127.0.0.1", "::1", "localhost", "0.0.0.0", "::", "192.168.1.10", "::ffff:10.0.0.1"} {
+		if err := ValidateWebAccessBind(bind); err != nil {
+			t.Errorf("ValidateWebAccessBind(%q) = %v, want nil", bind, err)
+		}
+	}
+	for _, bind := range []string{"", "garbage", "example.com"} {
+		err := ValidateWebAccessBind(bind)
+		if err == nil {
+			t.Errorf("ValidateWebAccessBind(%q) = nil, want error", bind)
+			continue
+		}
+		if !strings.Contains(err.Error(), "web_access") {
+			t.Errorf("ValidateWebAccessBind(%q): error must name the section, got %q", bind, err.Error())
+		}
+	}
+	// The exact message the load/save paths produce for the empty bind.
+	if got := ValidateWebAccessBind("").Error(); got != "web_access: bind is required when enabled" {
+		t.Errorf("ValidateWebAccessBind(\"\") = %q, want the section-naming required-bind message", got)
 	}
 }

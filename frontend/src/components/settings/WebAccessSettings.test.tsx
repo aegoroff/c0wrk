@@ -32,9 +32,19 @@ const runningInfo = {
   running: true,
   url: 'http://127.0.0.1:8765',
   port: 8765,
+  configuredBind: '127.0.0.1',
+  bindIsLoopback: true,
   token: 'tok-abcdef0123456789',
 }
-const offInfo = { enabled: false, running: false, url: '', port: 0, token: '' }
+const offInfo = {
+  enabled: false,
+  running: false,
+  url: '',
+  port: 0,
+  configuredBind: '127.0.0.1',
+  bindIsLoopback: true,
+  token: '',
+}
 
 let container: HTMLDivElement
 let root: Root
@@ -185,7 +195,70 @@ describe('WebAccessSettings', () => {
   })
 })
 
-describe('WebAccessSettings pin (fixed port & token)', () => {
+describe('WebAccessSettings non-loopback bind warnings', () => {
+  const lanInfo = { ...runningInfo, configuredBind: '0.0.0.0', bindIsLoopback: false }
+
+  beforeEach(() => {
+    mocks.getWebAccessInfo.mockResolvedValue(lanInfo)
+  })
+
+  it('renders the strong network warning only for an enabled non-loopback bind', async () => {
+    render()
+    await flush()
+    const net = byTestId('web-access-warning-network')
+    expect(net).not.toBeNull()
+    expect(net?.textContent).toContain('Network exposure')
+    expect(net?.textContent).toContain('plain HTTP')
+    expect(net?.textContent).toContain('only protection')
+    // The loopback-tier banner is replaced, not duplicated.
+    expect(byTestId('web-access-warning')).toBeNull()
+  })
+
+  it('keeps the plain full-control warning on a loopback bind (no network banner)', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render()
+    await flush()
+    expect(byTestId('web-access-warning')?.textContent).toContain('full control')
+    expect(byTestId('web-access-warning-network')).toBeNull()
+  })
+
+  it('shows neither warning while disabled, even on a non-loopback bind', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({ ...lanInfo, enabled: false })
+    render()
+    await flush()
+    expect(byTestId('web-access-warning')).toBeNull()
+    expect(byTestId('web-access-warning-network')).toBeNull()
+  })
+
+  it('no longer claims the listener is loopback-only as an unconditional fact', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render()
+    await flush()
+    expect(byTestId('web-access-warning')?.textContent).not.toContain('loopback-only')
+  })
+
+  it('worded the running status for a network listener', async () => {
+    render()
+    await flush()
+    const status = byTestId('web-access-status')?.textContent ?? ''
+    expect(status).toContain('Running')
+    expect(status).toContain('other devices on the network')
+  })
+
+  it('keeps the machine-local wording for a loopback listener', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render()
+    await flush()
+    expect(byTestId('web-access-status')?.textContent).toContain('on this machine.')
+  })
+})
+
+describe('WebAccessSettings pin (fixed bind, port & token)', () => {
+  function pinBind(): HTMLInputElement {
+    const el = byTestId('web-access-pin-bind')
+    if (!(el instanceof HTMLInputElement)) throw new Error('pin bind input not found')
+    return el
+  }
   function pinPort(): HTMLInputElement {
     const el = byTestId('web-access-pin-port')
     if (!(el instanceof HTMLInputElement)) throw new Error('pin port input not found')
@@ -208,31 +281,70 @@ describe('WebAccessSettings pin (fixed port & token)', () => {
   beforeEach(() => {
     mocks.getWebAccessInfo.mockResolvedValue({
       ...runningInfo,
+      configuredBind: '127.0.0.1',
+      bindIsLoopback: true,
       configuredPort: 0,
       tokenPinned: false,
     })
   })
 
-  it('applies the drafts: port and token travel, state re-reads, draft clears', async () => {
+  it('applies the drafts: bind, port and token travel, state re-reads, token draft clears', async () => {
     render()
     await flush()
+    typeInto(pinBind(), '0.0.0.0')
     typeInto(pinPort(), '9000')
     typeInto(pinToken(), ' fixed-secret ')
     clickButton('web-access-pin-apply')
     await flush()
-    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith(9000, 'fixed-secret')
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000, 'fixed-secret')
     // The authoritative state is re-read after the apply.
     expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
     // A typed secret never lingers on screen.
     expect(pinToken().value).toBe('')
   })
 
-  it('empty drafts mean auto port + ephemeral token (the zero values)', async () => {
+  it('empty drafts mean the default bind, auto port + ephemeral token (the zero values)', async () => {
     render()
     await flush()
     clickButton('web-access-pin-apply')
     await flush()
-    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith(0, '')
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('127.0.0.1', 0, '')
+  })
+
+  it('an emptied bind draft sends the default sentinel (empty = 127.0.0.1)', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({
+      ...runningInfo,
+      configuredBind: '0.0.0.0',
+      bindIsLoopback: false,
+    })
+    render()
+    await flush()
+    expect(pinBind().value).toBe('0.0.0.0')
+    typeInto(pinBind(), '')
+    clickButton('web-access-pin-apply')
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('', 0, '')
+  })
+
+  it('seeds the bind draft from the persisted pin', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({
+      ...runningInfo,
+      configuredBind: '192.168.1.10',
+      bindIsLoopback: false,
+      configuredPort: 8765,
+    })
+    render()
+    await flush()
+    expect(pinBind().value).toBe('192.168.1.10')
+    expect(pinPort().value).toBe('8765')
+  })
+
+  it('the bind input is a plain text field with the default placeholder, autocomplete off', async () => {
+    render()
+    await flush()
+    expect(pinBind().type).toBe('text')
+    expect(pinBind().placeholder).toBe('Bind — 127.0.0.1')
+    expect(pinBind().autocomplete).toBe('off')
   })
 
   it('seeds the port draft from the persisted pin', async () => {

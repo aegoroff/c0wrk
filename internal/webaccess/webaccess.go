@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Package webaccess is the core of the browser web-access sidecar
-// (specs/decisions/090-browser-web-access.md): a loopback-only HTTP +
-// WebSocket server that mirrors the desktop UI into a browser tab by
-// dispatching the same RPC surface the Wails webview uses.
+// (specs/decisions/090-browser-web-access.md): an HTTP + WebSocket server
+// that mirrors the desktop UI into a browser tab by dispatching the same RPC
+// surface the Wails webview uses. It binds loopback by default; since stage 2
+// a non-loopback (LAN-exposed) bind is allowed and draws a startup warning.
 //
 // The package is deliberately SELF-CONTAINED: it knows nothing about Wails
 // or the desktop layer. Everything environment-specific is injected through
@@ -29,8 +30,12 @@
 //	GET  /ws                → RFC6455 upgrade — cookie auth + same-origin Origin
 //	GET  /                  → static SPA through the injected CSP — no auth
 //
-// Security posture (stage 1, ADR-090):
-//   - Loopback-only bind; the config loader fail-soft resets anything else.
+// Security posture (stage 2, ADR-090):
+//   - Bind = any valid IP literal or "localhost" (config.IsValidWebAccessBind).
+//     Loopback stays the safe default; a NON-loopback bind makes the listener
+//     reachable beyond this machine over plain HTTP without TLS, and New
+//     warns about exactly that — with no transport encryption the auth token
+//     is the only protection. An invalid bind is refused (fail-closed).
 //   - Auth token: cfg.Token when set, else a fresh crypto/rand token per
 //     launch. The token is never logged in full and never travels in a URL
 //     (login is POST body only; requests authenticate by HttpOnly
@@ -43,10 +48,13 @@
 //     (dispatch.go). A browser tab holds full control of the app by design;
 //     the denylist only removes methods that are web-transport hazards.
 //
-// KNOWN LIMITATION (stage 1): the cookie is issued without the Secure flag
-// because the sidecar serves plain HTTP on loopback (no TLS in stage 1).
-// Loopback-only binding plus HttpOnly/SameSite=Strict is the compensation;
-// a TLS stage-2 must flip Secure on.
+// KNOWN LIMITATION: the cookie is issued without the Secure flag because the
+// sidecar serves plain HTTP (no TLS yet). On the loopback default this is a
+// local-machine concern; on a non-loopback bind the missing Secure flag plus
+// the lack of TLS is part of the exposure the startup warning names.
+// HttpOnly/SameSite=Strict, the per-launch session secret and the token gate
+// remain the compensations; a TLS stage must flip Secure on. Websocket origin
+// checks compare Origin against r.Host, which stays correct on any interface.
 package webaccess
 
 import (
@@ -86,7 +94,7 @@ const (
 	// deadline-free context.
 	shutdownBudget = 5 * time.Second
 	// readHeaderTimeout and idleTimeout harden the HTTP server against
-	// slowloris-style stalling on the loopback listener.
+	// slowloris-style stalling on the listener.
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
 	// wsPath is advertised by /api/transport so the SPA shell can find the
@@ -103,7 +111,9 @@ var ErrDisabled = errors.New("webaccess: web_access section is not enabled")
 // Nothing inside the package constructs any of them.
 type Options struct {
 	// Config is the resolved `web_access` config section. New refuses a
-	// disabled section (ErrDisabled) and a non-loopback bind.
+	// disabled section (ErrDisabled) and an invalid bind
+	// (config.IsValidWebAccessBind); a valid non-loopback bind is accepted
+	// with a startup warning (network exposure, no TLS).
 	Config config.WebAccessConfig
 	// Dispatch is the RPC target: at runtime a *backend.FrontendAPI. Only its
 	// exported methods are reachable, minus the denylist (dispatch.go).
@@ -172,8 +182,13 @@ func New(opts Options) (*Server, error) {
 	if !opts.Config.Enabled {
 		return nil, ErrDisabled
 	}
-	if !config.IsLoopbackBind(opts.Config.Bind) {
-		return nil, fmt.Errorf("webaccess: bind %q is not loopback — the sidecar listens on loopback only", opts.Config.Bind)
+	if !config.IsValidWebAccessBind(opts.Config.Bind) {
+		// Fail-closed: an invalid bind is a wiring bug, not an exposure
+		// decision. Same two messages the config load/save paths produce.
+		if opts.Config.Bind == "" {
+			return nil, errors.New("webaccess: bind is required when enabled")
+		}
+		return nil, fmt.Errorf("webaccess: bind %q is not a valid IP literal or \"localhost\"", opts.Config.Bind)
 	}
 	if opts.Config.Port < 0 || opts.Config.Port > 65535 {
 		return nil, fmt.Errorf("webaccess: port %d out of range (0 = auto)", opts.Config.Port)
@@ -197,6 +212,14 @@ func New(opts Options) (*Server, error) {
 		log = slog.Default()
 	}
 
+	// Stage-2 posture: a valid non-loopback bind puts the listener on the
+	// network. Allowed (the operator owns the exposure decision) but loudly
+	// surfaced — plain HTTP without TLS means the auth token is the only
+	// protection out there.
+	if !config.IsLoopbackBind(opts.Config.Bind) {
+		log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection", opts.Config.Bind))
+	}
+
 	authToken := opts.Config.Token
 	if authToken == "" {
 		gen, err := randomHex(tokenBytes)
@@ -206,7 +229,8 @@ func New(opts Options) (*Server, error) {
 		authToken = gen
 	} else if len(authToken) < 16 {
 		// Operator-chosen weak secret: allowed (the operator owns the
-		// risk on a loopback-only listener) but surfaced.
+		// risk — a short token is the weakest link already on loopback,
+		// and the only protection on a non-loopback bind) but surfaced.
 		log.Warn("webaccess: configured token is short; prefer the per-launch token or at least 16 characters")
 	}
 	sessionToken, err := randomHex(tokenBytes)
@@ -276,9 +300,9 @@ func (s *Server) Addr() (string, bool) {
 	return s.ln.Addr().String(), true
 }
 
-// Start binds the configured loopback interface (resolving port 0 to a free
-// port) and serves until Stop or ctx cancellation. It returns after the
-// listener is bound; serve errors after that are logged, not returned.
+// Start binds the configured interface (resolving port 0 to a free port) and
+// serves until Stop or ctx cancellation. It returns after the listener is
+// bound; serve errors after that are logged, not returned.
 func (s *Server) Start(ctx context.Context) error {
 	addr := net.JoinHostPort(s.cfg.Bind, strconv.Itoa(s.cfg.Port))
 	var lc net.ListenConfig
@@ -289,7 +313,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.ln = ln
-	s.httpSrv = &http.Server{ //nolint:gosec // loopback-only stage-1 sidecar; timeouts set below
+	s.httpSrv = &http.Server{ //nolint:gosec // plain-HTTP sidecar (TLS is a later stage); timeouts set below
 		Handler:           s.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,

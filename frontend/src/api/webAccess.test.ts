@@ -23,6 +23,8 @@ const validInfo = {
   url: 'http://127.0.0.1:8765',
   port: 8765,
   configured_port: 8765,
+  configured_bind: '127.0.0.1',
+  bind_is_loopback: true,
   token: 'per-launch-token',
   token_pinned: false,
 }
@@ -34,6 +36,8 @@ describe('parseWebAccessInfo', () => {
     url: 'http://127.0.0.1:8765',
     port: 8765,
     configuredPort: 8765,
+    configuredBind: '127.0.0.1',
+    bindIsLoopback: true,
     token: 'per-launch-token',
     tokenPinned: false,
   }
@@ -44,13 +48,23 @@ describe('parseWebAccessInfo', () => {
 
   it('accepts the not-running shape (empty url, zero port)', () => {
     expect(
-      parseWebAccessInfo({ ...validInfo, running: false, url: '', port: 0, configured_port: 0, token: '' }),
+      parseWebAccessInfo({
+        ...validInfo,
+        running: false,
+        url: '',
+        port: 0,
+        configured_port: 0,
+        configured_bind: '',
+        bind_is_loopback: true,
+        token: '',
+      }),
     ).toEqual({
       ...parsedValid,
       running: false,
       url: '',
       port: 0,
       configuredPort: 0,
+      configuredBind: '',
       token: '',
     })
   })
@@ -61,6 +75,15 @@ describe('parseWebAccessInfo', () => {
     ).toEqual({ ...parsedValid, configuredPort: 9000, tokenPinned: true })
   })
 
+  it('maps the snake_case bind fields (a non-loopback bind)', () => {
+    expect(
+      parseWebAccessInfo({ ...validInfo, configured_bind: '0.0.0.0', bind_is_loopback: false }),
+    ).toEqual({ ...parsedValid, configuredBind: '0.0.0.0', bindIsLoopback: false })
+    expect(
+      parseWebAccessInfo({ ...validInfo, configured_bind: 'localhost', bind_is_loopback: true }),
+    ).toEqual({ ...parsedValid, configuredBind: 'localhost', bindIsLoopback: true })
+  })
+
   it('defaults the pin fields when absent (stale fixture tolerance)', () => {
     const legacy = {
       enabled: true,
@@ -69,7 +92,21 @@ describe('parseWebAccessInfo', () => {
       port: 8765,
       token: 'tok',
     }
-    expect(parseWebAccessInfo(legacy)).toEqual({ ...legacy, configuredPort: 0, tokenPinned: false })
+    expect(parseWebAccessInfo(legacy)).toEqual({
+      ...legacy,
+      configuredPort: 0,
+      configuredBind: '',
+      bindIsLoopback: true,
+      tokenPinned: false,
+    })
+  })
+
+  it('defaults a wrong-typed bind field to the unpinned/loopback shape (stale fixture tolerance)', () => {
+    expect(parseWebAccessInfo({ ...validInfo, configured_bind: 5 })).toEqual({
+      ...parsedValid,
+      configuredBind: '',
+    })
+    expect(parseWebAccessInfo({ ...validInfo, bind_is_loopback: 'no' })).toEqual(parsedValid)
   })
 
   it('rejects non-objects and null', () => {
@@ -150,20 +187,20 @@ describe('setWebAccessConnection', () => {
     for (const key of Object.keys(mockApp)) delete mockApp[key]
   })
 
-  it('passes the port and token through and resolves on success', async () => {
+  it('passes the bind, port and token through and resolves on success', async () => {
     mockApp.SetWebAccessConnection = vi.fn().mockResolvedValue(undefined)
-    await expect(setWebAccessConnection(9000, 'fixed-secret')).resolves.toBeUndefined()
-    expect(mockApp.SetWebAccessConnection).toHaveBeenCalledWith(9000, 'fixed-secret')
-    // The auto/ephemeral shape travels as the zero values.
-    await setWebAccessConnection(0, '')
-    expect(mockApp.SetWebAccessConnection).toHaveBeenLastCalledWith(0, '')
+    await expect(setWebAccessConnection('0.0.0.0', 9000, 'fixed-secret')).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000, 'fixed-secret')
+    // The auto/ephemeral/default-bind shape travels as the zero values.
+    await setWebAccessConnection('', 0, '')
+    expect(mockApp.SetWebAccessConnection).toHaveBeenLastCalledWith('', 0, '')
   })
 
   it('rethrows on failure (including the rollback message must surface)', async () => {
     mockApp.SetWebAccessConnection = vi.fn().mockRejectedValue(
       new Error('web access connection not applied: the sidecar failed to start with the new settings'),
     )
-    await expect(setWebAccessConnection(70000, '')).rejects.toThrow(
+    await expect(setWebAccessConnection('example.com', 70000, '')).rejects.toThrow(
       'web access connection not applied',
     )
     expect(logger.error).toHaveBeenCalled()

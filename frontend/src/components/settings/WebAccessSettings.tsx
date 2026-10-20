@@ -21,8 +21,10 @@ import { Toggle } from './ModelProfilesControls'
  * derived locally.
  *
  * The URL + token are the browser login credentials: the token stays masked
- * until revealed and both copy through the app clipboard bridge. The warning
- * is the feature's honest cost: a tab holding them controls the whole app.
+ * until revealed and both copy through the app clipboard bridge. The warnings
+ * are the feature's honest cost: a tab holding them controls the whole app —
+ * and when the bind leaves loopback, the listener itself is network-reachable
+ * over plain HTTP, which carries its own stronger warning.
  */
 export function WebAccessSettings() {
   // null until the RPC answers — the toggle stays disabled rather than
@@ -32,10 +34,12 @@ export function WebAccessSettings() {
   const [revealed, setRevealed] = useState(false)
   const [copiedKey, setCopiedKey] = useState<'' | 'url' | 'token'>('')
   const copyTimer = useRef<number | null>(null)
-  // The pin drafts. The port mirrors the persisted pin (empty = auto); the
-  // token is deliberately NEVER prefilled — it is live-secret material, the
-  // row above reveals it on demand, and the draft only ever carries what the
-  // operator just typed.
+  // The pin drafts. The port mirrors the persisted pin (empty = auto) and the
+  // bind mirrors the persisted interface pin (empty = the 127.0.0.1 default);
+  // the token is deliberately NEVER prefilled — it is live-secret material,
+  // the row above reveals it on demand, and the draft only ever carries what
+  // the operator just typed.
+  const [bindDraft, setBindDraft] = useState('')
   const [portDraft, setPortDraft] = useState('')
   const [tokenDraft, setTokenDraft] = useState('')
   const [pinBusy, setPinBusy] = useState(false)
@@ -51,11 +55,16 @@ export function WebAccessSettings() {
     }
   }, [])
 
-  // Seed the port draft once the authoritative read lands (0 = auto = empty).
+  // Seed the pin drafts once the authoritative read lands (0 = auto = empty;
+  // an empty bind = the loopback default).
   useEffect(() => {
     const pin = info?.configuredPort ?? 0
     setPortDraft(pin > 0 ? String(pin) : '')
   }, [info?.configuredPort])
+
+  useEffect(() => {
+    setBindDraft(info?.configuredBind ?? '')
+  }, [info?.configuredBind])
 
   // A new credential invalidates any reveal: after a start/restart the token
   // on screen must never be a stale one shown in the clear.
@@ -106,10 +115,12 @@ export function WebAccessSettings() {
     }
   }, [])
 
-  /** Apply the pin drafts: port '' = auto (0), token '' = ephemeral ('').
-   *  The RPC persists AND hot-restarts the sidecar; the authoritative state
-   *  is re-read, and the token draft is always cleared — a typed secret must
-   *  not linger on screen after it traveled. */
+  /** Apply the pin drafts: bind '' = the 127.0.0.1 default, port '' = auto
+   *  (0), token '' = ephemeral (''). The RPC persists AND hot-restarts the
+   *  sidecar; the authoritative state is re-read, and the token draft is
+   *  always cleared — a typed secret must not linger on screen after it
+   *  traveled. The bind is validated backend-side (an IP literal or
+   *  "localhost"); a rejection surfaces verbatim in the pin error. */
   const handlePin = useCallback(async () => {
     if (!info) return
     const trimmedPort = portDraft.trim()
@@ -124,7 +135,7 @@ export function WebAccessSettings() {
     setPinBusy(true)
     setPinError(null)
     try {
-      await setWebAccessConnection(port, tokenDraft.trim())
+      await setWebAccessConnection(bindDraft.trim(), port, tokenDraft.trim())
       const fresh = await getWebAccessInfo()
       if (fresh) setInfo(fresh)
       setTokenDraft('')
@@ -133,11 +144,18 @@ export function WebAccessSettings() {
     } finally {
       setPinBusy(false)
     }
-  }, [info, portDraft, tokenDraft])
+  }, [info, bindDraft, portDraft, tokenDraft])
 
   const statusLine = (() => {
     if (!info) return 'Status unavailable — the desktop bridge did not answer.'
-    if (info.running) return `Running — open ${info.url} in a browser on this machine.`
+    if (info.running) {
+      // A loopback listener is machine-local by construction; a non-loopback
+      // bind is reachable from the network, and "on this machine" would be
+      // false comfort there.
+      return info.bindIsLoopback
+        ? `Running — open ${info.url} in a browser on this machine.`
+        : `Running — open ${info.url} on this machine, or the same port from other devices on the network.`
+    }
     if (info.enabled) return 'Enabled, but not running in this session — it starts on the next app launch.'
     return 'Off — the app is reachable from the desktop window only.'
   })()
@@ -153,7 +171,7 @@ export function WebAccessSettings() {
         onChange={(next) => void handleToggle(next)}
         disabled={info === null || saving}
         label={info?.enabled ? 'Enabled' : 'Disabled'}
-        description="Serve this app's UI to a local browser from a loopback sidecar. The browser session sees the same chats, projects and tools as the desktop window."
+        description="Serve this app's UI to a browser from a local HTTP sidecar (loopback by default). The browser session sees the same chats, projects and tools as the desktop window."
       />
       <p className="text-xs text-muted-foreground" data-testid="web-access-status">
         {statusLine}
@@ -209,9 +227,20 @@ export function WebAccessSettings() {
         <div className="flex flex-col gap-1.5 pl-12" data-testid="web-access-pin-block">
           <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <Pin className="size-3" />
-            Fixed port &amp; token
+            Fixed bind, port &amp; token
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Input
+              data-testid="web-access-pin-bind"
+              type="text"
+              value={bindDraft}
+              onChange={(e) => setBindDraft(e.target.value)}
+              placeholder="Bind — 127.0.0.1"
+              aria-label="Fixed bind address (empty = 127.0.0.1)"
+              disabled={pinBusy}
+              className="h-7 w-40 text-xs"
+              autoComplete="off"
+            />
             <Input
               data-testid="web-access-pin-port"
               type="text"
@@ -249,7 +278,8 @@ export function WebAccessSettings() {
           </div>
           <p className="text-xs text-muted-foreground">
             Persisted in config.yaml and applied immediately — a running sidecar restarts onto the
-            new connection, so open browser tabs must sign in again.
+            new connection, so open browser tabs must sign in again. Bind takes an IP literal or
+            &ldquo;localhost&rdquo; — empty = 127.0.0.1; 0.0.0.0 listens on every network interface.
           </p>
           {pinError !== null && (
             <p className="text-xs text-destructive" role="alert" data-testid="web-access-pin-error">
@@ -259,7 +289,7 @@ export function WebAccessSettings() {
         </div>
       )}
 
-      {info?.enabled && (
+      {info?.enabled && info.bindIsLoopback && (
         <div
           className="flex items-start gap-2 rounded-md bg-warning/10 border border-warning/20 p-2 text-xs text-warning"
           data-testid="web-access-warning"
@@ -267,8 +297,23 @@ export function WebAccessSettings() {
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span>
             A browser tab holding this URL and token has <span className="font-semibold">full control</span> of
-            this app — every chat, project and tool the desktop window has. The listener is loopback-only, but
-            anything running in that tab acts as you: never share the token or paste it into another site.
+            this app — every chat, project and tool the desktop window has. Anything running in that tab acts
+            as you: never share the token or paste it into another site.
+          </span>
+        </div>
+      )}
+
+      {info?.enabled && !info.bindIsLoopback && (
+        <div
+          className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-2 text-xs text-warning"
+          data-testid="web-access-warning-network"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            <span className="font-semibold">Network exposure:</span> the sidecar listens beyond loopback, so
+            its login page is reachable from other machines on this network. Traffic is plain HTTP —
+            unencrypted — and the token is the <span className="font-semibold">only protection</span>: pin a
+            strong token and never expose this listener across an untrusted network.
           </span>
         </div>
       )}

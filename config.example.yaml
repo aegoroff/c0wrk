@@ -2065,30 +2065,37 @@ notifications:
 # ---------------------------------------------------------------------------
 # Web Access (browser sidecar)
 # ---------------------------------------------------------------------------
-# Lets the desktop UI be mirrored into a browser window: c0wrk starts a
-# loopback-only HTTP/WebSocket sidecar that serves the same frontend and
-# bridges its live events into the browser tab it opens (ADR-090). OFF by
-# default — with the section absent (or enabled: false) no listener is
-# created and the app behaves exactly as before.
+# Lets the desktop UI be mirrored into a browser window: c0wrk starts an
+# HTTP/WebSocket sidecar that serves the same frontend and bridges its live
+# events into the browser tab it opens (ADR-090; the configurable bind and
+# its warn-only exposure model below are ADR-091). OFF by default — with the
+# section absent (or enabled: false) no listener is created and the app
+# behaves exactly as before.
 #
-# The sidecar listens on LOOPBACK ONLY. This stage of the design explicitly
-# accepts full control of the running app from that browser tab: the tab IS
-# the desktop UI — anything the desktop app can do, the tab can do. Do not
-# enable it on a machine you do not physically control. A LAN-exposed,
-# TLS-protected stage is a future, separate decision — this section
-# deliberately cannot express it.
+# Enabling this explicitly accepts full control of the running app from that
+# browser tab: the tab IS the desktop UI — anything the desktop app can do,
+# the tab can do. The default bind is loopback-only, so the listener stays
+# reachable from this machine only. A non-loopback bind exposes the listener
+# to the network and the traffic is unencrypted — do not point it at a
+# network you do not fully control (a TLS-protected stage is a future,
+# separate decision).
 #
 #   enabled (default false) — master switch; false starts nothing.
 #
-#   bind (default "127.0.0.1") — the interface the sidecar listens on. Only
-#                            loopback addresses are accepted while enabled:
-#                            an IP literal whose address is loopback
-#                            ("127.0.0.1", "127.x.y.z", "::1") or the
-#                            "localhost" name. Anything else ("0.0.0.0", a
-#                            LAN IP, a hostname) is fail-soft at load: a
-#                            warning is surfaced and the section is reset to
-#                            the safe default (sidecar off); saving such a
-#                            state is refused with an error.
+#   bind (default "127.0.0.1") — the interface the sidecar listens on. Any
+#                            valid IP literal is accepted: loopback
+#                            ("127.0.0.1", "127.x.y.z", "::1"), the
+#                            unspecified "0.0.0.0"/"::", or a specific
+#                            LAN/public IPv4/IPv6 address — plus the
+#                            "localhost" name. A non-loopback bind is a
+#                            LAN-exposed listener: it loads with a warning
+#                            ("not loopback — network-accessible, traffic
+#                            unencrypted") and is saved as-is. Invalid
+#                            values (unparseable; empty while enabled) are
+#                            fail-soft at load: a warning is surfaced and
+#                            the section is reset to the safe default
+#                            (sidecar off); saving such a state is refused
+#                            with an error.
 #
 #   port (default 0)        — TCP port to listen on. 0 = auto: a free port
 #                            is picked at every start.
@@ -2099,10 +2106,10 @@ notifications:
 #                            secret is persisted in this file. Set a value
 #                            (or pin the port) to keep a stable URL and
 #                            credential across restarts — most easily from
-#                            the app: Settings → Web Access → "Fixed port &
-#                            token". A pinned token is a durable credential
-#                            in this file; a short one (< 16 chars) draws a
-#                            warning when the sidecar starts.
+#                            the app: Settings → Web Access → "Fixed bind,
+#                            port & token". A pinned token is a durable
+#                            credential in this file; a short one (< 16
+#                            chars) draws a warning when the sidecar starts.
 #
 # web_access:
 #   enabled: false

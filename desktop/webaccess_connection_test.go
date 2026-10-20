@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_connection_test.go — SetWebAccessConnection: the pinned
-// port/token surface of the browser web-access sidecar (ADR-090 amendment,
-// decision 10). Pins persist to config.yaml, apply live via a hot restart,
-// roll back when the new pin cannot serve, and are refused by the same port
-// validation the load/save paths use.
+// bind/port/token surface of the browser web-access sidecar (ADR-090
+// amendment, decision 10). Pins persist to config.yaml, apply live via a hot
+// restart, roll back when the new pin cannot serve, and are refused by the
+// same bind/port validation the load/save paths use.
 
 package desktop
 
@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/v0lka/c0wrk/backend/config"
 )
@@ -45,6 +46,38 @@ func sidecarPort(t *testing.T, a *App) int {
 	return port
 }
 
+// sidecarBind extracts the host part of a running sidecar's resolved listen
+// address, failing the test when it has none.
+func sidecarBind(t *testing.T, a *App) string {
+	t.Helper()
+	srv := a.webAccess.Load()
+	if srv == nil {
+		t.Fatal("sidecar is not running")
+	}
+	addr, ok := srv.Addr()
+	if !ok {
+		t.Fatal("running sidecar has no resolved address")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("sidecar address %q: %v", addr, err)
+	}
+	return host
+}
+
+// dialBind reports whether anything accepts TCP on host:port within a bounded
+// wait — the bind-aware sibling of dialLoopback (which is pinned to
+// 127.0.0.1 and cannot see a sidecar bound to ::1 only).
+func dialBind(host string, port int) bool {
+	dialer := &net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // TestSetWebAccessConnection_PinsAndHotRestarts: an auto-port sidecar is
 // restarted onto the pinned port with the pinned token; both pins persist,
 // the new token authenticates, and the info surface reports them.
@@ -58,7 +91,7 @@ func TestSetWebAccessConnection_PinsAndHotRestarts(t *testing.T) {
 		t.Fatal("sidecar did not mount")
 	}
 
-	if err := a.SetWebAccessConnection(pinned, "ops-token"); err != nil {
+	if err := a.SetWebAccessConnection("", pinned, "ops-token"); err != nil {
 		t.Fatalf("SetWebAccessConnection: %v", err)
 	}
 	if a.webAccess.Load() == first {
@@ -74,15 +107,23 @@ func TestSetWebAccessConnection_PinsAndHotRestarts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if reloaded.WebAccess.Port != pinned || reloaded.WebAccess.Token != "ops-token" {
-		t.Errorf("disk pin = (port %d, token %q), want (%d, ops-token)",
-			reloaded.WebAccess.Port, reloaded.WebAccess.Token, pinned)
+	// An empty bind resolves to the loopback default, which is then the
+	// persisted shape.
+	if reloaded.WebAccess.Bind != config.DefaultWebAccessBind ||
+		reloaded.WebAccess.Port != pinned || reloaded.WebAccess.Token != "ops-token" {
+		t.Errorf("disk pin = (bind %q, port %d, token %q), want (%q, %d, ops-token)",
+			reloaded.WebAccess.Bind, reloaded.WebAccess.Port, reloaded.WebAccess.Token,
+			config.DefaultWebAccessBind, pinned)
 	}
 
 	// The pinned token is the live credential: a browser login with it works.
 	info := a.GetWebAccessInfo()
 	if !info.Running || info.ConfiguredPort != pinned || !info.TokenPinned || info.Token != "ops-token" {
 		t.Errorf("info = %+v, want running, configured_port=%d, token_pinned, token=ops-token", info, pinned)
+	}
+	if info.ConfiguredBind != config.DefaultWebAccessBind || !info.BindIsLoopback {
+		t.Errorf("info bind = (%q, loopback=%v), want (%q, true)",
+			info.ConfiguredBind, info.BindIsLoopback, config.DefaultWebAccessBind)
 	}
 	ts := newWebAccessHTTPTest(t, a.webAccess.Load())
 	client := loginWebAccessClient(t, ts.URL, "ops-token")
@@ -100,7 +141,7 @@ func TestSetWebAccessConnection_PinsAndHotRestarts(t *testing.T) {
 	}
 
 	// Unpinning the token (empty) restarts onto the ephemeral mode.
-	if err := a.SetWebAccessConnection(pinned, ""); err != nil {
+	if err := a.SetWebAccessConnection("", pinned, ""); err != nil {
 		t.Fatalf("SetWebAccessConnection unpin token: %v", err)
 	}
 	if a.webAccess.Load().AuthToken() == "" {
@@ -136,7 +177,7 @@ func TestSetWebAccessConnection_RestartFailureRestoresPreviousPin(t *testing.T) 
 		t.Fatal("sidecar did not mount")
 	}
 
-	if err := a.SetWebAccessConnection(occupied, ""); err == nil {
+	if err := a.SetWebAccessConnection("", occupied, ""); err == nil {
 		t.Fatal("expected an error when the pinned port is already taken")
 	} else if !strings.Contains(err.Error(), "previous settings were restored") {
 		t.Errorf("error = %v, want the restored-previous-settings message", err)
@@ -163,6 +204,10 @@ func TestSetWebAccessConnection_RestartFailureRestoresPreviousPin(t *testing.T) 
 		t.Errorf("disk after rollback = (port %d, token %q), want (0, keep-me)",
 			reloaded.WebAccess.Port, reloaded.WebAccess.Token)
 	}
+	if reloaded.WebAccess.Bind != config.DefaultWebAccessBind {
+		t.Errorf("bind after rollback = %q, want the untouched default %q",
+			reloaded.WebAccess.Bind, config.DefaultWebAccessBind)
+	}
 	if info := a.GetWebAccessInfo(); !info.Running || !info.TokenPinned {
 		t.Errorf("info after rollback = %+v, want running with token_pinned=true (the original pin)", info)
 	}
@@ -184,7 +229,7 @@ func TestSetWebAccessConnection_ValidationRefused(t *testing.T) {
 	}
 
 	for _, port := range []int{-1, 65536} {
-		if err := a.SetWebAccessConnection(port, ""); err == nil {
+		if err := a.SetWebAccessConnection("", port, ""); err == nil {
 			t.Errorf("SetWebAccessConnection(%d): expected a validation error", port)
 		} else if !strings.Contains(err.Error(), "out of range") {
 			t.Errorf("SetWebAccessConnection(%d) error = %v, want the out-of-range message", port, err)
@@ -210,7 +255,7 @@ func TestSetWebAccessConnection_NotRunningPersistsOnly(t *testing.T) {
 	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: false\n")
 	a := newWebAccessTestApp(t, cfg, path)
 
-	if err := a.SetWebAccessConnection(pinned, "next-launch"); err != nil {
+	if err := a.SetWebAccessConnection("", pinned, "next-launch"); err != nil {
 		t.Fatalf("SetWebAccessConnection: %v", err)
 	}
 	if a.webAccess.Load() != nil {
@@ -227,9 +272,17 @@ func TestSetWebAccessConnection_NotRunningPersistsOnly(t *testing.T) {
 		t.Errorf("disk pin = (port %d, token %q), want (%d, next-launch)",
 			reloaded.WebAccess.Port, reloaded.WebAccess.Token, pinned)
 	}
+	if reloaded.WebAccess.Bind != config.DefaultWebAccessBind {
+		t.Errorf("disk bind = %q, want the empty-bind default %q",
+			reloaded.WebAccess.Bind, config.DefaultWebAccessBind)
+	}
 	info := a.GetWebAccessInfo()
 	if info.Running || info.ConfiguredPort != pinned || !info.TokenPinned || info.Token != "next-launch" {
 		t.Errorf("info = %+v, want configured pin visible while not running", info)
+	}
+	if info.ConfiguredBind != config.DefaultWebAccessBind || !info.BindIsLoopback {
+		t.Errorf("info bind = (%q, loopback=%v), want (%q, true)",
+			info.ConfiguredBind, info.BindIsLoopback, config.DefaultWebAccessBind)
 	}
 }
 
@@ -237,9 +290,153 @@ func TestSetWebAccessConnection_NotRunningPersistsOnly(t *testing.T) {
 func TestSetWebAccessConnection_RequiresConfigRef(t *testing.T) {
 	a := NewApp()
 	a.logger = slog.New(slog.NewTextHandler(&strings.Builder{}, &slog.HandlerOptions{Level: slog.LevelError}))
-	if err := a.SetWebAccessConnection(8080, ""); err == nil {
+	if err := a.SetWebAccessConnection("", 8080, ""); err == nil {
 		t.Fatal("expected an error without a config ref, got nil")
 	} else if !strings.Contains(err.Error(), "config not initialized") {
 		t.Errorf("error = %v, want the config-not-initialized message", err)
+	}
+}
+
+// TestSetWebAccessConnection_BindPinRoundTrip: the bind is a first-class pin.
+// Pinning a non-default loopback bind hot-restarts the sidecar onto it and
+// persists all three fields; a matching request (bind included) is a no-op;
+// and a VALID bind that cannot be listened on rolls the previous pin back on
+// disk and live. 192.0.2.1 (TEST-NET-1) is the durable failure bind: never
+// assignable on a normal host, so the restart fails at the listener itself
+// (EADDRNOTAVAIL) regardless of which binds the sidecar is willing to accept.
+func TestSetWebAccessConnection_BindPinRoundTrip(t *testing.T) {
+	pinned := reserveLoopbackPort(t)
+	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n")
+	a := newWebAccessTestApp(t, cfg, path)
+	a.initWebAccess(cfg, a.log())
+	first := a.webAccess.Load()
+	if first == nil {
+		t.Fatal("sidecar did not mount")
+	}
+
+	// ── Pin a non-default loopback bind with the port: hot restart ──
+	if err := a.SetWebAccessConnection("::1", pinned, "bind-token"); err != nil {
+		t.Fatalf("SetWebAccessConnection(::1, %d, bind-token): %v", pinned, err)
+	}
+	if a.webAccess.Load() == first {
+		t.Error("bind pin did not hot-restart the sidecar")
+	}
+	if got := sidecarBind(t, a); got != "::1" {
+		t.Errorf("sidecar listens on %q, want ::1", got)
+	}
+	if !dialBind("::1", pinned) {
+		t.Errorf("sidecar is not accepting on [::1]:%d", pinned)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.WebAccess.Bind != "::1" || reloaded.WebAccess.Port != pinned || reloaded.WebAccess.Token != "bind-token" {
+		t.Errorf("disk pin = (bind %q, port %d, token %q), want (::1, %d, bind-token)",
+			reloaded.WebAccess.Bind, reloaded.WebAccess.Port, reloaded.WebAccess.Token, pinned)
+	}
+	info := a.GetWebAccessInfo()
+	if !info.Running || info.ConfiguredBind != "::1" || !info.BindIsLoopback || info.ConfiguredPort != pinned {
+		t.Errorf("info = %+v, want running with configured_bind=::1, bind_is_loopback, configured_port=%d", info, pinned)
+	}
+	// A specific (non-wildcard) bind is reported as-is: the resolved ::1
+	// listener renders as a bracketed IPv6 URL, not a rewritten one.
+	if want := "http://[::1]:" + strconv.Itoa(pinned); info.URL != want {
+		t.Errorf("info.URL = %q, want %q", info.URL, want)
+	}
+
+	// ── A matching request — bind included in the comparison — is a no-op ──
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if err := a.SetWebAccessConnection("::1", pinned, "bind-token"); err != nil {
+		t.Fatalf("matching SetWebAccessConnection: %v", err)
+	}
+	if a.webAccess.Load() == first {
+		t.Error("a matching request rebuilt the sidecar")
+	}
+	if a.webAccess.Load() == nil {
+		t.Fatal("sidecar vanished after a matching request")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config after no-op: %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Error("a matching request rewrote the config file")
+	}
+
+	// ── A valid but unservable bind rolls the previous pin back ──
+	if err := a.SetWebAccessConnection("192.0.2.1", pinned, ""); err == nil {
+		t.Fatal("expected an error for the unbindable bind")
+	} else if !strings.Contains(err.Error(), "previous settings were restored") {
+		t.Errorf("error = %v, want the restored-previous-settings message", err)
+	}
+	reloaded, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("reload config after rollback: %v", err)
+	}
+	if reloaded.WebAccess.Bind != "::1" || reloaded.WebAccess.Port != pinned || reloaded.WebAccess.Token != "bind-token" {
+		t.Errorf("disk after rollback = (bind %q, port %d, token %q), want (::1, %d, bind-token)",
+			reloaded.WebAccess.Bind, reloaded.WebAccess.Port, reloaded.WebAccess.Token, pinned)
+	}
+	if got := sidecarBind(t, a); got != "::1" {
+		t.Errorf("sidecar after rollback listens on %q, want ::1", got)
+	}
+	if a.webAccess.Load().AuthToken() != "bind-token" {
+		t.Error("the rolled-back token pin is not the live credential")
+	}
+	if !dialBind("::1", pinned) {
+		t.Errorf("restored sidecar is not accepting on [::1]:%d", pinned)
+	}
+}
+
+// TestSetWebAccessConnection_InvalidBindRefused: a bind that fails the shared
+// validity rule is rejected before anything is mutated — neither the disk pin
+// nor the running sidecar moves (the same refusal shape as the port rule).
+func TestSetWebAccessConnection_InvalidBindRefused(t *testing.T) {
+	pinned := reserveLoopbackPort(t)
+	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n")
+	a := newWebAccessTestApp(t, cfg, path)
+	a.initWebAccess(cfg, a.log())
+	srv := a.webAccess.Load()
+	if srv == nil {
+		t.Fatal("sidecar did not mount")
+	}
+	statBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	// Note: whitespace-only trims to empty = the default bind, which is
+	// VALID — the invalid class is hostnames and host:port shapes.
+	for _, bind := range []string{"example.com", "localhost.localdomain", "0.0.0.0:8080", "127.0.0.1:80"} {
+		if err := a.SetWebAccessConnection(bind, pinned, "nope"); err == nil {
+			t.Errorf("SetWebAccessConnection(%q): expected a validation error", bind)
+		} else if !strings.Contains(err.Error(), "not a valid IP literal") {
+			t.Errorf("SetWebAccessConnection(%q) error = %v, want the shared bind message", bind, err)
+		}
+	}
+	if a.webAccess.Load() != srv {
+		t.Error("a rejected bind rebuilt the sidecar")
+	}
+	if got := sidecarBind(t, a); got != config.DefaultWebAccessBind {
+		t.Errorf("sidecar still listens on %q, want the untouched default %q", got, config.DefaultWebAccessBind)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.WebAccess.Bind != config.DefaultWebAccessBind || reloaded.WebAccess.Port != 0 || reloaded.WebAccess.Token != "" {
+		t.Errorf("disk after rejections = (bind %q, port %d, token %q), want the untouched pin",
+			reloaded.WebAccess.Bind, reloaded.WebAccess.Port, reloaded.WebAccess.Token)
+	}
+	statAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config after rejections: %v", err)
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Error("a rejected bind rewrote the config file")
 	}
 }

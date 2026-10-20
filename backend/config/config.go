@@ -120,14 +120,15 @@ type Config struct {
 	// this file; see core/updater/state.go and config.UpdateStatePath.
 	Updates UpdatesConfig `yaml:"updates"`
 
-	// WebAccess configures the browser web-access sidecar (ADR-090): a
-	// loopback-only HTTP/WebSocket server that mirrors the desktop UI into a
-	// browser window. Default off — an absent section (or enabled: false)
-	// starts nothing and the app behaves exactly as before the section
-	// existed. The struct is pure data: it knows nothing about the webaccess
-	// package. Load problems are fail-soft (warning + reset to the safe
-	// default state, see web_access.go); Save refuses to persist an unsafe
-	// enabled state. See specs/decisions/090-browser-web-access.md.
+	// WebAccess configures the browser web-access sidecar (ADR-090): an
+	// HTTP/WebSocket server that mirrors the desktop UI into a browser
+	// window. Default off — an absent section (or enabled: false) starts
+	// nothing and the app behaves exactly as before the section existed. The
+	// struct is pure data: it knows nothing about the webaccess package.
+	// Load-time validity problems are fail-soft (warning + reset to the safe
+	// default state, see web_access.go); Save refuses to persist an invalid
+	// enabled state, while a valid non-loopback bind is a warned-about LAN
+	// listener. See specs/decisions/090-browser-web-access.md.
 	WebAccess WebAccessConfig `yaml:"web_access"`
 }
 
@@ -3142,10 +3143,11 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	shellExecWarnings := normalizeShellExec(&cfg)
 
 	// Validate the web_access section in place (fail-soft: an enabled section
-	// with a non-loopback bind or an out-of-range port is warned about and
-	// reset to the safe default state — the sidecar stays off). Must run
-	// after ApplyDefaults (which seeds the default bind) and before validate,
-	// so the persisted shape is always valid. See web_access.go / ADR-090.
+	// with an invalid bind or an out-of-range port is warned about and reset
+	// to the safe default state — the sidecar stays off; a valid non-loopback
+	// bind stays enabled with a network-exposure warning). Must run after
+	// ApplyDefaults (which seeds the default bind) and before validate, so
+	// the persisted shape is always valid. See web_access.go / ADR-090.
 	webAccessWarnings := normalizeWebAccess(&cfg)
 
 	// Validate the MCP per-server timeout durations (fail-soft: invalid entries
@@ -3194,10 +3196,11 @@ func LoadWithResult(path string) (*LoadResult, error) {
 // Save writes the configuration to a YAML file atomically.
 func Save(cfg *Config, path string) error {
 	// Fail-closed web_access gate: refuse to persist an enabled section with
-	// a non-loopback bind or an out-of-range port. The load path heals such a
-	// state (normalizeWebAccess resets it), so hitting this means an in-memory
-	// mutation tried to persist a section the sidecar must never run with.
-	// See web_access.go / ADR-090.
+	// an invalid bind or an out-of-range port (a valid non-loopback bind is
+	// a stage-2 LAN listener and saves as-is). The load path heals an
+	// invalid state (normalizeWebAccess resets it), so hitting this means an
+	// in-memory mutation tried to persist a section the sidecar must never
+	// run with. See web_access.go / ADR-090.
 	if err := validateWebAccessForSave(cfg); err != nil {
 		return fmt.Errorf("refusing to save config: %w", err)
 	}

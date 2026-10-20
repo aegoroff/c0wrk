@@ -921,8 +921,11 @@ type WebAccessInfo struct {
 	Enabled bool `json:"enabled"`
 	// Running reports whether the sidecar is live in THIS process.
 	Running bool `json:"running"`
-	// URL is the loopback URL a browser opens (scheme + resolved host:port).
-	// Empty while the sidecar is not running (port 0 resolves only at bind).
+	// URL is the browser-openable URL (scheme + resolved host:port): a
+	// wildcard bind (0.0.0.0, ::) is reported as localhost — the
+	// machine-local way into an every-interface listener — while a specific
+	// IP is reported as-is. Empty while the sidecar is not running (port 0
+	// resolves only at bind).
 	URL string `json:"url"`
 	// Port is the resolved listen port; 0 while not running.
 	Port int `json:"port"`
@@ -930,6 +933,14 @@ type WebAccessInfo struct {
 	// runtime state: 0 = auto (a free port is picked at every start),
 	// 1–65535 = the operator-pinned port every start must bind.
 	ConfiguredPort int `json:"configured_port"`
+	// ConfiguredBind is the PERSISTED web_access.bind — the interface pin,
+	// not the runtime state: the address every start listens on.
+	ConfiguredBind string `json:"configured_bind"`
+	// BindIsLoopback classifies the configured bind (the same
+	// config.IsLoopbackBind rule the loader warns on): a loopback bind keeps
+	// the sidecar machine-local, any other valid bind exposes it to the
+	// network.
+	BindIsLoopback bool `json:"bind_is_loopback"`
 	// Token is the credential a browser pastes at the login screen: the
 	// effective per-launch token while running, else the configured token
 	// (empty when the next launch would mint a fresh per-launch one). This is
@@ -942,6 +953,25 @@ type WebAccessInfo struct {
 	TokenPinned bool `json:"token_pinned"`
 }
 
+// webAccessBrowserURL renders the URL a browser opens for the sidecar's
+// resolved listener address: plain http (stage 1 carries no TLS) plus
+// host:port, with one rewrite — an unspecified wildcard host (0.0.0.0, ::)
+// becomes "localhost". The wildcard names "every interface", not an address
+// a browser can open, and localhost is the machine-local way in; a specific
+// IP (loopback or LAN) is reported exactly as bound.
+func webAccessBrowserURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Not host:port — never expected from a TCP listener address; pass
+		// the raw value through rather than invent a port.
+		return "http://" + addr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
 // GetWebAccessInfo reports the sidecar state for Settings → Web Access.
 // Desktop-only by construction: it is an App method, so the web reflection
 // surface (the FrontendAPI methods) cannot serve it back to a browser tab.
@@ -949,13 +979,15 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 	info := WebAccessInfo{}
 	if cfg, _ := a.configRef(); cfg != nil {
 		info.Enabled = cfg.WebAccess.Enabled
+		info.ConfiguredBind = cfg.WebAccess.Bind
+		info.BindIsLoopback = config.IsLoopbackBind(cfg.WebAccess.Bind)
 		info.ConfiguredPort = cfg.WebAccess.Port
 		info.TokenPinned = cfg.WebAccess.Token != ""
 	}
 	if srv := a.webAccess.Load(); srv != nil {
 		info.Running = true
 		if addr, ok := srv.Addr(); ok {
-			info.URL = "http://" + addr
+			info.URL = webAccessBrowserURL(addr)
 			if _, port, perr := net.SplitHostPort(addr); perr == nil {
 				info.Port, _ = strconv.Atoi(port)
 			}
@@ -1022,12 +1054,17 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 	return nil
 }
 
-// SetWebAccessConnection persists the pinned port and token (Settings → Web
-// Access) and applies them live: a running sidecar is hot-restarted onto the
-// new connection settings. Port 0 = auto (a free port at every start),
-// 1–65535 = pinned; an empty token = ephemeral per-launch secret, a non-empty
-// one = a static credential persisted in config.yaml that survives restarts.
-// A request matching the current pin is a no-op.
+// SetWebAccessConnection persists the pinned bind, port and token (Settings
+// → Web Access) and applies them live: a running sidecar is hot-restarted
+// onto the new connection settings. An empty bind = the loopback default
+// (config.DefaultWebAccessBind); otherwise any valid IP literal or
+// "localhost" is accepted through config.ValidateWebAccessBind — the exact
+// rule the load/save paths enforce (a valid non-loopback bind is a
+// deliberate LAN listener, classified by config.IsLoopbackBind). Port 0 =
+// auto (a free port at every start), 1–65535 = pinned; an empty token =
+// ephemeral per-launch secret, a non-empty one = a static credential
+// persisted in config.yaml that survives restarts. A request matching the
+// current pin (all three fields) is a no-op.
 //
 // Failure ordering mirrors the toggle's honesty rules: the config write is
 // rolled back if persisting fails, and if the RESTART with the new settings
@@ -1036,7 +1073,7 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 // explaining both, and the app is never left silently without a sidecar it
 // had before the call. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam).
-func (a *App) SetWebAccessConnection(port int, token string) error {
+func (a *App) SetWebAccessConnection(bind string, port int, token string) error {
 	a.webAccessMu.Lock()
 	defer a.webAccessMu.Unlock()
 
@@ -1044,17 +1081,25 @@ func (a *App) SetWebAccessConnection(port int, token string) error {
 	if cfg == nil || cfgPath == "" {
 		return errors.New("config not initialized")
 	}
+	bind = strings.TrimSpace(bind)
+	if bind == "" {
+		bind = config.DefaultWebAccessBind
+	}
+	if err := config.ValidateWebAccessBind(bind); err != nil {
+		return err
+	}
 	if err := config.ValidateWebAccessPort(port); err != nil {
 		return err
 	}
 	token = strings.TrimSpace(token)
 
-	if cfg.WebAccess.Port == port && cfg.WebAccess.Token == token {
+	if cfg.WebAccess.Bind == bind && cfg.WebAccess.Port == port && cfg.WebAccess.Token == token {
 		return nil
 	}
 
 	prev := cfg.WebAccess
 	wasRunning := a.webAccess.Load() != nil
+	cfg.WebAccess.Bind = bind
 	cfg.WebAccess.Port = port
 	cfg.WebAccess.Token = token
 	if err := config.Save(cfg, cfgPath); err != nil {

@@ -182,6 +182,95 @@ web_access:
 	}
 }
 
+// TestGetWebAccessInfo_BindFields: the info surface exposes the persisted
+// bind pin and its loopback classification, running or not.
+func TestGetWebAccessInfo_BindFields(t *testing.T) {
+	t.Run("running on the loopback default", func(t *testing.T) {
+		cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n")
+		a := newWebAccessTestApp(t, cfg, path)
+		a.initWebAccess(cfg, a.log())
+
+		info := a.GetWebAccessInfo()
+		if !info.Running {
+			t.Fatal("sidecar did not mount")
+		}
+		// ApplyDefaults seeds the empty bind with the loopback default, so
+		// the pin is always an explicit address.
+		if info.ConfiguredBind != config.DefaultWebAccessBind {
+			t.Errorf("info.ConfiguredBind = %q, want the seeded default %q", info.ConfiguredBind, config.DefaultWebAccessBind)
+		}
+		if !info.BindIsLoopback {
+			t.Error("info.BindIsLoopback = false, want true for the loopback default")
+		}
+		if !strings.HasPrefix(info.URL, "http://127.0.0.1:") {
+			t.Errorf("info.URL = %q, want the resolved loopback URL as-is", info.URL)
+		}
+	})
+	t.Run("wildcard bind visible while not running", func(t *testing.T) {
+		// A disabled section accepts any bind (no load warning) — the pin is
+		// reported as configured, classified non-loopback, with no URL (the
+		// sidecar never resolved a listener).
+		cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: false\n  bind: 0.0.0.0\n")
+		a := newWebAccessTestApp(t, cfg, path)
+
+		info := a.GetWebAccessInfo()
+		if info.Running || info.URL != "" {
+			t.Errorf("info = %+v, want not running with no URL", info)
+		}
+		if info.ConfiguredBind != "0.0.0.0" {
+			t.Errorf("info.ConfiguredBind = %q, want 0.0.0.0", info.ConfiguredBind)
+		}
+		if info.BindIsLoopback {
+			t.Error("info.BindIsLoopback = true, want false for the wildcard bind")
+		}
+	})
+	t.Run("wildcard bind resolves a localhost URL", func(t *testing.T) {
+		// A running wildcard listener (the sidecar binds 0.0.0.0 for real)
+		// must surface the browser-openable localhost form — no browser can
+		// open http://0.0.0.0:port — while the machine-local dial still
+		// reaches the very listener behind it.
+		cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n  bind: 0.0.0.0\n")
+		a := newWebAccessTestApp(t, cfg, path)
+		a.initWebAccess(cfg, a.log())
+
+		info := a.GetWebAccessInfo()
+		if !info.Running {
+			t.Fatal("sidecar did not mount")
+		}
+		if !strings.HasPrefix(info.URL, "http://localhost:") {
+			t.Errorf("info.URL = %q, want the localhost form of the wildcard listener", info.URL)
+		}
+		if info.ConfiguredBind != "0.0.0.0" || info.BindIsLoopback {
+			t.Errorf("info bind = (%q, loopback=%v), want (0.0.0.0, false)", info.ConfiguredBind, info.BindIsLoopback)
+		}
+		if info.Port == 0 || !dialLoopback(info.Port) {
+			t.Errorf("wildcard sidecar not reachable on its resolved port %d", info.Port)
+		}
+	})
+}
+
+// TestWebAccessBrowserURL pins the browser-openable URL mapping GetWebAccessInfo
+// applies to the sidecar's resolved listener address: a wildcard host
+// (0.0.0.0, ::) is rewritten to localhost — the machine-local way into an
+// every-interface listener, which no browser can open by its wildcard name —
+// while every specific address is reported exactly as bound. The live
+// wildcard path through GetWebAccessInfo is pinned by
+// TestGetWebAccessInfo_BindFields; this table pins the mapping itself.
+func TestWebAccessBrowserURL(t *testing.T) {
+	cases := []struct{ addr, want string }{
+		{"0.0.0.0:8080", "http://localhost:8080"},
+		{"[::]:9000", "http://localhost:9000"},
+		{"127.0.0.1:41234", "http://127.0.0.1:41234"},
+		{"[::1]:41235", "http://[::1]:41235"},
+		{"192.168.1.10:8080", "http://192.168.1.10:8080"},
+	}
+	for _, tc := range cases {
+		if got := webAccessBrowserURL(tc.addr); got != tc.want {
+			t.Errorf("webAccessBrowserURL(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
+	}
+}
+
 func TestInitWebAccess_NilGuards(t *testing.T) {
 	t.Run("no FrontendAPI seed", func(t *testing.T) {
 		a := &App{} // no NewApp: frontendAPI() is nil

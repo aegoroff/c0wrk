@@ -182,9 +182,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure is deliberately omitted in stage 1: the sidecar serves
-		// plain HTTP on loopback. KNOWN LIMITATION — a TLS stage must
-		// flip this on. Loopback-only bind is the compensation.
+		// Secure is deliberately omitted: the sidecar serves plain HTTP
+		// (no TLS yet). KNOWN LIMITATION — a TLS stage must flip this on.
+		// The loopback default, the startup warning on a non-loopback bind
+		// and the auth token are the compensations.
 		MaxAge: sessionCookieTTL,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

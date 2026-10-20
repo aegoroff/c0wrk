@@ -292,9 +292,9 @@ func TestLoginFlow(t *testing.T) {
 			t.Errorf("Path = %q, want /", c.Path)
 		}
 		if c.Secure {
-			// Stage-1 documented limitation: loopback HTTP carries no Secure
-			// flag; a TLS stage must flip it on.
-			t.Error("Secure flag unexpected in stage 1 (documented limitation is its ABSENCE — flip this test when TLS lands)")
+			// Documented limitation: the sidecar serves plain HTTP, so the
+			// cookie carries no Secure flag; a TLS stage must flip it on.
+			t.Error("Secure flag unexpected (documented limitation is its ABSENCE — flip this test when TLS lands)")
 		}
 		if c.Value == srv.cfg.Token {
 			t.Error("cookie must carry the per-launch session secret, not the configured token")
@@ -510,10 +510,18 @@ func TestNewValidatesOptions(t *testing.T) {
 			t.Fatalf("err = %v, want ErrDisabled", err)
 		}
 	})
-	t.Run("non-loopback bind is refused", func(t *testing.T) {
-		opts := newTestOptions(stubDispatch{}, func(o *Options) { o.Config.Bind = "0.0.0.0" })
-		if _, err := New(opts); err == nil || strings.Contains(err.Error(), "loopback") == false {
-			t.Fatalf("err = %v, want loopback refusal", err)
+	t.Run("unparseable bind is refused", func(t *testing.T) {
+		opts := newTestOptions(stubDispatch{}, func(o *Options) { o.Config.Bind = "garbage" })
+		_, err := New(opts)
+		if err == nil || !strings.Contains(err.Error(), "not a valid IP literal") {
+			t.Fatalf("err = %v, want invalid-bind refusal", err)
+		}
+	})
+	t.Run("empty bind is refused", func(t *testing.T) {
+		opts := newTestOptions(stubDispatch{}, func(o *Options) { o.Config.Bind = "" })
+		_, err := New(opts)
+		if err == nil || !strings.Contains(err.Error(), "bind is required") {
+			t.Fatalf("err = %v, want empty-bind refusal", err)
 		}
 	})
 	t.Run("nil dispatch is refused", func(t *testing.T) {
@@ -569,6 +577,106 @@ func TestNewValidatesOptions(t *testing.T) {
 			t.Fatalf("redacted = %q, want sha256 prefix", red)
 		}
 	})
+}
+
+// --- stage-2 bind posture -----------------------------------------------------
+
+// TestNewAcceptsNonLoopbackBinds pins the stage-2 widening: any valid bind —
+// the unspecified wildcard or a specific LAN address — constructs, and each
+// draws exactly one Warn naming the exposure (slog hook).
+func TestNewAcceptsNonLoopbackBinds(t *testing.T) {
+	for _, bind := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5"} {
+		t.Run(bind, func(t *testing.T) {
+			capture := &captureHandler{}
+			opts := newTestOptions(stubDispatch{}, func(o *Options) {
+				o.Config.Bind = bind
+				o.Logger = slog.New(capture)
+			})
+			if _, err := New(opts); err != nil {
+				t.Fatalf("New(%q): %v", bind, err)
+			}
+			warns := 0
+			for _, r := range capture.snapshot() {
+				if !strings.Contains(r.Message, "is not loopback") {
+					continue
+				}
+				if r.Level != slog.LevelWarn {
+					t.Errorf("level = %v, want Warn", r.Level)
+				}
+				if !strings.Contains(r.Message, "the auth token is the only protection") {
+					t.Errorf("warning %q does not name the token as the only protection", r.Message)
+				}
+				warns++
+			}
+			if warns != 1 {
+				t.Fatalf("non-loopback warnings = %d, want 1", warns)
+			}
+		})
+	}
+}
+
+// TestNewSilentOnLoopbackBinds: the warning is an exposure signal, so loopback
+// binds — including the "localhost" name — must stay completely silent.
+func TestNewSilentOnLoopbackBinds(t *testing.T) {
+	for _, bind := range []string{config.DefaultWebAccessBind, "127.0.0.1", "::1", "localhost"} {
+		t.Run(bind, func(t *testing.T) {
+			capture := &captureHandler{}
+			opts := newTestOptions(stubDispatch{}, func(o *Options) {
+				o.Config.Bind = bind
+				o.Logger = slog.New(capture)
+			})
+			if _, err := New(opts); err != nil {
+				t.Fatalf("New(%q): %v", bind, err)
+			}
+			if n := len(capture.snapshot()); n != 0 {
+				t.Fatalf("captured %d diagnostics for loopback bind %q, want 0", n, bind)
+			}
+		})
+	}
+}
+
+// TestStartOnWildcardBindServesLoopback drives the widened contract end to
+// end: the 0.0.0.0 listener answers on the loopback address and shuts down
+// cleanly, with exactly one exposure warning logged at construction.
+func TestStartOnWildcardBindServesLoopback(t *testing.T) {
+	capture := &captureHandler{}
+	srv := mustNew(t, newTestOptions(stubDispatch{}, func(o *Options) {
+		o.Config.Bind = "0.0.0.0"
+		o.Logger = slog.New(capture)
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	addr, ok := srv.Addr()
+	if !ok {
+		t.Fatal("Addr missing after Start")
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+	url := "http://127.0.0.1:" + port + "/api/transport"
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	bodyString(t, resp) // drains + closes
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if n := capture.count(t, `webaccess: bind "0.0.0.0" is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection`); n != 1 {
+		t.Fatalf("exposure warnings = %d, want 1", n)
+	}
 }
 
 // --- lifecycle ---------------------------------------------------------------
