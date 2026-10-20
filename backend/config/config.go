@@ -2444,7 +2444,7 @@ type GoalSuggestConfig struct {
 	// true; an explicit false opts out of the suggestion gate entirely.
 	Enabled *bool `yaml:"enabled"`
 	// MinComplexity is the routing-complexity floor below which the
-	// suitability classifier is never consulted. Default 2.
+	// suitability classifier is never consulted. Default 3.
 	MinComplexity int `yaml:"min_complexity"`
 }
 
