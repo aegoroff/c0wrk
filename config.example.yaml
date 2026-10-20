@@ -1291,17 +1291,17 @@ orchestration:
 # the explicit toggle or a leading /goal.
 #
 #   enabled        (default true)  — master gate for the suggestion feature.
-#   min_complexity (default 2)     — routing-complexity floor below which the
+#   min_complexity (default 3)     — routing-complexity floor below which the
 #                                    classifier is never consulted (0 = use
-#                                    the default; complexity-1 messages such
-#                                    as greetings or factual questions can
-#                                    never be goals).
+#                                    the default; complexity-1-2 messages
+#                                    such as greetings, factual questions or
+#                                    simple edits are virtually never goals).
 #
 # goal_loop:
 #   verification: independent
 #   suggest:
 #     enabled: true
-#     min_complexity: 2
+#     min_complexity: 3
 
 # ---------------------------------------------------------------------------
 # Prompt Suggestions

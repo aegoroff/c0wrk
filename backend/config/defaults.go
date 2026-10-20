@@ -471,10 +471,11 @@ func ApplyDefaults(cfg *Config) {
 	}
 	// Goal-mode suggestion defaults: the feature is on unless explicitly
 	// disabled (pointer-bool nil = enabled); the classifier is consulted
-	// from complexity 2 upward — complexity-1 requests (greetings, factual
-	// questions) can never be goals, so consulting them wastes an LLM call.
+	// from complexity 3 upward — complexity-1-2 requests (greetings, factual
+	// questions, simple edits) are virtually never goals, so consulting
+	// them wastes an LLM call.
 	if cfg.GoalLoop.Suggest.MinComplexity == 0 {
-		cfg.GoalLoop.Suggest.MinComplexity = 2
+		cfg.GoalLoop.Suggest.MinComplexity = 3
 	}
 
 	// Vector index / hybrid search defaults. Hybrid is a pointer-bool so
