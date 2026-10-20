@@ -135,6 +135,11 @@ already persisted, so the next manual start applies it.
 - The watchdog's post-relaunch quit arms the close-guard bypass (`gpuFallbackQuit` — the same `exitConfirmed` flag `ConfirmExit` arms, stored in the same breath as the quit): the confirmation modal lives in the very webview being replaced, so an intercepted fallback quit would strand an unanswerable dialog and cancel the auto-recovery, while the sessions the guard protects are auto-resumed in the relaunched instance. A quit that cannot be issued (no Wails context) logs an Error and leaves the bypass unarmed.
 - On every Wails upgrade, `window.c` (`SetupWebview`) and `pkg/options/linux/linux.go` are re-verified; if upstream aligns the C switch with the Go enum, the two non-default arms of `wailsWebviewGpuPolicy` are swapped back or dropped and the numeric pins updated to match.
 
+## Known Limitations
+
+- The post-mortem reads only `stderr.log`, never `stderr.old.log`: `crashlog.Install` rotates an oversized stderr.log (past `maxStderrLogBytes`, 4 MiB) to `stderr.old.log` BEFORE the post-mortem runs, so when the log has accumulated past the threshold by the recovery launch, the crashed run's segment rotates away with it and `previousRunDiedOnWaylandProtocolError` finds no previous run to inspect — that launch stays accelerated. The skip self-heals one crash later: the rotation restarts stderr.log small, so the next crash's segment survives into the following start's post-mortem and the fallback persists then. A persistent failure converges in one extra crash cycle; the rotated-away evidence stays readable in stderr.old.log.
+- `gpuFailureDetectionApplies` (the shared gate for both detectors — usable capture, fresh auto, no valid env override) carries no platform check: the Linux guard lives in each exported entry point (`newWebviewGpuWatchdog` and `applyWebviewGpuCrashFallback`, which take the platform as an injectable parameter and return early off Linux). A new caller of the shared gate must repeat the Linux check in front of it; the gate itself does not.
+
 ## Configuration
 
 | Surface | Default | Meaning |
