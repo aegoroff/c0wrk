@@ -1200,9 +1200,11 @@ func (a *App) startVectorIndexBackground(
 		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderOpenVINO {
 			// External verification of the device class the OpenVINO
 			// provider actually drives ("gpu" | "cpu" | "" unverified) —
-			// the plugin appends both its GPU and CPU devices and OpenVINO
-			// picks one itself, so only an external probe can tell them
-			// apart. Diagnostics only, never blocks or fails startup.
+			// sp4rk resolves the concrete device inside the rung (the plugin
+			// uses only the first appended device, so a device it cannot
+			// compile — an Intel NPU — is skipped for the next one), which
+			// means only an external probe can tell GPU from CPU. Diagnostics
+			// only, never blocks or fails startup.
 			embedderInfo.OVDevice = vectorindex.VerifyEmbedderOvDevice(context.Background(), emb, log)
 		}
 		a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)

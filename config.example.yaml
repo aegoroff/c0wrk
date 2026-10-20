@@ -1441,21 +1441,26 @@ orchestration:
 #                             # (error_code "vector_openvino_fallback"),
 #                             # and the requested-vs-effective mismatch
 #                             # recorded in every status payload. When the
-#                             # provider does come up, the OpenVINO plugin
-#                             # picks the concrete Intel device itself; the
-#                             # status payload records the externally
-#                             # verified device class in "ov_device"
-#                             # ("gpu" | "cpu", or absent when the xpu-smi
-#                             # probe could not answer).
+#                             # provider does come up, the OpenVINO rung
+#                             # resolves the concrete Intel device itself:
+#                             # it tries the plugin's devices in order and
+#                             # keeps the first that can compile the model
+#                             # (an Intel NPU is skipped — it rejects this
+#                             # model's dynamic shapes — and the integrated
+#                             # GPU runs it); the status payload records
+#                             # the externally verified device class in
+#                             # "ov_device" ("gpu" | "cpu", or absent when
+#                             # the xpu-smi probe could not answer).
 #
 #   device_id: 0              # GPU index used when the CUDA provider is
 #                             # active (default 0 = the first GPU, which
 #                             # is what most machines want; ignored by
 #                             # the CPU provider). Must be >= 0; the
 #                             # OpenVINO provider additionally accepts
-#                             # only 0 — it chooses the concrete Intel
-#                             # device itself, and any other value fails
-#                             # embedder creation (loud CPU fallback).
+#                             # only 0 — 0 lets that rung resolve the
+#                             # concrete Intel device itself, and any
+#                             # other value fails embedder creation
+#                             # (loud CPU fallback).
 #
 # GPU requirements — "auto" and "cuda" only use the GPU when a CUDA-
 # enabled ONNX Runtime build sits next to the executable (the standard
