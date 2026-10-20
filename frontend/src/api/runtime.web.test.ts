@@ -502,6 +502,75 @@ describe('websocket reconnect (virtual time)', () => {
   })
 })
 
+describe('websocket re-connect notification', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    runtime = await bootedRuntime()
+  })
+
+  it('fires on a successful re-connect, not on the first open', () => {
+    const fires: number[] = []
+    runtime.onWSReconnected(() => fires.push(1))
+
+    // The page-load's first open is not a re-connect.
+    const first = webSocket()
+    first.serverOpen()
+    expect(fires).toEqual([])
+
+    // The first open after an outage is.
+    first.serverClose()
+    vi.advanceTimersByTime(500)
+    FakeWebSocket.instances[1]!.serverOpen()
+    expect(fires).toEqual([1])
+
+    // And a later outage → open pair fires again (the flag re-arms on close).
+    FakeWebSocket.instances[1]!.serverClose()
+    vi.advanceTimersByTime(500)
+    FakeWebSocket.instances[2]!.serverOpen()
+    expect(fires).toEqual([1, 1])
+  })
+
+  it('fires even when no connection was ever established before (first attempt failed)', () => {
+    // Boundary of the wsAttempts>0 contract: the initial attempt never made
+    // it to open (close while CONNECTING), so the successful retry is
+    // technically the first open — but events were still lost during the
+    // outage window, so the re-connect signal fires. A harmless over-trigger:
+    // the resync loaders are idempotent.
+    const fires: number[] = []
+    runtime.onWSReconnected(() => fires.push(1))
+
+    webSocket().serverClose() // initial attempt dies before opening
+    vi.advanceTimersByTime(500)
+    FakeWebSocket.instances[1]!.serverOpen()
+    expect(fires).toEqual([1])
+  })
+
+  it('supports unsubscribe and isolates a throwing listener', () => {
+    const seen: string[] = []
+    const unsubscribe = runtime.onWSReconnected(() => seen.push('a'))
+    runtime.onWSReconnected(() => {
+      throw new Error('listener bug')
+    })
+    runtime.onWSReconnected(() => seen.push('b'))
+
+    webSocket().serverClose()
+    vi.advanceTimersByTime(500)
+    FakeWebSocket.instances[1]!.serverOpen()
+
+    // The throwing listener neither prevents the others nor escapes the
+    // socket's event path (it surfaces as a warned, swallowed error).
+    expect(seen).toEqual(['a', 'b'])
+    expect(loggerWarn).toHaveBeenCalled()
+
+    unsubscribe()
+    FakeWebSocket.instances[1]!.serverClose()
+    vi.advanceTimersByTime(500)
+    FakeWebSocket.instances[2]!.serverOpen()
+    // Only 'a' was unsubscribed: it stops, 'b' keeps receiving.
+    expect(seen).toEqual(['a', 'b', 'b'])
+  })
+})
+
 describe('web capability helpers', () => {
   beforeEach(async () => {
     runtime = await bootedRuntime()

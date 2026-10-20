@@ -454,6 +454,18 @@ export interface MemoryReadData {
 }
 
 /**
+ * A user message was persisted for this session (normal send, nudge-resume,
+ * live interjection). Emitted as a dedicated `message_received` session
+ * event. The surface that sent the message already rendered its optimistic
+ * card and dedupes this echo (useChatEvents); every other surface watching
+ * the session has no optimistic copy and renders the card from this event.
+ */
+export interface MessageReceivedData {
+  readonly session_id: string
+  readonly text: string
+}
+
+/**
  * Mid-loop goal progress telemetry. Emitted as its OWN dedicated
  * `goal_progress` session event after a non-terminal turn.
  */
@@ -646,6 +658,11 @@ export interface SessionEventMap {
   readonly step_todo_update: StepTodoUpdateData
   readonly plan_review_ready: PlanReviewReadyData
   readonly memory_read: MemoryReadData
+  /** A user message was persisted for this session (normal send,
+   *  nudge-resume, live interjection). The sending surface dedupes this echo
+   *  against its optimistic card; other surfaces watching the session render
+   *  the card from this event (see useChatEvents). */
+  readonly message_received: MessageReceivedData
   /** Goal lifecycle events, each its OWN dedicated session event:
    *  goal_proposal (a pending proposal awaiting approval), goal_status (the
    *  full goal state snapshot, emitted on every turn transition), and
@@ -883,6 +900,12 @@ export interface GlobalEventMap {
   readonly 'backend:ready': void
   readonly 'projects:loaded': void
   readonly 'sessions:loaded': void
+  /** A list-affecting session mutation landed anywhere in the app (create,
+   *  fork, delete, archive, pin, CHAT→project promotion, project delete
+   *  cascade, managed-worktree commit). No payload — consumers re-read via
+   *  ListSessions / ListAllSessions (backend/frontend_api_session.go
+   *  `emitSessionsChanged`). */
+  readonly 'sessions:changed': void
   /** A config mutation was persisted via an Update* RPC (trusted git repos,
    *  the experimental toggle, LLM/search/proxy settings, …). No payload —
    *  consumers re-read via GetConfig (backend/frontend_api_config.go
@@ -1541,6 +1564,15 @@ export function isGoalProgressData(d: unknown): d is GoalProgressData {
 export function isMemoryReadData(d: unknown): d is MemoryReadData {
   if (!isObj(d)) return false
   return typeof d.step_num === 'number' && typeof d.content === 'string'
+}
+
+/**
+ * Guard for a message_received payload — a user message persisted for the
+ * session (normal send, nudge-resume, live interjection).
+ */
+export function isMessageReceivedData(d: unknown): d is MessageReceivedData {
+  if (!isObj(d)) return false
+  return typeof d.session_id === 'string' && typeof d.text === 'string'
 }
 
 // --- E2S event type guards ---

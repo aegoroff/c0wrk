@@ -43,6 +43,20 @@ func (f *FrontendAPI) switchStoreOpCtx(switchCtx context.Context) (context.Conte
 	return context.WithTimeout(switchCtx, sessionStoreOpTimeout)
 }
 
+// emitSessionsChanged emits the global sessions:changed event so the
+// frontend refreshes its session list after a list-affecting mutation
+// (create, fork, delete, archive, pin, promotion, project deletion). No
+// payload — consumers re-read via ListSessions/ListAllSessions. No-op when
+// the Wails emitter has not been wired yet (e.g. very early in startup) —
+// mirrors how other global events are dispatched through the injected
+// emitEvent callback.
+func (f *FrontendAPI) emitSessionsChanged() {
+	f.seedAcquire()
+	if f.emitEvent != nil {
+		f.emitEvent(EventSessionsChanged)
+	}
+}
+
 // CreateSession creates a new agent session within the active project.
 func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 	if f.appCell() == nil || f.app.Manager() == nil {
@@ -62,6 +76,7 @@ func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
+	f.emitSessionsChanged()
 	// Persist to SQLite
 	// Best-effort persistence: log and continue to avoid disrupting the user session.
 	if f.store != nil {
@@ -127,6 +142,7 @@ func (f *FrontendAPI) ForkSession(sessionID string) (*session.SessionInfo, error
 		return nil, fmt.Errorf("failed to fork session: %w", err)
 	}
 
+	f.emitSessionsChanged()
 	return info, nil
 }
 
@@ -218,6 +234,7 @@ func (f *FrontendAPI) DeleteSessionWithOptions(id string, opts SessionDeleteOpti
 			f.log().Warn("failed to remove session directory", "session_id", id, "dir", sessionDir, "error", err)
 		}
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -304,6 +321,7 @@ func (f *FrontendAPI) ArchiveSession(id string) error {
 		}
 		cancel()
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -332,6 +350,7 @@ func (f *FrontendAPI) PinSession(id string) error {
 		}
 		cancel()
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 

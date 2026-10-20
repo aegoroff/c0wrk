@@ -115,6 +115,9 @@ func (f *FrontendAPI) PromoteSessionToProject(sessionID, projectName string) (*p
 	f.savePromotionSessionPointers(ctx, sessionID, proj.ID)
 	f.initPromotedWorkspaceGit(proj.WorkspacePath)
 	f.emitEvent(EventProjectCreated, proj)
+	// The session re-parented from No Project to the new project: both
+	// session lists changed.
+	f.emitSessionsChanged()
 
 	f.log().Info("promoted CHAT session to project",
 		"session_id", sessionID, "project_id", proj.ID, "project_name", projectName)

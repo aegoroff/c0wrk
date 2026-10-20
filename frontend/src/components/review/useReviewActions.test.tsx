@@ -1,10 +1,12 @@
 // Unit tests for useReviewActions.handleSubmit's optimistic presentation.
 // A review submit bypasses the chat input (and therefore useMessageSender),
-// while the chat UI renders user messages exclusively from its own optimistic
-// copy — the message_received event the backend emits is intentionally
-// ignored. The submit flow must therefore add the user message card itself:
-// without it, the review feedback the agent is already working on stays
-// invisible until a session reload brings in the persisted row.
+// while the chat UI renders user messages from its optimistic copy — the
+// message_received event the backend emits is deduped against that copy by
+// useChatEvents (tail user-message content + time window). The submit flow
+// must therefore add the user message card itself: without it, the review
+// feedback the agent is already working on stays invisible until a session
+// reload brings in the persisted row (and the dedup would have no optimistic
+// card to match the echo against on this surface).
 //
 // No @testing-library/react in this repo; we follow the established
 // createRoot + jsdom harness pattern (see useMessageSender.test.tsx).

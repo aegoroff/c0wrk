@@ -91,15 +91,16 @@ export function useReviewActions(sessionId: string) {
       const commentsText = parts.join('\n\n')
 
       // Present the feedback as a user message optimistically. The chat
-      // renders user messages from its own optimistic copy only — the
-      // message_received event the backend emits is intentionally ignored by
-      // the UI (normal sends add the card in useMessageSender before the
-      // RPC). A review submit bypasses the chat input, so it must add the
-      // card itself; without this the feedback the agent is already working
-      // on stays invisible until a session reload brings in the persisted
-      // row. Mirrors useMessageSender: task-state handling for the three
-      // dispatch paths (fresh / nudge-resume / live interjection) and a full
-      // rollback when the send is rejected.
+      // renders user messages from its own optimistic copy — the
+      // message_received event the backend emits after persisting the
+      // message is deduped against that copy (useChatEvents: tail
+      // user-message content + time window), so this card is what keeps the
+      // feedback from rendering twice HERE. A review submit bypasses the
+      // chat input and its card must exist before the send for that dedup
+      // to match; surfaces not watching the send render the card from the
+      // event itself. Mirrors useMessageSender: task-state handling for the
+      // three dispatch paths (fresh / nudge-resume / live interjection) and
+      // a full rollback when the send is rejected.
       const wasPaused = useChatStore.getState().paused[sessionId] ?? false
       const isRunning = useChatStore.getState().taskActive[sessionId] ?? false
       const wasActivity = useChatStore.getState().activityStatus[sessionId] ?? null

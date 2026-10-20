@@ -44,6 +44,11 @@ vi.mock('@/hooks/useProjectLoader', () => ({ useProjectLoader: () => {} }))
 vi.mock('@/hooks/useSessionLoader', () => ({ useSessionLoader: () => {} }))
 vi.mock('@/hooks/useSessionEvents', () => ({ useSessionEvents: () => {} }))
 vi.mock('@/hooks/useBackgroundSessionWatcher', () => ({ useBackgroundSessionWatcher: () => {} }))
+// Mounted beside useBackgroundSessionWatcher at the App root; its own
+// behavior is covered by hooks/useShallowResync.test.ts. Stubbed here so the
+// App mount does not pull the resync loaders (lib/sessionHistoryReload →
+// api/chat → the wails bridge) into this audio-unlock-only suite.
+vi.mock('@/hooks/useShallowResync', () => ({ useShallowResync: () => {} }))
 vi.mock('@/stores/activeSessionsStore', () => ({ useActiveSessionsRefresh: () => {} }))
 vi.mock('@/hooks/useAutonomyLoader', () => ({ useAutonomyLoader: () => {} }))
 

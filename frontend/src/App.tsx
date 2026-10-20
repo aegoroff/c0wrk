@@ -22,6 +22,7 @@ import { useProjectLoader } from '@/hooks/useProjectLoader'
 import { useSessionLoader } from '@/hooks/useSessionLoader'
 import { useSessionEvents } from '@/hooks/useSessionEvents'
 import { useBackgroundSessionWatcher } from '@/hooks/useBackgroundSessionWatcher'
+import { useShallowResync } from '@/hooks/useShallowResync'
 import { useWindowTitle } from '@/hooks/useWindowTitle'
 import { useActiveSessionsRefresh } from '@/stores/activeSessionsStore'
 import { initSoundUnlock } from '@/lib/sound'
@@ -110,6 +111,13 @@ function App() {
   useAutonomyLoader()
   useSessionEvents(activeSessionId)
   useBackgroundSessionWatcher()
+  // Shallow resync after connectivity/signal gaps (WS re-connect, window
+  // focus / tab visibility): re-reads the active session's history, the
+  // active project's session list and the live-sessions snapshot + pending
+  // sweep, so UI state catches up with the backend without the user
+  // switching sessions back and forth. Mounted at the App root — the
+  // triggers are app-global and must survive every phase/panel transition.
+  useShallowResync()
   // Authoritative live-sessions snapshot loader. Mounted at the App root — NOT
   // in the sidebar header (ActiveSessionsIndicator) — because the header
   // unmounts when the sidebar is collapsed, which would freeze the snapshot

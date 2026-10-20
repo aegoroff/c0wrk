@@ -123,6 +123,8 @@ func (f *FrontendAPI) DeleteProject(id string) error {
 	f.watcherMu.Unlock()
 
 	f.emitEvent(EventProjectDeleted, id)
+	// The project's sessions cascaded away with it.
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -1242,6 +1244,7 @@ func (f *FrontendAPI) createSessionForProject(switchCtx context.Context, project
 		cancel()
 	}
 
+	f.emitSessionsChanged()
 	return created.ID
 }
 

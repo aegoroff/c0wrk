@@ -108,6 +108,16 @@ const EventWorkDirsChanged = "workdirs:changed"
 // EventSessionsLoaded is emitted when all sessions have been loaded from disk.
 const EventSessionsLoaded = "sessions:loaded"
 
+// EventSessionsChanged is emitted after every successful session mutation
+// that changes a session list: create (the RPC, the SwitchProject fallback
+// creation, and both managed-worktree creation paths), fork (plain and
+// managed), delete, archive/unarchive, pin/unpin, CHAT→project promotion,
+// and project deletion (which cascades its sessions). No payload — consumers
+// re-read the list via ListSessions/ListAllSessions, mirroring
+// EventWorkDirsChanged. Emitted through the shared f.emitEvent funnel
+// (backend/frontend_api_session.go emitSessionsChanged).
+const EventSessionsChanged = "sessions:changed"
+
 // EventSessionEvent is the prefix for session-scoped orchestration events.
 // Actual events use the pattern session:{id}:{type}.
 const EventSessionEvent = "session:event"

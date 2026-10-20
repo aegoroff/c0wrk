@@ -19,6 +19,7 @@
 
 import { useEffect, useRef } from 'react'
 import { create } from 'zustand'
+import { subscribe } from '@/api/runtime'
 import { listAllSessions } from '@/api/sessions'
 import { getPendingActions, type PendingActionsResponse } from '@/api/chat'
 import { logger } from '@/lib/logger'
@@ -242,7 +243,10 @@ const SNAPSHOT_POLL_INTERVAL_MS = 30_000
  * changes — i.e. on task transitions (start / complete / error / cancel /
  * pause / resume / resumable failure), when the DB snapshot has just become
  * stale. Streaming chunks and message appends do not change the set and do
- * not trigger anything.
+ * not trigger anything. The global `sessions:changed` push (any list-affecting
+ * session mutation from any surface) funnels through the same debounced
+ * refresh, keeping the cross-project snapshot current without waiting for the
+ * safety poll.
  *
  * Switch-time refresh: EVERY project/session switch (the CHAT↔CODE toggle
  * included) also triggers a refresh. The live-set trigger is derived from the
@@ -287,6 +291,19 @@ export function useActiveSessionsRefresh(): void {
       useActiveSessionsStore.getState().refresh()
     }, SNAPSHOT_POLL_INTERVAL_MS)
     return () => clearInterval(id)
+  }, [])
+  // Push-driven snapshot refresh: any list-affecting session mutation (create,
+  // fork, delete, archive, pin, CHAT→project promotion, project delete
+  // cascade, managed-worktree commit) emits the global `sessions:changed`
+  // (backend `emitSessionsChanged`). It rides the same 500ms debounce funnel
+  // as the triggers above, so a burst of mutations collapses into a single
+  // ListAllSessions RPC, and an event colliding with a poll/switch refresh
+  // coalesces with it. Failure-safe: fetchSnapshot keeps the previous
+  // snapshot on error.
+  useEffect(() => {
+    return subscribe('sessions:changed', () => {
+      useActiveSessionsStore.getState().refresh()
+    })
   }, [])
   // One-time pending-HITL sweep once the snapshot first loads (the restart
   // path): a task blocked on a prompt is yellow at first render instead of

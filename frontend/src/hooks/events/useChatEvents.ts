@@ -1,9 +1,9 @@
 // Chat stream & response events: assistant_chunk, assistant_done, thought, error,
-// task_complete, task_cancelled, reflection, memory_read
+// task_complete, task_cancelled, reflection, memory_read, message_received
 
 import { useEffect } from 'react'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isAssistantChunkData, isAssistantDoneData, isThoughtData, isErrorData, isTaskCompleteData, isReflectionData, isMemoryReadData } from '@/types/events'
+import { isAssistantChunkData, isAssistantDoneData, isThoughtData, isErrorData, isTaskCompleteData, isReflectionData, isMemoryReadData, isMessageReceivedData } from '@/types/events'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { useReviewStore } from '@/stores/reviewStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
@@ -47,6 +47,55 @@ export function shouldAddTaskCompleteOutput(messages: ChatMessageUI[], output: s
 export function shouldTriggerReview(isNoProject: boolean, hasChanges: boolean): boolean {
   if (isNoProject) return false
   return hasChanges
+}
+
+/** Time window (ms) within which a `message_received` event is treated as
+ *  the delivery echo of this surface's own optimistic user card (added by
+ *  useMessageSender / useReviewActions right before the send RPC). The echo
+ *  follows the RPC within milliseconds; anything older cannot be this
+ *  send's optimistic copy. Mirrors mergeHistoryMessages' time-window
+ *  preservation of in-flight live messages. */
+export const MESSAGE_RECEIVED_ECHO_WINDOW_MS = 10_000
+
+/** How deep into the user-message tail the echo dedup scans. More than one
+ *  because an interleaved event from another surface (rendered between this
+ *  send's optimistic card and its echo) must not hide the optimistic copy. */
+export const MESSAGE_RECEIVED_SCAN_DEPTH = 5
+
+/**
+ * Decide whether a `message_received` event should add a user message card.
+ * The backend emits the event after persisting every user message, on every
+ * surface watching the session. The surface that SENT the message already
+ * rendered its own optimistic card, so the event is dropped there (it is the
+ * echo of that card); a surface that did not send has no optimistic copy and
+ * renders the card from the event.
+ *
+ * The drop decision compares the event text against the tail of user
+ * messages by content + time window. A card this handler synthesized for a
+ * PREVIOUS received event (metadata.received) is never a match target — a
+ * repeated identical message is a genuinely new message and must render as
+ * its own card, not be glued to the previous one.
+ *
+ * Pure + exported so it is unit-testable without the Wails runtime.
+ */
+export function shouldAddReceivedUserMessage(
+  messages: ChatMessageUI[],
+  text: string,
+  now: number,
+  windowMs: number = MESSAGE_RECEIVED_ECHO_WINDOW_MS,
+): boolean {
+  if (!text) return false
+  let scanned = 0
+  for (let i = messages.length - 1; i >= 0 && scanned < MESSAGE_RECEIVED_SCAN_DEPTH; i--) {
+    const m = messages[i]!
+    if (m.type !== 'user') continue
+    scanned++
+    // A card rendered from an earlier message_received event is not an
+    // optimistic send copy — skip it when hunting for the echo's twin.
+    if (m.metadata?.received === true) continue
+    if (m.content === text && now - m.timestamp <= windowMs) return false
+  }
+  return true
 }
 
 export function useChatEvents(sessionId: string | null): void {
@@ -369,6 +418,39 @@ export function useChatEvents(sessionId: string | null): void {
           type: 'memory_read',
           content: data.content,
           metadata: { step_num: data.step_num },
+          timestamp: Date.now(),
+        })
+      }),
+    )
+
+    // --- message_received ---
+    // The backend emits this after persisting every user message (normal
+    // send, nudge-resume, live interjection) to ALL surfaces watching the
+    // session. The surface that sent the message already rendered its
+    // optimistic card (useMessageSender before the RPC; useReviewActions for
+    // a review submit), so its event is the delivery echo — dropped by
+    // shouldAddReceivedUserMessage. Every OTHER surface watching the session
+    // has no optimistic copy and renders the user card here, so the message
+    // is visible without a session switch. The card is stamped
+    // metadata.received so the dedup never targets it: a repeated identical
+    // message (same text sent again) is a new message and must stay a
+    // distinct card. Like the other random-id live cards, a re-emission
+    // landing exactly during a history RPC can duplicate — acceptable;
+    // hiding a real message is not.
+    cleanups.push(
+      onSessionEvent(sessionId, 'message_received', (data) => {
+        if (!isMessageReceivedData(data)) { reportDroppedEvent('message_received', data); return }
+        const store = useChatStore.getState()
+        // Imperative read (not a reactive selector) — safe despite the ⚠️
+        // in selectSessionMessages, which only applies to useStore(selector).
+        const msgs = selectSessionMessages(store, sessionId)
+        if (!shouldAddReceivedUserMessage(msgs, data.text, Date.now())) return
+        store.addMessage(sessionId, {
+          id: generateMessageId(),
+          sessionId,
+          type: 'user',
+          content: data.text,
+          metadata: { received: true },
           timestamp: Date.now(),
         })
       }),

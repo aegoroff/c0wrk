@@ -463,6 +463,7 @@ func (f *FrontendAPI) createLocalFallbackSession(projectID, repoRoot, branch str
 			f.log().Error("failed to save local fallback session to store", "error", err)
 		}
 	}
+	f.emitSessionsChanged()
 	return info, nil
 }
 
@@ -485,6 +486,9 @@ func (f *FrontendAPI) commitManagedDraft(ctx context.Context, draft session.Sess
 		}
 		return nil, fmt.Errorf("failed to persist managed session binding: %w", err)
 	}
+	// Emitted only past the rollback point: a persistence failure deletes the
+	// session again, so the list never changed.
+	f.emitSessionsChanged()
 	return info, nil
 }
 
@@ -574,6 +578,7 @@ func (f *FrontendAPI) forkManagedSession(ctx context.Context, src *session.Sessi
 	// starts at the source's committed HEAD, so the checkout cache is a
 	// near-perfect match for its first index pass.
 	f.seedWorktreeEmbeddingCache(src.ProjectID, treeName)
+	f.emitSessionsChanged()
 	return info, nil
 }
 

@@ -395,6 +395,35 @@ let ws: WebSocket | null = null
 let wsAttempts = 0
 let wsEmitDropWarned = false
 
+/** Re-connect subscribers (see onWSReconnected). */
+const wsReconnectListeners = new Set<() => void>()
+
+/**
+ * Subscribe to a websocket RE-connect: a successful `onopen` that follows at
+ * least one failed/closed attempt — never the socket's first open of the page
+ * load. The web transport keeps no replay queue, so every event emitted while
+ * the stream was down is gone; this signal lets consumers re-read the state
+ * the missed events carried (see useShallowResync). Never fires on the
+ * desktop transport (no websocket there). Returns an unsubscribe function;
+ * listeners never throw into the socket's event path.
+ */
+export function onWSReconnected(callback: () => void): () => void {
+  wsReconnectListeners.add(callback)
+  return () => {
+    wsReconnectListeners.delete(callback)
+  }
+}
+
+function notifyWSReconnected(): void {
+  for (const callback of Array.from(wsReconnectListeners)) {
+    try {
+      callback()
+    } catch (err) {
+      logger.warn('[events] ws-reconnect listener threw', err)
+    }
+  }
+}
+
 function connectWS(): void {
   if (ws || typeof WebSocket !== 'function' || typeof location === 'undefined') return
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -409,8 +438,14 @@ function connectWS(): void {
   }
   ws = sock
   sock.onopen = () => {
+    // An open that follows at least one failed/closed attempt is a
+    // RE-connect: events emitted during the outage are lost, so resync
+    // subscribers re-read state. The page load's first open is not one —
+    // the initial loads own their state. Read the flag BEFORE the reset.
+    const reconnected = wsAttempts > 0
     wsAttempts = 0
     wsEmitDropWarned = false
+    if (reconnected) notifyWSReconnected()
   }
   sock.onmessage = (ev: MessageEvent) => handleWSFrame(ev.data)
   sock.onclose = () => {
