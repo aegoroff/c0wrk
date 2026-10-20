@@ -42,6 +42,7 @@ import { useConfigData } from '@/hooks/useConfigData'
 import { resolveModelContext, visionRejectionMessage, VISION_UNSUPPORTED } from '@/lib/vision'
 import { logger } from '@/lib/logger'
 import type { ChatEditorAPI } from '@/hooks/useChatEditor'
+import { generateUUID } from '@/lib/ids'
 
 /**
  * Resolve the active model's image-input capability from the model store.
@@ -178,7 +179,7 @@ export function usePasteHandler(editor: ChatEditorAPI): {
       } catch (err) {
         logger.error('Failed to handle paste:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to paste from clipboard',
         })
       }

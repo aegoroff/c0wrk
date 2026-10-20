@@ -658,6 +658,10 @@ export function RefreshSkills() {
   return window['go']['desktop']['App']['RefreshSkills']();
 }
 
+export function RegenerateWebAccessToken() {
+  return window['go']['desktop']['App']['RegenerateWebAccessToken']();
+}
+
 export function ReindexVectorIndex() {
   return window['go']['desktop']['App']['ReindexVectorIndex']();
 }
@@ -830,8 +834,8 @@ export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
 }
 
-export function SetWebAccessConnection(arg1, arg2, arg3) {
-  return window['go']['desktop']['App']['SetWebAccessConnection'](arg1, arg2, arg3);
+export function SetWebAccessConnection(arg1, arg2) {
+  return window['go']['desktop']['App']['SetWebAccessConnection'](arg1, arg2);
 }
 
 export function SetWebAccessEnabled(arg1) {
@@ -840,6 +844,10 @@ export function SetWebAccessEnabled(arg1) {
 
 export function SetWebAccessStaticFS(arg1) {
   return window['go']['desktop']['App']['SetWebAccessStaticFS'](arg1);
+}
+
+export function SetWebAccessToken(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessToken'](arg1);
 }
 
 export function SetWebviewGpuPolicy(arg1) {

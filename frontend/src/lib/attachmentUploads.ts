@@ -33,6 +33,7 @@ import { getAttachments, isImagePath, removeAttachment } from '@/api/attachments
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
 import type { AttachmentInfoUI, AttachmentUploadUI } from '@/types/models'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /** Descriptor of one file about to be staged. */
 export interface UploadDescriptor {
@@ -252,7 +253,7 @@ function registerUploads(
   baseline: ReadonlySet<string>,
 ): AttachmentUploadUI[] {
   const uploads: AttachmentUploadUI[] = descriptors.map((d) => ({
-    id: crypto.randomUUID(),
+    id: generateUUID(),
     fileName: d.fileName,
     path: d.path,
     isImage: d.isImage,

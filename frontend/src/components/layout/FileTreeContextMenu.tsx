@@ -19,6 +19,7 @@ import { useUIStore } from '@/stores/uiStore'
 import { useCursorMenuPosition } from '@/lib/cursorMenuPosition'
 import { logger } from '@/lib/logger'
 import type { FileEntry } from '@/types/models'
+import { generateUUID } from '@/lib/ids'
 
 interface FileTreeContextMenuProps {
   entry: FileEntry
@@ -130,7 +131,7 @@ export function FileTreeContextMenu({
       ).catch((err) => {
         logger.error('Failed to dispatch study-paper:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to start studying the paper',
         })
       })
@@ -159,7 +160,7 @@ export function FileTreeContextMenu({
     } catch (err) {
       logger.error('Failed to copy path:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy path to clipboard',
       })
     }
@@ -173,7 +174,7 @@ export function FileTreeContextMenu({
     } catch (err) {
       logger.error('Failed to copy relative path:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy relative path to clipboard',
       })
     }

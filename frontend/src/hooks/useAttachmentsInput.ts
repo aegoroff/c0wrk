@@ -19,6 +19,7 @@ import { pickAttachmentFiles } from '@/api/attachments'
 import { openBrowserFilePicker } from '@/lib/browserFilePicker'
 import { useStageAttachments } from '@/hooks/useStageAttachments'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /**
  * @param activeSessionId active chat session id (may be null).
@@ -40,7 +41,7 @@ export function useAttachmentsInput(activeSessionId: string | null): {
       } catch (err) {
         logger.error('Failed to attach files:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to attach files',
         })
       }
@@ -55,7 +56,7 @@ export function useAttachmentsInput(activeSessionId: string | null): {
     } catch (err) {
       logger.error('Failed to attach files:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to attach files',
       })
     }

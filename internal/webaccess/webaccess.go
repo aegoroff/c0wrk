@@ -36,8 +36,12 @@
 //     reachable beyond this machine over plain HTTP without TLS, and New
 //     warns about exactly that — with no transport encryption the auth token
 //     is the only protection. An invalid bind is refused (fail-closed).
-//   - Auth token: cfg.Token when set, else a fresh crypto/rand token per
-//     launch. The token is never logged in full and never travels in a URL
+//   - Auth token: cfg.Token. The desktop layer guarantees a non-empty token
+//     before mounting: an empty config token is generated ONCE (GenerateToken)
+//     and persisted through the same config-save path every other settings
+//     write uses, so the credential is stable across restarts. This package
+//     keeps a fresh crypto/rand per-launch fallback for direct construction,
+//     and the token is never logged in full and never travels in a URL
 //     (login is POST body only; requests authenticate by HttpOnly
 //     SameSite=Strict cookie).
 //   - The cookie carries a per-launch session secret, NOT the configured
@@ -88,7 +92,8 @@ const (
 	// positional-JSON envelope adds slack, so the cap lands at 48 MiB.
 	// Ordinary RPCs keep the default maxBodyBytes.
 	maxUploadBodyBytes = 48 << 20 // 48 MiB
-	// tokenBytes is the entropy of a generated per-launch auth token.
+	// tokenBytes is the entropy of a generated auth token — the desktop-minted
+	// persistent credential and the per-launch fallback alike.
 	tokenBytes = 32
 	// shutdownBudget bounds the graceful Stop wait when the caller passes a
 	// deadline-free context.
@@ -222,7 +227,10 @@ func New(opts Options) (*Server, error) {
 
 	authToken := opts.Config.Token
 	if authToken == "" {
-		gen, err := randomHex(tokenBytes)
+		// Defense-in-depth fallback: the desktop layer generates and persists
+		// the token before mounting, so an empty config token should not
+		// reach New. A fresh per-launch secret is still better than none.
+		gen, err := GenerateToken()
 		if err != nil {
 			return nil, fmt.Errorf("webaccess: generating per-launch token: %w", err)
 		}
@@ -231,7 +239,7 @@ func New(opts Options) (*Server, error) {
 		// Operator-chosen weak secret: allowed (the operator owns the
 		// risk — a short token is the weakest link already on loopback,
 		// and the only protection on a non-loopback bind) but surfaced.
-		log.Warn("webaccess: configured token is short; prefer the per-launch token or at least 16 characters")
+		log.Warn("webaccess: configured token is short; leave it empty to use the generated credential or use at least 16 characters")
 	}
 	sessionToken, err := randomHex(tokenBytes)
 	if err != nil {
@@ -288,6 +296,16 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // one. This is the ONLY channel the token leaves the package through — it is
 // never logged and never appears in a URL.
 func (s *Server) AuthToken() string { return s.authToken }
+
+// GenerateToken mints a fresh auth token: 32 bytes of crypto/rand rendered as
+// 64 hex characters — the same entropy the sidecar's per-launch fallback
+// mints. The desktop layer calls it when the persisted token is empty (first
+// enable, or a hand-edited config): the credential is created once and then
+// persisted through the same config-save path every other settings write
+// uses (ADR-090) — it is never silently re-minted per launch again.
+func GenerateToken() (string, error) {
+	return randomHex(tokenBytes)
+}
 
 // Addr returns the resolved listen address after a successful Start
 // (host:port; the port is the actual one when config port was 0/auto).

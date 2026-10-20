@@ -24,10 +24,11 @@ import {
   themeTypeOf,
   useThemeStore,
 } from '@/stores/themeStore'
+import { generateUUID } from '@/lib/ids'
 
 /** Surfaces a failure via the app-wide runtime_error toast. */
 function toastError(message: string): void {
-  emit('runtime_error', { id: crypto.randomUUID(), message })
+  emit('runtime_error', { id: generateUUID(), message })
 }
 
 export function ThemeSelector() {

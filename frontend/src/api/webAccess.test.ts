@@ -14,7 +14,19 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { parseWebAccessInfo, getWebAccessInfo, setWebAccessEnabled, setWebAccessConnection, webAccessLogin } from '@/api/webAccess'
+import {
+  parseWebAccessInfo,
+  parseWebAccessAddress,
+  parseWebAccessToken,
+  WEB_ACCESS_TOKEN_MIN_LENGTH,
+  WEB_ACCESS_TOKEN_MAX_LENGTH,
+  getWebAccessInfo,
+  setWebAccessEnabled,
+  setWebAccessConnection,
+  regenerateWebAccessToken,
+  setWebAccessToken,
+  webAccessLogin,
+} from '@/api/webAccess'
 import { logger } from '@/lib/logger'
 
 const validInfo = {
@@ -187,23 +199,162 @@ describe('setWebAccessConnection', () => {
     for (const key of Object.keys(mockApp)) delete mockApp[key]
   })
 
-  it('passes the bind, port and token through and resolves on success', async () => {
+  it('passes the bind and port through and resolves on success (no token — it is generation-owned)', async () => {
     mockApp.SetWebAccessConnection = vi.fn().mockResolvedValue(undefined)
-    await expect(setWebAccessConnection('0.0.0.0', 9000, 'fixed-secret')).resolves.toBeUndefined()
-    expect(mockApp.SetWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000, 'fixed-secret')
-    // The auto/ephemeral/default-bind shape travels as the zero values.
-    await setWebAccessConnection('', 0, '')
-    expect(mockApp.SetWebAccessConnection).toHaveBeenLastCalledWith('', 0, '')
+    await expect(setWebAccessConnection('0.0.0.0', 9000)).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000)
+    // The auto/default-bind shape travels as the zero values.
+    await setWebAccessConnection('', 0)
+    expect(mockApp.SetWebAccessConnection).toHaveBeenLastCalledWith('', 0)
   })
 
   it('rethrows on failure (including the rollback message must surface)', async () => {
     mockApp.SetWebAccessConnection = vi.fn().mockRejectedValue(
       new Error('web access connection not applied: the sidecar failed to start with the new settings'),
     )
-    await expect(setWebAccessConnection('example.com', 70000, '')).rejects.toThrow(
+    await expect(setWebAccessConnection('example.com', 70000)).rejects.toThrow(
       'web access connection not applied',
     )
     expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('regenerateWebAccessToken', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    for (const key of Object.keys(mockApp)) delete mockApp[key]
+  })
+
+  it('calls the rotation RPC and resolves on success', async () => {
+    mockApp.RegenerateWebAccessToken = vi.fn().mockResolvedValue(undefined)
+    await expect(regenerateWebAccessToken()).resolves.toBeUndefined()
+    expect(mockApp.RegenerateWebAccessToken).toHaveBeenCalledTimes(1)
+  })
+
+  it('rethrows on failure (a rejected rotation must surface)', async () => {
+    mockApp.RegenerateWebAccessToken = vi.fn().mockRejectedValue(new Error('failed to persist web access config'))
+    await expect(regenerateWebAccessToken()).rejects.toThrow('failed to persist web access config')
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('setWebAccessToken', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    for (const key of Object.keys(mockApp)) delete mockApp[key]
+  })
+
+  it('calls the set-token RPC with the given credential and resolves on success', async () => {
+    mockApp.SetWebAccessToken = vi.fn().mockResolvedValue(undefined)
+    await expect(setWebAccessToken('custom-token-123')).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessToken).toHaveBeenCalledWith('custom-token-123')
+  })
+
+  it('rethrows on failure (including the rollback message must surface)', async () => {
+    mockApp.SetWebAccessToken = vi.fn().mockRejectedValue(
+      new Error('web access token change not applied: the previous token was restored'),
+    )
+    await expect(setWebAccessToken('custom-token-123')).rejects.toThrow('previous token was restored')
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('parseWebAccessAddress', () => {
+  it('accepts the canonical shapes and yields the (bind, port) pair', () => {
+    expect(parseWebAccessAddress('127.0.0.1:8080')).toEqual({ bind: '127.0.0.1', port: 8080 })
+    expect(parseWebAccessAddress('0.0.0.0:3000')).toEqual({ bind: '0.0.0.0', port: 3000 })
+    expect(parseWebAccessAddress('localhost:8080')).toEqual({ bind: 'localhost', port: 8080 })
+    expect(parseWebAccessAddress('[::1]:8080')).toEqual({ bind: '::1', port: 8080 })
+    expect(parseWebAccessAddress('192.168.1.10')).toEqual({ bind: '192.168.1.10', port: 0 })
+  })
+
+  it('adds the http:// scheme automatically when omitted', () => {
+    expect(parseWebAccessAddress('http://127.0.0.1:8080')).toEqual({ bind: '127.0.0.1', port: 8080 })
+    expect(parseWebAccessAddress('HTTP://localhost')).toEqual({ bind: 'localhost', port: 0 })
+    expect(parseWebAccessAddress('http://[::1]:9090')).toEqual({ bind: '::1', port: 9090 })
+  })
+
+  it('treats the empty input as the defaults (loopback bind, auto port)', () => {
+    expect(parseWebAccessAddress('')).toEqual({ bind: '', port: 0 })
+    expect(parseWebAccessAddress('   ')).toEqual({ bind: '', port: 0 })
+  })
+
+  it('accepts the boundary octets and ports', () => {
+    expect(parseWebAccessAddress('255.255.255.255:65535')).toEqual({ bind: '255.255.255.255', port: 65535 })
+    expect(parseWebAccessAddress('0.0.0.0:1')).toEqual({ bind: '0.0.0.0', port: 1 })
+    expect(parseWebAccessAddress('[::1]')).toEqual({ bind: '::1', port: 0 })
+  })
+
+  it('refuses https:// instead of silently downgrading', () => {
+    const refused = parseWebAccessAddress('https://127.0.0.1:8080')
+    expect('error' in refused).toBe(true)
+    if ('error' in refused) expect(refused.error).toMatch(/https/i)
+  })
+
+  it('refuses schemes other than http://', () => {
+    const refused = parseWebAccessAddress('ftp://127.0.0.1:8080')
+    expect('error' in refused).toBe(true)
+    if ('error' in refused) expect(refused.error).toMatch(/http/i)
+  })
+
+  it('refuses hostnames other than localhost', () => {
+    for (const bad of ['example.com:8080', 'myhost.local', 'localhost.localdomain:80']) {
+      const refused = parseWebAccessAddress(bad)
+      expect('error' in refused).toBe(true)
+    }
+  })
+
+  it('refuses out-of-range IPv4 octets', () => {
+    for (const bad of ['256.1.1.1', '1.2.3.256', '300.300.300.300', '999.0.0.1']) {
+      expect('error' in parseWebAccessAddress(bad)).toBe(true)
+    }
+  })
+
+  it('refuses out-of-range and malformed ports', () => {
+    for (const bad of ['127.0.0.1:0', '127.0.0.1:65536', '127.0.0.1:99999', '127.0.0.1:-1']) {
+      expect('error' in parseWebAccessAddress(bad)).toBe(true)
+    }
+  })
+
+  it('refuses garbage shapes', () => {
+    for (const bad of ['127.0.0.1:', ':8080', '127.0.0.1:80:90', '::1', '[::1]junk', '1.2.3', 'a:b']) {
+      expect('error' in parseWebAccessAddress(bad)).toBe(true)
+    }
+  })
+
+  it('carries an actionable message on every refusal', () => {
+    const refused = parseWebAccessAddress('nope')
+    expect('error' in refused).toBe(true)
+    if ('error' in refused) {
+      expect(refused.error.length).toBeGreaterThan(10)
+      expect(refused.error).toMatch(/127\.0\.0\.1/)
+    }
+  })
+})
+
+describe('parseWebAccessToken', () => {
+  it('accepts an in-bounds credential and trims the paste artifacts', () => {
+    expect(parseWebAccessToken('custom-token-123')).toEqual({ token: 'custom-token-123' })
+    expect(parseWebAccessToken('  spaced-token-1  ')).toEqual({ token: 'spaced-token-1' })
+    expect(parseWebAccessToken('a'.repeat(WEB_ACCESS_TOKEN_MAX_LENGTH))).toEqual({
+      token: 'a'.repeat(WEB_ACCESS_TOKEN_MAX_LENGTH),
+    })
+  })
+
+  it('rejects values below the floor — including the empty one', () => {
+    for (const input of ['', 'short', '  ', 'a'.repeat(WEB_ACCESS_TOKEN_MIN_LENGTH - 1)]) {
+      const result = parseWebAccessToken(input)
+      if (!('error' in result)) {
+        throw new Error(`parseWebAccessToken(${JSON.stringify(input)}) accepted a too-short token`)
+      }
+      expect(result.error).toContain(`at least ${WEB_ACCESS_TOKEN_MIN_LENGTH}`)
+      expect(result.error).toContain('generated')
+    }
+  })
+
+  it('rejects values above the ceiling', () => {
+    const result = parseWebAccessToken('x'.repeat(WEB_ACCESS_TOKEN_MAX_LENGTH + 1))
+    expect('error' in result && result.error).toContain(`at most ${WEB_ACCESS_TOKEN_MAX_LENGTH}`)
   })
 })
 

@@ -553,7 +553,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		if _, err := New(opts); err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if n := capture.count(t, "webaccess: configured token is short; prefer the per-launch token or at least 16 characters"); n != 1 {
+		if n := capture.count(t, "webaccess: configured token is short; leave it empty to use the generated credential or use at least 16 characters"); n != 1 {
 			t.Fatalf("short-token warnings = %d, want 1", n)
 		}
 	})

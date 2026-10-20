@@ -8,13 +8,21 @@ const mocks = vi.hoisted(() => ({
   getWebAccessInfo: vi.fn(),
   setWebAccessEnabled: vi.fn(),
   setWebAccessConnection: vi.fn(),
+  regenerateWebAccessToken: vi.fn(),
+  setWebAccessToken: vi.fn(),
   clipboardSetText: vi.fn(),
 }))
 
-vi.mock('@/api/webAccess', () => ({
+// The RPC wrappers are mocked; parseWebAccessAddress and parseWebAccessToken
+// stay REAL — the fields' local validation is pure logic, and the UI tests
+// exercise it as-is.
+vi.mock('@/api/webAccess', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/webAccess')>()),
   getWebAccessInfo: mocks.getWebAccessInfo,
   setWebAccessEnabled: mocks.setWebAccessEnabled,
   setWebAccessConnection: mocks.setWebAccessConnection,
+  regenerateWebAccessToken: mocks.regenerateWebAccessToken,
+  setWebAccessToken: mocks.setWebAccessToken,
 }))
 
 vi.mock('@/api/runtime', () => ({
@@ -33,6 +41,7 @@ const runningInfo = {
   url: 'http://127.0.0.1:8765',
   port: 8765,
   configuredBind: '127.0.0.1',
+  configuredPort: 8765,
   bindIsLoopback: true,
   token: 'tok-abcdef0123456789',
 }
@@ -42,6 +51,7 @@ const offInfo = {
   url: '',
   port: 0,
   configuredBind: '127.0.0.1',
+  configuredPort: 0,
   bindIsLoopback: true,
   token: '',
 }
@@ -69,6 +79,18 @@ function byTestId(id: string): Element | null {
   return container.querySelector(`[data-testid="${id}"]`)
 }
 
+function addressInput(): HTMLInputElement {
+  const el = byTestId('web-access-address-input')
+  if (!(el instanceof HTMLInputElement)) throw new Error('address input not found')
+  return el
+}
+
+function tokenInput(): HTMLInputElement {
+  const el = byTestId('web-access-token-input')
+  if (!(el instanceof HTMLInputElement)) throw new Error('token input not found')
+  return el
+}
+
 function clickToggle(): void {
   act(() => {
     toggleInput().click()
@@ -83,11 +105,35 @@ function clickButton(id: string): void {
   })
 }
 
+function typeInto(input: HTMLInputElement, value: string): void {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    if (setter) setter.call(input, value)
+    else input.value = value
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+/** The fields commit like the UI Scale control: Enter or focus loss. */
+function pressEnter(input: HTMLInputElement): void {
+  act(() => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  })
+}
+
+function blurField(input: HTMLInputElement): void {
+  act(() => {
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.getWebAccessInfo.mockResolvedValue(offInfo)
   mocks.setWebAccessEnabled.mockResolvedValue(undefined)
   mocks.setWebAccessConnection.mockResolvedValue(undefined)
+  mocks.regenerateWebAccessToken.mockResolvedValue(undefined)
+  mocks.setWebAccessToken.mockResolvedValue(undefined)
   mocks.clipboardSetText.mockResolvedValue(true)
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -108,21 +154,28 @@ describe('WebAccessSettings', () => {
     expect(toggleInput().checked).toBe(false)
     expect(container.textContent).toContain('Web Access')
     expect(container.textContent).toContain('Disabled')
-    expect(byTestId('web-access-url-row')).toBeNull()
-    expect(byTestId('web-access-token-row')).toBeNull()
+    // The single field displays the persisted pin (auto port = no port in
+    // the shape); nothing to copy while the sidecar is off.
+    expect(addressInput().value).toBe('http://127.0.0.1')
+    expect(byTestId('web-access-copy-url')).toBeNull()
+    expect(byTestId('web-access-token-block')).toBeNull()
     expect(byTestId('web-access-warning')).toBeNull()
     expect(byTestId('web-access-status')?.textContent).toContain('Off')
   })
 
-  it('renders the running state: URL row, masked token, full-control warning', async () => {
+  it('renders the running state: URL in the field, masked token input, full-control warning', async () => {
     mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
     render()
     await flush()
     expect(toggleInput().checked).toBe(true)
-    expect(byTestId('web-access-url-row')?.textContent).toContain('http://127.0.0.1:8765')
-    // The token is masked on screen: the raw value never lands in the DOM.
+    // One field displays AND edits the URL: the persisted pin, with scheme.
+    expect(addressInput().value).toBe('http://127.0.0.1:8765')
+    expect(byTestId('web-access-copy-url')).not.toBeNull()
+    // The token is a password-masked input seeded with the live credential:
+    // the raw value is never in the text flow.
+    expect(tokenInput().type).toBe('password')
+    expect(tokenInput().value).toBe(runningInfo.token)
     expect(container.textContent).not.toContain(runningInfo.token)
-    expect(byTestId('web-access-token-row')?.textContent).toContain('••••')
     expect(byTestId('web-access-warning')?.textContent).toContain('full control')
   })
 
@@ -130,12 +183,13 @@ describe('WebAccessSettings', () => {
     mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
     render()
     await flush()
+    expect(tokenInput().type).toBe('password')
     clickButton('web-access-reveal')
     await flush()
-    expect(byTestId('web-access-token-row')?.textContent).toContain(runningInfo.token)
+    expect(tokenInput().type).toBe('text')
     clickButton('web-access-reveal')
     await flush()
-    expect(byTestId('web-access-token-row')?.textContent).not.toContain(runningInfo.token)
+    expect(tokenInput().type).toBe('password')
   })
 
   it('copies the URL and the token through the app clipboard bridge', async () => {
@@ -159,7 +213,7 @@ describe('WebAccessSettings', () => {
     expect(mocks.setWebAccessEnabled).toHaveBeenCalledWith(true)
     // The post-toggle re-read, not a local derivation, feeds the display.
     expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
-    expect(byTestId('web-access-url-row')?.textContent).toContain('http://127.0.0.1:8765')
+    expect(addressInput().value).toBe('http://127.0.0.1:8765')
     expect(byTestId('web-access-warning')).not.toBeNull()
   })
 
@@ -171,7 +225,8 @@ describe('WebAccessSettings', () => {
     clickToggle()
     await flush()
     expect(toggleInput().checked).toBe(false)
-    expect(byTestId('web-access-url-row')).toBeNull()
+    // The field keeps showing the persisted (untoggled) pin.
+    expect(addressInput().value).toBe('http://127.0.0.1')
   })
 
   it('renders the unavailable state and disables the toggle when the bridge fails', async () => {
@@ -181,15 +236,21 @@ describe('WebAccessSettings', () => {
     expect(toggleInput().disabled).toBe(true)
     expect(byTestId('web-access-status')?.textContent).toContain('unavailable')
     expect(byTestId('web-access-warning')).toBeNull()
+    // Without an authoritative read there is nothing to display or edit.
+    expect(byTestId('web-access-address-input')).toBeNull()
+    expect(byTestId('web-access-token-input')).toBeNull()
   })
 
-  it('hides the credential rows when enabled but not running', async () => {
+  it('hides the credential rows when enabled but not running (no token minted yet)', async () => {
     mocks.getWebAccessInfo.mockResolvedValue({ ...offInfo, enabled: true })
     render()
     await flush()
     expect(toggleInput().checked).toBe(true)
-    expect(byTestId('web-access-url-row')).toBeNull()
-    expect(byTestId('web-access-token-row')).toBeNull()
+    // The field always shows the persisted pin; only the copy affordance
+    // needs a running sidecar (no resolved URL to open otherwise).
+    expect(addressInput().value).toBe('http://127.0.0.1')
+    expect(byTestId('web-access-copy-url')).toBeNull()
+    expect(byTestId('web-access-token-block')).toBeNull()
     expect(byTestId('web-access-warning')?.textContent).toContain('full control')
     expect(byTestId('web-access-status')?.textContent).toContain('not running')
   })
@@ -253,80 +314,65 @@ describe('WebAccessSettings non-loopback bind warnings', () => {
   })
 })
 
-describe('WebAccessSettings pin (fixed bind, port & token)', () => {
-  function pinBind(): HTMLInputElement {
-    const el = byTestId('web-access-pin-bind')
-    if (!(el instanceof HTMLInputElement)) throw new Error('pin bind input not found')
-    return el
-  }
-  function pinPort(): HTMLInputElement {
-    const el = byTestId('web-access-pin-port')
-    if (!(el instanceof HTMLInputElement)) throw new Error('pin port input not found')
-    return el
-  }
-  function pinToken(): HTMLInputElement {
-    const el = byTestId('web-access-pin-token')
-    if (!(el instanceof HTMLInputElement)) throw new Error('pin token input not found')
-    return el
-  }
-  function typeInto(input: HTMLInputElement, value: string): void {
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-      if (setter) setter.call(input, value)
-      else input.value = value
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-  }
-
+describe('WebAccessSettings address (one URL-style field, commit on Enter/blur)', () => {
   beforeEach(() => {
     mocks.getWebAccessInfo.mockResolvedValue({
       ...runningInfo,
       configuredBind: '127.0.0.1',
       bindIsLoopback: true,
       configuredPort: 0,
-      tokenPinned: false,
+      tokenPinned: true,
     })
   })
 
-  it('applies the drafts: bind, port and token travel, state re-reads, token draft clears', async () => {
+  it('commits on Enter: the parsed (bind, port) travels, state re-reads', async () => {
     render()
     await flush()
-    typeInto(pinBind(), '0.0.0.0')
-    typeInto(pinPort(), '9000')
-    typeInto(pinToken(), ' fixed-secret ')
-    clickButton('web-access-pin-apply')
+    typeInto(addressInput(), 'http://0.0.0.0:9000')
+    pressEnter(addressInput())
     await flush()
-    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000, 'fixed-secret')
-    // The authoritative state is re-read after the apply.
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 9000)
+    // The authoritative state is re-read after the commit.
     expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
-    // A typed secret never lingers on screen.
-    expect(pinToken().value).toBe('')
   })
 
-  it('empty drafts mean the default bind, auto port + ephemeral token (the zero values)', async () => {
+  it('commits on focus loss', async () => {
     render()
     await flush()
-    clickButton('web-access-pin-apply')
+    typeInto(addressInput(), 'localhost:9000')
+    blurField(addressInput())
     await flush()
-    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('127.0.0.1', 0, '')
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('localhost', 9000)
   })
 
-  it('an emptied bind draft sends the default sentinel (empty = 127.0.0.1)', async () => {
-    mocks.getWebAccessInfo.mockResolvedValue({
-      ...runningInfo,
-      configuredBind: '0.0.0.0',
-      bindIsLoopback: false,
-    })
+  it('does not save an unchanged value (blur or Enter on the seeded field)', async () => {
     render()
     await flush()
-    expect(pinBind().value).toBe('0.0.0.0')
-    typeInto(pinBind(), '')
-    clickButton('web-access-pin-apply')
+    blurField(addressInput())
+    pressEnter(addressInput())
     await flush()
-    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('', 0, '')
+    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
   })
 
-  it('seeds the bind draft from the persisted pin', async () => {
+  it('adds the http:// scheme automatically; a bare host means the auto port', async () => {
+    render()
+    await flush()
+    typeInto(addressInput(), '0.0.0.0')
+    blurField(addressInput())
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('0.0.0.0', 0)
+  })
+
+  it('an emptied field applies the defaults (loopback bind, auto port)', async () => {
+    render()
+    await flush()
+    typeInto(addressInput(), '')
+    pressEnter(addressInput())
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('', 0)
+  })
+
+  it('seeds the field from the persisted pin (IPv4 and bracketed IPv6)', async () => {
     mocks.getWebAccessInfo.mockResolvedValue({
       ...runningInfo,
       configuredBind: '192.168.1.10',
@@ -335,32 +381,57 @@ describe('WebAccessSettings pin (fixed bind, port & token)', () => {
     })
     render()
     await flush()
-    expect(pinBind().value).toBe('192.168.1.10')
-    expect(pinPort().value).toBe('8765')
-  })
+    expect(addressInput().value).toBe('http://192.168.1.10:8765')
 
-  it('the bind input is a plain text field with the default placeholder, autocomplete off', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({
+      ...runningInfo,
+      configuredBind: '::1',
+      bindIsLoopback: true,
+      configuredPort: 8765,
+    })
+    // A fresh mount seeds the IPv6 shape with its brackets.
+    act(() => {
+      root.unmount()
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
     render()
     await flush()
-    expect(pinBind().type).toBe('text')
-    expect(pinBind().placeholder).toBe('Bind — 127.0.0.1')
-    expect(pinBind().autocomplete).toBe('off')
+    expect(addressInput().value).toBe('http://[::1]:8765')
   })
 
-  it('seeds the port draft from the persisted pin', async () => {
-    mocks.getWebAccessInfo.mockResolvedValue({ ...runningInfo, configuredPort: 8765 })
+  it('the field is a plain text input with the default placeholder, autocomplete off', async () => {
     render()
     await flush()
-    expect(pinPort().value).toBe('8765')
+    expect(addressInput().type).toBe('text')
+    expect(addressInput().placeholder).toContain('http://127.0.0.1:8080')
+    expect(addressInput().autocomplete).toBe('off')
   })
 
-  it('refuses an out-of-range port locally without calling the RPC', async () => {
+  it('refuses an invalid address locally without calling the RPC', async () => {
     render()
     await flush()
-    typeInto(pinPort(), '70000')
-    clickButton('web-access-pin-apply')
+    typeInto(addressInput(), 'example.com:8080')
+    blurField(addressInput())
     await flush()
-    expect(byTestId('web-access-pin-error')?.textContent).toContain('1–65535')
+    expect(byTestId('web-access-address-error')?.textContent).toContain('host:port')
+    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+  })
+
+  it('refuses https:// and out-of-range ports locally without calling the RPC', async () => {
+    render()
+    await flush()
+    typeInto(addressInput(), 'https://127.0.0.1:8080')
+    pressEnter(addressInput())
+    await flush()
+    expect(byTestId('web-access-address-error')?.textContent).toContain('https')
+    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+
+    typeInto(addressInput(), '127.0.0.1:70000')
+    pressEnter(addressInput())
+    await flush()
+    expect(byTestId('web-access-address-error')?.textContent).toContain('1-65535')
     expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
   })
 
@@ -370,15 +441,146 @@ describe('WebAccessSettings pin (fixed bind, port & token)', () => {
     )
     render()
     await flush()
-    typeInto(pinPort(), '9000')
-    clickButton('web-access-pin-apply')
+    typeInto(addressInput(), '127.0.0.1:9000')
+    pressEnter(addressInput())
     await flush()
-    expect(byTestId('web-access-pin-error')?.textContent).toContain('previous settings were restored')
+    expect(byTestId('web-access-address-error')?.textContent).toContain('previous settings were restored')
+  })
+})
+
+describe('WebAccessSettings token (input under the address, commit on Enter/blur)', () => {
+  beforeEach(() => {
+    mocks.getWebAccessInfo.mockResolvedValue({ ...runningInfo, tokenPinned: true })
   })
 
-  it('the token draft is a password field', async () => {
+  it('commits a typed custom token on Enter: the trimmed value travels, state re-reads', async () => {
     render()
     await flush()
-    expect(pinToken().type).toBe('password')
+    typeInto(tokenInput(), '  custom-token-123  ')
+    pressEnter(tokenInput())
+    await flush()
+    expect(mocks.setWebAccessToken).toHaveBeenCalledWith('custom-token-123')
+    expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
+  })
+
+  it('commits on focus loss too', async () => {
+    render()
+    await flush()
+    typeInto(tokenInput(), 'another-token-9')
+    blurField(tokenInput())
+    await flush()
+    expect(mocks.setWebAccessToken).toHaveBeenCalledWith('another-token-9')
+  })
+
+  it('does not save an unchanged token (blur or Enter on the seeded field)', async () => {
+    render()
+    await flush()
+    blurField(tokenInput())
+    pressEnter(tokenInput())
+    await flush()
+    expect(mocks.setWebAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('an emptied field reverts instead of clearing the credential', async () => {
+    render()
+    await flush()
+    typeInto(tokenInput(), '')
+    blurField(tokenInput())
+    await flush()
+    expect(mocks.setWebAccessToken).not.toHaveBeenCalled()
+    expect(tokenInput().value).toBe(runningInfo.token)
+    expect(byTestId('web-access-token-error')).toBeNull()
+  })
+
+  it('refuses a short token locally without calling the RPC', async () => {
+    render()
+    await flush()
+    typeInto(tokenInput(), 'short')
+    pressEnter(tokenInput())
+    await flush()
+    expect(byTestId('web-access-token-error')?.textContent).toContain('at least 8')
+    expect(mocks.setWebAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('surfaces the backend failure message (including the rollback case)', async () => {
+    mocks.setWebAccessToken.mockRejectedValue(
+      new Error('web access token change not applied: the previous token was restored'),
+    )
+    render()
+    await flush()
+    typeInto(tokenInput(), 'never-lands-123')
+    pressEnter(tokenInput())
+    await flush()
+    expect(byTestId('web-access-token-error')?.textContent).toContain('previous token was restored')
+  })
+
+  it('is a monospace password input with autocomplete off', async () => {
+    render()
+    await flush()
+    expect(tokenInput().type).toBe('password')
+    expect(tokenInput().autocomplete).toBe('off')
+    expect(tokenInput().classList.contains('font-mono')).toBe(true)
+  })
+})
+
+describe('WebAccessSettings token regenerate', () => {
+  function regenerateButton(): HTMLButtonElement {
+    const el = byTestId('web-access-token-regenerate')
+    if (!(el instanceof HTMLButtonElement)) throw new Error('regenerate button not found')
+    return el
+  }
+
+  beforeEach(() => {
+    mocks.getWebAccessInfo.mockResolvedValue({
+      ...runningInfo,
+      configuredPort: 0,
+      tokenPinned: true,
+    })
+  })
+
+  it('the rotation button sits next to the token input and mints through the RPC, re-reading state', async () => {
+    render()
+    await flush()
+    expect(regenerateButton()).toBeTruthy()
+    clickButton('web-access-token-regenerate')
+    await flush()
+    expect(mocks.regenerateWebAccessToken).toHaveBeenCalledTimes(1)
+    // The authoritative state is re-read after the rotation.
+    expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(2)
+  })
+
+  it('is disabled while the rotation is in flight', async () => {
+    let resolveRegen!: () => void
+    mocks.regenerateWebAccessToken.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRegen = resolve
+        }),
+    )
+    render()
+    await flush()
+    clickButton('web-access-token-regenerate')
+    expect(regenerateButton().disabled).toBe(true)
+    await act(async () => {
+      resolveRegen()
+    })
+    await flush()
+    expect(regenerateButton().disabled).toBe(false)
+  })
+
+  it('surfaces the rotation failure next to the token field', async () => {
+    mocks.regenerateWebAccessToken.mockRejectedValue(new Error('failed to persist web access config'))
+    render()
+    await flush()
+    clickButton('web-access-token-regenerate')
+    await flush()
+    expect(byTestId('web-access-token-error')?.textContent).toContain('failed to persist')
+  })
+
+  it('no rotation button without a live token (nothing minted yet)', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(offInfo)
+    render()
+    await flush()
+    expect(byTestId('web-access-token-regenerate')).toBeNull()
   })
 })

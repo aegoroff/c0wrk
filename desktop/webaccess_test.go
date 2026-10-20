@@ -143,8 +143,9 @@ web_access:
 	if info.Port == 0 {
 		t.Errorf("info.Port = 0, want the resolved auto port")
 	}
-	// A per-launch token is minted when the section carries none — the login
-	// screen credential must exist, and it is only ever revealed here.
+	// An empty config token is minted once at the first start and persisted
+	// (ADR-090) — the login screen credential must exist, and it is only
+	// ever revealed here.
 	if info.Token == "" {
 		t.Error("info.Token is empty — the browser login could never authenticate")
 	}
@@ -469,7 +470,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 		t.Fatal("sidecar did not mount")
 	}
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken"} {
 		if srv.Dispatchable(method) {
 			t.Errorf("%s is dispatchable over the web surface — the control RPC leaked into the reflection target", method)
 		}
@@ -478,7 +479,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 	ts := newWebAccessHTTPTest(t, srv)
 	client := loginWebAccessClient(t, ts.URL, srv.AuthToken())
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken"} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 			ts.URL+"/api/rpc/"+method, strings.NewReader("[]"))
 		if err != nil {

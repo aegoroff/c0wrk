@@ -4,6 +4,7 @@ import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'
 import { useThemeStore, selectActiveThemeType } from '@/stores/themeStore'
 import { Button } from '@/components/ui/button'
 import { DEFAULT_ZOOM_STEP, INITIAL_VIEW, usePanZoom } from '@/lib/usePanZoom'
+import { generateUUID } from '@/lib/ids'
 
 interface MermaidBlockProps {
   code: string
@@ -71,7 +72,7 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
           // (no HTML ever reaches the SVG).
           flowchart: { htmlLabels: false },
         })
-        renderId = `mermaid-${crypto.randomUUID()}`
+        renderId = `mermaid-${generateUUID()}`
         const { svg } = await mermaid.render(renderId, code.trim())
         if (cancelled) return
         // Defense-in-depth: mermaid's strict mode already sanitizes, but

@@ -941,15 +941,18 @@ type WebAccessInfo struct {
 	// the sidecar machine-local, any other valid bind exposes it to the
 	// network.
 	BindIsLoopback bool `json:"bind_is_loopback"`
-	// Token is the credential a browser pastes at the login screen: the
-	// effective per-launch token while running, else the configured token
-	// (empty when the next launch would mint a fresh per-launch one). This is
+	// Token is the credential a browser pastes at the login screen: the live
+	// token while running, else the configured one (empty only before the
+	// very first start — that start mints one and persists it). This is
 	// the ONLY channel the token leaves the sidecar through — it is never
 	// logged and never reaches the web dispatch surface.
 	Token string `json:"token"`
-	// TokenPinned reports whether a static token is persisted in config.yaml
-	// (a credential that survives restarts) as opposed to the default
-	// ephemeral per-launch secret.
+	// TokenPinned reports whether a persistent token is stored in config.yaml.
+	// Since ADR-090's generated-credential default this is true from the first
+	// sidecar start on: an empty config token is minted once and written back
+	// through the same config save every other settings value uses. False
+	// means the section never started with an empty token (the next start
+	// would mint one).
 	TokenPinned bool `json:"token_pinned"`
 }
 
@@ -994,8 +997,8 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 		}
 		info.Token = srv.AuthToken()
 	} else if cfg, _ := a.configRef(); cfg != nil {
-		// Not running: the configured token is what the next launch would
-		// use (an empty value means a fresh per-launch token).
+		// Not running: the configured token is what the next start would
+		// use (an empty value means that start mints and persists one).
 		info.Token = cfg.WebAccess.Token
 	}
 	return info
@@ -1054,17 +1057,19 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 	return nil
 }
 
-// SetWebAccessConnection persists the pinned bind, port and token (Settings
-// → Web Access) and applies them live: a running sidecar is hot-restarted
-// onto the new connection settings. An empty bind = the loopback default
-// (config.DefaultWebAccessBind); otherwise any valid IP literal or
-// "localhost" is accepted through config.ValidateWebAccessBind — the exact
-// rule the load/save paths enforce (a valid non-loopback bind is a
-// deliberate LAN listener, classified by config.IsLoopbackBind). Port 0 =
-// auto (a free port at every start), 1–65535 = pinned; an empty token =
-// ephemeral per-launch secret, a non-empty one = a static credential
-// persisted in config.yaml that survives restarts. A request matching the
-// current pin (all three fields) is a no-op.
+// SetWebAccessConnection persists the pinned bind and port (Settings →
+// Web Access: the single address field parses into these two) and applies
+// them live: a running sidecar is hot-restarted onto the new connection
+// settings. The token is deliberately NOT part of this call — the credential
+// has its own RPCs (SetWebAccessToken for an operator-typed value,
+// RegenerateWebAccessToken for rotation), all serialized by webAccessMu so
+// concurrent writers can never interleave their persist+restart pairs. An
+// empty bind = the loopback default (config.DefaultWebAccessBind); otherwise
+// any valid IP literal or "localhost" is accepted through
+// config.ValidateWebAccessBind — the exact rule the load/save paths enforce
+// (a valid non-loopback bind is a deliberate LAN listener, classified by
+// config.IsLoopbackBind). Port 0 = auto (a free port at every start),
+// 1–65535 = pinned. A request matching the current pin is a no-op.
 //
 // Failure ordering mirrors the toggle's honesty rules: the config write is
 // rolled back if persisting fails, and if the RESTART with the new settings
@@ -1073,7 +1078,7 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 // explaining both, and the app is never left silently without a sidecar it
 // had before the call. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam).
-func (a *App) SetWebAccessConnection(bind string, port int, token string) error {
+func (a *App) SetWebAccessConnection(bind string, port int) error {
 	a.webAccessMu.Lock()
 	defer a.webAccessMu.Unlock()
 
@@ -1091,29 +1096,107 @@ func (a *App) SetWebAccessConnection(bind string, port int, token string) error 
 	if err := config.ValidateWebAccessPort(port); err != nil {
 		return err
 	}
-	token = strings.TrimSpace(token)
 
-	if cfg.WebAccess.Bind == bind && cfg.WebAccess.Port == port && cfg.WebAccess.Token == token {
+	if cfg.WebAccess.Bind == bind && cfg.WebAccess.Port == port {
 		return nil
 	}
 
 	prev := cfg.WebAccess
-	wasRunning := a.webAccess.Load() != nil
 	cfg.WebAccess.Bind = bind
 	cfg.WebAccess.Port = port
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess = prev
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "connection")
+}
+
+// RegenerateWebAccessToken mints a fresh persistent credential (the Settings
+// → Web Access button): the new token replaces the stored one through the
+// same immediate config write every settings change uses, and a running
+// sidecar hot-restarts onto it — every open browser tab must sign in again
+// with the token Settings now shows. Works while the sidecar is stopped too:
+// the persisted write is the whole effect then. Failure ordering mirrors
+// SetWebAccessConnection: a failed persist rolls the mint back in memory,
+// and a failed restart restores the previous token on disk and brings the
+// sidecar back up on it. Locking discipline: webAccessMu.
+func (a *App) RegenerateWebAccessToken() error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	tok, err := webaccess.GenerateToken()
+	if err != nil {
+		return fmt.Errorf("web access: generating auth token: %w", err)
+	}
+
+	prev := cfg.WebAccess
+	cfg.WebAccess.Token = tok
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess = prev
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "token regeneration")
+}
+
+// SetWebAccessToken persists an operator-typed credential (the Settings →
+// Web Access token field) and applies it live, exactly like the rotation
+// above: a running sidecar hot-restarts onto the new token — every open
+// browser tab must sign in again — and with the sidecar stopped the
+// persisted write is the whole effect. The value is trimmed and
+// bounds-checked by config.ValidateWebAccessToken (min
+// config.MinWebAccessTokenLength characters; the empty value is rejected —
+// emptiness means GENERATED, and clearing the field reverts the UI instead
+// of overwriting an existing credential). A request matching the stored
+// token is a no-op. Failure ordering and locking discipline mirror
+// RegenerateWebAccessToken: webAccessMu, rollback on persist failure,
+// restore-and-restart on restart failure.
+func (a *App) SetWebAccessToken(token string) error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	token = strings.TrimSpace(token)
+	if token == cfg.WebAccess.Token {
+		return nil
+	}
+	if err := config.ValidateWebAccessToken(token); err != nil {
+		return err
+	}
+
+	prev := cfg.WebAccess
 	cfg.WebAccess.Token = token
 	if err := config.Save(cfg, cfgPath); err != nil {
 		cfg.WebAccess = prev
 		return fmt.Errorf("failed to persist web access config: %w", err)
 	}
-	if !wasRunning {
+	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "token change")
+}
+
+// restartWebAccessOrRollbackLocked hot-restarts a running sidecar onto the
+// just-persisted config state; when the sidecar is not running it is a no-op
+// (the persisted write was the whole effect). If the restart cannot serve
+// (e.g. the pinned port is already taken), prev — the section state the
+// sidecar was running with — is restored in memory, persisted, and the
+// sidecar is brought back on it; the returned error names both failures and
+// the app is never left silently without a sidecar it had before. Callers
+// hold webAccessMu and have already persisted the new state into cfg; what
+// names the change in error messages comes through what.
+func (a *App) restartWebAccessOrRollbackLocked(prev config.WebAccessConfig, cfg *config.Config, cfgPath, what string) error {
+	if a.webAccess.Load() == nil {
 		return nil
 	}
 
-	// Hot-restart onto the new pin. The stop's error is deliberately not
+	// Hot-restart onto the new state. The stop's error is deliberately not
 	// fatal here: the start below needs the listener gone, and a failed stop
 	// surfaces through the start failure (the old socket still holds the
-	// port) — the rollback path then restores the previous pin.
+	// port) — the rollback path then restores the previous state.
 	sctx, cancel := context.WithTimeout(context.Background(), webAccessStopBudget)
 	defer cancel()
 	_ = a.stopWebAccessLocked(sctx)
@@ -1123,22 +1206,22 @@ func (a *App) SetWebAccessConnection(bind string, port int, token string) error 
 		return nil
 	}
 
-	// The new pin does not serve. Restore the previous one on disk and bring
-	// the sidecar back up on it; both failures are named to the caller.
+	// The new state does not serve. Restore the previous one on disk and
+	// bring the sidecar back up on it; both failures are named to the caller.
 	cfg.WebAccess = prev
 	if saveErr := config.Save(cfg, cfgPath); saveErr != nil {
-		a.log().Error("web access: failed to persist the rolled-back connection settings", "err", saveErr)
+		a.log().Error("web access: failed to persist the rolled-back settings", "err", saveErr)
 	}
 	restored, restartErr := a.startWebAccessLocked(a.log())
 	if restartErr != nil {
 		return fmt.Errorf(
-			"web access connection not applied: the sidecar failed to start with the new settings (%w) and could not be restored on the previous ones (%w) — it will retry on the next launch",
-			err, restartErr)
+			"web access %s not applied: the sidecar failed to start with the new settings (%w) and could not be restored on the previous ones (%w) — it will retry on the next launch",
+			what, err, restartErr)
 	}
 	logWebAccessReady(a.log(), restored)
 	return fmt.Errorf(
-		"web access connection not applied: the sidecar failed to start with the new settings (%w); the previous settings were restored and the sidecar is running again",
-		err)
+		"web access %s not applied: the sidecar failed to start with the new settings (%w); the previous settings were restored and the sidecar is running again",
+		what, err)
 }
 
 // startWebAccessLocked constructs and starts the sidecar and publishes the
@@ -1149,9 +1232,27 @@ func (a *App) startWebAccessLocked(log *slog.Logger) (*webaccess.Server, error) 
 	if cur := a.webAccess.Load(); cur != nil {
 		return cur, nil
 	}
-	cfg, _ := a.configRef()
-	if cfg == nil {
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
 		return nil, errors.New("config not initialized")
+	}
+	// The persistent credential: an empty config token means "mint one, now"
+	// — generated once and written back through the same immediate config
+	// save every other settings change uses (ADR-090). From the first start
+	// on the credential is stable across restarts; the sidecar's own
+	// per-launch fallback stays as defense-in-depth for direct construction.
+	if cfg.WebAccess.Token == "" {
+		tok, err := webaccess.GenerateToken()
+		if err != nil {
+			return nil, fmt.Errorf("web access: generating auth token: %w", err)
+		}
+		prev := cfg.WebAccess
+		cfg.WebAccess.Token = tok
+		if err := config.Save(cfg, cfgPath); err != nil {
+			cfg.WebAccess = prev
+			return nil, fmt.Errorf("web access: failed to persist the generated auth token: %w", err)
+		}
+		log.Info("web access: generated a persistent auth token (the config token was empty)")
 	}
 	srv, err := webaccess.New(webaccess.Options{
 		Config:   cfg.WebAccess,

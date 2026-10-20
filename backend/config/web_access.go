@@ -19,7 +19,7 @@
 //   - Load-time VALIDITY problems are FAIL-SOFT (the shell_exec precedent):
 //     an invalid section (unparseable bind, out-of-range port) produces a
 //     visible load warning and is reset to the safe default state (disabled,
-//     loopback bind, auto port, ephemeral token). A broken section must never
+//     loopback bind, auto port, empty token). A broken section must never
 //     keep the app from starting — and must never silently leave an unsafe
 //     listener configured either.
 //   - Save-time VALIDITY problems are FAIL-CLOSED: Save refuses to persist an
@@ -29,8 +29,10 @@
 //     re-saved, so hitting the save error means an in-memory mutation tried
 //     to persist a section the sidecar must never run with.
 //   - Port 0 (the zero value) means AUTO: the sidecar picks a free port at
-//     start. An empty token means EPHEMERAL: the sidecar generates a fresh
-//     per-launch token instead of authenticating with a persisted secret.
+//     start. An empty token means GENERATED: the desktop layer mints a fresh
+//     crypto/rand token at the first start and persists it back here through
+//     the same config save every other setting uses — the credential is
+//     stable across restarts from then on (ADR-090, decision 10).
 
 package config
 
@@ -64,9 +66,15 @@ type WebAccessConfig struct {
 	// a free port is picked at sidecar start. Out-of-range values (negative
 	// or above 65535) are fail-soft at load and refused at save.
 	Port int `yaml:"port"`
-	// Token is the static token the sidecar authenticates browser requests
-	// with. Empty (the default) = ephemeral per-launch: the sidecar generates
-	// a fresh token every start instead of persisting a secret in config.yaml.
+	// Token is the credential the sidecar authenticates browser requests
+	// with. Empty (the default) = GENERATED: the first start mints a fresh
+	// crypto/rand token and persists it back into config.yaml, so the
+	// credential is stable across restarts (ADR-090, decision 10). A
+	// hand-edited static value is honored and warned when shorter than 16
+	// characters; the Settings surface writes it through desktop's
+	// SetWebAccessToken (an operator-typed value, bounds-checked by
+	// ValidateWebAccessToken) and rotates it through
+	// RegenerateWebAccessToken — both serialize on desktop's webAccessMu.
 	Token string `yaml:"token"`
 }
 
@@ -140,6 +148,36 @@ func ValidateWebAccessBind(bind string) error {
 	return validateWebAccessBind(bind)
 }
 
+// Web access token input bounds (ADR-090): the interactive entry points —
+// desktop's SetWebAccessToken and the Settings field that feeds it — refuse a
+// credential outside this range. The floor keeps a typed token from being
+// trivially guessable; the ceiling is an overflow guard, not a tuning
+// opinion. A hand-edited config.yaml is deliberately NOT gated by these
+// bounds: the load path keeps honoring any non-empty value (warned when
+// shorter than 16 characters at sidecar start), so tightening the rule here
+// can never lock an operator out of their own config.
+const (
+	MinWebAccessTokenLength = 8
+	MaxWebAccessTokenLength = 256
+)
+
+// ValidateWebAccessToken is the interactive-input rule for the web access
+// credential: length within [MinWebAccessTokenLength, MaxWebAccessTokenLength]
+// after trimming. Callers outside the package (desktop's SetWebAccessToken)
+// enforce the exact same message the Settings field shows. The empty value is
+// rejected here too — emptiness means GENERATED and is represented by leaving
+// the field alone (the first start mints and persists), never by "saving"
+// an empty credential over an existing one.
+func ValidateWebAccessToken(token string) error {
+	if len(token) < MinWebAccessTokenLength {
+		return fmt.Errorf("web_access: token must be at least %d characters (leave it empty to keep the generated one)", MinWebAccessTokenLength)
+	}
+	if len(token) > MaxWebAccessTokenLength {
+		return fmt.Errorf("web_access: token is too long — at most %d characters", MaxWebAccessTokenLength)
+	}
+	return nil
+}
+
 // webAccessLoopbackWarning is the load warning for a valid non-loopback bind:
 // the listener becomes reachable beyond the machine, and the shipped design
 // carries no transport encryption (ADR-090 records TLS as a follow-up).
@@ -149,9 +187,10 @@ func webAccessLoopbackWarning(bind string) string {
 
 // defaultWebAccessState is the canonical default section state the fail-soft
 // load path resets an invalid section to: disabled, loopback bind, auto port,
-// ephemeral token. Resetting to THIS state (rather than the bare zero value)
-// keeps the persisted shape always valid and self-describing — the same
-// doctrine as shell_exec's "persisted shape is always valid".
+// empty token (the credential is minted at the first start). Resetting to
+// THIS state (rather than the bare zero value) keeps the persisted shape
+// always valid and self-describing — the same doctrine as shell_exec's
+// "persisted shape is always valid".
 func defaultWebAccessState() WebAccessConfig {
 	return WebAccessConfig{
 		Enabled: false,

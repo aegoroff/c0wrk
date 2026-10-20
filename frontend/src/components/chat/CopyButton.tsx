@@ -5,6 +5,7 @@ import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
 import { useShiftHeld } from '@/hooks/useShiftHeld'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 interface CopyButtonProps {
   /** Text copied to the clipboard on click (or saved to a file on Shift+click). */
@@ -88,7 +89,7 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
         // path) is invisible without a toast — surface it.
         logger.error('Failed to save message to file:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to save message to file',
         })
       })

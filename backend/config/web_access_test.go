@@ -449,3 +449,44 @@ func TestValidateWebAccessBind(t *testing.T) {
 		t.Errorf("ValidateWebAccessBind(\"\") = %q, want the section-naming required-bind message", got)
 	}
 }
+
+func TestValidateWebAccessToken(t *testing.T) {
+	// The interactive-input rule (desktop's SetWebAccessToken and the
+	// Settings field behind it): a non-empty credential within
+	// [MinWebAccessTokenLength, MaxWebAccessTokenLength] passes; shorter
+	// values — including the empty one, which must never overwrite an
+	// existing credential — and oversized values are rejected.
+	valid := []string{
+		strings.Repeat("a", MinWebAccessTokenLength),
+		"tok-abcdef0123456789",
+		strings.Repeat("x", MaxWebAccessTokenLength),
+		strings.Repeat(" ", MinWebAccessTokenLength), // length, not content
+	}
+	for _, tok := range valid {
+		if err := ValidateWebAccessToken(tok); err != nil {
+			t.Errorf("ValidateWebAccessToken(%q…) = %v, want nil", tok[:8], err)
+		}
+	}
+	invalid := []string{
+		"",
+		"short",
+		strings.Repeat("a", MinWebAccessTokenLength-1),
+		strings.Repeat("x", MaxWebAccessTokenLength+1),
+	}
+	for _, tok := range invalid {
+		err := ValidateWebAccessToken(tok)
+		if err == nil {
+			t.Errorf("ValidateAccessToken(len=%d) = nil, want error", len(tok))
+			continue
+		}
+		if !strings.Contains(err.Error(), "web_access") {
+			t.Errorf("ValidateWebAccessToken(len=%d): error must name the section, got %q", len(tok), err.Error())
+		}
+	}
+	// The exact message the empty value produces — the Settings field's
+	// no-credential guidance.
+	want := "web_access: token must be at least 8 characters (leave it empty to keep the generated one)"
+	if got := ValidateWebAccessToken("").Error(); got != want {
+		t.Errorf("ValidateWebAccessToken(\"\") = %q, want %q", got, want)
+	}
+}

@@ -337,6 +337,8 @@ export function RefreshAgents():Promise<Array<backend.AgentDescriptorDTO>>;
 
 export function RefreshSkills():Promise<Array<backend.SkillDescriptorDTO>>;
 
+export function RegenerateWebAccessToken():Promise<void>;
+
 export function ReindexVectorIndex():Promise<void>;
 
 export function RemoveAttachment(arg1:string,arg2:string):Promise<void>;
@@ -423,11 +425,13 @@ export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
 
-export function SetWebAccessConnection(arg1:string,arg2:number,arg3:string):Promise<void>;
+export function SetWebAccessConnection(arg1:string,arg2:number):Promise<void>;
 
 export function SetWebAccessEnabled(arg1:boolean):Promise<void>;
 
 export function SetWebAccessStaticFS(arg1:fs.FS):Promise<void>;
+
+export function SetWebAccessToken(arg1:string):Promise<void>;
 
 export function SetWebviewGpuPolicy(arg1:string):Promise<backend.WebviewGpuPolicyInfo>;
 

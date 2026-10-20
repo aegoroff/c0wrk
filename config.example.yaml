@@ -2067,8 +2067,7 @@ notifications:
 # ---------------------------------------------------------------------------
 # Lets the desktop UI be mirrored into a browser window: c0wrk starts an
 # HTTP/WebSocket sidecar that serves the same frontend and bridges its live
-# events into the browser tab it opens (ADR-090; the configurable bind and
-# its warn-only exposure model below are ADR-091). OFF by default — with the
+# events into the browser tab it opens (ADR-090). OFF by default — with the
 # section absent (or enabled: false) no listener is created and the app
 # behaves exactly as before.
 #
@@ -2100,18 +2099,22 @@ notifications:
 #   port (default 0)        — TCP port to listen on. 0 = auto: a free port
 #                            is picked at every start.
 #
-#   token (default empty)   — static token the sidecar authenticates browser
-#                            requests with. Empty = ephemeral per-launch: a
-#                            fresh token is generated at every start, so no
-#                            secret is persisted in this file. Set a value
-#                            (or pin the port) to keep a stable URL and
-#                            credential across restarts — most easily from
-#                            the app: Settings → Web Access → "Fixed bind,
-#                            port & token". A pinned token is a durable
-#                            credential in this file; a short one (< 16
-#                            chars) draws a warning when the sidecar starts.
-#
-# web_access:
+#   token (default empty)   — the credential the sidecar authenticates
+#                            browser requests with. Empty = minted once at
+#                            the first start and written back here through
+#                            the same config save every other setting uses —
+#                            the credential is stable across restarts from
+#                            then on, so browser logins survive app
+#                            restarts. Set a value by hand to pin your own
+#                            static secret (a short one, < 16 chars, draws
+#                            a warning when the sidecar starts); from the
+#                            app, Settings → Web Access writes it two ways:
+#                            type your own into the token field (8-256
+#                            characters, committed on Enter or focus loss)
+#                            or hit Regenerate to mint a fresh one. The
+#                            token is a durable credential in this file —
+#                            treat it like a password.
+## web_access:
 #   enabled: false
 #   bind: "127.0.0.1"
 #   port: 0

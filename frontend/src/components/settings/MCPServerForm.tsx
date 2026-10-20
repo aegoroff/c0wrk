@@ -12,6 +12,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import type { MCPServerConfig } from '@/types/models'
+import { generateUUID } from '@/lib/ids'
 
 type TransportType = 'stdio' | 'http'
 
@@ -30,7 +31,7 @@ interface ServerFormData {
 interface KeyValueEntry { id: string; key: string; value: string }
 
 function makeEntry(key = '', value = ''): KeyValueEntry {
-  return { id: crypto.randomUUID(), key, value }
+  return { id: generateUUID(), key, value }
 }
 
 const emptyForm: ServerFormData = {

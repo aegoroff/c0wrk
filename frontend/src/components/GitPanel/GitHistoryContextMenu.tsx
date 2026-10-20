@@ -36,6 +36,7 @@ import {
 import { clipboardSetText, emit } from '@/api/runtime'
 import { runGitOperation } from '@/lib/gitOperation'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /** Reset modes offered by the "Reset <branch> to This Commit" submenu. */
 const RESET_MODES = [
@@ -242,7 +243,7 @@ export function GitHistoryContextMenu({
     } catch (err) {
       logger.error('Failed to copy commit SHA:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy commit SHA',
       })
     }
@@ -398,7 +399,7 @@ export function GitHistoryContextMenu({
       } catch (err) {
         logger.error('Failed to copy tag name:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to copy tag name',
         })
       }

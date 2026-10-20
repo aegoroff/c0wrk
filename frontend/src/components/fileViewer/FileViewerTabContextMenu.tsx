@@ -9,6 +9,7 @@ import { revealInWorkspace } from '@/lib/revealInWorkspace'
 import { relativePath } from '@/lib/localFileLink'
 import { logger } from '@/lib/logger'
 import { cn } from '@/lib/utils'
+import { generateUUID } from '@/lib/ids'
 
 interface FileViewerTabContextMenuProps {
   /** The file path of the tab the menu was opened on. */
@@ -74,7 +75,7 @@ export function FileViewerTabContextMenu({ path, position, onClose }: FileViewer
     } catch (err) {
       logger.error('Failed to copy path:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy path to clipboard',
       })
     }
@@ -89,7 +90,7 @@ export function FileViewerTabContextMenu({ path, position, onClose }: FileViewer
     } catch (err) {
       logger.error('Failed to copy relative path:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy relative path to clipboard',
       })
     }

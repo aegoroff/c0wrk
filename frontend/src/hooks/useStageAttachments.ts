@@ -37,6 +37,7 @@ import { useInputModeStore } from '@/stores/inputModeStore'
 import { useConfigData } from '@/hooks/useConfigData'
 import { resolveModelContext, visionRejectionMessage } from '@/lib/vision'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /** One file to stage, transport-shaped: native entry points keep their
  *  absolute path; web content uploads carry the name only (path='') — the
@@ -149,7 +150,7 @@ export function useStageAttachments(): {
       } catch (err) {
         logger.error('Failed to attach files:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to attach files',
         })
       }

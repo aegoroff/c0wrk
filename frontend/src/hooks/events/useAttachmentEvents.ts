@@ -20,6 +20,7 @@ import { getAttachments, mapAttachments } from '@/api/attachments'
 import { processIncomingAttachments } from '@/lib/attachmentUploads'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
 import type { AttachmentInfoUI } from '@/types/models'
+import { generateUUID } from '@/lib/ids'
 
 /**
  * Apply an incoming FULL pending list to the store: the lib's registry
@@ -62,7 +63,7 @@ export function useAttachmentEvents(sessionId: string | null): void {
       if (data.failed && data.failed.length > 0) {
         const names = data.failed.map((f) => f.path).join(', ')
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: `Could not attach: ${names}`,
         })
       }

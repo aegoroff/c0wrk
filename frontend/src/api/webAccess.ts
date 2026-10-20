@@ -112,24 +112,156 @@ export async function setWebAccessEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * Pin the bind, port and token (Settings → Web Access): persists all three to
- * config.yaml AND applies them live — a running sidecar hot-restarts onto the
- * new connection settings, so every open tab must re-login afterwards. An
- * empty bind = the loopback default (127.0.0.1); a valid non-loopback IP
- * literal is a deliberate network listener (the backend validates and rejects
- * anything else). Port 0 = auto; an empty token = ephemeral per-launch
- * secret. Throws on failure — the section surfaces the message (including
- * the "previous settings were restored" rollback case) instead of guessing
- * the state.
+ * Pin the bind and port (Settings → Web Access): persists both to config.yaml
+ * AND applies them live — a running sidecar hot-restarts onto the new
+ * connection settings, so every open tab must re-login afterwards. An empty
+ * bind = the loopback default (127.0.0.1); a valid non-loopback IP literal is
+ * a deliberate network listener (the backend validates and rejects anything
+ * else). Port 0 = auto. The token is deliberately not part of this call: the
+ * credential is owned by generation (minted at the first start, rotated via
+ * regenerateWebAccessToken). Throws on failure — the section surfaces the
+ * message (including the "previous settings were restored" rollback case)
+ * instead of guessing the state.
  */
-export async function setWebAccessConnection(bind: string, port: number, token: string): Promise<void> {
+export async function setWebAccessConnection(bind: string, port: number): Promise<void> {
   try {
     const app = getApp()
-    await app.SetWebAccessConnection(bind, port, token)
+    await app.SetWebAccessConnection(bind, port)
   } catch (err) {
     logger.error('Failed to set web access connection:', err)
     throw err
   }
+}
+
+/**
+ * Regenerate the persistent access token (Settings → Web Access): mints a
+ * fresh credential, persists it through the same config write every settings
+ * change uses, and hot-restarts a running sidecar onto it — every open tab
+ * must sign in again with the token the section now shows. Throws on failure.
+ */
+export async function regenerateWebAccessToken(): Promise<void> {
+  try {
+    const app = getApp()
+    await app.RegenerateWebAccessToken()
+  } catch (err) {
+    logger.error('Failed to regenerate the web access token:', err)
+    throw err
+  }
+}
+
+/**
+ * Persist an operator-typed access token (Settings → Web Access token field):
+ * the custom credential replaces the stored one through the same immediate
+ * config write and hot-restarts a running sidecar onto it — every open tab
+ * must sign in again with the token the section now shows. The backend
+ * trims, bounds-checks (min 8 / max 256 characters) and no-ops on the
+ * unchanged value. Throws on failure — the field surfaces the message
+ * (including the rollback case) instead of guessing the state.
+ */
+export async function setWebAccessToken(token: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.SetWebAccessToken(token)
+  } catch (err) {
+    logger.error('Failed to set the web access token:', err)
+    throw err
+  }
+}
+
+/** A successfully parsed address field: the bind the backend stores (an IP
+ *  literal or "localhost"; a bracketed IPv6 loses its brackets) and the port
+ *  (0 = auto). */
+export interface WebAccessAddress {
+  readonly bind: string
+  readonly port: number
+}
+
+// The address-field grammar after the scheme: "localhost", an IPv4 dotted
+// quad with every octet bounded 0-255 entirely inside the pattern, or a
+// bracketed IPv6 literal (character-class shape only — the backend's
+// net.ParseIP is the exact authority), then an optional :port. Deliberately
+// narrower than a generic URL: the sidecar binds IP literals or the
+// "localhost" name only, so any other hostname could never work.
+const WEB_ACCESS_ADDRESS_PATTERN =
+  /^(localhost|(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|\[[0-9A-Fa-f:.]+\])(?::(\d{1,5}))?$/
+
+/**
+ * Parse the Settings address field into the (bind, port) pair the backend
+ * stores. Accepted shapes: "127.0.0.1:8080", "localhost:8080", "[::1]:8080",
+ * the same with an explicit "http://" prefix, and the bare host without a
+ * port (= auto port). An empty input means the defaults (127.0.0.1 + auto).
+ * A missing scheme gains "http://" automatically; "https://" is refused
+ * rather than silently downgraded — the sidecar serves plain HTTP. Invalid
+ * input yields the error message and the caller must not save.
+ */
+export function parseWebAccessAddress(input: string): WebAccessAddress | { error: string } {
+  const value = input.trim()
+  if (value === '') return { bind: '', port: 0 }
+  if (/^https:\/\//i.test(value)) {
+    return { error: 'https:// is not supported — the sidecar serves plain HTTP only.' }
+  }
+  // Strip an explicit http://, refuse any other scheme, auto-prepend http://
+  // when none is given — the remainder is host[:port] in every branch, so one
+  // pattern validates all spellings.
+  let hostPort = value
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    if (!/^http:\/\//i.test(value)) {
+      return { error: 'Only the http:// scheme is supported — the sidecar serves plain HTTP.' }
+    }
+    hostPort = value.slice(7)
+  }
+  const match = WEB_ACCESS_ADDRESS_PATTERN.exec(hostPort)
+  if (match === null || match[1] === undefined) {
+    return {
+      error:
+        'Use host:port — an IPv4 address, "localhost" or [IPv6] with a port 1-65535, e.g. 127.0.0.1:8080. Empty = defaults (127.0.0.1, auto port).',
+    }
+  }
+  let bind = match[1]
+  if (bind.startsWith('[') && bind.endsWith(']')) {
+    bind = bind.slice(1, -1)
+  }
+  const portGroup = match[2]
+  if (portGroup === undefined) {
+    return { bind, port: 0 }
+  }
+  const port = Number(portGroup)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { error: 'The port must be a whole number 1-65535 (omit it for an auto port).' }
+  }
+  return { bind, port }
+}
+
+/** The token field's local bounds — the exact rule the backend's
+ *  config.ValidateWebAccessToken enforces, mirrored client-side so an
+ *  out-of-bounds value never travels. */
+export const WEB_ACCESS_TOKEN_MIN_LENGTH = 8
+export const WEB_ACCESS_TOKEN_MAX_LENGTH = 256
+
+/** A successfully parsed token field: the trimmed credential to persist. */
+export interface WebAccessToken {
+  readonly token: string
+}
+
+/**
+ * Validate the Settings token field into the credential the backend stores.
+ * The value is trimmed; a non-empty result of 8–256 characters is accepted.
+ * The empty input is rejected like any other short value — the caller treats
+ * it as "revert the draft" (emptiness means GENERATED; it must never
+ * overwrite an existing credential) rather than a save. An invalid value
+ * yields the error message and the caller must not save.
+ */
+export function parseWebAccessToken(input: string): WebAccessToken | { error: string } {
+  const token = input.trim()
+  if (token.length < WEB_ACCESS_TOKEN_MIN_LENGTH) {
+    return {
+      error: `The token must be at least ${WEB_ACCESS_TOKEN_MIN_LENGTH} characters — leave it empty to keep the generated one.`,
+    }
+  }
+  if (token.length > WEB_ACCESS_TOKEN_MAX_LENGTH) {
+    return { error: `The token is too long — at most ${WEB_ACCESS_TOKEN_MAX_LENGTH} characters.` }
+  }
+  return { token }
 }
 
 /**

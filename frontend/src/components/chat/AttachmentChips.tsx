@@ -25,6 +25,7 @@ import {
 import { formatBytes } from '@/lib/formatters'
 import { logger } from '@/lib/logger'
 import type { AttachmentInfoUI, AttachmentUploadUI } from '@/types/models'
+import { generateUUID } from '@/lib/ids'
 
 function AttachmentChip({
   attachment,
@@ -107,7 +108,7 @@ export function AttachmentChips(): React.JSX.Element | null {
       } catch (err) {
         logger.error('Failed to remove attachment:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to remove attachment',
         })
       }
@@ -142,7 +143,7 @@ export function AttachmentChips(): React.JSX.Element | null {
       ).catch((err) => {
         logger.error('Failed to dispatch study-paper:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to start studying the paper',
         })
       })

@@ -6,6 +6,7 @@ import {
   sanitizeTabUI,
   type TabUIState,
 } from '@/lib/tabSnapshot'
+import { generateUUID } from '@/lib/ids'
 
 // --- Model ---
 
@@ -71,7 +72,7 @@ interface TabActions {
 // --- Factories ---
 
 function generateTabId(): string {
-  return crypto.randomUUID()
+  return generateUUID()
 }
 
 /**
