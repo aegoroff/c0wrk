@@ -161,13 +161,18 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 /**
  * Read the current notification authorization WITHOUT prompting. Desktop:
  * macOS answers from UNNotificationCenter; Linux/Windows always grant (no
- * authorization concept). Web: the browser permission state. An RPC failure
- * resolves to true — a transient transport error must not paint a
- * misleading "disabled in macOS Settings" hint.
+ * authorization concept). Web: the browser permission state — 'default'
+ * (never asked) is NOT a denial: the Settings toggle and the Test button
+ * are the documented user gestures that request the permission (ADR-090,
+ * decision 11), so only a real 'denied' may surface the blocked hint. An
+ * RPC failure resolves to true — a transient transport error must not paint
+ * a misleading "disabled in macOS Settings" hint.
  */
 export async function checkNotificationAuthorization(): Promise<boolean> {
   if (isWebTransport()) {
-    return !webNotificationsAvailable() || Notification.permission === 'granted'
+    // Mapping 'default' to "denied" would hide exactly the Test button whose
+    // click is supposed to request the permission — treat only 'denied' as one.
+    return !webNotificationsAvailable() || Notification.permission !== 'denied'
   }
   const app = getApp()
   try {

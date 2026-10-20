@@ -254,6 +254,11 @@ describe('web transport notifications', () => {
     await expect(checkNotificationAuthorization()).resolves.toBe(true)
     FakeNotification.permission = 'denied'
     await expect(checkNotificationAuthorization()).resolves.toBe(false)
+    // 'default' (never asked) is NOT a denial — the Test button's click is
+    // the gesture that requests the permission (ADR-090, decision 11), so
+    // the probe must leave the button reachable in a fresh browser.
+    FakeNotification.permission = 'default'
+    await expect(checkNotificationAuthorization()).resolves.toBe(true)
   })
 
   it('the test banner requests permission from the click gesture and sends', async () => {

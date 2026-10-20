@@ -339,4 +339,18 @@ describe('SystemNotificationSettings web transport', () => {
     expect(hintText()).not.toContain('macOS')
     expect(testButton()).toBeNull()
   })
+
+  it('keeps the test button reachable in a fresh browser (permission never asked)', async () => {
+    // The api layer maps the unasked 'default' permission to "not denied"
+    // (ADR-090 decision 11: the Test button's click is the gesture that
+    // requests it) — the probe resolving true here IS that fresh-browser
+    // state. The button must render, not the blocked-site hint.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(true)
+    useSystemNotificationStore.setState({ enabled: true })
+    render()
+    await flush()
+    expect(hintText()).toBeNull()
+    expect(testButton()).not.toBeNull()
+  })
 })
