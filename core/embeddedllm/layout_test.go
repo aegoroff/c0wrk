@@ -29,6 +29,7 @@ func testLayout(t *testing.T) (layout Layout, agentDir string) {
 	built, err := NewLayout(
 		filepath.Join(agentDir, "runtimes"),
 		filepath.Join(agentDir, "models", testModelDirName),
+		filepath.Join(agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
@@ -61,9 +62,9 @@ func TestNewLayoutRejectsUnusableRoots(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := NewLayout(tc.runtimes, tc.model); !errors.Is(err, ErrLayoutInvalid) {
-				t.Fatalf("NewLayout(%q, %q) error = %v, want ErrLayoutInvalid",
-					tc.runtimes, tc.model, err)
+			if _, err := NewLayout(tc.runtimes, tc.model, tc.model); !errors.Is(err, ErrLayoutInvalid) {
+				t.Fatalf("NewLayout(%q, %q, %q) error = %v, want ErrLayoutInvalid",
+					tc.runtimes, tc.model, tc.model, err)
 			}
 		})
 	}
@@ -75,6 +76,7 @@ func TestNewLayoutCleansRoots(t *testing.T) {
 	layout, err := NewLayout(
 		filepath.Join(abs, "runtimes", "..", "runtimes")+string(filepath.Separator),
 		filepath.Join(abs, "models", "bonsai-2-27b", "..", "bonsai-2-27b"),
+		filepath.Join(abs, "models", "bonsai-2-27b-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
@@ -408,6 +410,7 @@ func TestEnsureRootsRefusesSymlinkedRoot(t *testing.T) {
 	layout, err := NewLayout(
 		filepath.Join(agentDir, "runtimes"),
 		filepath.Join(agentDir, "models", testModelDirName),
+		filepath.Join(agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)

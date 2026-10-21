@@ -63,11 +63,29 @@ type InstallProgressFunc func(Progress)
 // smoke-tested. A failed install therefore never leaves a manifest describing
 // bytes that are not on disk.
 type Manifest struct {
-	Packing        Packing           `json:"packing"`
-	Backend        Backend           `json:"backend"`
-	RuntimeVersion string            `json:"runtime_version"`
-	Checksums      map[string]string `json:"checksums"` // component -> verified sha256
-	Port           int               `json:"port"`
+	Packing        Packing `json:"packing"`
+	Backend        Backend `json:"backend"`
+	RuntimeVersion string  `json:"runtime_version"`
+	// Checksums maps each verified artifact to its SHA256 digest. The llama
+	// family's components are single artifacts and key by component name; the
+	// mtplx family's multi-file components (the wheel set, the weight pack)
+	// key EVERY file by its file name — one digest per file, never one digest
+	// standing in for a whole component (checksumKey).
+	Checksums map[string]string `json:"checksums"`
+	Port      int               `json:"port"`
+
+	// Engine is the runtime family this manifest describes. Empty on a
+	// manifest written before the field existed — every pre-existing install
+	// is a llama-family install, and readers must treat empty as llama, never
+	// as "unknown engine".
+	Engine Engine `json:"engine,omitempty"`
+	// PythonVersion is the managed CPython the mtplx engine was provisioned
+	// with (empty on the llama family).
+	PythonVersion string `json:"python_version,omitempty"`
+	// PackRevision is the pinned Hugging Face revision the mtplx engine's
+	// weight pack was verified against (empty on the llama family, whose pin
+	// is RuntimeVersion + the per-asset checksums).
+	PackRevision string `json:"pack_revision,omitempty"`
 
 	// ContextSize is the LAST KNOWN EFFECTIVE context of this installation —
 	// the number the `llm.models."Bonsai 2 27B".context_window` override is
@@ -429,6 +447,11 @@ func recordableContext(plan MemoryPlan, fallback int) int {
 // config.yaml — core never imports backend/config (backend/config sits above
 // core and already imports core packages, so an import back would cycle).
 type InstallState struct {
+	// Engine is the runtime family that was provisioned. Installs set it
+	// explicitly for BOTH families; the zero value is unset/invalid input
+	// (config spelling "" means auto, and validity is ResolveEngine's call —
+	// mlxpins.go), never a silent "llama".
+	Engine         Engine
 	Packing        Packing
 	Backend        Backend
 	Port           int
@@ -436,6 +459,11 @@ type InstallState struct {
 	RuntimeVersion string
 	InstalledAt    string // RFC 3339, matching Manifest.InstalledAt
 	ContextSize    int
+
+	// PythonVersion and PackRevision are the mtplx engine's extra pins
+	// (empty on the llama family).
+	PythonVersion string
+	PackRevision  string
 
 	// AutoUnloadEnabled and AutoUnloadMinutes are the DEFAULTS the install
 	// establishes. The sink must apply them only where the operator has not
@@ -728,6 +756,19 @@ type InstallOptions struct {
 	// Backend overrides the probed accelerator. Empty → probed. Resolution
 	// still degrades an override it cannot serve.
 	Backend Backend
+	// Engine selects the runtime family to provision. The ZERO value is the
+	// llama family (every pre-existing caller keeps its meaning); the config
+	// layer resolves `embedded_llm.engine: auto` through ResolveEngine before
+	// calling Install and passes the resolved engine explicitly. EngineMTPLX
+	// runs the MLX provisioning flow (install_mlx.go).
+	Engine Engine
+	// Tuning is the operator's memory-plan override the plan is made from —
+	// the same `embedded_llm.tuning` the preflight CheckMemoryBudget call
+	// carried, so the plan the install prices, persists and launches is the
+	// plan the operator configured (the mtplx engine's `context.mode: exact`
+	// lives or dies by this; the llama family replans from the live setting
+	// at load instead). The zero value is the all-Auto plan.
+	Tuning Tuning
 	// Progress receives one update per component and stage. May be nil.
 	Progress InstallProgressFunc
 }
@@ -834,6 +875,13 @@ func (in *Installer) Install(ctx context.Context, opts InstallOptions) (*Install
 		if err := in.stopBeforeInstall(ctx); err != nil {
 			return nil, fmt.Errorf("embeddedllm: stopping the inference server before installation: %w", err)
 		}
+	}
+
+	// The mtplx engine branches here — AFTER the step-0 stop (its rebuild
+	// replaces the tree a resident server would execute from, exactly like the
+	// llama path) and BEFORE any llama probe/pack/guard machinery runs.
+	if opts.Engine == EngineMTPLX {
+		return in.installMLX(ctx, opts)
 	}
 
 	hw, platform, res, topology, err := in.plan(ctx, opts)
@@ -951,6 +999,7 @@ func (in *Installer) Install(ctx context.Context, opts InstallOptions) (*Install
 		"model_file", manifest.ModelFile)
 
 	state := InstallState{
+		Engine:            EngineLlama,
 		Packing:           manifest.Packing,
 		Backend:           manifest.Backend,
 		Port:              manifest.Port,
@@ -1296,10 +1345,10 @@ func (in *Installer) prepareStaging(staging string) error {
 }
 
 // fetchComponents downloads and verifies each asset, recording its digest in
-// checksums. When staging is non-empty the assets are runtime archives: each is
-// extracted into the staging tree, and its StageDone is deferred to
-// provisionRuntime so the component's stream ends when the runtime is actually
-// usable rather than when its bytes landed.
+// checksums under checksumKey's per-artifact key. When staging is non-empty the
+// assets are runtime archives: each is extracted into the staging tree, and its
+// StageDone is deferred to provisionRuntime so the component's stream ends when
+// the runtime is actually usable rather than when its bytes landed.
 func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, assets []Asset,
 	staging string, checksums map[string]string,
 ) error {
@@ -1309,7 +1358,7 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 		if err != nil {
 			return err
 		}
-		checksums[string(asset.Component)] = digest
+		checksums[checksumKey(asset)] = digest
 
 		if deferDone {
 			in.emit(opts, Progress{Component: asset.Component, Stage: StageExtracting,
@@ -1329,6 +1378,22 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 	return nil
 }
 
+// checksumKey is the manifest.Checksums key one verified artifact records its
+// digest under. The llama family's components are each ONE artifact and keep
+// their historical component-name key (existing manifests and their readers
+// keep their shape). The mtplx family introduced MULTI-artifact components —
+// a 46-file wheel set and a 16-file pack — and keying those by component would
+// collapse each to the digest of whichever file downloaded last, a manifest
+// entry that describes nothing: every file records its own digest by name.
+func checksumKey(asset Asset) string {
+	switch asset.Component {
+	case ComponentEngineWheels, ComponentMLXPack:
+		return asset.ArchiveName
+	default:
+		return string(asset.Component)
+	}
+}
+
 // fetchOne downloads one artifact and enforces the verification gate.
 //
 // Downloader.Download already refuses to promote unverified bytes, so this is
@@ -1337,13 +1402,21 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 // aborts the install. Fail-closed is the only acceptable behaviour here
 // (ASI04) — "probably fine" is how an unverified binary ends up executed.
 func (in *Installer) fetchOne(ctx context.Context, opts InstallOptions, asset Asset) (string, error) {
-	in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
-		BytesDone: 0, BytesTotal: asset.SizeBytes})
-
 	dst, err := in.Layout.Destination(asset)
 	if err != nil {
 		return "", err
 	}
+	return in.fetchOneTo(ctx, opts, asset, dst)
+}
+
+// fetchOneTo is fetchOne with the destination given, for an artifact fetched
+// somewhere other than its final layout path — the mtplx pack is staged and
+// swapped whole so a mid-fetch failure can never mix two pack revisions
+// (install_mlx.go). The verification gate is identical.
+func (in *Installer) fetchOneTo(ctx context.Context, opts InstallOptions, asset Asset, dst string) (string, error) {
+	in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
+		BytesDone: 0, BytesTotal: asset.SizeBytes})
+
 	result, err := in.downloader().Download(ctx, asset, dst, func(done, total int64) {
 		in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
 			BytesDone: done, BytesTotal: total})
@@ -1650,6 +1723,12 @@ func (in *Installer) Remove(ctx context.Context) error {
 	return in.RemoveWithScope(ctx, RemoveAll)
 }
 
+// ErrNoProjectionOnMLX reports RemoveProjection against an mtplx install: the
+// vision tower is inside the pack, so there is no separate projector artifact
+// to remove. Callers hid the scope in the UI for this engine; the refusal is
+// the fail-closed backstop.
+var ErrNoProjectionOnMLX = errors.New("embeddedllm: the mtplx engine has no separate vision projector to remove")
+
 // RemoveWithScope stops a running server and removes the parts of the
 // installation the scope names, plus — under EVERY scope — the manifest and
 // the config registration. A partial removal is therefore uniform: the
@@ -1683,6 +1762,10 @@ func (in *Installer) RemoveWithScope(ctx context.Context, scope RemoveScope) err
 	}
 
 	var errs []error
+	// The recorded engine is read BEFORE the manifest goes: the scope's
+	// meaning (projection is llama-only) depends on it, and the manifest is
+	// the authority until it is deleted.
+	engine := in.recordedEngine()
 	// The manifest goes with EVERY scope: it is install state, not artifact
 	// bytes, and a record describing files a scoped removal just deleted — or
 	// one describing an install coexisting with no runtime tree — would point
@@ -1694,6 +1777,8 @@ func (in *Installer) RemoveWithScope(ctx context.Context, scope RemoveScope) err
 		errs = append(errs, err)
 	}
 
+	// The runtime/weights halves reach BOTH engines' trees (a scope names a
+	// KIND of artifact, not an engine).
 	removed := 0
 	switch scope {
 	case RemoveRuntime:
@@ -1701,9 +1786,16 @@ func (in *Installer) RemoveWithScope(ctx context.Context, scope RemoveScope) err
 	case RemoveWeights:
 		in.removeScopeWeights(&errs)
 	case RemoveProjection:
-		in.removeScopeProjection(&errs)
+		if engine == EngineMTPLX {
+			errs = append(errs, ErrNoProjectionOnMLX)
+		} else {
+			in.removeScopeProjection(&errs)
+		}
 	default: // RemoveAll — the historical full removal
 		if err := in.removeOwned(in.Layout.ModelRoot); err != nil {
+			errs = append(errs, err)
+		}
+		if err := in.removeOwned(in.Layout.MLXModelRoot); err != nil {
 			errs = append(errs, err)
 		}
 		var err error
@@ -1727,6 +1819,21 @@ func (in *Installer) RemoveWithScope(ctx context.Context, scope RemoveScope) err
 	return errors.Join(errs...)
 }
 
+// recordedEngine reads the engine the on-disk manifest describes. A missing
+// manifest (or one written before the field existed) is the llama family —
+// the only family that could have written such a manifest.
+func (in *Installer) recordedEngine() Engine {
+	manifestPath, err := in.Layout.ManifestPath()
+	if err != nil {
+		return EngineLlama
+	}
+	manifest, err := ReadManifest(manifestPath)
+	if err != nil || manifest.Engine == "" {
+		return EngineLlama
+	}
+	return manifest.Engine
+}
+
 // removeScopeRuntimeTrees is RemoveWithScope's runtime half: every llama-* tree
 // plus the archive staging area. Returns the number of trees deleted.
 func (in *Installer) removeScopeRuntimeTrees(errs *[]error) int {
@@ -1743,7 +1850,8 @@ func (in *Installer) removeScopeRuntimeTrees(errs *[]error) int {
 }
 
 // removeScopeWeights is RemoveWithScope's weights half: both pinned packings'
-// GGUFs, so the cleanup reaches a packing the recorded install did not use too.
+// GGUFs AND the mtplx engine's whole pack directory, so the cleanup reaches
+// weights an install did not record too.
 func (in *Installer) removeScopeWeights(errs *[]error) {
 	for _, packing := range []Packing{PackingPQ2_0, PackingPTQ1_0} {
 		file, ferr := in.Layout.ModelFile(packing)
@@ -1754,6 +1862,9 @@ func (in *Installer) removeScopeWeights(errs *[]error) {
 		if err := in.removeOwned(file); err != nil {
 			*errs = append(*errs, err)
 		}
+	}
+	if err := in.removeOwned(in.Layout.MLXModelRoot); err != nil {
+		*errs = append(*errs, err)
 	}
 }
 
@@ -1783,7 +1894,8 @@ func (in *Installer) DetectLeftovers() (Leftovers, error) {
 		return lo, fmt.Errorf("embeddedllm: listing %q: %w", in.Layout.RuntimesRoot, err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), runtimeDirPrefix) {
+		if strings.HasPrefix(entry.Name(), runtimeDirPrefix) ||
+			strings.HasPrefix(entry.Name(), mlxRuntimePrefix) {
 			lo.Runtime = true
 			break
 		}
@@ -1792,6 +1904,9 @@ func (in *Installer) DetectLeftovers() (Leftovers, error) {
 	// runtime/cudart archives (and their resumable partials).
 	if downloads, derr := in.Layout.DownloadsDir(); derr == nil && pathExists(downloads) {
 		lo.Runtime = true
+	}
+	if packDir, perr := in.Layout.MLXPackDir(); perr == nil && pathExists(packDir) {
+		lo.Weights = true
 	}
 	for _, packing := range []Packing{PackingPQ2_0, PackingPTQ1_0} {
 		file, ferr := in.Layout.ModelFile(packing)
@@ -1823,7 +1938,10 @@ func (in *Installer) removeRuntimeTrees() (int, error) {
 	removed := 0
 	var errs []error
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), runtimeDirPrefix) {
+		// Both engines' trees: "llama-<tag>-<backend>" and "mtplx-<ver>"
+		// (plus their staging/retired/work suffixes, which share the prefix).
+		if !strings.HasPrefix(entry.Name(), runtimeDirPrefix) &&
+			!strings.HasPrefix(entry.Name(), mlxRuntimePrefix) {
 			continue
 		}
 		// Built through the layout's containment-checked join, then deleted

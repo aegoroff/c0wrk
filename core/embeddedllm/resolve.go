@@ -39,6 +39,14 @@ type ResolveInput struct {
 	// the all-Auto plan: the runtime's fit pass sizes layers and context, the
 	// KV precision escalates to whatever fits, and one slot is served.
 	Tuning Tuning
+	// Engine selects the runtime family this resolution is for. The ZERO value
+	// is the llama family — every pre-existing caller and test keeps its
+	// meaning — while the config layer resolves `embedded_llm.engine: auto`
+	// through ResolveEngine BEFORE calling Resolve and passes the resolved
+	// engine explicitly. EngineMTPLX switches the whole flow to the MLX pack
+	// (mlxplan.go): a different artifact set, a different planner, and a
+	// single-pool gate.
+	Engine Engine
 }
 
 // Resolution is the pure output of a ResolveInput: everything the installer
@@ -111,6 +119,12 @@ type Resolution struct {
 	// archive (Windows CUDA only), so the installer can surface it as its own
 	// component with its own progress bar.
 	NeedsCudart bool
+	// Engine is the runtime family this resolution provisions: the zero value
+	// (llama) for every pre-existing caller, EngineMTPLX for the MLX pack. The
+	// manifest and the Settings label record it next to Backend, which under
+	// the mtplx engine stays BackendMetal — the accelerator MLX actually runs
+	// on — while Engine is the difference a reader needs first.
+	Engine Engine
 }
 
 // Launch-flag policy derived from a Resolution. Every value mirrors the fork's
@@ -292,6 +306,14 @@ func resolveWith(table AssetTable, in ResolveInput) (Resolution, error) {
 			ErrRAMUnknown)
 	}
 
+	// The mtplx engine branches here, before any llama machinery runs: its
+	// artifact set, planner and gate are all different (mlxplan.go). Every
+	// llama-side rule below — backends, packings, guards, topology — is
+	// deliberately not consulted on this path.
+	if in.Engine == EngineMTPLX {
+		return resolveMLX(table, in)
+	}
+
 	effective := effectiveBackend(table, in.Platform, in.Backend)
 
 	// The GPU generation is classified from the probed inventory when the
@@ -365,6 +387,47 @@ func resolveWith(table AssetTable, in ResolveInput) (Resolution, error) {
 		ImageMaxTokens: imageMaxTokensFor(effective),
 		NeedsCudart:    hasCudart(assets),
 		Memory:         memory,
+	}, nil
+}
+
+// resolveMLX is the mtplx engine's resolution path: the pinned engine stack
+// (managed CPython + the closed wheel set) plus the pinned MLX pack, planned
+// by PlanMLX against the measured single-pool budget. The AssetTable seam is
+// not consulted — the engine tables are this package's own mlxpins.go, and
+// the pinnedRegistry's llama tables describe a different runtime — so a test
+// that needs to vary the engine set swaps the package-level pins the way the
+// validator teeth tests do.
+//
+// The compatibility guards do not run here: compat.go's table is derived from
+// the pinned llama.cpp fork's KNOWN_ISSUES, and none of its rows describes an
+// MLX failure. Guards arriving on an mtplx resolution would be a transcription
+// error, not safety.
+func resolveMLX(_ AssetTable, in ResolveInput) (Resolution, error) {
+	if in.Platform != PlatformDarwinARM64 {
+		return Resolution{}, fmt.Errorf("%w: engine %q needs %q, got %q (use engine %q)",
+			ErrEngineUnsupportedPlatform, EngineMTPLX, PlatformDarwinARM64, in.Platform, EngineLlama)
+	}
+	terms, err := PinnedMLXMemoryTerms()
+	if err != nil {
+		return Resolution{}, err
+	}
+	plan, err := PlanMLX(in.RAMGiB, in.Tuning, terms)
+	if err != nil {
+		return Resolution{}, err
+	}
+	assets, err := EngineArtifactSet(in.Platform)
+	if err != nil {
+		return Resolution{}, err
+	}
+	return Resolution{
+		Engine:        EngineMTPLX,
+		Assets:        assets,
+		Backend:       BackendMetal, // the accelerator MLX runs on; Engine carries the rest
+		PackingReason: PackingReasonMLXPack,
+		GPU:           GPUFamilyAppleSilicon,
+		ContextSize:   plan.ContextSize,
+		NeedsCudart:   false,
+		Memory:        plan,
 	}, nil
 }
 
@@ -745,6 +808,12 @@ const (
 	// refused with ErrMemoryNotMeasured rather than estimated from a file
 	// size).
 	PackingReasonOperatorOverride PackingReason = "operator_override"
+
+	// PackingReasonMLXPack is the mtplx engine: the MLX pack ships exactly one
+	// quantization, so there is no packing decision to make — the reason
+	// records that absence rather than leaving a zero Packing unexplained
+	// (ADR-090).
+	PackingReasonMLXPack PackingReason = "mlx_pack"
 )
 
 // PackingInput is the packing decision's whole input: the backend the plan

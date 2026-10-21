@@ -71,6 +71,12 @@ const (
 	ComponentCudart  Component = "cudart" // Windows CUDA only: the paired DLL archive
 	ComponentModel   Component = "model"
 	ComponentMMProj  Component = "mmproj"
+	// mtplx-engine components (ADR-090): the managed CPython archive, the
+	// closed wheel set of the engine venv, and the MLX weight pack (vision
+	// tower and MTP head inside — no separate projector).
+	ComponentPython       Component = "python"
+	ComponentEngineWheels Component = "wheels"
+	ComponentMLXPack      Component = "pack"
 )
 
 // Platform keys use the toolmanager.Platform() shape, "<goos>-<goarch>".
@@ -337,7 +343,10 @@ func TotalBytes(assets []Asset) int64 {
 // supply-chain hole: every asset must carry a URL, a well-formed lowercase
 // hex SHA256, a positive exact size and a file name.
 func ValidateRegistry() error {
-	return validateTables(runtimeAssets, cudartAssets, modelAssets, mmprojAsset, supportedPlatforms)
+	return errors.Join(
+		validateTables(runtimeAssets, cudartAssets, modelAssets, mmprojAsset, supportedPlatforms),
+		ValidateMLXPins(),
+	)
 }
 
 // validateTables is ValidateRegistry over explicit tables rather than the
