@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -59,7 +59,7 @@ func (spec LaunchSpec) mlxValidate() error {
 	if spec.ModelFile == "" {
 		return fmt.Errorf("%w: the model pack directory is required", ErrLaunchSpecInvalid)
 	}
-	if !filepath.IsAbs(spec.ModelFile) {
+	if !path.IsAbs(spec.ModelFile) {
 		return fmt.Errorf("%w: the model pack directory %q must be absolute", ErrLaunchSpecInvalid, spec.ModelFile)
 	}
 	if spec.Host != LoopbackHost {
@@ -217,10 +217,16 @@ func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, err
 // pythonBinPath is the pinned interpreter the child is launched with
 // (<tree>/python/bin/python3.12): its directory seeds PATH and its tree root
 // holds the isolated config/model paths.
+// The path dialect is POSIX end to end — the engine's layout (`path.Dir`,
+// `path.Join`), not the host's `filepath`: production only ever calls this on
+// the darwin engine host, where the two agree, and the declared-goos contract
+// (see pathListSeparator) keeps the function table-testable from any CI
+// machine, including Windows hosts where filepath would corrupt the POSIX
+// inputs.
 func mlxChildEnv(parent []string, goos, pythonBinPath string) []string {
-	treeRoot := filepath.Dir(filepath.Dir(filepath.Dir(pythonBinPath)))
+	treeRoot := path.Dir(path.Dir(path.Dir(pythonBinPath)))
 	env := make([]string, 0, len(parent)+6)
-	path := ""
+	inheritedPATH := ""
 	for _, entry := range parent {
 		name, value, found := strings.Cut(entry, "=")
 		if !found {
@@ -231,19 +237,19 @@ func mlxChildEnv(parent []string, goos, pythonBinPath string) []string {
 		case strings.HasPrefix(name, "PIP_"), strings.HasPrefix(name, "PYTHON"), strings.HasPrefix(name, "MTPLX_"):
 			continue // scrubbed: the child's bytes are pinned, its env must be too
 		case name == "PATH":
-			path = value
+			inheritedPATH = value
 			continue // re-added below with the pinned bin dir first
 		}
 		env = append(env, entry)
 	}
-	if path == "" {
-		env = append(env, "PATH="+filepath.Dir(pythonBinPath))
+	if inheritedPATH == "" {
+		env = append(env, "PATH="+path.Dir(pythonBinPath))
 	} else {
-		env = append(env, "PATH="+filepath.Dir(pythonBinPath)+pathListSeparator(goos)+path)
+		env = append(env, "PATH="+path.Dir(pythonBinPath)+pathListSeparator(goos)+inheritedPATH)
 	}
 	env = append(env,
 		"PYTHONNOUSERSITE=1",
-		"MTPLX_CONFIG="+filepath.Join(treeRoot, "config.toml"),
+		"MTPLX_CONFIG="+path.Join(treeRoot, "config.toml"),
 		"MTPLX_MODEL_DIR="+treeRoot, // never used for downloads (path-loaded), but never points at ~/.mtplx either
 	)
 	return env
