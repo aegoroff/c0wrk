@@ -3718,7 +3718,7 @@ export namespace session {
 	    unfinished_task_status?: string;
 	    paused: boolean;
 	    compacting: boolean;
-	    compaction_availability: core.CompactionAvailability[];
+	    compaction_availability?: core.CompactionAvailability[];
 	    activity?: string;
 	    streaming: boolean;
 	    work_units?: WorkUnitStatus[];
