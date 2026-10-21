@@ -812,7 +812,7 @@ const (
 	// PackingReasonMLXPack is the mtplx engine: the MLX pack ships exactly one
 	// quantization, so there is no packing decision to make — the reason
 	// records that absence rather than leaving a zero Packing unexplained
-	// (ADR-078).
+	// (ADR-090).
 	PackingReasonMLXPack PackingReason = "mlx_pack"
 )
 

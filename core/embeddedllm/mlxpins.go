@@ -1,6 +1,6 @@
 package embeddedllm
 
-// MLX engine pins (ADR-078): the second embedded-LLM runtime family for
+// MLX engine pins (ADR-090): the second embedded-LLM runtime family for
 // darwin/arm64. Where the llama family provisions the PrismML-Eng llama.cpp
 // fork with the GGUF weights, the mtplx family provisions the pinned MTPLX
 // release — a Python/MLX stack that runs Ternary-Bonsai-2-27B natively on MLX
@@ -8,15 +8,17 @@ package embeddedllm
 //
 // Supply chain (ADR-066 D11 posture, unchanged): every artifact below is a
 // compile-time pin — the MTPLX release, the managed CPython build, every wheel
-// of the virtual environment, and every file of the model pack. No upstream
-// version queries, no auto-updates; a bump is a hand-run, CVE-reviewed
-// operation that re-records the whole table. Wheel SHA256 values come from the
-// PyPI JSON API (files.pythonhosted.org digests); pack SHA256 values are the
-// Hugging Face LFS OIDs for LFS files and content hashes captured from the
-// pinned revision for plain files. The wheel set was resolved with
+// of the engine tree, and every file of the model pack. No upstream version
+// queries, no auto-updates; a bump is a hand-run, CVE-reviewed operation that
+// re-records the whole table. Wheel SHA256 values come from the PyPI JSON API
+// (files.pythonhosted.org digests); pack SHA256 values are the Hugging Face
+// LFS OIDs for LFS files and content hashes captured from the pinned revision
+// for plain files. The wheel set was resolved with
 // `uv pip compile --generate-hashes` (cp312, aarch64-apple-darwin, deployment
 // target 14.0) and then reduced to the single wheel uv would install on that
-// platform, so `uv pip install --require-hashes` reproduces this table exactly.
+// platform; the installer replays it offline as a pip requirements file (one
+// `name==version --hash=sha256:…` line per wheel) so
+// `pip install --require-hashes` accepts exactly these files and nothing else.
 //
 // License note: MTPLX is Apache-2.0 with a NOTICE attribution clause — a
 // product built on it must surface "Powered by MTPLX" inside the product UI.
@@ -113,7 +115,9 @@ const mlxPackResolveBase = "https://huggingface.co/" + mtlxPackRepoOwner + "/" +
 // installs from. Pinning the archive (not "uv python install 3.12") keeps
 // every byte of the engine stack under this package's fail-closed SHA256
 // verification: the installer downloads it through the same Downloader as
-// everything else and hands the extracted interpreter to `uv venv --python`.
+// everything else, and the extracted interpreter — a relocatable plain-file
+// tree, no venv and no uv anywhere in the delivery — installs the pinned
+// wheel set itself, offline (mlxPipInstall).
 const (
 	pythonInstallTag     = "20261013"
 	pythonInstallVersion = "3.12.15"
@@ -135,12 +139,12 @@ var pythonArchiveAsset = Asset{
 // engine. ok is false on any platform where the engine is not offered.
 func PythonArchiveAsset() (Asset, bool) { return pythonArchiveAsset, true }
 
-// mtplxWheelPins is the complete, closed wheel set of the engine virtual
-// environment: mtplx itself, its pinned MLX (exactly 0.32.2 — an
-// exactness-gated pin by upstream), and every transitive dependency, resolved
-// and hashed from PyPI for cp312 / aarch64-apple-darwin. The installer runs
-// `uv pip install --require-hashes` against exactly these files, so an
-// unsigned registry response can never enter the venv.
+// mtplxWheelPins is the complete, closed wheel set of the engine tree:
+// mtplx itself, its pinned MLX (exactly 0.32.2 — an exactness-gated pin by
+// upstream), and every transitive dependency, resolved and hashed from PyPI
+// for cp312 / aarch64-apple-darwin. The installer turns this table into a
+// requirements file and runs `pip install --require-hashes` against it, so
+// an unsigned registry response can never enter the engine tree.
 
 var mtplxWheelPins = []WheelAsset{
 	{Name: "annotated-doc", Version: "0.0.5",
@@ -381,7 +385,7 @@ var mtplxWheelPins = []WheelAsset{
 // the three LFS files are the Hugging Face LFS OIDs of MLXPackRevision; every
 // other value is the content hash captured from that revision. The pack is a
 // plain directory of these files — the engine is pointed at it with
-// `--model <dir>`, and nothing is ever fetched through `mtplx pull` (ADR-078
+// `--model <dir>`, and nothing is ever fetched through `mtplx pull` (ADR-090
 // keeps the supply chain in this registry).
 var mlxPackPins = []Asset{
 	{Component: ComponentMLXPack, URL: mlxPackResolveBase + "model.safetensors",
@@ -454,9 +458,10 @@ func EngineWheel(name string) (WheelAsset, bool) {
 	return WheelAsset{}, false
 }
 
-// EngineWheels returns every pinned wheel in resolution order (uv's own
-// topological order is irrelevant to install correctness — uv verifies each
-// file against this table by name — so the stable registry order is used).
+// EngineWheels returns every pinned wheel in resolution order. The order is
+// the registry's stable one; install correctness does not depend on it — pip
+// matches each requirements-file line to its file by name and pinned hash
+// (mlxPipInstall), so order only decides the progress bar's sequence.
 func EngineWheels() []WheelAsset { return slices.Clone(mtplxWheelPins) }
 
 // TotalWheelBytes sums the pinned sizes of the whole engine wheel set; the

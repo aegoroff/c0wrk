@@ -59,9 +59,23 @@ function formatMiB(mib: number): string {
   return `${mib} MiB`
 }
 
-/** The launch shape as one compact line; '—' when nothing was recorded. */
-function formatPlan(plan: EmbeddedLLMPlan): string {
+/** The launch shape as one compact line; '—' when nothing was recorded.
+ *  Engine-aware: the mtplx planner prices ONE unified memory pool and has no
+ *  fit pass, no `-np` flag and no device/host split (`mlxValidate` rejects the
+ *  llama fields) — rendering them under mtplx would describe decisions nobody
+ *  made, so the MLX line carries the window and the pool only. The llama
+ *  vocabulary stays for the llama family — and for a pre-engine-era record,
+ *  which is a llama install. */
+function formatPlan(plan: EmbeddedLLMPlan, engine: string): string {
   if (!plan.recorded) return '—'
+  if (engine === 'mtplx') {
+    return [
+      plan.context_size > 0 ? `${plan.context_size} ctx` : null,
+      `${formatMiB(plan.expected_device_mib)} pool`,
+    ]
+      .filter((part) => part !== null && part !== '')
+      .join(' · ')
+  }
   const offload =
     plan.offload_mode === 'layers' && plan.layers >= 0
       ? `${plan.layers} layers`
@@ -79,16 +93,21 @@ function formatPlan(plan: EmbeddedLLMPlan): string {
     .join(' · ')
 }
 
-/** The human label for the runtime family on disk. "" is a pre-engine
- *  install — the llama family is what could have written such a record. */
+/** The human label for the runtime family on disk. `""` is a pre-engine
+ *  install — the llama family is what could have written such a record, so the
+ *  empty spelling is the ONLY id that renders as llama.cpp by default; any
+ *  other unrecognized non-empty id renders as its raw id (the embeddedLLMLabels
+ *  convention: never a guess), so a future engine's install record cannot be
+ *  mislabeled as llama.cpp. */
 function engineLabel(engine: string): string {
   switch (engine) {
     case 'mtplx':
       return 'MLX (MTPLX)'
+    case '':
     case 'llama':
       return 'llama.cpp'
     default:
-      return 'llama.cpp'
+      return engine
   }
 }
 
@@ -114,10 +133,27 @@ export function EmbeddedLLMInstallRecord({ status }: { status: EmbeddedLLMStatus
     },
     {
       label: 'Plan',
-      value: formatPlan(status.plan),
+      value: formatPlan(status.plan, status.engine),
       testId: 'embedded-llm-plan',
     },
   ]
+  // The mtplx install's informational records, beside the sibling fields they
+  // belong with: the managed CPython version and the pinned pack revision
+  // (abbreviated — the full sha lives in the config record).
+  if (status.python_version !== '') {
+    items.push({
+      label: 'Python',
+      value: status.python_version,
+      testId: 'embedded-llm-python',
+    })
+  }
+  if (status.pack_revision !== '') {
+    items.push({
+      label: 'Pack',
+      value: status.pack_revision.slice(0, 8),
+      testId: 'embedded-llm-pack-revision',
+    })
+  }
 
   return (
     <div

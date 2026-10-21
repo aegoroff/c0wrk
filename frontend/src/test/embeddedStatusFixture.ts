@@ -22,6 +22,8 @@ export function makeEmbeddedStatus(
     loading: false,
     loaded: false,
     engine: '',
+    python_version: '',
+    pack_revision: '',
     packing: '',
     backend: '',
     port: 0,

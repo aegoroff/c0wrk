@@ -140,7 +140,7 @@ const mlxRuntimePrefix = "mtplx-"
 // installed into it, and the pack pointer) — there is no llama-style
 // staging/retire swap, because the engine has no binary whose replacement
 // races a resident process: the step-0 stop guarantees nothing executes from
-// the tree while a rebuild replaces it (ADR-078 records the deviation).
+// the tree while a rebuild replaces it (ADR-090 records the deviation).
 func MLXRuntimeDirName() string {
 	return mlxRuntimePrefix + MTPLXVersion
 }
@@ -174,6 +174,21 @@ func (l Layout) MLXRuntimeWorkDir() (string, error) {
 // `--model`, so it holds EXACTLY the pinned files and nothing else.
 func (l Layout) MLXPackDir() (string, error) {
 	return l.safeJoin(l.MLXModelRoot, mlxPackDirName)
+}
+
+// MLXPackStagingDir is where the mtplx weight pack is fetched and verified
+// before it replaces MLXPackDir. The pack is a SET of files that must come
+// from one revision, so the whole set is staged and swapped in one atomic
+// rename — a mid-fetch failure leaves the previous pack directory untouched.
+func (l Layout) MLXPackStagingDir() (string, error) {
+	return l.safeJoin(l.MLXModelRoot, mlxPackDirName+stagingSuffix)
+}
+
+// MLXPackRetiredDir is the previous pack directory, parked during the swap so
+// the staged rename can never collide with it and a failed promotion can be
+// deleted without touching the new tree.
+func (l Layout) MLXPackRetiredDir() (string, error) {
+	return l.safeJoin(l.MLXModelRoot, mlxPackDirName+retiredSuffix)
 }
 
 // MLXServerPythonPath is the interpreter a launch runs the engine with:
@@ -223,7 +238,9 @@ func (l Layout) ManifestPath() (string, error) {
 	return l.safeJoin(l.ModelRoot, ManifestFileName)
 }
 
-// Destination is the on-disk path one asset is fetched to.
+// Destination is the on-disk path one asset is fetched to — its FINAL layout
+// path (the mtplx pack stages elsewhere and swaps in whole; fetchOneTo takes
+// an explicit destination).
 //
 // Weights (model, mmproj) are downloaded straight to their final path inside
 // the model root: the artifact IS the file, so there is nothing to extract and

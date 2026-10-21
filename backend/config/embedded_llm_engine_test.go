@@ -61,9 +61,11 @@ func TestEmbeddedLLMEngineSettingSurvivesSink(t *testing.T) {
 		PythonVersion:  "3.12.15",
 		PackRevision:   "03bd60bb82755f2446f5083426dca9708eb8e0fe",
 	}
-	// The sink half is exercised in the sink test file; this half pins the
-	// config layer's contract: the section can REPRESENT an mtplx install
-	// (records set, packing empty) and still validate.
+	// The sink half is exercised for real in the sink test file
+	// (TestEmbeddedConfigSinkAppliesMTPLXInstallState pins that ApplyInstalled
+	// preserves the operator's engine choice and writes these records); this
+	// half pins the config layer's contract: the section can REPRESENT an
+	// mtplx install (records set, packing empty) and still validate.
 	cfg2 := EmbeddedLLMConfig{
 		Engine:         "mtplx",
 		Installed:      true,

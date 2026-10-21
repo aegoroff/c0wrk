@@ -63,11 +63,16 @@ type InstallProgressFunc func(Progress)
 // smoke-tested. A failed install therefore never leaves a manifest describing
 // bytes that are not on disk.
 type Manifest struct {
-	Packing        Packing           `json:"packing"`
-	Backend        Backend           `json:"backend"`
-	RuntimeVersion string            `json:"runtime_version"`
-	Checksums      map[string]string `json:"checksums"` // component -> verified sha256
-	Port           int               `json:"port"`
+	Packing        Packing `json:"packing"`
+	Backend        Backend `json:"backend"`
+	RuntimeVersion string  `json:"runtime_version"`
+	// Checksums maps each verified artifact to its SHA256 digest. The llama
+	// family's components are single artifacts and key by component name; the
+	// mtplx family's multi-file components (the wheel set, the weight pack)
+	// key EVERY file by its file name — one digest per file, never one digest
+	// standing in for a whole component (checksumKey).
+	Checksums map[string]string `json:"checksums"`
+	Port      int               `json:"port"`
 
 	// Engine is the runtime family this manifest describes. Empty on a
 	// manifest written before the field existed — every pre-existing install
@@ -442,8 +447,10 @@ func recordableContext(plan MemoryPlan, fallback int) int {
 // config.yaml — core never imports backend/config (backend/config sits above
 // core and already imports core packages, so an import back would cycle).
 type InstallState struct {
-	// Engine is the runtime family that was provisioned. The zero value is
-	// the llama family (legacy sinks and tests); installs set it explicitly.
+	// Engine is the runtime family that was provisioned. Installs set it
+	// explicitly for BOTH families; the zero value is unset/invalid input
+	// (config spelling "" means auto, and validity is ResolveEngine's call —
+	// mlxpins.go), never a silent "llama".
 	Engine         Engine
 	Packing        Packing
 	Backend        Backend
@@ -755,6 +762,13 @@ type InstallOptions struct {
 	// calling Install and passes the resolved engine explicitly. EngineMTPLX
 	// runs the MLX provisioning flow (install_mlx.go).
 	Engine Engine
+	// Tuning is the operator's memory-plan override the plan is made from —
+	// the same `embedded_llm.tuning` the preflight CheckMemoryBudget call
+	// carried, so the plan the install prices, persists and launches is the
+	// plan the operator configured (the mtplx engine's `context.mode: exact`
+	// lives or dies by this; the llama family replans from the live setting
+	// at load instead). The zero value is the all-Auto plan.
+	Tuning Tuning
 	// Progress receives one update per component and stage. May be nil.
 	Progress InstallProgressFunc
 }
@@ -1331,10 +1345,10 @@ func (in *Installer) prepareStaging(staging string) error {
 }
 
 // fetchComponents downloads and verifies each asset, recording its digest in
-// checksums. When staging is non-empty the assets are runtime archives: each is
-// extracted into the staging tree, and its StageDone is deferred to
-// provisionRuntime so the component's stream ends when the runtime is actually
-// usable rather than when its bytes landed.
+// checksums under checksumKey's per-artifact key. When staging is non-empty the
+// assets are runtime archives: each is extracted into the staging tree, and its
+// StageDone is deferred to provisionRuntime so the component's stream ends when
+// the runtime is actually usable rather than when its bytes landed.
 func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, assets []Asset,
 	staging string, checksums map[string]string,
 ) error {
@@ -1344,7 +1358,7 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 		if err != nil {
 			return err
 		}
-		checksums[string(asset.Component)] = digest
+		checksums[checksumKey(asset)] = digest
 
 		if deferDone {
 			in.emit(opts, Progress{Component: asset.Component, Stage: StageExtracting,
@@ -1364,6 +1378,22 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 	return nil
 }
 
+// checksumKey is the manifest.Checksums key one verified artifact records its
+// digest under. The llama family's components are each ONE artifact and keep
+// their historical component-name key (existing manifests and their readers
+// keep their shape). The mtplx family introduced MULTI-artifact components —
+// a 46-file wheel set and a 16-file pack — and keying those by component would
+// collapse each to the digest of whichever file downloaded last, a manifest
+// entry that describes nothing: every file records its own digest by name.
+func checksumKey(asset Asset) string {
+	switch asset.Component {
+	case ComponentEngineWheels, ComponentMLXPack:
+		return asset.ArchiveName
+	default:
+		return string(asset.Component)
+	}
+}
+
 // fetchOne downloads one artifact and enforces the verification gate.
 //
 // Downloader.Download already refuses to promote unverified bytes, so this is
@@ -1372,13 +1402,21 @@ func (in *Installer) fetchComponents(ctx context.Context, opts InstallOptions, a
 // aborts the install. Fail-closed is the only acceptable behaviour here
 // (ASI04) — "probably fine" is how an unverified binary ends up executed.
 func (in *Installer) fetchOne(ctx context.Context, opts InstallOptions, asset Asset) (string, error) {
-	in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
-		BytesDone: 0, BytesTotal: asset.SizeBytes})
-
 	dst, err := in.Layout.Destination(asset)
 	if err != nil {
 		return "", err
 	}
+	return in.fetchOneTo(ctx, opts, asset, dst)
+}
+
+// fetchOneTo is fetchOne with the destination given, for an artifact fetched
+// somewhere other than its final layout path — the mtplx pack is staged and
+// swapped whole so a mid-fetch failure can never mix two pack revisions
+// (install_mlx.go). The verification gate is identical.
+func (in *Installer) fetchOneTo(ctx context.Context, opts InstallOptions, asset Asset, dst string) (string, error) {
+	in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
+		BytesDone: 0, BytesTotal: asset.SizeBytes})
+
 	result, err := in.downloader().Download(ctx, asset, dst, func(done, total int64) {
 		in.emit(opts, Progress{Component: asset.Component, Stage: StageDownloading,
 			BytesDone: done, BytesTotal: total})

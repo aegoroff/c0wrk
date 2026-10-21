@@ -1,7 +1,7 @@
 package embeddedllm
 
-// The mtplx engine's supervision surface (ADR-078): the argv, the validation,
-// the launch identity, the state isolation environment and the /health context
+// The mtplx engine's supervision surface (ADR-090): the argv, the validation,
+// the launch identity, the child environment and the /health context
 // readback. The supervisor machinery — the single-instance gate, the readiness
 // polling loop, crash detection, the idle unload, the stop budgets — is
 // runtime-agnostic and lives in server.go untouched; this file is only the
@@ -10,6 +10,7 @@ package embeddedllm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,17 +23,26 @@ import (
 // ── argv ─────────────────────────────────────────────────────────────────────
 
 // mlxArgs renders the mtplx engine's command line. This is the only place an
-// mtplx argv exists, mirroring LaunchSpec.Args's llama monopoly. The run shape
-// is fixed by the same invariants as the llama argv: loopback bind, explicit
-// context (the plan's computed window — "an explicit --context-window still
-// wins" is the runtime's own documented precedence), rate limiting off (one
-// local client, one request at a time), and the model given as the pack
-// DIRECTORY the installer verified (never an HF id, so the runtime can never
-// resolve it to different bytes).
+// mtplx argv exists, mirroring LaunchSpec.Args's llama monopoly. The
+// interpreter is launched with -I (isolated: no user site-packages, no
+// PYTHON* environment influence) and runs the engine through its `mtplx.cli`
+// module — verified against the pinned wheel: the distribution ships no
+// `mtplx/__main__.py`, so `-m mtplx` cannot work, while cli.py carries the
+// `if __name__ == "__main__"` guard `-m mtplx.cli` executes. (The pip-installed
+// console script in <tree>/bin is not used because its generated shebang
+// points at the staging tree's absolute interpreter path, which the promote
+// rename invalidates.) The run shape is fixed by the same invariants as the
+// llama argv: the `serve` subcommand with loopback bind, explicit context (the
+// plan's computed window), rate limiting off (one local client, one request at
+// a time), and the model given as the pack DIRECTORY the installer verified
+// (never an HF id, so the runtime can never resolve it to different bytes) —
+// `serve` spells the model `--model`; it has no `-m` alias.
 func (spec LaunchSpec) mlxArgs() []string {
-	args := make([]string, 0, 12)
+	args := make([]string, 0, 16)
 	args = append(args,
-		"-m", spec.ModelFile, // mtplx reuses -m for the model reference (path)
+		"-I",
+		"-m", "mtplx.cli", "serve",
+		"--model", spec.ModelFile,
 		"--host", spec.Host,
 		"--port", strconv.Itoa(spec.Port),
 		"--context-window", strconv.Itoa(spec.ContextSize),
@@ -83,10 +93,14 @@ func (spec LaunchSpec) mlxValidate() error {
 // recorded pack directory must lie inside the MLX pack root (a tampered
 // manifest cannot aim the launch at foreign bytes).
 //
-// The SHAPE half is the recorded plan's context window; there is no load-time
-// re-plan on this engine because the compat probe is llama-specific
-// (`llama-server --list-devices`) and the memory decision was made and
-// re-checkable from the same pinned terms at install.
+// The SHAPE half is the plan's context window. The install records the plan it
+// made; the launch re-derives it from the SAME pinned terms with the LIVE
+// operator tuning (PlanMLX is pure — no probe, no I/O), so `context.mode:
+// exact` keeps working under this engine exactly as on the llama family (ADR-090
+// D5). An infeasible live plan refuses the launch with the gate's own error;
+// a plan the launch cannot price at all (no topology snapshot to take the RAM
+// from — ErrRAMUnknown — or a tuning the planner refuses, which config
+// validation owns) falls back to the recorded plan.
 func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, error) {
 	if manifest.Engine != EngineMTPLX {
 		return resolvedLaunch{}, fmt.Errorf("%w: launchSpecMLX called for engine %q", ErrLaunchSpecInvalid, manifest.Engine)
@@ -129,6 +143,35 @@ func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, err
 		Port:         port,
 	}
 	plan := manifest.Plan
+	terms, err := PinnedMLXMemoryTerms()
+	if err != nil {
+		// The pinned pack pins and the pinned memory contract disagree: this
+		// is the same build-time drift the install refuses on, and a launch
+		// must not serve a shape nobody was able to price.
+		return resolvedLaunch{}, fmt.Errorf("embeddedllm: %w", err)
+	}
+	var ramGiB float64
+	if manifest.Topology != nil {
+		ramGiB = manifest.Topology.HostRAMGiB
+	}
+	live, err := PlanMLX(ramGiB, s.tuning(), terms)
+	switch {
+	case err == nil:
+		plan = &live
+	case errors.Is(err, ErrMemoryPlanInfeasible):
+		// The live operator tuning asks for a window this machine cannot
+		// hold. Launching the smaller recorded window would silently ignore
+		// the override the gate's advice told the operator to use, so the
+		// refusal is the answer — carrying the gate's own arithmetic.
+		return resolvedLaunch{}, fmt.Errorf("embeddedllm: %w", err)
+	default:
+		// ErrRAMUnknown (a manifest with no topology snapshot — every manifest
+		// written before the snapshot existed) or a tuning the planner refuses
+		// (config validation owns that refusal): a load is not the place to
+		// re-litigate it. Launch the recorded decision.
+		s.logger().Debug("the mtplx launch shape was not re-planned from the live tuning; launching the recorded plan",
+			"error", err)
+	}
 	switch {
 	case plan != nil && plan.ContextSize > 0:
 		spec.ContextSize = plan.ContextSize
@@ -145,21 +188,65 @@ func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, err
 	return resolvedLaunch{Spec: spec, Plan: plan}, nil
 }
 
-// ── state isolation ──────────────────────────────────────────────────────────
+// ── child environment ─────────────────────────────────────────────────────────
 
-// mlxStateEnv is the environment that keeps the engine's own state OUT of
-// ~/.mtplx: its config file and its model-search root both live inside the
-// c0wrk layout, so an operator's MTPLX install (or a future download) can
-// never mix with this one. Isolation here is why the engine never finds a
-// model c0wrk did not pin.
-func mlxStateEnv(spec LaunchSpec) []string {
-	// ServerBinary is <runtimeDir>/python/bin/python3.12 — the runtime dir is
-	// three levels up, and the config file sits at its root.
-	runtimeDir := filepath.Dir(filepath.Dir(filepath.Dir(spec.ServerBinary)))
-	return []string{
-		"MTPLX_CONFIG=" + filepath.Join(runtimeDir, "config.toml"),
-		"MTPLX_MODEL_DIR=" + runtimeDir, // never used for downloads (path-loaded), but never points at ~/.mtplx either
+// mlxChildEnv is the COMPLETE environment every mtplx python child runs with —
+// the offline pip install, the import smoke test and the supervised server.
+// The engine children are built from operator-invisible pinned bytes, so they
+// must not inherit an operator environment that can steer them: an exported
+// PIP_FIND_LINKS would offer pip foreign wheels, PYTHONPATH/PYTHONHOME would
+// shadow the pinned imports, an operator MTPLX_CONFIG could mix standalone
+// state into the pinned tree, and CPython adds the user site-packages to
+// sys.path even with no variable set at all (ADR-090 D1/D3, SECURITY.md
+// ASI04). So the parent environment is scrubbed of every PIP_*, PYTHON* and
+// MTPLX_* key (case-sensitive — the documented prefixes) and rebuilt:
+//
+//   - PATH with the pinned tree's bin directory FIRST, so the staged
+//     interpreter and its console scripts resolve before anything on the
+//     operator's PATH;
+//   - PYTHONNOUSERSITE=1, so the user site-packages can never shadow the
+//     pinned wheels;
+//   - TEMPDIR/TMP pass through untouched (the scrub does not match them):
+//     pip and the engine need a writable temp;
+//   - MTPLX_CONFIG/MTPLX_MODEL_DIR set EXPLICITLY to the tree's own paths —
+//     never inherited, and set once (replace-by-scrub, not append), so no
+//     reader — C-level getenv takes the FIRST duplicate, CPython's os.environ
+//     the last — can resolve an operator's value (the naive append-to-env
+//     hazard).
+//
+// pythonBinPath is the pinned interpreter the child is launched with
+// (<tree>/python/bin/python3.12): its directory seeds PATH and its tree root
+// holds the isolated config/model paths.
+func mlxChildEnv(parent []string, goos, pythonBinPath string) []string {
+	treeRoot := filepath.Dir(filepath.Dir(filepath.Dir(pythonBinPath)))
+	env := make([]string, 0, len(parent)+6)
+	path := ""
+	for _, entry := range parent {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			env = append(env, entry)
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "PIP_"), strings.HasPrefix(name, "PYTHON"), strings.HasPrefix(name, "MTPLX_"):
+			continue // scrubbed: the child's bytes are pinned, its env must be too
+		case name == "PATH":
+			path = value
+			continue // re-added below with the pinned bin dir first
+		}
+		env = append(env, entry)
 	}
+	if path == "" {
+		env = append(env, "PATH="+filepath.Dir(pythonBinPath))
+	} else {
+		env = append(env, "PATH="+filepath.Dir(pythonBinPath)+pathListSeparator(goos)+path)
+	}
+	env = append(env,
+		"PYTHONNOUSERSITE=1",
+		"MTPLX_CONFIG="+filepath.Join(treeRoot, "config.toml"),
+		"MTPLX_MODEL_DIR="+treeRoot, // never used for downloads (path-loaded), but never points at ~/.mtplx either
+	)
+	return env
 }
 
 // ── context readback ─────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -643,6 +644,87 @@ func TestSetEmbeddedLLMTuningDoesNotRequireAnInstall(t *testing.T) {
 	if reloaded.EmbeddedLLM.Tuning.Offload.Mode == nil {
 		t.Error("the tuning was not persisted")
 	}
+}
+
+// TestSetEmbeddedLLMTuningMirrorsTheLoadTimeEngineCrossCheck pins the RPC's
+// other half of the load-time validation: beside an explicit engine: mtplx the
+// llama-only tuning keys are refused with the load validator's message, so the
+// RPC cannot write a config.yaml the next load rejects — otherwise the file the
+// app itself wrote becomes a permanent startup validation error.
+func TestSetEmbeddedLLMTuningMirrorsTheLoadTimeEngineCrossCheck(t *testing.T) {
+	t.Run("a llama-only knob beside engine mtplx is refused like at load", func(t *testing.T) {
+		f, _, _ := newEmbeddedTestAPI(t)
+		f.configMu.Lock()
+		f.config.EmbeddedLLM.Engine = "mtplx"
+		f.configMu.Unlock()
+
+		err := f.SetEmbeddedLLMTuning(EmbeddedLLMTuningRequest{KVCacheType: strPtr("q8_0")})
+		if err == nil {
+			t.Fatal("the RPC accepted a llama-only knob beside engine: mtplx")
+		}
+		for _, want := range []string{"kv_cache_type", "engine: mtplx"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal %q does not name %q", err, want)
+			}
+		}
+
+		// The refusal must be verbatim the load validator's message: build the
+		// same contradicting section on disk (Save does not validate, so the
+		// pair really reaches the loader) and compare with what the next load
+		// reports.
+		onDisk, lerr := config.Load(f.configPath)
+		if lerr != nil {
+			t.Fatalf("the refused write must not corrupt the config, but it no longer loads: %v", lerr)
+		}
+		onDisk.EmbeddedLLM.Engine = "mtplx"
+		onDisk.EmbeddedLLM.Tuning.KVCacheType = strPtr("q8_0")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := config.Save(onDisk, path); err != nil {
+			t.Fatalf("Save(): %v", err)
+		}
+		_, loadErr := config.LoadWithResult(path)
+		if loadErr == nil {
+			t.Fatal("the contradicting section loaded — the fixture is wrong")
+		}
+		// The loader prefixes its validation failures; the sentence itself must
+		// be verbatim the RPC's.
+		if !strings.HasSuffix(loadErr.Error(), err.Error()) {
+			t.Errorf("RPC refusal %q differs from the load-time error %q", err, loadErr)
+		}
+		// …and the refused patch never reached the file.
+		if got := storedTuning(t, f).KVCacheType; got != nil {
+			t.Errorf("kv_cache_type = %q was persisted despite the refusal", *got)
+		}
+	})
+
+	t.Run("a legal write beside engine mtplx persists and reloads clean", func(t *testing.T) {
+		f, _, _ := newEmbeddedTestAPI(t)
+		f.configMu.Lock()
+		f.config.EmbeddedLLM.Engine = "mtplx"
+		f.configMu.Unlock()
+
+		// `context` is engine-generic — the mtplx refusal message itself names
+		// lowering context.mode as the remediation — so it stays legal beside
+		// engine: mtplx.
+		if err := f.SetEmbeddedLLMTuning(EmbeddedLLMTuningRequest{
+			Context: &EmbeddedLLMContextTuningRequest{
+				Mode: strPtr(config.EmbeddedLLMContextExact), Tokens: tuningIntPtr(16384),
+			},
+		}); err != nil {
+			t.Fatalf("SetEmbeddedLLMTuning beside engine mtplx: %v", err)
+		}
+		result, err := config.LoadWithResult(f.configPath)
+		if err != nil {
+			t.Fatalf("the persisted config no longer loads: %v", err)
+		}
+		if len(result.LoadErrors) != 0 {
+			t.Errorf("load errors = %v, want none", result.LoadErrors)
+		}
+		got := storedTuning(t, f).Context
+		if got.Mode == nil || *got.Mode != config.EmbeddedLLMContextExact || got.Tokens == nil || *got.Tokens != 16384 {
+			t.Errorf("context = %+v, want the written exact/16384", got)
+		}
+	})
 }
 
 // TestApplyEmbeddedTuningRequestFoldsEveryKnob is the table half of the partial

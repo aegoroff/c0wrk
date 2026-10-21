@@ -669,6 +669,10 @@ func assertNoPartialDownloads(t *testing.T, agentDir string) {
 // says which pool is short by how much, which is what makes it actionable.
 func TestInstallEmbeddedLLMRefusesBelowTheMemoryGateWithoutDownloading(t *testing.T) {
 	f, rec, _ := newEmbeddedTestAPI(t)
+	// Pin the llama family: this test prices the LLAMA machine shape (the
+	// accelerator pool is its system RAM); the empty engine spelling is the
+	// documented writing of auto and resolves to mtplx on darwin/arm64.
+	f.config.EmbeddedLLM.Engine = "llama"
 	f.embedded.probeFn = func(context.Context, *slog.Logger) (embeddedllm.Hardware, error) {
 		return embeddedllm.Hardware{
 			Platform: "darwin-arm64",
@@ -753,6 +757,10 @@ func TestInstallEmbeddedLLMRefusesBelowTheMemoryGateWithoutDownloading(t *testin
 // host pool alone and lets the install proceed.
 func TestInstallEmbeddedLLMDegradesWhenTheAcceleratorWasNotMeasured(t *testing.T) {
 	f, _, _ := newEmbeddedTestAPI(t)
+	// Pin the llama family: the empty engine spelling is the documented
+	// writing of auto and resolves to mtplx on THIS test machine (darwin/arm64)
+	// regardless of the probed shape below.
+	f.config.EmbeddedLLM.Engine = "llama"
 	f.embedded.probeFn = func(context.Context, *slog.Logger) (embeddedllm.Hardware, error) {
 		return embeddedllm.Hardware{
 			Platform: "linux-amd64",

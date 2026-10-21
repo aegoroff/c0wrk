@@ -1,6 +1,6 @@
 package embeddedllm
 
-// The mtplx engine's provisioning flow (ADR-078). It mirrors the llama
+// The mtplx engine's provisioning flow (ADR-090). It mirrors the llama
 // install's gate order — stop first, probe, resolve (whose gate is the first
 // check), disk guard, port, engine stack, smoke test, weights, manifest,
 // config — with three deliberate deviations the engine's shape dictates:
@@ -12,9 +12,10 @@ package embeddedllm
 //   - the smoke test is an import of the pinned engine in the provisioned
 //     interpreter, not a `--version` of a downloaded binary — the real
 //     readiness proof remains the load path's /v1/models poll;
-//   - the weights are a DIRECTORY of pinned files (the pack), fetched into
-//     MLXPackDir exactly like the GGUFs are, verified by the same fail-closed
-//     SHA256 gate.
+//   - the weights are a DIRECTORY of pinned files (the pack): every file is
+//     fetched and verified into a staging sibling and the directory is swapped
+//     atomically, so no mid-fetch failure can ever leave two pack revisions
+//     mixed under one manifest.
 //
 // Nothing here ever runs `mtplx pull` or lets the engine fetch its own bytes:
 // every artifact the tree contains was downloaded and verified by this
@@ -22,7 +23,9 @@ package embeddedllm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -39,7 +42,17 @@ const (
 	// archives themselves: the extracted CPython (~120 MiB) plus the wheel set
 	// unpacked into site-packages (~1 GiB), rounded up to a policy 2 GiB.
 	mlxProvisionHeadroomBytes = int64(2) << 30
+	// mlxRequirementsName is the pin-generated requirements file the offline
+	// pip install runs against, written into the staging tree and removed
+	// before the tree is promoted.
+	mlxRequirementsName = "mlx-requirements.txt"
 )
+
+// mlxProvisionAssets is the provisioning seam over EngineArtifactSet. The
+// production value IS EngineArtifactSet; a test replaces it to provision a
+// tiny fake artifact set hermetically (no network, no real pins), the same
+// way the llama path tests through the assetTable seam.
+var mlxProvisionAssets = EngineArtifactSet
 
 // splitMLXAssets orders the engine's artifact set into the engine stack (the
 // managed CPython archive, then the closed wheel set) and the weight pack.
@@ -75,16 +88,19 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 	}
 
 	// 2. Resolve: the single-pool memory gate is the FIRST check — a machine
-	// whose memory no window fits plans no assets and downloads nothing.
+	// whose memory no window fits plans no assets and downloads nothing. The
+	// plan is made from the operator's tuning (the same one the preflight
+	// CheckMemoryBudget priced), so `context.mode: exact` is honored here and
+	// the persisted plan is what the operator configured.
 	terms, err := PinnedMLXMemoryTerms()
 	if err != nil {
 		return nil, err
 	}
-	plan, err := PlanMLX(hw.RAMGiB, Tuning{}, terms)
+	plan, err := PlanMLX(hw.RAMGiB, opts.Tuning, terms)
 	if err != nil {
 		return nil, fmt.Errorf("embeddedllm: %w", err)
 	}
-	assets, err := EngineArtifactSet(platform)
+	assets, err := mlxProvisionAssets(platform)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +121,11 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 	}
 
 	// 3. The engine stack. The step-0 stop guaranteed nothing is resident, so
-	// a previous attempt's trees are rebuilt from scratch: a partial rebuild
-	// is a cache of verified downloads, never a half-installed engine.
+	// a previous attempt's staging is rebuilt from scratch: a partial rebuild
+	// is a cache of verified downloads, never a half-installed engine. The
+	// PREVIOUS engine tree is left untouched until the promotion below — a
+	// failed pip run or smoke test here must leave the working install in
+	// place (layout.go's staging invariant).
 	runtimeDir, err := in.Layout.MLXRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -115,10 +134,16 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 	if err != nil {
 		return nil, err
 	}
-	if err := in.removeOwned(runtimeDir); err != nil {
+	if err := in.prepareStaging(workDir); err != nil {
 		return nil, err
 	}
-	if err := in.prepareStaging(workDir); err != nil {
+	// The downloads area is a persistent cache shared across installs and pin
+	// bumps. Anything it holds that the CURRENT pin table does not name is a
+	// stale artifact of an older table: sweep it before fetching, so the pip
+	// step's --find-links source only ever carries files this build's pins
+	// own (the files themselves are verified against the current pins by the
+	// downloader gate regardless).
+	if err := in.mlxSweepDownloads(); err != nil {
 		return nil, err
 	}
 
@@ -142,22 +167,28 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 		return nil, fmt.Errorf("embeddedllm: the managed Python archive did not extract the expected tree (missing %q)", stagedPython)
 	}
 
-	// 4. The wheels, offline: the download directory is the only source, the
-	// dependency set is closed by the pin, and every byte in it already passed
-	// the verification gate. pip's own index traffic is disabled twice — by
-	// --no-index and by the environment — so a mispinned name fails HERE, as
-	// "wheel not found", instead of becoming an unpinned download.
-	if err := in.mlxPipInstall(ctx, stagedPython); err != nil {
+	// 4. The wheels, offline: the download directory is the only source and
+	// the requirements file pins every distribution to its exact sha256, so
+	// pip accepts no bytes this table did not verify — a stale or foreign
+	// wheel of the same name==version fails HERE instead of installing. The
+	// child runs on mlxChildEnv (no inherited PIP_*/PYTHON*/MTPLX_* influence)
+	// and an isolated interpreter (-I), so neither the operator's environment
+	// nor user site-packages can steer the build. The engine tree is the cache
+	// and everything in it is already verified; there is nothing for pip to
+	// fetch and nowhere to phone home (--no-index).
+	if err := in.mlxPipInstall(ctx, stagedPython, workDir); err != nil {
 		return nil, err
 	}
 
 	// 5. Smoke test: the pinned engine must import in THIS interpreter before
 	// the multi-gigabyte pack is fetched.
-	if err := in.mlxSmoke(ctx, stagedPython); err != nil {
+	if err := in.mlxSmoke(ctx, stagedPython, workDir); err != nil {
 		return nil, err
 	}
 
-	// 6. Promote the finished tree.
+	// 6. Promote the finished tree. This is the FIRST touch of the previous
+	// tree: it survives every failure above, so a failed rebuild leaves the
+	// machine with a working engine.
 	if err := in.removeOwned(runtimeDir); err != nil {
 		return nil, err
 	}
@@ -173,17 +204,61 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 			BytesDone: asset.SizeBytes, BytesTotal: asset.SizeBytes})
 	}
 
-	// 7. The weight pack, straight to its final directory — the artifact IS
-	// the file, so the downloader's verify-then-promote is the atomicity.
+	// 7. The weight pack, staged and swapped WHOLE. The pack is a set of 16
+	// files that only make sense together (weights, MTP head, tokenizer stack
+	// and serving contract from ONE revision), so per-file verify-then-promote
+	// is not atomicity enough: a mid-fetch failure would leave two revisions
+	// mixed under the old manifest and the next launch would serve it
+	// silently. Every file is fetched and hash-verified into a staging
+	// sibling first; the swap below is two renames, so the pack directory is
+	// always exactly one revision.
 	packDir, err := in.Layout.MLXPackDir()
 	if err != nil {
 		return nil, err
 	}
-	if err := mkdirAll(packDir); err != nil {
+	packStaging, err := in.Layout.MLXPackStagingDir()
+	if err != nil {
 		return nil, err
 	}
-	if err := in.fetchComponents(ctx, opts, packAssets, "", checksums); err != nil {
-		return nil, fmt.Errorf("embeddedllm: fetching the MLX weight pack: %w", err)
+	if err := in.prepareStaging(packStaging); err != nil {
+		return nil, err
+	}
+	for _, asset := range packAssets {
+		dst, derr := in.Layout.safeJoin(packStaging, asset.ArchiveName)
+		if derr != nil {
+			return nil, derr
+		}
+		digest, ferr := in.fetchOneTo(ctx, opts, asset, dst)
+		if ferr != nil {
+			return nil, fmt.Errorf("embeddedllm: fetching the MLX weight pack: %w", ferr)
+		}
+		checksums[checksumKey(asset)] = digest
+		in.emit(opts, Progress{Component: asset.Component, Stage: StageDone,
+			BytesDone: asset.SizeBytes, BytesTotal: asset.SizeBytes})
+	}
+	// The swap: the previous pack steps aside, the staged revision takes its
+	// place, and only then is the old tree deleted. A failure before this
+	// point leaves the previous pack and the previous manifest fully
+	// consistent; the only window left is a crash BETWEEN the swap and the
+	// manifest write below, which leaves the NEW (complete) revision recorded
+	// under the OLD manifest — stale, never a mixture.
+	packOld, err := in.Layout.MLXPackRetiredDir()
+	if err != nil {
+		return nil, err
+	}
+	if pathExists(packDir) {
+		if err := in.removeOwned(packOld); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(packDir, packOld); err != nil {
+			return nil, fmt.Errorf("embeddedllm: retiring the previous MLX weight pack: %w", err)
+		}
+	}
+	if err := os.Rename(packStaging, packDir); err != nil {
+		return nil, fmt.Errorf("embeddedllm: promoting the staged MLX weight pack: %w", err)
+	}
+	if err := in.removeOwned(packOld); err != nil {
+		return nil, err
 	}
 
 	installedAt := in.now().UTC().Format(time.RFC3339)
@@ -202,6 +277,17 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 		PackingReason:  PackingReasonMLXPack,
 		GPUFamily:      GPUFamilyAppleSilicon,
 		Plan:           &plan,
+		// The machine shape this plan was priced from: the RAM probe is the
+		// only evidence this engine has (no llama device inventory), the pool
+		// is unified, and the budget is the measured ¾-of-RAM the planner
+		// spent. The launch's live re-plan takes the RAM from here.
+		Topology: &MemoryTopology{
+			HostRAMGiB:        hw.RAMGiB,
+			Unified:           true,
+			DeviceBudgetBytes: mlxEngineBudgetBytes(hw.RAMGiB),
+			HostBudgetBytes:   mlxEngineBudgetBytes(hw.RAMGiB),
+			ProbedAt:          installedAt,
+		},
 	}
 	manifestPath, err := in.Layout.ManifestPath()
 	if err != nil {
@@ -218,6 +304,7 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 		"model_dir", manifest.ModelFile)
 
 	state := InstallState{
+		Engine:            EngineMTPLX,
 		Packing:           manifest.Packing,
 		Backend:           manifest.Backend,
 		Port:              manifest.Port,
@@ -225,6 +312,8 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 		RuntimeVersion:    manifest.RuntimeVersion,
 		InstalledAt:       manifest.InstalledAt,
 		ContextSize:       manifest.ContextSize,
+		PythonVersion:     manifest.PythonVersion,
+		PackRevision:      manifest.PackRevision,
 		AutoUnloadEnabled: DefaultAutoUnloadEnabled,
 		AutoUnloadMinutes: DefaultAutoUnloadMinutes,
 	}
@@ -254,31 +343,48 @@ func (in *Installer) installMLX(ctx context.Context, opts InstallOptions) (*Inst
 }
 
 // mlxPipInstall installs the closed wheel set into the staged interpreter,
-// offline. Environment hygiene: pip must not phone home for a version check,
-// must never prompt, and must not write a cache — the downloads directory is
-// the cache, and it is already verified.
-func (in *Installer) mlxPipInstall(ctx context.Context, stagedPython string) error {
+// offline. The requirements file is generated from the pin table — one
+// `name==version --hash=sha256:<pin>` line per wheel — and pip is run with
+// --require-hashes against the verified downloads directory, so the bytes it
+// installs cannot be anything but the pinned files: a foreign find-links
+// source, a stale same-version wheel that survived a pin bump, or any other
+// substitute fails HERE instead of entering the engine tree. Environment
+// hygiene is mlxChildEnv's: no inherited PIP_*/PYTHON*/MTPLX_* influence, no
+// user site-packages, and the interpreter runs isolated (-I).
+func (in *Installer) mlxPipInstall(ctx context.Context, stagedPython, workDir string) error {
 	downloads, err := in.Layout.DownloadsDir()
 	if err != nil {
 		return err
 	}
 	wheels := EngineWheels()
-	specs := make([]string, 0, len(wheels))
-	for _, w := range wheels {
-		specs = append(specs, w.Name+"=="+w.Version)
+	reqPath, err := in.Layout.safeJoin(workDir, mlxRequirementsName)
+	if err != nil {
+		return err
 	}
+	var req strings.Builder
+	for _, w := range wheels {
+		fmt.Fprintf(&req, "%s==%s --hash=sha256:%s\n", w.Name, w.Version, w.Asset.SHA256)
+	}
+	if err := os.WriteFile(reqPath, []byte(req.String()), 0o640); err != nil {
+		return fmt.Errorf("embeddedllm: writing the pinned wheel requirements: %w", err)
+	}
+	defer func() { _ = os.Remove(reqPath) }() // never promoted with the tree
+
 	pipCtx, cancel := context.WithTimeout(ctx, mlxPipInstallTimeout)
 	defer cancel()
-	env := append(os.Environ(), "PIP_DISABLE_PIP_VERSION_CHECK=1", "PIP_NO_INPUT=1")
-	args := append([]string{
-		"-m", "pip", "install",
-		"--no-index", "--no-deps", "--no-cache-dir", "--find-links", downloads,
-	}, specs...)
+	env := mlxChildEnv(os.Environ(), in.hostOS(), stagedPython)
+	args := []string{
+		"-I", "-m", "pip", "install",
+		"--no-index", "--no-deps", "--only-binary=:all:", "--require-hashes",
+		"--no-cache-dir", "--disable-pip-version-check", "--no-input",
+		"--find-links", downloads,
+		"-r", reqPath,
+	}
 	if _, err := in.runCommand()(pipCtx, stagedPython, &RunOptions{Env: env}, args...); err != nil {
-		return fmt.Errorf("embeddedllm: installing the pinned engine wheels (offline, %d distributions): %w", len(specs), err)
+		return fmt.Errorf("embeddedllm: installing the pinned engine wheels (offline, %d distributions): %w", len(wheels), err)
 	}
 	in.logger().Info("embedded LLM engine wheels installed",
-		"distributions", len(specs), "source", downloads)
+		"distributions", len(wheels), "source", downloads)
 	return nil
 }
 
@@ -286,12 +392,15 @@ func (in *Installer) mlxPipInstall(ctx context.Context, stagedPython string) err
 // before the multi-gigabyte pack is fetched. It deliberately does NOT import
 // MLX or touch Metal: the load path's /v1/models readiness poll is the proof
 // that the GPU stack runs, and a smoke test that allocated a Metal context
-// here would hold memory the gate just finished pricing.
-func (in *Installer) mlxSmoke(ctx context.Context, stagedPython string) error {
+// here would hold memory the gate just finished pricing. The child runs on
+// mlxChildEnv and an isolated interpreter (-I), so the import it proves is
+// the pinned tree's own, not an operator shadow.
+func (in *Installer) mlxSmoke(ctx context.Context, stagedPython, workDir string) error {
 	smokeCtx, cancel := context.WithTimeout(ctx, mlxSmokeTimeout)
 	defer cancel()
-	out, err := in.runCommand()(smokeCtx, stagedPython, nil,
-		"-c", "import mtplx, mtplx.cli; v = getattr(mtplx, '__version__', 'unknown'); print(v)")
+	env := mlxChildEnv(os.Environ(), in.hostOS(), stagedPython)
+	out, err := in.runCommand()(smokeCtx, stagedPython, &RunOptions{Env: env},
+		"-I", "-c", "import mtplx, mtplx.cli; v = getattr(mtplx, '__version__', 'unknown'); print(v)")
 	if err != nil {
 		return fmt.Errorf("%w: the pinned MTPLX engine did not import in the provisioned Python (%s): %s",
 			ErrSmokeTestFailed, strings.TrimSpace(out), mlxSmokeHint())
@@ -299,6 +408,48 @@ func (in *Installer) mlxSmoke(ctx context.Context, stagedPython string) error {
 	if !strings.Contains(out, MTPLXVersion) {
 		in.logger().Warn("embedded LLM engine smoke test reported an unexpected version",
 			"want", MTPLXVersion, "got", strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// mlxSweepDownloads prunes the persistent downloads area of everything the
+// CURRENT pin table does not name. The area survives installs and pin bumps
+// by design (cache hits), but its occupants must stay this build's own: a
+// wheel left by an older table can satisfy the same distribution name while
+// carrying different bytes. --require-hashes is the primary enforcement at
+// the pip step; this sweep is what keeps the --find-links source itself
+// clean. Files the current table DOES name are left for the downloader to
+// reuse (it re-verifies them against the pins on every cache hit).
+func (in *Installer) mlxSweepDownloads() error {
+	downloads, err := in.Layout.DownloadsDir()
+	if err != nil {
+		return err
+	}
+	pinned := make(map[string]bool, 1+len(mtplxWheelPins))
+	pinned[pythonArchiveAsset.ArchiveName] = true
+	for _, w := range mtplxWheelPins {
+		pinned[w.Asset.ArchiveName] = true
+	}
+	entries, err := os.ReadDir(downloads)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // nothing downloaded yet: nothing to sweep
+		}
+		return fmt.Errorf("embeddedllm: reading the downloads area: %w", err)
+	}
+	for _, entry := range entries {
+		if pinned[entry.Name()] {
+			continue
+		}
+		stale, serr := in.Layout.safeJoin(downloads, entry.Name())
+		if serr != nil {
+			return serr
+		}
+		if err := in.removeOwned(stale); err != nil {
+			return err
+		}
+		in.logger().Info("removed a download the current pin table does not carry",
+			"name", entry.Name())
 	}
 	return nil
 }

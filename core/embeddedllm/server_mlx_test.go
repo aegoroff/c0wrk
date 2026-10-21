@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,9 +26,12 @@ func mlxLaunchSpec() LaunchSpec {
 	}
 }
 
-// TestMLXArgsRendersTheEngineContract locks the mtplx argv: fixed order, typed
-// values, loopback bind, explicit window, rate limiting off, and the model
-// given as the verified pack directory.
+// TestMLXArgsRendersTheEngineContract locks the mtplx argv: the isolated
+// interpreter, the module entry point and `serve` subcommand (verified against
+// the pinned wheel: no mtplx/__main__.py exists, and `serve` spells the model
+// --model with no -m alias), fixed order, typed values, loopback bind,
+// explicit window, rate limiting off, and the model given as the verified pack
+// directory.
 func TestMLXArgsRendersTheEngineContract(t *testing.T) {
 	spec := mlxLaunchSpec()
 	// The deliberate split (see the Args rendering guard): Args is ALWAYS the
@@ -40,7 +44,9 @@ func TestMLXArgsRendersTheEngineContract(t *testing.T) {
 	}
 	argv := spec.mlxArgs()
 	want := []string{
-		"-m", spec.ModelFile,
+		"-I",
+		"-m", "mtplx.cli", "serve",
+		"--model", spec.ModelFile,
 		"--host", LoopbackHost,
 		"--port", "18432",
 		"--context-window", "94208",
@@ -62,8 +68,8 @@ func TestMLXArgsRendersTheEngineContract(t *testing.T) {
 			dashes++
 		}
 	}
-	if dashes != 5 {
-		t.Fatalf("argv carries %d flags, want exactly 5 (-m, host, port, context-window, rate-limit)", dashes)
+	if dashes != 7 {
+		t.Fatalf("argv carries %d flags, want exactly 7 (-I, -m, --model, host, port, context-window, rate-limit)", dashes)
 	}
 }
 
@@ -190,15 +196,76 @@ func TestLaunchSpecMLX(t *testing.T) {
 	}
 }
 
-func TestMLXStateEnv(t *testing.T) {
-	spec := mlxLaunchSpec()
-	env := mlxStateEnv(spec)
-	joined := strings.Join(env, "\n")
-	if !strings.Contains(joined, "MTPLX_CONFIG=/runtimes/mtplx-"+MTPLXVersion+"/config.toml") {
-		t.Fatalf("env %q does not isolate the config file", joined)
+// TestMLXChildEnv locks the mtplx python children's complete environment: the
+// operator's PIP_*/PYTHON*/MTPLX_* influence is scrubbed, the pinned bin dir
+// leads PATH, user site-packages are off, temp passes through, and the
+// engine's own state is pointed inside the tree — set once, never inherited
+// as a duplicate a C reader could resolve first.
+func TestMLXChildEnv(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PIP_FIND_LINKS=/operator/mirror",
+		"PIP_INDEX_URL=https://operator.example/simple",
+		"PYTHONPATH=/operator/site-packages",
+		"PYTHONHOME=/operator/python",
+		"MTPLX_CONFIG=/operator/.mtplx/config.toml",
+		"MTPLX_MODEL_DIR=/operator/.mtplx",
+		"TMPDIR=/var/folders/tmp",
+		"HOME=/Users/operator",
 	}
-	if !strings.Contains(joined, "MTPLX_MODEL_DIR=/runtimes/mtplx-"+MTPLXVersion) {
-		t.Fatalf("env %q does not isolate the model dir", joined)
+	python := "/runtimes/mtplx-" + MTPLXVersion + "/python/bin/python3.12"
+	env := mlxChildEnv(parent, "darwin", python)
+
+	byName := map[string]string{}
+	for _, entry := range env {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			byName[name] = value
+		}
+	}
+	// The scrub: nothing the operator steers with survives.
+	for _, banned := range []string{"PIP_FIND_LINKS", "PIP_INDEX_URL", "PYTHONPATH", "PYTHONHOME"} {
+		if _, ok := byName[banned]; ok {
+			t.Fatalf("child env carries inherited %s=%q", banned, byName[banned])
+		}
+	}
+	// The MTPLX_* keys are SET, not inherited: the operator's values are gone.
+	if byName["MTPLX_CONFIG"] == "/operator/.mtplx/config.toml" || byName["MTPLX_MODEL_DIR"] == "/operator/.mtplx" {
+		t.Fatal("child env resolved the operator's MTPLX_* values")
+	}
+	// The pinned bin dir FIRST on PATH, the operator's tail kept.
+	if want := "/runtimes/mtplx-" + MTPLXVersion + "/python/bin:/usr/local/bin:/usr/bin:/bin"; byName["PATH"] != want {
+		t.Fatalf("PATH = %q, want %q", byName["PATH"], want)
+	}
+	if byName["PYTHONNOUSERSITE"] != "1" {
+		t.Fatalf("PYTHONNOUSERSITE = %q, want 1 (the user site-packages shadow)", byName["PYTHONNOUSERSITE"])
+	}
+	// Temp passes through; unrelated variables pass through.
+	if byName["TMPDIR"] != "/var/folders/tmp" {
+		t.Fatalf("TMPDIR = %q, want it passed through", byName["TMPDIR"])
+	}
+	if byName["HOME"] != "/Users/operator" {
+		t.Fatalf("HOME = %q, want it passed through", byName["HOME"])
+	}
+	// The engine's state is set exactly once, to the tree's own paths.
+	if want := "/runtimes/mtplx-" + MTPLXVersion + "/config.toml"; byName["MTPLX_CONFIG"] != want {
+		t.Fatalf("MTPLX_CONFIG = %q, want %q", byName["MTPLX_CONFIG"], want)
+	}
+	if want := "/runtimes/mtplx-" + MTPLXVersion; byName["MTPLX_MODEL_DIR"] != want {
+		t.Fatalf("MTPLX_MODEL_DIR = %q, want %q", byName["MTPLX_MODEL_DIR"], want)
+	}
+	for _, entry := range env {
+		if strings.Count(entry, "MTPLX_") > 0 && strings.HasPrefix(entry, "MTPLX_") {
+			if got := strings.SplitN(entry, "=", 2)[0]; got != "MTPLX_CONFIG" && got != "MTPLX_MODEL_DIR" {
+				t.Fatalf("unexpected MTPLX key %q in child env", got)
+			}
+		}
+	}
+	// A parent without PATH still yields a working child.
+	bare := mlxChildEnv([]string{"HOME=/Users/operator"}, "darwin", python)
+	joined := strings.Join(bare, "\n")
+	if !strings.Contains(joined, "PATH=/runtimes/mtplx-"+MTPLXVersion+"/python/bin\n") {
+		t.Fatalf("PATH-less parent produced %q without the pinned bin dir", joined)
 	}
 }
 
@@ -218,14 +285,17 @@ func TestReadHealthContext(t *testing.T) {
 		t.Fatalf("readHealthContext = (%d, %v), want (57344, true)", got, ok)
 	}
 
-	// Fail-soft on every malformed answer.
+	// Fail-soft on every malformed answer. The fixtures carry the field the
+	// parser ACTUALLY reads (the top-level `context_window`), so every guard
+	// below — nil pointer, non-positive, over-training-context, type error —
+	// is exercised on the real field, not on a field the parser ignores.
 	for name, body := range map[string]string{
 		"missing field": `{"ok": true}`,
-		"zero":          `{"model_max_context": 0}`,
-		"negative":      `{"model_max_context": -5}`,
-		"absurd":        `{"model_max_context": 999999999}`,
+		"zero":          `{"context_window": 0}`,
+		"negative":      `{"context_window": -5}`,
+		"absurd":        `{"context_window": 999999999}`,
 		"not json":      `hello`,
-		"wrong type":    `{"model_max_context": "big"}`,
+		"wrong type":    `{"context_window": "big"}`,
 	} {
 		bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(body))
@@ -235,8 +305,128 @@ func TestReadHealthContext(t *testing.T) {
 		}
 		bad.Close()
 	}
+
+	// The boundary is the model's training context: the value itself is
+	// accepted, one token more is refused.
+	boundary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"context_window": ` + strconv.Itoa(maxTrainingContext) + `}`))
+	}))
+	defer boundary.Close()
+	got, ok = readHealthContext(context.Background(), boundary.Client(), boundary.URL+"/health", probeTimeoutForTest())
+	if !ok || got != maxTrainingContext {
+		t.Fatalf("readHealthContext(maxTrainingContext) = (%d, %v), want (%d, true)", got, ok, maxTrainingContext)
+	}
+	over := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"context_window": ` + strconv.Itoa(maxTrainingContext+1) + `}`))
+	}))
+	defer over.Close()
+	if _, ok := readHealthContext(context.Background(), over.Client(), over.URL+"/health", probeTimeoutForTest()); ok {
+		t.Fatal("readHealthContext accepted maxTrainingContext+1")
+	}
+
 	if _, ok := readHealthContext(context.Background(), client, "http://127.0.0.1:1/health", probeTimeoutForTest()); ok {
 		t.Fatal("a dead server answered the readback")
+	}
+}
+
+// mlxLaunchTestServer builds a Server over a provisioned-shape layout: the
+// interpreter and the pack directory both exist, as a launch expects.
+func mlxLaunchTestServer(t *testing.T) (*Server, Layout, string) {
+	t.Helper()
+	agentDir := t.TempDir()
+	layout, err := NewLayout(
+		filepath.Join(agentDir, "runtimes"),
+		filepath.Join(agentDir, "models", "bonsai-2-27b"),
+		filepath.Join(agentDir, "models", "bonsai-2-27b-mlx"),
+	)
+	if err != nil {
+		t.Fatalf("NewLayout: %v", err)
+	}
+	runtimeDir, err := layout.MLXRuntimeDir()
+	if err != nil {
+		t.Fatalf("MLXRuntimeDir: %v", err)
+	}
+	python, err := MLXServerPythonPath(runtimeDir)
+	if err != nil {
+		t.Fatalf("MLXServerPythonPath: %v", err)
+	}
+	if err := mkdirAll(filepath.Dir(python)); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(python, []byte("#!/bin/sh\n"), 0o750); err != nil {
+		t.Fatalf("touch python: %v", err)
+	}
+	packDir, err := layout.MLXPackDir()
+	if err != nil {
+		t.Fatalf("MLXPackDir: %v", err)
+	}
+	if err := mkdirAll(packDir); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	return NewServer(layout, discardLogger()), layout, packDir
+}
+
+// TestLaunchSpecMLXLiveReplan keeps `context.mode: exact` alive under the
+// mtplx engine (ADR-090 D5): the launch re-plans with the LIVE operator
+// tuning from the recorded topology snapshot, refuses a window the machine
+// cannot hold with the gate's own error, and falls back to the recorded plan
+// when no pricing is possible.
+func TestLaunchSpecMLXLiveReplan(t *testing.T) {
+	server, _, packDir := mlxLaunchTestServer(t)
+	ctx := context.Background()
+	recorded := MemoryPlan{ContextSize: 94208}
+	manifest := Manifest{
+		Engine:    EngineMTPLX,
+		ModelFile: packDir,
+		Port:      18432,
+		Plan:      &recorded,
+		Topology:  &MemoryTopology{HostRAMGiB: 24, Unified: true},
+	}
+
+	// An exact override REPLACES the recorded window.
+	server.Tuning = func() Tuning {
+		return Tuning{Context: ContextTuning{Mode: ContextExact, Tokens: 12345}}
+	}
+	resolved, err := server.launchSpec(ctx, manifest, 18432)
+	if err != nil {
+		t.Fatalf("launchSpec(exact): %v", err)
+	}
+	if resolved.Spec.ContextSize != 12345 {
+		t.Fatalf("exact override context = %d, want 12345", resolved.Spec.ContextSize)
+	}
+
+	// A window the machine cannot hold refuses the launch with the gate's
+	// own arithmetic — it never silently launches the smaller recorded plan.
+	server.Tuning = func() Tuning {
+		return Tuning{Context: ContextTuning{Mode: ContextExact, Tokens: maxTrainingContext}}
+	}
+	_, err = server.launchSpec(ctx, manifest, 18432)
+	if !errors.Is(err, ErrMemoryPlanInfeasible) {
+		t.Fatalf("launchSpec(infeasible exact) error = %v, want ErrMemoryPlanInfeasible", err)
+	}
+
+	// A llama-only tuning key is config validation's refusal, not a launch
+	// failure: the recorded plan launches.
+	server.Tuning = func() Tuning { return Tuning{KVType: "q8_0"} }
+	resolved, err = server.launchSpec(ctx, manifest, 18432)
+	if err != nil {
+		t.Fatalf("launchSpec(forbidden tuning): %v", err)
+	}
+	if resolved.Spec.ContextSize != 94208 {
+		t.Fatalf("forbidden-tuning fallback context = %d, want the recorded 94208", resolved.Spec.ContextSize)
+	}
+
+	// No topology snapshot (a pre-snapshot manifest) leaves the recorded plan
+	// in place: ErrRAMUnknown falls back, never fails.
+	server.Tuning = func() Tuning { return Tuning{} }
+	noSnapshot := manifest
+	noSnapshot.Topology = nil
+	resolved, err = server.launchSpec(ctx, noSnapshot, 18432)
+	if err != nil {
+		t.Fatalf("launchSpec(no topology): %v", err)
+	}
+	if resolved.Spec.ContextSize != 94208 {
+		t.Fatalf("no-topology fallback context = %d, want the recorded 94208", resolved.Spec.ContextSize)
 	}
 }
 

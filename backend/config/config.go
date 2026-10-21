@@ -802,8 +802,8 @@ const (
 // EmbeddedLLMConfig is the persisted state of the embedded local model. Most
 // fields are written by the app and document what is on THIS machine (resolved
 // packing, probed backend, allocated port) so a restart can supervise the
-// server without probing hardware or network. The two operator-owned
-// sub-sections — AutoUnload and Tuning — are settings instead: every flow that
+// server without probing hardware or network. The three operator-owned entries
+// — Engine, AutoUnload and Tuning — are settings instead: every flow that
 // rewrites the record carries them through unchanged.
 type EmbeddedLLMConfig struct {
 	// Engine is the runtime-family SETTING: "auto" (the empty or absent
@@ -812,8 +812,8 @@ type EmbeddedLLMConfig struct {
 	// install time — mtplx on darwin/arm64, llama everywhere else — and the
 	// resolution is what Install runs; an explicit value is honored wherever
 	// the platform supports it and refused where it does not. This is one of
-	// the two operator-owned keys in this section (the other is auto_unload):
-	// install and removal PRESERVE it.
+	// the three operator-owned entries in this section (the others are
+	// auto_unload and tuning): install and removal PRESERVE it.
 	Engine string `yaml:"engine,omitempty"`
 	// Installed reports that the runtime and the weights are on disk and
 	// SHA256-verified. It gates the generated provider entry.

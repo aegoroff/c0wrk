@@ -2,6 +2,7 @@ package embeddedllm
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -271,7 +272,8 @@ func TestPlanMLXIsPure(t *testing.T) {
 
 // TestPlanMLXImportsNoIOPackage is the structural half of the purity
 // guarantee: mlxplan.go must not import anything that can touch a file, a
-// socket, a subprocess, the clock or global state.
+// socket, a subprocess, the clock or global state, and its one package-level
+// var must stay a constant map literal.
 func TestPlanMLXImportsNoIOPackage(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "mlxplan.go", nil, 0)
@@ -292,16 +294,134 @@ func TestPlanMLXImportsNoIOPackage(t *testing.T) {
 	}
 	// Package-level `var` declarations would be mutable global state a plan
 	// could read; only consts and types belong here. The one intentional var
-	// (mlxMeasuredWindows) is checked to stay a map literal of constants.
-	varFound := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		if gen, ok := n.(*ast.GenDecl); ok && gen.Tok == token.VAR {
-			varFound = true
+	// (mlxMeasuredWindows) is checked to stay a map literal of constant
+	// basic literals — a computed or mutable form would make the planner's
+	// windows depend on state, not the pack's measured evidence.
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
 		}
-		return true
-	})
-	if !varFound {
-		t.Log("note: mlxplan.go declares no package-level vars")
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range valueSpec.Names {
+				if name.Name != "mlxMeasuredWindows" {
+					t.Errorf("mlxplan.go declares package-level var %s; only consts and types belong in the planner", name.Name)
+				}
+			}
+		}
+	}
+	if err := checkMeasuredWindowsShape(f); err != nil {
+		t.Errorf("mlxMeasuredWindows is not the constant map literal the planner promises: %v", err)
+	}
+}
+
+// checkMeasuredWindowsShape asserts that a parsed file declares
+// mlxMeasuredWindows as a map composite literal whose keys and values are all
+// constant basic literals (an INT basic literal, possibly negated). It returns
+// a descriptive error otherwise, so the negative subtest below can prove the
+// check has teeth on synthetic input.
+func checkMeasuredWindowsShape(f *ast.File) error {
+	var spec *ast.ValueSpec
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, s := range gen.Specs {
+			vs, ok := s.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range vs.Names {
+				if name.Name == "mlxMeasuredWindows" {
+					spec = vs
+				}
+			}
+		}
+	}
+	if spec == nil {
+		return errors.New("no package-level var mlxMeasuredWindows declared")
+	}
+	if len(spec.Values) != 1 {
+		return fmt.Errorf("mlxMeasuredWindows has %d values, want exactly one composite literal", len(spec.Values))
+	}
+	lit, ok := spec.Values[0].(*ast.CompositeLit)
+	if !ok {
+		return fmt.Errorf("mlxMeasuredWindows is %T, want a map composite literal", spec.Values[0])
+	}
+	if lit.Type == nil {
+		return errors.New("mlxMeasuredWindows has no map type in its composite literal")
+	}
+	constInt := func(expr ast.Expr) error {
+		switch e := expr.(type) {
+		case *ast.BasicLit:
+			if e.Kind == token.INT {
+				return nil
+			}
+			return fmt.Errorf("literal %s is %s, want an integer constant", e.Value, e.Kind)
+		case *ast.UnaryExpr:
+			if inner, ok := e.X.(*ast.BasicLit); ok && e.Op == token.SUB && inner.Kind == token.INT {
+				return nil
+			}
+			return errors.New("expression is not a negated integer literal")
+		default:
+			return fmt.Errorf("element %T is not a constant basic literal", expr)
+		}
+	}
+	var errs []error
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			errs = append(errs, fmt.Errorf("element %T is not a key:value entry", elt))
+			continue
+		}
+		if err := constInt(kv.Key); err != nil {
+			errs = append(errs, fmt.Errorf("map key: %w", err))
+		}
+		if err := constInt(kv.Value); err != nil {
+			errs = append(errs, fmt.Errorf("map value: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// TestPlanMLXMeasuredWindowsCheckerRefuses proves the structural check above
+// CAN fail: a synthetic planner file whose var is computed, mutable or not a
+// constant map must be rejected.
+func TestPlanMLXMeasuredWindowsCheckerRefuses(t *testing.T) {
+	cases := map[string]string{
+		"not a map":          "package p\n\nvar mlxMeasuredWindows = 8192\n",
+		"computed value":     "package p\n\nvar n = 8192\n\nvar mlxMeasuredWindows = map[int]int{16: n}\n",
+		"function call":      "package p\n\nfunc w() int { return 8192 }\n\nvar mlxMeasuredWindows = map[int]int{16: w()}\n",
+		"missing entirely":   "package p\n\nconst other = 1\n",
+		"non-integer values": "package p\n\nvar mlxMeasuredWindows = map[int]int{16: 8192, 18: 20480, 24: 94208, 32: 1.5}\n",
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+			if err != nil {
+				t.Fatalf("parse synthetic: %v", err)
+			}
+			if err := checkMeasuredWindowsShape(f); err == nil {
+				t.Fatalf("checkMeasuredWindowsShape accepted the %q shape", name)
+			}
+		})
+	}
+	// The real shape must keep passing, pinned here so a future edit that
+	// breaks the checker itself is caught in the same run.
+	good := "package p\n\nvar mlxMeasuredWindows = map[int]int{16: 8192, 18: 20480, 24: 94208}\n"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "good.go", good, 0)
+	if err != nil {
+		t.Fatalf("parse good: %v", err)
+	}
+	if err := checkMeasuredWindowsShape(f); err != nil {
+		t.Fatalf("checkMeasuredWindowsShape refused the real shape: %v", err)
 	}
 }
 

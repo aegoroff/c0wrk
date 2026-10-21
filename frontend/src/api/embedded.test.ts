@@ -47,6 +47,8 @@ const STATUS = {
   loading: false,
   loaded: false,
   engine: '',
+  python_version: '',
+  pack_revision: '',
   packing: 'PQ2_0',
   backend: 'metal',
   port: 43211,
@@ -76,7 +78,6 @@ const STATUS = {
   topology_probed_at: '',
   plan: {
     recorded: false,
-    engine: '',
     packing: '',
     kv_type: '',
     context_size: 0,
@@ -183,7 +184,6 @@ describe('isEmbeddedLLMStatus / getEmbeddedLLMStatus — the boundary guard', ()
           issue: 'PrismML-Eng/llama.cpp#222',
           applied: false,
           backend: 'cuda-12.8',
-          engine: '',
           packing: '',
           guidance: 'the CUDA 13.3 build is documented to segfault …',
         },
@@ -198,6 +198,33 @@ describe('isEmbeddedLLMStatus / getEmbeddedLLMStatus — the boundary guard', ()
     expect(isEmbeddedLLMStatus({ ...STATUS, leftover_runtime: 'yes' })).toBe(false)
     expect(isEmbeddedLLMStatus({ ...STATUS, leftover_weights: 1 })).toBe(false)
     expect(isEmbeddedLLMStatus({ ...STATUS, leftover_projection: null })).toBe(false)
+  })
+
+  it('accepts a snapshot carrying an mtplx record block', () => {
+    expect(
+      isEmbeddedLLMStatus({ ...STATUS, engine: 'mtplx', python_version: '3.12.15', pack_revision: '03bd60bb' }),
+    ).toBe(true)
+  })
+
+  it('rejects a snapshot whose engine field drifted or went missing', () => {
+    expect(isEmbeddedLLMStatus({ ...STATUS, engine: 42 })).toBe(false)
+    const missing = { ...STATUS }
+    delete (missing as { engine?: unknown }).engine
+    expect(isEmbeddedLLMStatus(missing)).toBe(false)
+  })
+
+  it('rejects a snapshot whose engine records drifted in type', () => {
+    expect(isEmbeddedLLMStatus({ ...STATUS, python_version: 5 })).toBe(false)
+    expect(isEmbeddedLLMStatus({ ...STATUS, pack_revision: null })).toBe(false)
+  })
+
+  it('rejects a snapshot whose engine records went missing (no omitempty on the wire)', () => {
+    const noPython = { ...STATUS }
+    delete (noPython as { python_version?: unknown }).python_version
+    const noPack = { ...STATUS }
+    delete (noPack as { pack_revision?: unknown }).pack_revision
+    expect(isEmbeddedLLMStatus(noPython)).toBe(false)
+    expect(isEmbeddedLLMStatus(noPack)).toBe(false)
   })
 })
 

@@ -2214,9 +2214,12 @@ func (s *Server) spawn(ctx context.Context, spec LaunchSpec) (*processRun, error
 	}
 	env := launchEnv(binaryDir, s.hostOS(), os.Environ())
 	if spec.Engine == EngineMTPLX {
-		// State isolation: the engine's config and model root live inside the
-		// c0wrk layout, never ~/.mtplx (server_mlx.go).
-		env = append(env, mlxStateEnv(spec)...)
+		// The mtplx children run on a scrubbed, self-contained environment:
+		// pinned bin dir first on PATH, no inherited PIP_*/PYTHON*/MTPLX_*
+		// influence, and the engine's config/model state pointed INSIDE the
+		// c0wrk layout (mlxChildEnv, server_mlx.go) — an operator's MTPLX
+		// install can never mix with this one.
+		env = mlxChildEnv(os.Environ(), s.hostOS(), binaryDir)
 	}
 	cmd := LaunchCommand{
 		Binary: spec.ServerBinary,
@@ -2787,12 +2790,12 @@ type modelsPayload struct {
 }
 
 // modelsReady applies the readiness predicate to one parsed model list. The
-// llama contract is "a served model is listed". The mtplx contract adds a
-// window requirement: its listing names the configured model before the
-// backend has resolved its context, and a request sent before that resolution
-// would queue behind the load. Any of the three window spellings the server
-// emits satisfies it; their absence satisfies it too (llama never sends them
-// and must stay ready on id alone).
+// llama contract is "a served model is listed" — llama never sends window
+// fields, so absence satisfies it. The mtplx contract is STRICTER: its listing
+// names the configured model before the backend has resolved its context, and
+// a request sent before that resolution would queue behind the load, so a
+// window spelling MUST be present — any of the three the server emits
+// satisfies it, their absence means NOT ready and the poll keeps going.
 func modelsReady(payload modelsPayload, requireWindow bool) bool {
 	for _, m := range payload.Data {
 		if m.ID == "" {

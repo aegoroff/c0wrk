@@ -97,11 +97,20 @@ export function EmbeddedLLMSettings() {
   const idleSeconds = status?.idle_remaining_seconds ?? 0
   // The artifact groups on disk right now. An installed model has all three
   // (the manifest describes them); a not-installed machine reports whatever a
-  // scoped removal left behind.
+  // scoped removal left behind. The projection scope is the exception: under
+  // the mtplx engine there is no separately removable vision projector — the
+  // backend refuses the scope with ErrNoProjectionOnMLX, but only AFTER it has
+  // stopped the model and cleared the install record — so the menu entry
+  // self-disables instead of leading the operator into that path (ADR-090 D7),
+  // and the refusal text explains why.
+  const projectionRefusal =
+    status?.engine === 'mtplx' ? 'not removable under the MTPLX engine' : undefined
   const leftovers = {
     runtime: installed || (status?.leftover_runtime ?? false),
     weights: installed || (status?.leftover_weights ?? false),
-    projection: installed || (status?.leftover_projection ?? false),
+    projection:
+      status?.engine !== 'mtplx' && (installed || (status?.leftover_projection ?? false)),
+    projectionRefusal,
   }
   const anyLeftover = leftovers.runtime || leftovers.weights || leftovers.projection
   // Error precedence: the action the operator just took (its rejected promise
