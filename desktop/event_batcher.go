@@ -290,11 +290,15 @@ func eventStreamDiscriminator(eventType string, data any) string {
 // isImmediateFlushEvent reports whether a session event must be flushed right
 // away rather than waiting for the ~16ms tick: task settlement (so the UI
 // leaves the running state without a perceptible delay) and the HITL prompts
-// whose handlers block a live task until the user answers.
+// whose handlers block a live task until the user answers. hitl_resolved
+// rides the same class: it settles an open prompt on every surface, and a
+// confirmation card that lags one tick behind the resume of the task it was
+// blocking reads as a ghost.
 func isImmediateFlushEvent(eventType string) bool {
 	switch eventType {
 	case "task_complete", "task_cancelled", "error", "task_failed_resumable",
-		"ask_user", "tool_confirm", "step_limit", "plan_review_ready", "goal_proposal":
+		"ask_user", "tool_confirm", "step_limit", "plan_review_ready", "goal_proposal",
+		"hitl_resolved":
 		return true
 	default:
 		return false

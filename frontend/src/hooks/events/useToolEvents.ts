@@ -5,7 +5,7 @@ import { useEffect } from 'react'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
 import { isToolCallData, isToolResultData, isToolConfirmData, isToolJudgePhaseData, isAutonomyDecisionData } from '@/types/events'
 import { useChatStore } from '@/stores/chatStore'
-import { handleToolConfirmEvent, handleToolJudgeStartedEvent, handleToolJudgeFinishedEvent, handleAutonomyDecisionEvent } from './hitlHandlers'
+import { handleToolConfirmEvent, handleToolJudgeStartedEvent, handleToolJudgeFinishedEvent, handleAutonomyDecisionEvent, resolveConfirmForToolResult } from './hitlHandlers'
 
 /** Build the message ID used to correlate tool_call ↔ tool_result */
 function buildToolMsgId(d: { tool_call_id?: string; plan_step_id?: string; step: number; call_idx?: number; retry_attempt?: number }): string {
@@ -83,6 +83,11 @@ export function useToolEvents(sessionId: string | null): void {
             timestamp: Date.now(),
           })
         }
+
+        // HITL backstop: the tool gated by a confirm card has demonstrably
+        // run — settle an orphaned card the hitl_resolved push never reached
+        // (see resolveConfirmForToolResult; a settled card is never touched).
+        resolveConfirmForToolResult(sessionId, data.tool_call_id)
       }),
     )
 

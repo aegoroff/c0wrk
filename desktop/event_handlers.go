@@ -107,6 +107,51 @@ func stringField(payload map[string]any, key, eventName string, log *slog.Logger
 	return s, true
 }
 
+// confirmDecisionString renders a ConfirmationResponse back to the wire
+// string the frontend protocol uses ("allow_once" / "deny" /
+// "deny_and_stop"), so a hitl_resolved event can carry the effective decision
+// as text. Returns "" for out-of-range values (the field is omitempty).
+func confirmDecisionString(resp sdktools.ConfirmationResponse) string {
+	switch resp {
+	case sdktools.ConfirmAllowOnce:
+		return "allow_once"
+	case sdktools.ConfirmDeny:
+		return "deny"
+	case sdktools.ConfirmDenyAndStop:
+		return "deny_and_stop"
+	default:
+		return ""
+	}
+}
+
+// emitHitlResolved broadcasts the settlement of one pending HITL prompt to
+// every surface — the desktop webview AND all web-access browser tabs —
+// through the standard emit funnel (buildUIEmitFunc → batcher → a.emit →
+// event tap). This is the multi-surface convergence point for HITL answers:
+// a surface that did not perform the resolution (a second browser tab, a
+// side-by-side window, the webview while the user works in a browser)
+// retires its card on this event instead of waiting for the next
+// session-switch / focus-resync reconcile, and a surface that raced the
+// resolution learns the EFFECTIVE (first-responder) decision. Skipped at
+// Debug when no transport exists (a bare &App{} in unit tests): production
+// paths always run after Startup, so the guard only avoids noise where the
+// event could not be delivered anyway.
+func (a *App) emitHitlResolved(sessionID string, kind session.HitlResolvedKind, id, decision string) {
+	if a.wailsCtx() == nil && a.wailsEmit == nil {
+		a.log().Debug("hitl_resolved skipped: no emit transport", "kind", string(kind), "id", id)
+		return
+	}
+	a.buildUIEmitFunc()(session.Event{
+		SessionID: sessionID,
+		Type:      "hitl_resolved",
+		Data: session.HitlResolvedData{
+			Kind:     kind,
+			ID:       id,
+			Decision: decision,
+		},
+	})
+}
+
 // handleToolConfirmResponse is the body of the EventToolConfirmResponse listener.
 // Extracted from wireWailsEventListeners (W-23) so it can be unit-tested without
 // a live Wails runtime.
@@ -152,6 +197,13 @@ func (a *App) handleToolConfirmResponse(payload map[string]any, log *slog.Logger
 	}); err != nil {
 		log.Warn("failed to resolve persisted tool_confirm message", "confirm_id", requestID, "error", err)
 	}
+
+	// Tell every surface the prompt is settled (multi-surface HITL
+	// convergence — see emitHitlResolved). Emitted AFTER the channel send and
+	// the pending-map delete so a surface reacting to the event can never
+	// re-answer a live entry: a late tool_confirm_response finds no pending
+	// confirmation and logs its first-responder-wins warning.
+	a.emitHitlResolved(confirmData.sessionID, session.HitlResolvedToolConfirm, requestID, confirmDecisionString(resp))
 }
 
 // handleToolJudgeRequest is the body of the EventToolJudgeRequest listener.
@@ -293,6 +345,11 @@ func (a *App) handleAskUserResponse(payload map[string]any, log *slog.Logger) {
 	}); err != nil {
 		log.Warn("failed to resolve persisted ask_user message", "request_id", requestID, "error", err)
 	}
+
+	// Multi-surface convergence (see emitHitlResolved): the answers themselves
+	// are agent-owned payload, not UI state, so the event carries no decision —
+	// every other surface only needs to retire its open ask-user form.
+	a.emitHitlResolved(entry.sessionID, session.HitlResolvedAskUser, requestID, "")
 }
 
 // handlePlanApprovalResponse is the body of the EventPlanApprovalResponse listener.
@@ -333,6 +390,9 @@ func (a *App) handlePlanApprovalResponse(payload map[string]any, log *slog.Logge
 	}); err != nil {
 		log.Warn("failed to resolve persisted plan_review message", "request_id", requestID, "error", err)
 	}
+
+	// Multi-surface convergence (see emitHitlResolved).
+	a.emitHitlResolved(entry.sessionID, session.HitlResolvedPlanReview, requestID, decision)
 }
 
 // resolveGoalProposal delivers a user decision to a blocked goal-proposal
@@ -378,6 +438,12 @@ func (a *App) resolveGoalProposal(requestID, decision, condition, verify, verifi
 	}); err != nil {
 		a.log().Warn("failed to resolve persisted goal_proposal message", "request_id", requestID, "error", err)
 	}
+
+	// Multi-surface convergence (see emitHitlResolved). Emitted HERE — in the
+	// shared resolver — so both the event-based path (handleGoalProposalResponse)
+	// and the RPC-based path (FrontendAPI.ConfirmGoal/CancelGoal via the
+	// manager resolver) broadcast the settlement.
+	a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalProposal, requestID, decision)
 	return true
 }
 
@@ -438,6 +504,13 @@ func (a *App) resolveGoalSuggestion(requestID, decision string) bool {
 	}); err != nil {
 		a.log().Warn("failed to resolve persisted goal_suggestion message", "request_id", requestID, "error", err)
 	}
+
+	// Multi-surface convergence (see emitHitlResolved). Emitted HERE — in the
+	// shared resolver — so both the event-based path
+	// (handleGoalSuggestionResponse) and the RPC-based path
+	// (FrontendAPI.AcceptGoalSuggestion/DeclineGoalSuggestion via the manager
+	// resolver) broadcast the settlement.
+	a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalSuggestion, requestID, decision)
 	return true
 }
 
@@ -554,4 +627,7 @@ func (a *App) handleStepLimitResponse(payload map[string]any, log *slog.Logger) 
 	}); err != nil {
 		log.Warn("failed to resolve persisted step_limit message", "request_id", requestID, "error", err)
 	}
+
+	// Multi-surface convergence (see emitHitlResolved).
+	a.emitHitlResolved(entry.sessionID, session.HitlResolvedStepLimit, requestID, respStr)
 }

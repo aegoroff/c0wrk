@@ -267,6 +267,40 @@ type GoalSuggestionPayload struct {
 	Reason string `json:"reason"`
 }
 
+// --- HITL resolution payloads ---
+
+// HitlResolvedKind identifies which kind of HITL prompt a HitlResolvedPayload
+// settles. Values mirror the frontend message types (tool_confirm, ask_user,
+// ...) so the UI can locate the exact card to retire.
+type HitlResolvedKind string
+
+const (
+	HitlResolvedToolConfirm    HitlResolvedKind = "tool_confirm"
+	HitlResolvedAskUser        HitlResolvedKind = "ask_user"
+	HitlResolvedStepLimit      HitlResolvedKind = "step_limit"
+	HitlResolvedPlanReview     HitlResolvedKind = "plan_review"
+	HitlResolvedGoalProposal   HitlResolvedKind = "goal_proposal"
+	HitlResolvedGoalSuggestion HitlResolvedKind = "goal_suggestion"
+)
+
+// HitlResolvedData is the typed Data payload for "hitl_resolved" session
+// events — broadcast to EVERY surface (desktop webview plus all web-access
+// tabs) when a pending HITL prompt is consumed by the first responder, so a
+// surface that did not perform the resolution can retire its card immediately
+// instead of waiting for the next session switch / focus-resync reconcile.
+// ID carries the confirm_id (tool_confirm) or request_id (every other kind)
+// of the settled prompt. Decision carries the EFFECTIVE decision — the first
+// responder's answer, so a surface that raced the resolution converges on the
+// outcome that actually drove the agent rather than its own local guess;
+// empty when the prompt was consumed without a user answer. Transient (not
+// persisted): the durable resolution lives in the resolved pending message
+// row, and a restart re-reads it through GetPendingActions reconciliation.
+type HitlResolvedData struct {
+	Kind     HitlResolvedKind `json:"kind"`
+	ID       string           `json:"id"`
+	Decision string           `json:"decision,omitempty"`
+}
+
 // --- Emitter event data types (typed Data field payloads) ---
 // These mirror the event data produced by the EventEmitter methods,
 // enabling type-safe assertions in the emitFunc / persistence layer.

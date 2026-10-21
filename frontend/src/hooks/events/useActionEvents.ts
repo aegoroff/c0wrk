@@ -2,10 +2,10 @@
 
 import { useEffect } from 'react'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isAskUserData, isStepLimitData, isTaskFailedResumableData, isPlanReviewReadyData } from '@/types/events'
+import { isAskUserData, isStepLimitData, isTaskFailedResumableData, isPlanReviewReadyData, isHitlResolvedData } from '@/types/events'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { generateMessageId } from '@/lib/ids'
-import { handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent } from './hitlHandlers'
+import { handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent, handleHitlResolvedEvent } from './hitlHandlers'
 
 export function useActionEvents(sessionId: string | null): void {
   useEffect(() => {
@@ -26,6 +26,17 @@ export function useActionEvents(sessionId: string | null): void {
       onSessionEvent(sessionId, 'step_limit', (data) => {
         if (!isStepLimitData(data)) { reportDroppedEvent('step_limit', data); return }
         handleStepLimitEvent(sessionId, data)
+      }),
+    )
+
+    // --- hitl_resolved (multi-surface HITL convergence) ---
+    // Broadcast when a pending prompt of ANY kind is consumed — usually by
+    // another surface (a second browser tab). Retires the local card and
+    // converges on the effective decision without waiting for a resync.
+    cleanups.push(
+      onSessionEvent(sessionId, 'hitl_resolved', (data) => {
+        if (!isHitlResolvedData(data)) { reportDroppedEvent('hitl_resolved', data); return }
+        handleHitlResolvedEvent(sessionId, data)
       }),
     )
 

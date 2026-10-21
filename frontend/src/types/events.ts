@@ -45,6 +45,32 @@ export interface PlanStepCompleteData { step_id: string; success: boolean; durat
  *  (completed_count is untouched; a Resume re-enters the step). */
 export interface PlanStepPausedData { step_id: string; duration: number; error?: string; progress?: number; current_step_index?: number; completed_count?: number; total_count?: number }
 
+/** Which kind of HITL prompt a hitl_resolved event settles. Values mirror the
+ *  frontend message types so the handler can locate the exact card. */
+export type HitlResolvedKind =
+  | 'tool_confirm'
+  | 'ask_user'
+  | 'step_limit'
+  | 'plan_review'
+  | 'goal_proposal'
+  | 'goal_suggestion'
+
+/** Payload of the `hitl_resolved` session event: broadcast to EVERY surface
+ *  (desktop webview plus all web-access tabs) when a pending HITL prompt is
+ *  consumed by the first responder. A surface that did not perform the
+ *  resolution retires its card on this event instead of waiting for the next
+ *  session-switch / focus-resync reconcile, and a surface that raced the
+ *  resolution converges on the EFFECTIVE decision (the first responder's
+ *  answer) rather than its own local guess. `id` is the confirm_id
+ *  (tool_confirm) or request_id (every other kind). `decision` is the wire
+ *  decision string; empty/absent when the prompt was consumed without a user
+ *  answer. Transient (not persisted). */
+export interface HitlResolvedData {
+  kind: HitlResolvedKind
+  id: string
+  decision?: string
+}
+
 export interface ToolConfirmData {
   confirm_id: string
   tool: string
@@ -601,6 +627,9 @@ export interface SessionEventMap {
   readonly tool_confirm: ToolConfirmData
   readonly ask_user: AskUserData
   readonly step_limit: StepLimitData
+  /** Settlement of a pending HITL prompt (any kind), broadcast to every
+   *  surface — multi-surface convergence; see HitlResolvedData. */
+  readonly hitl_resolved: HitlResolvedData
   /** Automatic (no-human) security decision taken under an automatic autonomy
    *  posture (assisted or silent) — recorded so the run's trajectory stays
    *  auditable (OWASP ASI10). Non-blocking: the UI renders it as a dedicated
@@ -1051,6 +1080,14 @@ export function isToolResultData(d: unknown): d is ToolResultData {
 }
 export function isToolConfirmData(d: unknown): d is ToolConfirmData {
   return isObj(d) && typeof d.confirm_id === 'string' && typeof d.tool === 'string' && typeof d.args === 'string'
+}
+const HITL_RESOLVED_KINDS: readonly string[] = ['tool_confirm', 'ask_user', 'step_limit', 'plan_review', 'goal_proposal', 'goal_suggestion']
+export function isHitlResolvedData(d: unknown): d is HitlResolvedData {
+  if (!isObj(d)) return false
+  if (typeof d.id !== 'string' || d.id === '') return false
+  if (typeof d.kind !== 'string' || !HITL_RESOLVED_KINDS.includes(d.kind)) return false
+  if (d.decision !== undefined && typeof d.decision !== 'string') return false
+  return true
 }
 /** Element guard for one ask_user question: id/question are rendered, options
  *  are mapped into the answer form (label/value as keys + children). */

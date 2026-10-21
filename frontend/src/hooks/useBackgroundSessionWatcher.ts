@@ -33,9 +33,9 @@ import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
 import { onSessionEvent, reportDroppedEvent } from '@/api/runtime'
-import { isToolConfirmData, isAskUserData, isStepLimitData, isPlanReviewReadyData, isGoalProposalData, isGoalStatusData, isGoalProgressData, isGoalSuggestionData } from '@/types/events'
+import { isToolConfirmData, isAskUserData, isStepLimitData, isPlanReviewReadyData, isGoalProposalData, isGoalStatusData, isGoalProgressData, isGoalSuggestionData, isHitlResolvedData } from '@/types/events'
 import type { SessionEventKey } from '@/types/events'
-import { handleToolConfirmEvent, handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent } from './events/hitlHandlers'
+import { handleToolConfirmEvent, handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent, handleHitlResolvedEvent } from './events/hitlHandlers'
 import { handleGoalProposalEvent, handleGoalStatusEvent, handleGoalProgressEvent, handleGoalSuggestionEvent } from './events/goalHandlers'
 import { handleSessionPausedEvent, handleSessionResumedEvent } from './events/sessionLifecycleHandlers'
 import { classifySessionEvent, notifySessionCue } from './events/useSoundEvents'
@@ -237,6 +237,17 @@ export function useBackgroundSessionWatcher(): void {
           if (!isPlanReviewReadyData(data)) { reportDroppedEvent('plan_review_ready', data); return }
           announceBackgroundCue(sessionId, 'plan_review_ready', data)
           handlePlanReviewEvent(sessionId, data)
+        }),
+      )
+      // hitl_resolved — multi-surface HITL convergence: a pending prompt of
+      // ANY kind was consumed (usually by another surface, e.g. a second
+      // browser tab answering from there). Retire this frontend's background
+      // card and converge on the effective decision. No cue: the settlement
+      // is not an attention request (and classifySessionEvent maps no tone).
+      cleanups.push(
+        onSessionEvent(sessionId, 'hitl_resolved', (data) => {
+          if (!isHitlResolvedData(data)) { reportDroppedEvent('hitl_resolved', data); return }
+          handleHitlResolvedEvent(sessionId, data)
         }),
       )
       // Goal proposal — the derivation agent blocks on propose_goal until the
