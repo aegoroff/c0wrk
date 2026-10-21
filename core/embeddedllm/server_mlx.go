@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -59,7 +60,11 @@ func (spec LaunchSpec) mlxValidate() error {
 	if spec.ModelFile == "" {
 		return fmt.Errorf("%w: the model pack directory is required", ErrLaunchSpecInvalid)
 	}
-	if !path.IsAbs(spec.ModelFile) {
+	// Absolute in the POSIX dialect or on this host — a path relative in BOTH
+	// could be steered by the launch CWD. The engine host is darwin, where the
+	// two dialects coincide; accepting either keeps the guard intact on a
+	// foreign CI host that feeds POSIX-literal fixtures.
+	if !path.IsAbs(spec.ModelFile) && !filepath.IsAbs(spec.ModelFile) {
 		return fmt.Errorf("%w: the model pack directory %q must be absolute", ErrLaunchSpecInvalid, spec.ModelFile)
 	}
 	if spec.Host != LoopbackHost {
@@ -217,14 +222,13 @@ func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, err
 // pythonBinPath is the pinned interpreter the child is launched with
 // (<tree>/python/bin/python3.12): its directory seeds PATH and its tree root
 // holds the isolated config/model paths.
-// The path dialect is POSIX end to end — the engine's layout (`path.Dir`,
-// `path.Join`), not the host's `filepath`: production only ever calls this on
-// the darwin engine host, where the two agree, and the declared-goos contract
-// (see pathListSeparator) keeps the function table-testable from any CI
-// machine, including Windows hosts where filepath would corrupt the POSIX
-// inputs.
+// Paths in and out are in the HOST dialect — production feeds the real
+// staged-tree's paths, so the derivation uses filepath. The goos argument's
+// only decision is the PATH list separator (see pathListSeparator); that
+// split is what keeps the child-env table testable from any CI machine, with
+// fixtures built through the same host filepath.
 func mlxChildEnv(parent []string, goos, pythonBinPath string) []string {
-	treeRoot := path.Dir(path.Dir(path.Dir(pythonBinPath)))
+	treeRoot := filepath.Dir(filepath.Dir(filepath.Dir(pythonBinPath)))
 	env := make([]string, 0, len(parent)+6)
 	inheritedPATH := ""
 	for _, entry := range parent {
@@ -243,13 +247,13 @@ func mlxChildEnv(parent []string, goos, pythonBinPath string) []string {
 		env = append(env, entry)
 	}
 	if inheritedPATH == "" {
-		env = append(env, "PATH="+path.Dir(pythonBinPath))
+		env = append(env, "PATH="+filepath.Dir(pythonBinPath))
 	} else {
-		env = append(env, "PATH="+path.Dir(pythonBinPath)+pathListSeparator(goos)+inheritedPATH)
+		env = append(env, "PATH="+filepath.Dir(pythonBinPath)+pathListSeparator(goos)+inheritedPATH)
 	}
 	env = append(env,
 		"PYTHONNOUSERSITE=1",
-		"MTPLX_CONFIG="+path.Join(treeRoot, "config.toml"),
+		"MTPLX_CONFIG="+filepath.Join(treeRoot, "config.toml"),
 		"MTPLX_MODEL_DIR="+treeRoot, // never used for downloads (path-loaded), but never points at ~/.mtplx either
 	)
 	return env

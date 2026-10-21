@@ -200,7 +200,10 @@ func TestLaunchSpecMLX(t *testing.T) {
 // operator's PIP_*/PYTHON*/MTPLX_* influence is scrubbed, the pinned bin dir
 // leads PATH, user site-packages are off, temp passes through, and the
 // engine's own state is pointed inside the tree — set once, never inherited
-// as a duplicate a C reader could resolve first.
+// as a duplicate a C reader could resolve first. The fixture paths are built
+// with the host's filepath — the function's dialect (it receives the real
+// staged-tree paths in production) — so the scrub/shape verdicts are provable
+// on every CI machine; only the PATH list separator is a goos decision.
 func TestMLXChildEnv(t *testing.T) {
 	parent := []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
@@ -213,7 +216,9 @@ func TestMLXChildEnv(t *testing.T) {
 		"TMPDIR=/var/folders/tmp",
 		"HOME=/Users/operator",
 	}
-	python := "/runtimes/mtplx-" + MTPLXVersion + "/python/bin/python3.12"
+	python := string(filepath.Separator) + filepath.Join("runtimes", "mtplx-"+MTPLXVersion, "python", "bin", "python3.12")
+	treeRoot := filepath.Dir(filepath.Dir(filepath.Dir(python)))
+	binDir := filepath.Dir(python)
 	env := mlxChildEnv(parent, "darwin", python)
 
 	byName := map[string]string{}
@@ -233,8 +238,9 @@ func TestMLXChildEnv(t *testing.T) {
 	if byName["MTPLX_CONFIG"] == "/operator/.mtplx/config.toml" || byName["MTPLX_MODEL_DIR"] == "/operator/.mtplx" {
 		t.Fatal("child env resolved the operator's MTPLX_* values")
 	}
-	// The pinned bin dir FIRST on PATH, the operator's tail kept.
-	if want := "/runtimes/mtplx-" + MTPLXVersion + "/python/bin:/usr/local/bin:/usr/bin:/bin"; byName["PATH"] != want {
+	// The pinned bin dir FIRST on PATH, the operator's tail kept; the list
+	// separator is the declared goos's (darwin), a pure string choice.
+	if want := binDir + pathListSeparator("darwin") + "/usr/local/bin:/usr/bin:/bin"; byName["PATH"] != want {
 		t.Fatalf("PATH = %q, want %q", byName["PATH"], want)
 	}
 	if byName["PYTHONNOUSERSITE"] != "1" {
@@ -248,10 +254,10 @@ func TestMLXChildEnv(t *testing.T) {
 		t.Fatalf("HOME = %q, want it passed through", byName["HOME"])
 	}
 	// The engine's state is set exactly once, to the tree's own paths.
-	if want := "/runtimes/mtplx-" + MTPLXVersion + "/config.toml"; byName["MTPLX_CONFIG"] != want {
+	if want := filepath.Join(treeRoot, "config.toml"); byName["MTPLX_CONFIG"] != want {
 		t.Fatalf("MTPLX_CONFIG = %q, want %q", byName["MTPLX_CONFIG"], want)
 	}
-	if want := "/runtimes/mtplx-" + MTPLXVersion; byName["MTPLX_MODEL_DIR"] != want {
+	if want := treeRoot; byName["MTPLX_MODEL_DIR"] != want {
 		t.Fatalf("MTPLX_MODEL_DIR = %q, want %q", byName["MTPLX_MODEL_DIR"], want)
 	}
 	for _, entry := range env {
@@ -264,7 +270,7 @@ func TestMLXChildEnv(t *testing.T) {
 	// A parent without PATH still yields a working child.
 	bare := mlxChildEnv([]string{"HOME=/Users/operator"}, "darwin", python)
 	joined := strings.Join(bare, "\n")
-	if !strings.Contains(joined, "PATH=/runtimes/mtplx-"+MTPLXVersion+"/python/bin\n") {
+	if !strings.Contains(joined, "PATH="+binDir+"\n") {
 		t.Fatalf("PATH-less parent produced %q without the pinned bin dir", joined)
 	}
 }
