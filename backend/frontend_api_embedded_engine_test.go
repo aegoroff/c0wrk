@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,9 @@ func TestInstallEmbeddedLLMResolveErrorReleasesTheGate(t *testing.T) {
 // gap on either side silently demotes `context.mode: exact` under mtplx to a
 // dead-but-advertised setting.
 func TestInstallEmbeddedLLMTuningReachesThePreflightAndTheRun(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skipf("the mtplx engine gate refuses before pricing on %s/%s; the preflight pricing verdict under test is a darwin/arm64 one", runtime.GOOS, runtime.GOARCH)
+	}
 	pinnedExact := func(f *FrontendAPI) {
 		t.Helper()
 		f.configMu.Lock()
