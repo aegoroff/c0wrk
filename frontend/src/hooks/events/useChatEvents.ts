@@ -70,10 +70,14 @@ export const MESSAGE_RECEIVED_SCAN_DEPTH = 5
  * echo of that card); a surface that did not send has no optimistic copy and
  * renders the card from the event.
  *
- * The drop decision compares the event text against the tail of user
- * messages by content + time window. A card this handler synthesized for a
- * PREVIOUS received event (metadata.received) is never a match target — a
- * repeated identical message is a genuinely new message and must render as
+ * The drop decision: when the echo carries a clientSendId (the sending
+ * surface's optimistic-card id), the match is exact identity against the tail
+ * of user cards — identical text sent from ANOTHER surface has a different id
+ * and must render its own card. Without an id (sends that rendered no
+ * optimistic card) the decision falls back to comparing the event text
+ * against the tail by content + time window. A card this handler synthesized
+ * for a PREVIOUS received event (metadata.received) is never a match target —
+ * a repeated identical message is a genuinely new message and must render as
  * its own card, not be glued to the previous one.
  *
  * Pure + exported so it is unit-testable without the Wails runtime.
@@ -82,6 +86,7 @@ export function shouldAddReceivedUserMessage(
   messages: ChatMessageUI[],
   text: string,
   now: number,
+  clientSendId?: string,
   windowMs: number = MESSAGE_RECEIVED_ECHO_WINDOW_MS,
 ): boolean {
   if (!text) return false
@@ -90,6 +95,11 @@ export function shouldAddReceivedUserMessage(
     const m = messages[i]!
     if (m.type !== 'user') continue
     scanned++
+    if (clientSendId) {
+      // Id-based dedup: the echo twin is exactly this optimistic card.
+      if (m.id === clientSendId) return false
+      continue
+    }
     // A card rendered from an earlier message_received event is not an
     // optimistic send copy — skip it when hunting for the echo's twin.
     if (m.metadata?.received === true) continue
@@ -448,7 +458,11 @@ export function useChatEvents(sessionId: string | null): void {
         // Imperative read (not a reactive selector) — safe despite the ⚠️
         // in selectSessionMessages, which only applies to useStore(selector).
         const msgs = selectSessionMessages(store, sessionId)
-        if (!shouldAddReceivedUserMessage(msgs, data.text, Date.now())) return
+        // The echo carries the sender's optimistic-card id (client_send_id)
+        // whenever the send rendered one: the dedup then matches that id
+        // exactly, so a second surface sending identical text inside the
+        // window keeps its own card instead of being swallowed as the echo.
+        if (!shouldAddReceivedUserMessage(msgs, data.text, Date.now(), data.client_send_id)) return
         store.addMessage(sessionId, {
           id: generateMessageId(),
           sessionId,

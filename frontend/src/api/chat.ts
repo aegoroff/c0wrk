@@ -26,6 +26,12 @@ import type { ChatMessage, TokenInfo, CompactionAvailability } from '@/types/mod
  *                   first message of a task. Mutually exclusive with goal.
  * @param reviewMode Marks the message as code review feedback the agent must
  *                   address (the system prompt gains a Code Review section).
+ * @param clientSendId Optional id of the optimistic user card this surface
+ *                     rendered before the RPC; the message_received echo
+ *                     carries it back so the sending surface dedups the echo
+ *                     by identity (two surfaces sending identical text inside
+ *                     the echo window stay two cards). Empty when no
+ *                     optimistic card was rendered.
  */
 export async function sendMessage(
   sessionId: string,
@@ -39,14 +45,15 @@ export async function sendMessage(
   goalBudget: string = '',
   e2s: boolean = false,
   reviewMode: boolean = false,
+  clientSendId: string = '',
 ): Promise<void> {
   try {
     const app = getApp()
     // Positional args must match the Go SendMessage binding EXACTLY
     // (id, text, skills, agents, mcpServers, modelOverride, reasoning, goal,
-    // goalBudget, e2s, reviewMode) — a drift silently drops mode flags
-    // before they reach HandleOptions.
-    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode)
+    // goalBudget, e2s, reviewMode, clientSendId) — a drift silently drops
+    // mode flags before they reach HandleOptions.
+    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode, clientSendId)
   } catch (err) {
     logger.error('Failed to send message:', err)
     throw err

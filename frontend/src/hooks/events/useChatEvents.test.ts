@@ -225,6 +225,34 @@ describe('shouldAddReceivedUserMessage', () => {
     ]
     expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(true)
   })
+
+  it('drops the echo by optimistic-card id even past an interleaved received card', () => {
+    // Id-based dedup: the twin is identified by id, not content — the scan
+    // must find it at the bounded tail depth like the content fallback.
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 100 }),
+      makeUI({ type: 'user', content: 'interjection', metadata: { received: true }, timestamp: NOW - 50 }),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-1')).toBe(false)
+  })
+
+  it('renders the event when the id has no twin (another surface sent identical text)', () => {
+    // Surface A's optimistic card holds id opt-1; surface B sends the SAME
+    // text — its echo carries a different id and must ADD a card. The
+    // content+window fallback swallowed exactly this message (multi-surface
+    // dedup bug); the id must not.
+    const msgs = [makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 50 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-2')).toBe(true)
+  })
+
+  it('stops the id scan at the bounded tail depth', () => {
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 100 }),
+      ...Array.from({ length: MESSAGE_RECEIVED_SCAN_DEPTH + 2 }, (_, i) =>
+        makeUI({ type: 'user', content: `filler ${i}`, timestamp: NOW - 90 + i })),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-1')).toBe(true)
+  })
 })
 
 describe('useChatEvents terminal events → live unfinished-task overlay', () => {

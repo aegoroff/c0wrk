@@ -553,12 +553,19 @@ export function subscribe(eventName: string, callback: (...data: unknown[]) => v
   }
 }
 
-/** Emit a backend event (UI→backend direction). */
+/** Emit a backend event (UI→backend direction).
+ *
+ *  A silent no-op when no serving transport exists ('none', or the probe is
+ *  still 'pending' without a Wails runtime), mirroring the sibling
+ *  best-effort helpers (`logError`, `setWindowTitle`): every caller fires
+ *  this from unguarded paths (error toasts, feedback flashes), so a throw
+ *  would only become an unhandled rejection. */
 export function emit(eventName: string, data?: unknown): void {
   if (transportMode === 'web') {
     webEmit(eventName, data)
     return
   }
+  if (typeof window === 'undefined' || !window.runtime) return
   const rt = getRuntime()
   if (data !== undefined) {
     rt.EventsEmit(eventName, data)
@@ -791,9 +798,18 @@ export async function confirmExit(): Promise<void> {
   await app.ConfirmExit()
 }
 
-// Kick off web-transport detection once per page load. A Wails page resolved
-// synchronously above (its bindings are injected before any bundle code runs),
-// so this network ask only happens on a plain browser page; it settles
-// 'none' — silently — when no sidecar serves this origin. The promise never
-// rejects, so the floating kick cannot turn into an unhandled rejection.
-void ensureTransportDetection()
+/** Kick off the web-transport probe once per page load. A Wails page resolved
+ *  synchronously above (its bindings are injected before any bundle code
+ *  runs), so the network ask only happens on a plain browser page; it settles
+ *  'none' — silently — when no sidecar serves this origin. The promise never
+ *  rejects, so the kick cannot turn into an unhandled rejection. Idempotent:
+ *  ensureTransportDetection dedupes (settled modes short-circuit, in-flight
+ *  probes share one promise), so a double call is safe.
+ *
+ *  Called once from main.tsx before the first render. The probe used to run
+ *  as this module's import side effect — a documented deviation from the
+ *  no-module-side-effects rule that also fired a network request on every
+ *  test import. */
+export function initRuntimeProbe(): void {
+  void ensureTransportDetection()
+}

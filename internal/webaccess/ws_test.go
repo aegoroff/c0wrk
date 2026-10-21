@@ -27,8 +27,14 @@ import (
 )
 
 // dialWS performs the raw upgrade handshake and returns the open connection.
-func dialWS(t *testing.T, ts *httptest.Server, cookie, origin, key string) net.Conn {
+// The optional version argument overrides the Sec-WebSocket-Version header
+// (default "13") for negative handshake tests.
+func dialWS(t *testing.T, ts *httptest.Server, cookie, origin, key string, version ...string) net.Conn {
 	t.Helper()
+	ver := "13"
+	if len(version) > 0 {
+		ver = version[0]
+	}
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(context.Background(), "tcp", strings.TrimPrefix(ts.URL, "http://"))
 	if err != nil {
@@ -40,7 +46,7 @@ func dialWS(t *testing.T, ts *httptest.Server, cookie, origin, key string) net.C
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Sec-WebSocket-Key: " + key + "\r\n" +
-		"Sec-WebSocket-Version: 13\r\n"
+		"Sec-WebSocket-Version: " + ver + "\r\n"
 	if cookie != "" {
 		req += "Cookie: " + cookie + "\r\n"
 	}
@@ -174,6 +180,36 @@ func TestWSAdmissionMatrix(t *testing.T) {
 }
 
 func hostOrigin(host string) string { return "http://" + host }
+
+// TestWSHandshakeVersionValidation pins the RFC6455 version gate: only
+// version 13 upgrades; anything else is refused with 426 and the supported
+// version named back on the response.
+func TestWSHandshakeVersionValidation(t *testing.T) {
+	srv, ts := newTestServer(t, nil)
+	host := strings.TrimPrefix(ts.URL, "http://")
+	client := loginClient(t, ts.URL, srv.AuthToken())
+	cookie := cookieHeader(t, client, ts.URL)
+
+	// Unsupported version → 426 Upgrade Required with Sec-WebSocket-Version: 13.
+	conn := dialWS(t, ts, cookie, hostOrigin(host), "dmVyc2lvbi10ZXN0LWtleTEy", "12")
+	resp := readWSResponse(t, conn)
+	if resp.StatusCode != http.StatusUpgradeRequired {
+		_ = resp.Body.Close()
+		t.Fatalf("status = %d, want 426", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Sec-WebSocket-Version"); got != "13" {
+		t.Errorf("Sec-WebSocket-Version = %q, want 13", got)
+	}
+	_ = resp.Body.Close()
+
+	// The supported version still upgrades.
+	conn = dialWS(t, ts, cookie, hostOrigin(host), "dmVyc2lvbi10ZXN0LWtleTEz")
+	resp = readWSResponse(t, conn)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status with version 13 = %d, want 101", resp.StatusCode)
+	}
+}
 
 func TestWSHandshakeAcceptValue(t *testing.T) {
 	srv, ts := newTestServer(t, nil)

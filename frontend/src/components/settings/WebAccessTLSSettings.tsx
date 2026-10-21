@@ -51,9 +51,11 @@ export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps
   }, [info.tlsCert])
 
   const reread = useCallback(async () => {
-    // A failed re-read rolls the display back — the backend still holds the
-    // previous value everywhere the UI can verify.
-    onInfo(await getWebAccessInfo())
+    // A failed re-read answers null and keeps the current display: blanking
+    // the section (onInfo(null) unmounts this block) over one transient RPC
+    // failure is worse than a possibly-stale value.
+    const fresh = await getWebAccessInfo()
+    if (fresh) onInfo(fresh)
   }, [onInfo])
 
   /** Toggle HTTPS: optimistic, then persist+apply through one RPC; the

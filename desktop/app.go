@@ -973,8 +973,9 @@ type WebAccessInfo struct {
 	// "ok" — the pair loads and the leaf covers the bind's browser-facing
 	// host within its validity window; "mismatch" — the leaf does not cover
 	// that host (the canonical trigger: the bind was changed after the pair
-	// was generated; regenerating is the fix); "expired" — the leaf is past
-	// NotAfter; "unreadable" — the pair cannot be loaded/parsed (missing
+	// was generated; regenerating is the fix); "expired" — the leaf is
+	// outside its validity window (past NotAfter or not yet valid before
+	// NotBefore); "unreadable" — the pair cannot be loaded/parsed (missing
 	// file, parse error, key/cert mismatch). Empty when no cert path is
 	// configured — nothing to classify.
 	CertStatus string `json:"cert_status"`
@@ -1414,11 +1415,13 @@ func (a *App) GenerateWebAccessCertificate() error {
 // (tls.LoadX509KeyPair) and the leaf is checked against the pinned bind —
 // SAN coverage of the bind's browser-facing host (webAccessURLHost: the same
 // rewrite the rendered URL applies, so the status certifies the address the
-// browser actually opens) and expiry (NotAfter). The check order is fixed so
+// browser actually opens) and validity window (NotBefore/NotAfter). The check
+// order is fixed so
 // the classification is deterministic: unreadable (nothing about an
 // unloadable pair can be judged) → mismatch (deterministic,
 // config-derived — the canonical changed-bind trigger) → expired
-// (clock-derived) → ok. An unconfigured cert path is the empty status with
+// (clock-derived: past NotAfter or not yet valid before NotBefore) → ok.
+// An unconfigured cert path is the empty status with
 // no detail.
 func classifyWebAccessCert(certPath, keyPath, bind string) (status, detail string) {
 	if certPath == "" {
@@ -1442,6 +1445,12 @@ func classifyWebAccessCert(certPath, keyPath, bind string) (status, detail strin
 	if !time.Now().Before(leaf.NotAfter) {
 		return webAccessCertStatusExpired, fmt.Sprintf(
 			"the certificate expired %s — regenerate the pair to renew it", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+	if time.Now().Before(leaf.NotBefore) {
+		// Same clock-derived bucket as expired: the pair is outside its
+		// validity window, which is what the status vocabulary expresses.
+		return webAccessCertStatusExpired, fmt.Sprintf(
+			"the certificate is not valid until %s — check the system clock or regenerate the pair", leaf.NotBefore.UTC().Format(time.RFC3339))
 	}
 	return webAccessCertStatusOK, ""
 }

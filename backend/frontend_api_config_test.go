@@ -4002,10 +4002,11 @@ func TestUpdateExperimentalFeatures_InvokesHookAfterPersist(t *testing.T) {
 
 // TestUpdateExperimentalFeatures_PersistFailureSkipsHook pins the negative
 // half of the hook contract: a rejected disk write must not fire the desktop
-// hook (the sidecar lifecycle follows PERSISTED operator intent), while the
-// in-memory gate still carries the toggle — the pre-existing contract the
-// Warn-instead-of-return behavior encodes. The Warn is intercepted at its
-// source (severity, message, payload) instead of leaking to the test output.
+// hook (the sidecar lifecycle follows PERSISTED operator intent), and the
+// in-memory gate is rolled back so the applied gate never diverges from the
+// persisted state — the failure surfaces as a returned error. The Warn is
+// intercepted at its source (severity, message, payload) instead of leaking
+// to the test output.
 func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
 	f, _, _ := newTestAPI(t)
 
@@ -4021,14 +4022,18 @@ func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
 	f.configPath = filepath.Join(f.configPath, "missing-dir", "config.yaml")
 	f.configMu.Unlock()
 
-	if err := f.UpdateExperimentalFeatures(true); err != nil {
-		t.Fatalf("a failed persist is warned, not returned: %v", err)
+	err := f.UpdateExperimentalFeatures(true)
+	if err == nil {
+		t.Fatal("a failed persist must be returned as an error, not swallowed")
+	}
+	if !strings.Contains(err.Error(), "persisting experimental features toggle") {
+		t.Errorf("error = %v, want it to name the failed persist", err)
 	}
 	if hookRan {
 		t.Error("the desktop hook fired despite the failed persist — it must follow persisted intent only")
 	}
-	if !f.experimentalFeaturesEnabled() {
-		t.Error("in-memory gate should still carry the toggle after a failed persist (existing contract)")
+	if f.experimentalFeaturesEnabled() {
+		t.Error("in-memory gate must be rolled back on a failed persist (no divergence from the persisted state)")
 	}
 
 	// Exactly one intercepted WARN names the failed persist.

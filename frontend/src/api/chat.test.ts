@@ -133,7 +133,7 @@ describe('sendMessage forwards MCP server mentions', () => {
     expect(args[4]).toEqual(['context7'])
     // modelOverride stays in position 6 right after the mention lists.
     expect(args[5]).toBe('')
-    expect(args).toHaveLength(11)
+    expect(args).toHaveLength(12)
   })
 
   it('defaults activeMCPServers to an empty array when omitted', async () => {
@@ -147,15 +147,15 @@ describe('sendMessage forwards MCP server mentions', () => {
 
     const args = calls[0]!
     expect(args[4]).toEqual([])
-    expect(args).toHaveLength(11)
+    expect(args).toHaveLength(12)
   })
 })
 
 // e2s must land in the EXACT Go-binding argument position (after goalBudget,
 // before reviewMode): (id, text, skills, agents, mcpServers, modelOverride,
-// reasoning, goal, goalBudget, e2s, reviewMode). A positional drift silently
-// reroutes mode flags — e.g. a review submit's reviewMode=true would arm E2S
-// instead.
+// reasoning, goal, goalBudget, e2s, reviewMode, clientSendId). A positional
+// drift silently reroutes mode flags — e.g. a review submit's reviewMode=true
+// would arm E2S instead.
 describe('sendMessage forwards the e2s flag positionally', () => {
   beforeEach(() => {
     delete mockApp.SendMessage
@@ -175,8 +175,9 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     expect(args[7]).toBe(false) // goal
     expect(args[8]).toBe('{"max_turns":5}') // goalBudget
     expect(args[9]).toBe(true) // e2s — the wiring under test
-    expect(args[10]).toBe(true) // reviewMode — must stay the LAST arg
-    expect(args).toHaveLength(11)
+    expect(args[10]).toBe(true) // reviewMode
+    expect(args[11]).toBe('') // clientSendId — the LAST arg (echo-dedup id)
+    expect(args).toHaveLength(12)
   })
 
   it('defaults e2s to false (and reviewMode stays false) when omitted', async () => {
@@ -191,7 +192,47 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     const args = calls[0]!
     expect(args[9]).toBe(false)
     expect(args[10]).toBe(false)
-    expect(args).toHaveLength(11)
+    expect(args[11]).toBe('')
+    expect(args).toHaveLength(12)
+  })
+})
+
+// clientSendId must land in the EXACT Go-binding argument position 12 (after
+// reviewMode): the message_received echo carries it back and the sending
+// surface dedups the echo by this id. A drift here silently disables the
+// id-based echo dedup — or shifts reviewMode.
+describe('sendMessage forwards the client send id positionally', () => {
+  beforeEach(() => {
+    delete mockApp.SendMessage
+  })
+
+  it('passes clientSendId in position 12 (after reviewMode)', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'hello', [], [], [], '', '', false, '', false, false, 'opt-1')
+
+    const args = calls[0]!
+    expect(args[10]).toBe(false) // reviewMode stays put
+    expect(args[11]).toBe('opt-1')
+    expect(args).toHaveLength(12)
+  })
+
+  it('defaults clientSendId to an empty string when omitted', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'plain message')
+
+    const args = calls[0]!
+    expect(args[11]).toBe('')
+    expect(args).toHaveLength(12)
   })
 })
 

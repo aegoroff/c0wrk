@@ -16,7 +16,7 @@ interface CopyButtonProps {
 }
 
 /** Which success state the button is flashing, if any. */
-type Feedback = 'copied' | 'saved' | 'failed' | null
+type Feedback = 'copied' | 'saved' | 'download-started' | 'failed' | null
 
 /**
  * CopyButton — small, low-contrast copy-to-clipboard control.
@@ -80,7 +80,9 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
       anchor.download = 'message.md'
       anchor.click()
       URL.revokeObjectURL(url)
-      flashFeedback('saved')
+      // The anchor click cannot report failure (a popup blocker can eat it
+      // silently) — claim only that the download was handed to the browser.
+      flashFeedback('download-started')
       return
     }
     saveMessageAsMarkdown(text)
@@ -105,11 +107,13 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
       ? 'Copied'
       : feedback === 'saved'
         ? 'Saved'
-        : feedback === 'failed'
-          ? 'Failed'
-          : shiftHeld
-            ? 'Save'
-            : label
+        : feedback === 'download-started'
+          ? 'Download started'
+          : feedback === 'failed'
+            ? 'Failed'
+            : shiftHeld
+              ? 'Save'
+              : label
   const Icon =
     feedback === 'failed' ? X : feedback !== null ? Check : shiftHeld ? Save : Copy
 

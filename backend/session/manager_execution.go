@@ -69,7 +69,7 @@ func (m *Manager) finishLiveLeftover(_ context.Context, id string, session *Sess
 	}
 	joined := strings.Join(leftover, "\n\n")
 	m.log().Info("launching follow-up task for undelivered live messages", "session_id", id, "count", len(leftover))
-	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, joined, nil, nil, nil, "", "", false, "", false, false, true); err != nil {
+	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, joined, "", nil, nil, nil, "", "", false, "", false, false, true); err != nil {
 		if errors.Is(err, ErrSessionCompacting) && m.requeueLiveMessages(session, joined) {
 			m.log().Info("follow-up deferred by manual compaction: live messages re-queued", "session_id", id)
 			m.emitFunc(Event{
@@ -622,12 +622,20 @@ type SendOption func(*sendOptions)
 // sendOptions carries the resolved option values for one dispatch.
 type sendOptions struct {
 	echoText string
+	// clientSendID is the sending surface's optimistic-card id, when the
+	// send originates from a surface that rendered one. The message_received
+	// echo carries it back so the sender dedups by identity instead of
+	// content+time-window: two surfaces sending identical text inside the
+	// echo window then stay two distinct cards instead of one echo being
+	// swallowed (frontend useChatEvents).
+	clientSendID string
 }
 
 // WithEchoText overrides the user-facing text carried by the message_received
 // event. The event is the UI's delivery notification: every surface watching
 // the session renders the user card from it, and the sending surface dedupes
-// it against its optimistic card by exact content. The manager's text
+// it against its optimistic card by send id when one was attached
+// (WithClientMessageID), falling back to exact content otherwise. The manager's text
 // parameter is the POST-preprocessing form (/-mention refs stripped, @file
 // refs resolved) built for the orchestrator, while the persisted message row
 // and the sending surface's optimistic card hold the RAW user input. Callers
@@ -639,6 +647,16 @@ type sendOptions struct {
 // historical behavior every internal caller and existing test relies on.
 func WithEchoText(raw string) SendOption {
 	return func(o *sendOptions) { o.echoText = raw }
+}
+
+// WithClientMessageID attaches the sending surface's optimistic-card id to
+// the message_received echo. The sender's echo dedup matches this id exactly,
+// so another surface sending the same text inside the echo window renders its
+// own card instead of being dropped as the sender's echo. Internal callers
+// without an optimistic card (resume drain, follow-up relaunch) omit it and
+// the echo carries no id.
+func WithClientMessageID(id string) SendOption {
+	return func(o *sendOptions) { o.clientSendID = id }
 }
 
 // resolveSendOptions applies opts over the defaults and falls an empty echo
@@ -663,7 +681,7 @@ func resolveSendOptions(text string, opts []SendOption) sendOptions {
 // The task itself runs in a goroutine and reports via events.
 func (m *Manager) SendMessageClassified(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool, opts ...SendOption) (SendClassification, error) {
 	o := resolveSendOptions(text, opts)
-	return m.sendMessage(ctx, id, text, o.echoText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, false)
+	return m.sendMessage(ctx, id, text, o.echoText, o.clientSendID, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, false)
 }
 
 // liveAction tells the request epilogue what to do with live user messages
@@ -758,7 +776,9 @@ func (m *Manager) refreshAutonomyPosture(session *Session) {
 // user-facing form the message_received event carries (WithEchoText) — the
 // two differ whenever preprocessing changed the input, and the UI dedup
 // (frontend useChatEvents) matches the echo against the raw optimistic card.
-func (m *Manager) sendMessage(ctx context.Context, id, text, echoText string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode, presented bool) (SendClassification, error) {
+// clientSendID is that card's id (WithClientMessageID); empty when the caller
+// rendered no optimistic card.
+func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSendID string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode, presented bool) (SendClassification, error) {
 	// No task may be launched once Shutdown has begun (see ResumeTask).
 	if m.shuttingDown.Load() {
 		return SendFresh, errors.New("session manager is shutting down")
@@ -810,8 +830,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText string, ac
 			SessionID: id,
 			Type:      "message_received",
 			Data: MessageReceivedData{
-				SessionID: id,
-				Text:      echoText,
+				SessionID:    id,
+				Text:         echoText,
+				ClientSendID: clientSendID,
 			},
 		})
 		return SendLive, nil
@@ -841,8 +862,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText string, ac
 			SessionID: id,
 			Type:      "message_received",
 			Data: MessageReceivedData{
-				SessionID: id,
-				Text:      echoText,
+				SessionID:    id,
+				Text:         echoText,
+				ClientSendID: clientSendID,
 			},
 		})
 		return SendNudgeResume, m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
@@ -939,8 +961,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText string, ac
 			SessionID: id,
 			Type:      "message_received",
 			Data: MessageReceivedData{
-				SessionID: id,
-				Text:      echoText,
+				SessionID:    id,
+				Text:         echoText,
+				ClientSendID: clientSendID,
 			},
 		})
 	}

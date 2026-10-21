@@ -384,6 +384,45 @@ describe('useShallowResync', () => {
     expect(getSessionHistoryMock).toHaveBeenCalledTimes(2)
   })
 
+  it('a WS re-connect inside the min-interval still resyncs; focus stays throttled; bursts coalesce', async () => {
+    useSessionStore.setState({ activeSessionId: 's1' })
+    useProjectStore.setState({ activeProjectId: 'p1' })
+    renderHook()
+    await settleTransport()
+
+    // A reconnect alone runs and primes the min-interval window.
+    fireWSReconnected()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(1)
+
+    // (a) A reconnect landing INSIDE the min-interval window still resyncs:
+    // the transport keeps no replay, so dropping it would strand the events
+    // missed during the outage with no retry.
+    await vi.advanceTimersByTimeAsync(500)
+    fireWSReconnected()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(2)
+    expect(listSessionsMock).toHaveBeenCalledTimes(2)
+
+    // (b) Focus inside the same window is still throttled.
+    fireFocus()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(2)
+
+    // (c) A reconnect burst coalesces into ONE debounced run — no duplicate
+    // concurrent fetches even past the min-interval gate.
+    fireWSReconnected()
+    fireWSReconnected()
+    fireWSReconnected()
+    await vi.advanceTimersByTimeAsync(400)
+    await flushMicrotasks()
+    expect(getSessionHistoryMock).toHaveBeenCalledTimes(3)
+    expect(listSessionsMock).toHaveBeenCalledTimes(3)
+  })
+
   it('a session switch mid-flight discards the history leg without writing the store', async () => {
     useSessionStore.setState({ activeSessionId: 's1' })
     useProjectStore.setState({ activeProjectId: 'p1' })

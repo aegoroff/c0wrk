@@ -274,7 +274,10 @@ describe('CopyButton in web transport (no native save dialog)', () => {
     expect(await blob?.text()).toBe('markdown body')
     expect(anchorClick).toHaveBeenCalledTimes(1)
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
-    expect(container.textContent).toContain('Saved')
+    // The anchor download cannot report failure — the feedback claims only
+    // that it started, never "Saved".
+    expect(container.textContent).toContain('Download started')
+    expect(container.textContent).not.toContain('Saved')
   })
 
   it('the plain click still copies through the shared transport clipboard', async () => {

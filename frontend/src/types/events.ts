@@ -493,6 +493,13 @@ export interface MemoryReadData {
 export interface MessageReceivedData {
   readonly session_id: string
   readonly text: string
+  /**
+   * Id of the sending surface's optimistic card, echoed back when the send
+   * rendered one. The sending surface dedups this echo by it (exact
+   * identity); every other surface has no matching card and renders its own.
+   * Absent on sends that rendered no optimistic card.
+   */
+  readonly client_send_id?: string
 }
 
 /**
@@ -1613,7 +1620,8 @@ export function isMemoryReadData(d: unknown): d is MemoryReadData {
  */
 export function isMessageReceivedData(d: unknown): d is MessageReceivedData {
   if (!isObj(d)) return false
-  return typeof d.session_id === 'string' && typeof d.text === 'string'
+  return typeof d.session_id === 'string' && typeof d.text === 'string' &&
+    (d.client_send_id === undefined || typeof d.client_send_id === 'string')
 }
 
 // --- E2S event type guards ---

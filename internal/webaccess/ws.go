@@ -102,6 +102,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "websocket upgrade required")
 		return
 	}
+	// RFC6455 §4.2.2: only version 13 is spoken here; a mismatched request is
+	// refused with the supported version named back. Checked after the
+	// upgrade-header gate so a non-upgrade request keeps its 400.
+	if v := r.Header.Get("Sec-WebSocket-Version"); v != "13" {
+		w.Header().Set("Sec-WebSocket-Version", "13")
+		writeJSONError(w, http.StatusUpgradeRequired, "unsupported websocket version")
+		return
+	}
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -223,7 +231,11 @@ func (s *Server) closeAllWS() {
 	s.wsConns = make(map[*WSConn]struct{})
 	s.wsMu.Unlock()
 	for _, c := range conns {
-		c.Close()
+		// Stop-path teardown aborts instead of Close: the close frame write
+		// carries a 10s deadline per client, so a wedged peer would stall
+		// shutdown tab-by-tab after the stop budget already expired. The
+		// browser reconnects with backoff.
+		c.abort()
 	}
 }
 
@@ -265,8 +277,9 @@ func (s *Server) liveConns() []*WSConn {
 }
 
 // Close tears the connection down (idempotent) and unregisters it. The
-// best-effort close frame keeps graceful paths (Stop, protocol close) clean;
-// it is bounded by wsWriteTimeout.
+// best-effort close frame keeps graceful per-client paths (read-loop end,
+// protocol close) clean; it is bounded by wsWriteTimeout. The server stop
+// path uses abort instead — shutdown must never wait on a peer-bound write.
 func (c *WSConn) Close() {
 	c.closed.Do(func() {
 		c.srv.unregisterWS(c)

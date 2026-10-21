@@ -88,6 +88,8 @@ func TestSendMessage_EchoDefaultsToDispatchText(t *testing.T) {
 
 	if data := waitForReceived(t, eventChan); data.Text != dispatchText {
 		t.Errorf("echo text = %q, want the dispatch text %q", data.Text, dispatchText)
+	} else if data.ClientSendID != "" {
+		t.Errorf("echo client_send_id = %q, want empty without WithClientMessageID", data.ClientSendID)
 	}
 }
 
@@ -109,5 +111,40 @@ func TestSendMessage_EchoCarriesRawText_LiveInterjection(t *testing.T) {
 	}
 	if data := waitForReceived(t, events); data.Text != raw {
 		t.Errorf("echo text = %q, want the RAW input %q", data.Text, raw)
+	}
+}
+
+// The echo carries the sending surface's optimistic-card id back
+// (WithClientMessageID): the sender dedups the echo by this id instead of
+// content+time-window, so a second surface sending identical text inside the
+// dedup window renders its own card instead of being swallowed as the echo.
+func TestSendMessage_EchoCarriesClientSendID(t *testing.T) {
+	const (
+		raw = "identical text on two surfaces"
+		id  = "opt-abc123"
+	)
+	caller := &scriptedLLM{scripted: []*llm.ChatResponse{
+		routingJSONResponse("software_engineering", 1),
+		finishResponse("done"),
+	}}
+	eventChan := make(chan Event, 100)
+	mgr := NewManager(routingFunctionalFactory(caller), func(e Event) { eventChan <- e }, runtimeTempDir(t))
+	t.Cleanup(mgr.Shutdown)
+
+	info, err := mgr.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	if _, err := mgr.SendMessageClassified(context.Background(), info.ID, raw, nil, nil, nil, "", "", false, "", false, false, WithEchoText(raw), WithClientMessageID(id)); err != nil {
+		t.Fatalf("SendMessageClassified failed: %v", err)
+	}
+
+	data := waitForReceived(t, eventChan)
+	if data.Text != raw {
+		t.Errorf("echo text = %q, want the raw input %q", data.Text, raw)
+	}
+	if data.ClientSendID != id {
+		t.Errorf("echo client_send_id = %q, want the optimistic-card id %q", data.ClientSendID, id)
 	}
 }

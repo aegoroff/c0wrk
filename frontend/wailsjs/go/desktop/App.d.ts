@@ -393,7 +393,7 @@ export function SearchVectorStore(arg1:backend.SearchRequest):Promise<Array<back
 
 export function SelectModelProfile(arg1:string):Promise<void>;
 
-export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:Array<string>,arg6:string,arg7:string,arg8:boolean,arg9:string,arg10:boolean,arg11:boolean):Promise<void>;
+export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:Array<string>,arg6:string,arg7:string,arg8:boolean,arg9:string,arg10:boolean,arg11:boolean,arg12:string):Promise<void>;
 
 export function SendSystemNotification(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
 

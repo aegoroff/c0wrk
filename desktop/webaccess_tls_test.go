@@ -500,7 +500,8 @@ func TestGenerateWebAccessCertificate_RestartsLiveSidecarOntoFreshPair(t *testin
 // TestGetWebAccessInfo_CertStatusMatrix pins the classification vocabulary
 // (ADR-092 decision 5): empty when unconfigured, ok when the pair covers the
 // pinned bind, mismatch after a bind change (the canonical trigger),
-// unreadable for an unloadable pair, expired past NotAfter — and the
+// unreadable for an unloadable pair, expired past NotAfter or not yet valid
+// before NotBefore (the same clock-derived bucket) — and the
 // wildcard-bind rewrite is shared with the URL renderer, so a pair covering
 // localhost stays ok under 0.0.0.0.
 func TestGetWebAccessInfo_CertStatusMatrix(t *testing.T) {
@@ -566,6 +567,22 @@ func TestGetWebAccessInfo_CertStatusMatrix(t *testing.T) {
 	st, detail = status()
 	if st != webAccessCertStatusExpired || detail == "" {
 		t.Fatalf("status with the expired pair = %q (%q), want expired with a detail", st, detail)
+	}
+
+	// Not-yet-valid pair → the same clock-derived expired bucket, with the
+	// validity start named (the vocabulary has no separate not-yet-valid
+	// status; the detail tells the two cases apart).
+	futureCert, futureKey := writeTLSPairFiles(t, dir, "future.crt", "future.key",
+		time.Now().Add(24*time.Hour), time.Now().Add(48*time.Hour), "127.0.0.1")
+	if err := a.SetWebAccessTLS(true, futureCert, futureKey); err != nil {
+		t.Fatalf("configure not-yet-valid pair: %v", err)
+	}
+	st, detail = status()
+	if st != webAccessCertStatusExpired || detail == "" {
+		t.Fatalf("status with the not-yet-valid pair = %q (%q), want expired with a detail", st, detail)
+	}
+	if !strings.Contains(detail, "not valid until") {
+		t.Errorf("not-yet-valid detail = %q, want it to name the validity start", detail)
 	}
 }
 

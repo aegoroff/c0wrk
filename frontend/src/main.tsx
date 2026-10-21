@@ -14,6 +14,13 @@ import {
   removeOrphanSystemFontKey,
 } from './stores/fontStore'
 import { installFloatingUiZoomCompensation } from './lib/floatingUiZoom'
+import { initRuntimeProbe } from './api/runtime'
+
+// Start the web-transport probe before anything renders. Earliest legal
+// point: the probe used to run as api/runtime's import side effect, which
+// broke the no-module-side-effects rule; starting it here still beats the
+// first render (and the splash gate that awaits the transport).
+initRuntimeProbe()
 
 // Apply the persisted theme before first paint to avoid a flash of the
 // default (dark) theme. Accessing getState() rehydrates from localStorage

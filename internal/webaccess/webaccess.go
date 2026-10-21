@@ -33,9 +33,11 @@
 // Security posture (stage 2, ADR-090):
 //   - Bind = any valid IP literal or "localhost" (config.IsValidWebAccessBind).
 //     Loopback stays the safe default; a NON-loopback bind makes the listener
-//     reachable beyond this machine over plain HTTP without TLS, and New
-//     warns about exactly that — with no transport encryption the auth token
-//     is the only protection. An invalid bind is refused (fail-closed).
+//     reachable beyond this machine over plain HTTP unless web_access.tls is
+//     on, and New warns about exactly that — naming the transport: with no
+//     TLS the auth token is the only protection, under TLS the token still is
+//     (the pipe is encrypted, the credential is not optional). An invalid
+//     bind is refused (fail-closed).
 //   - Auth token: cfg.Token. The desktop layer guarantees a non-empty token
 //     before mounting: an empty config token is generated ONCE (GenerateToken)
 //     and persisted through the same config-save path every other settings
@@ -59,9 +61,9 @@
 // as encrypted never silently downgrades to plaintext; MinVersion is pinned
 // to TLS 1.2) and the cookie carries Secure. HttpOnly/SameSite=Strict, the
 // per-launch session secret and the token gate remain the compensations on
-// every transport; the non-loopback exposure warning stands unchanged with
-// or without TLS (ADR-092 decision 6). Websocket origin checks compare
-// Origin against r.Host, which stays correct on any interface.
+// every transport; the non-loopback exposure warning stands with or without
+// TLS, naming the effective transport (ADR-092 decision 6). Websocket origin
+// checks compare Origin against r.Host, which stays correct on any interface.
 package webaccess
 
 import (
@@ -122,8 +124,8 @@ type Options struct {
 	// Config is the resolved `web_access` config section. New refuses a
 	// disabled section (ErrDisabled) and an invalid bind
 	// (config.IsValidWebAccessBind); a valid non-loopback bind is accepted
-	// with a startup warning (network exposure — the warning text stands
-	// unchanged under TLS, ADR-092 decision 6). A TLS-enabled section must
+	// with a startup warning (network exposure — the warning names the
+	// effective transport, ADR-092 decision 6). A TLS-enabled section must
 	// carry a readable cert/key pair; New fails closed otherwise.
 	Config config.WebAccessConfig
 	// Dispatch is the RPC target: at runtime a *backend.FrontendAPI. Only its
@@ -251,12 +253,16 @@ func New(opts Options) (*Server, error) {
 
 	// Stage-2 posture: a valid non-loopback bind puts the listener on the
 	// network. Allowed (the operator owns the exposure decision) but loudly
-	// surfaced — plain HTTP without TLS means the auth token is the only
-	// protection out there. ADR-092 keeps this warning byte-identical with
-	// and without TLS: the exposure classification is about reachability,
-	// never encryption, and ADR-090 decision 12's warn-only model stands.
+	// surfaced — the warning names the effective transport so it stays
+	// truthful under web_access.tls (ADR-092); the exposure classification
+	// itself is about reachability, never encryption, and ADR-090 decision
+	// 12's warn-only model stands.
 	if !config.IsLoopbackBind(opts.Config.Bind) {
-		log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection", opts.Config.Bind))
+		if tlsCfg != nil {
+			log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, the transport is TLS-encrypted, the auth token is the only protection", opts.Config.Bind))
+		} else {
+			log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection", opts.Config.Bind))
+		}
 	}
 
 	authToken := opts.Config.Token

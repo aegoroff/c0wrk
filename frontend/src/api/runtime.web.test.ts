@@ -138,9 +138,12 @@ async function freshRuntime(): Promise<RuntimeModule> {
 
 let runtime: RuntimeModule
 
-/** Import the module and wait until the transport probe has settled. */
+/** Import the module and wait until the transport probe has settled. The
+ *  init is called explicitly — the probe no longer runs as an import side
+ *  effect. */
 async function bootedRuntime(): Promise<RuntimeModule> {
   const mod = await freshRuntime()
+  mod.initRuntimeProbe()
   await mod.transportDetection()
   return mod
 }
@@ -257,6 +260,16 @@ describe('transport detection', () => {
     expect(fetchCalls).toHaveLength(0)
   })
 
+  it('initRuntimeProbe is idempotent: a double call sends exactly one probe', async () => {
+    runtime = await freshRuntime()
+    runtime.initRuntimeProbe()
+    runtime.initRuntimeProbe()
+    expect(await runtime.transportDetection()).toBe('web')
+
+    // The transport request went out once, no matter how often the kick ran.
+    expect(fetchCalls.filter((c) => c.url === '/api/transport')).toHaveLength(1)
+  })
+
   it('delivers events to a subscription made while the probe is still in flight', async () => {
     // Park the probe mid-flight: the page has neither Wails bit and the
     // bootstrap answer has not arrived yet.
@@ -266,6 +279,7 @@ describe('transport detection', () => {
         resolveTransport = resolve
       })
     runtime = await freshRuntime()
+    runtime.initRuntimeProbe()
     expect(runtime.isWebTransport()).toBe(false) // conservative while pending
 
     const seen: unknown[] = []
@@ -798,6 +812,16 @@ describe('desktop transport stays on the Wails runtime', () => {
     expect(calls).toEqual(['clipboard', 'emit:runtime_error', 'open:https://example.com', 'title:t', 'log:m'])
     expect(open).not.toHaveBeenCalled()
   })
+
+  it('emit is a silent no-op when no runtime is available (mirrors the sibling best-effort helpers)', () => {
+    // Error-toast and feedback callers fire emit from unguarded paths; a
+    // throw here would surface as an unhandled rejection, so the contract is
+    // the logError/setWindowTitle one: drop, never throw.
+    delete (window as unknown as Record<string, unknown>).runtime
+
+    expect(() => runtime.emit('runtime_error', { id: 'e1', message: 'x' })).not.toThrow()
+    expect(() => runtime.emit('session:ping')).not.toThrow()
+  })
 })
 
 describe('web transport login gating', () => {
@@ -834,6 +858,7 @@ describe('web transport login gating', () => {
         resolveTransport = resolve
       })
     runtime = await freshRuntime()
+    runtime.initRuntimeProbe()
     // The gate consumes this synchronously: the app must not mount while
     // the transport is unresolved (a mount-time RPC would beat the probe
     // and crash on the absent bindings).

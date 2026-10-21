@@ -97,11 +97,15 @@ export function useShallowResync(): void {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     let lastRunStartedAt = 0
 
-    const schedule = (): void => {
-      // Min-interval: an actual run just happened; drop this trigger.
-      if (Date.now() - lastRunStartedAt < RESYNC_MIN_INTERVAL_MS) return
+    // A bypass trigger (WS re-connect) skips the min-interval gate: the
+    // transport keeps no replay, so a reconnect dropped inside the window
+    // leaves the missed events unrecoverable — stale until the next trigger.
+    const schedule = (bypassMinInterval = false): void => {
       // Debounce: a run is already scheduled — this burst coalesces into it.
       if (debounceTimer !== null) return
+      // Min-interval: an actual run just happened; drop this trigger (unless
+      // a reconnect is asking).
+      if (!bypassMinInterval && Date.now() - lastRunStartedAt < RESYNC_MIN_INTERVAL_MS) return
       debounceTimer = setTimeout(() => {
         debounceTimer = null
         lastRunStartedAt = Date.now()
@@ -110,6 +114,9 @@ export function useShallowResync(): void {
     }
 
     const onFocus = (): void => schedule()
+    // A dedicated wrapper: notifyWSReconnected invokes its listeners bare, and
+    // the reconnect trigger must always ask for the bypass.
+    const onWSReconnect = (): void => schedule(true)
     const onVisibilityChange = (): void => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') schedule()
     }
@@ -127,7 +134,7 @@ export function useShallowResync(): void {
         document.removeEventListener('visibilitychange', onVisibilityChange)
       }
     })
-    const offWSReconnected = onWSReconnected(schedule)
+    const offWSReconnected = onWSReconnected(onWSReconnect)
 
     return () => {
       offWSReconnected()

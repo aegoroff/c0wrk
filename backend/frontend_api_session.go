@@ -371,7 +371,12 @@ func (f *FrontendAPI) PinSession(id string) error {
 // reviewMode, when true, marks the message as carrying code review feedback the
 // agent must address (review status == "submitted"); the system prompt gains a
 // Code Review section directing the agent to edit code.
-func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool) error {
+// clientSendID, when non-empty, is the sending surface's optimistic-card id;
+// the message_received echo carries it back so the sender dedups the echo by
+// identity instead of content+time-window (two surfaces sending the same text
+// inside the dedup window stay two cards). Internal sends without an
+// optimistic card pass "".
+func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool, clientSendID string) error {
 	// E2S and goal are alternative task modes with incompatible loop
 	// semantics; the frontend store enforces exclusivity, this is the
 	// server-side defense so a hand-crafted call cannot arm both. Checked
@@ -505,7 +510,7 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, a
 	// this, any message whose preprocessing actually changed the text (a
 	// leading "/skill" mention, an @file ref) renders twice on the sending
 	// surface: the optimistic card plus a ref-less duplicate from the echo.
-	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, session.WithEchoText(text))
+	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, session.WithEchoText(text), session.WithClientMessageID(clientSendID))
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

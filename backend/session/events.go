@@ -91,6 +91,12 @@ type SessionPinnedData struct {
 type MessageReceivedData struct {
 	SessionID string `json:"session_id"`
 	Text      string `json:"text"`
+	// ClientSendID, when non-empty, is the sending surface's optimistic-card
+	// id echoed back (WithClientMessageID): the sender dedups the echo by
+	// this id instead of content+time-window, so identical text sent from
+	// another surface inside the dedup window still renders. Absent on sends
+	// without an optimistic card.
+	ClientSendID string `json:"client_send_id,omitempty"`
 }
 
 // TaskCompleteData is the payload for "task_complete" events.

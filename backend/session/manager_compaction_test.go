@@ -583,7 +583,7 @@ func TestSendMessage_FreshTaskRejectedWhenCompactionArmsMidGap(t *testing.T) {
 	manager, sess, _, _, _ := newCompactionTestManager(t)
 	manager.SetTaskStore(&compactingArmingStore{sess: sess})
 
-	_, err := manager.sendMessage(context.Background(), sess.ID, "hello", "hello", nil, nil, nil, "", "", false, "", false, false, false)
+	_, err := manager.sendMessage(context.Background(), sess.ID, "hello", "hello", "", nil, nil, nil, "", "", false, "", false, false, false)
 	if !errors.Is(err, ErrSessionCompacting) {
 		t.Fatalf("expected ErrSessionCompacting when compaction arms mid-send, got %v", err)
 	}
@@ -1204,7 +1204,7 @@ func TestResumeAndSendRejectedDuringShutdown(t *testing.T) {
 	if err := manager.ResumeTask(context.Background(), sess.ID, "", "", ""); err == nil {
 		t.Error("ResumeTask must be rejected during shutdown")
 	}
-	if _, err := manager.sendMessage(context.Background(), sess.ID, "hi", "hi", nil, nil, nil, "", "", false, "", false, false, false); err == nil {
+	if _, err := manager.sendMessage(context.Background(), sess.ID, "hi", "hi", "", nil, nil, nil, "", "", false, "", false, false, false); err == nil {
 		t.Error("sendMessage must be rejected during shutdown")
 	}
 }

@@ -203,6 +203,20 @@ describe('WebAccessTLSSettings', () => {
     expect(byTestId('web-access-tls-error')?.textContent).toContain('tls.cert is required')
   })
 
+  it('keeps the block mounted with the optimistic state when the post-write re-read fails (null)', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(null)
+    render(plainInfo)
+    await flush()
+    clickToggle()
+    await flush()
+    // The write succeeded; only the re-read failed — the block must NOT
+    // unmount (the parent renders onInfo(null) as "unavailable") and the
+    // optimistic value stays.
+    expect(byTestId('tls-unmounted')).toBeNull()
+    expect(tlsToggle().checked).toBe(true)
+    expect(container.textContent).toContain('HTTPS')
+  })
+
   it('commits the certificate path on Enter with the key path riding along', async () => {
     render(httpsInfo)
     await flush()

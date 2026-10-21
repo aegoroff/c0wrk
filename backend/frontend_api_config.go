@@ -754,10 +754,10 @@ func (f *FrontendAPI) runExperimentalChangedHook(enabled bool) {
 // never touches its persisted master toggle (model_profiles.enabled).
 //
 // The desktop hook (OnExperimentalChanged) fires only on a SUCCESSFUL
-// persist: the sidecar's lifecycle follows persisted operator intent, so a
-// rejected disk write leaves the mount decision to the next successful
-// toggle or launch, even though the in-memory gate (what GetConfig serves)
-// already moved.
+// persist: the sidecar's lifecycle follows persisted operator intent. A
+// rejected disk write is returned as an error with the in-memory gate rolled
+// back, so the applied gate (what GetConfig serves) and the persisted state
+// never diverge.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.seedAcquire()
 	f.configMu.Lock()
@@ -767,12 +767,14 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		return errors.New("config not initialized")
 	}
 
+	prev := f.config.Experimental.Enabled
 	f.config.Experimental.Enabled = enabled
-
-	persisted := true
 	if err := f.persistConfig(); err != nil {
-		persisted = false
+		// Roll back: an error return must not leave the in-memory gate
+		// diverged from the persisted one (and the hook unrun).
+		f.config.Experimental.Enabled = prev
 		f.log().Warn("failed to persist experimental features toggle", "error", err)
+		return fmt.Errorf("persisting experimental features toggle: %w", err)
 	}
 
 	// Rebuild the LLM router so the E2S execution mode is applied or removed
@@ -795,12 +797,10 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		}
 	}
 
-	// The desktop hook fires LAST, only after the persist landed: the
+	// The desktop hook fires LAST, after the persist landed: the
 	// sidecar transition it drives is the visible consequence of the
-	// persisted gate, and a failed persist must not start (or stop) anything.
-	if persisted {
-		f.runExperimentalChangedHook(enabled)
-	}
+	// persisted gate (a failed persist returned above).
+	f.runExperimentalChangedHook(enabled)
 
 	return nil
 }

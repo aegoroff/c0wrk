@@ -111,7 +111,7 @@ const EventSessionsLoaded = "sessions:loaded"
 // EventSessionsChanged is emitted after every successful session mutation
 // that changes a session list: create (the RPC, the SwitchProject fallback
 // creation, and both managed-worktree creation paths), fork (plain and
-// managed), delete, archive/unarchive, pin/unpin, CHAT→project promotion,
+// managed), delete, archive, pin, CHAT→project promotion,
 // and project deletion (which cascades its sessions). Task lifecycle
 // transitions count as list-visible state too: the desktop emitter re-issues
 // this event for every task_started / task_complete / task_cancelled /

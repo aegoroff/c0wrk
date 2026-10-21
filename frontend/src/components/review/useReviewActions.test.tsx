@@ -149,11 +149,13 @@ describe('useReviewActions.handleSubmit optimistic presentation', () => {
     expect(msgs[0]!.content).toBe('General comment:\nfix the null deref')
     expect(msgs[0]!.sessionId).toBe('s1')
 
-    // The message is dispatched as review feedback (reviewMode = true, in the
-    // LAST position — e2s sits before it and must stay false here).
+    // The message is dispatched as review feedback (reviewMode = true;
+    // e2s sits before it and must stay false here). The last arg is the
+    // optimistic card's id for the identity-based echo dedup.
     expect(spies.sendMessage).toHaveBeenCalledTimes(1)
     expect(spies.sendMessage).toHaveBeenCalledWith(
       's1', 'General comment:\nfix the null deref', [], [], [], '', '', false, '', false, true,
+      userMessages('s1')[0]!.id,
     )
 
     // Fresh-task state: the session shows as running with an activity label,

@@ -260,13 +260,17 @@ func ValidateWebAccessToken(token string) error {
 }
 
 // webAccessLoopbackWarning is the load warning for a valid non-loopback bind:
-// the listener becomes reachable beyond the machine. The message describes
-// the TLS-off default (plain HTTP, ADR-090); the operator can encrypt the
-// transport with web_access.tls (ADR-092), and the classification itself
-// stands unchanged either way — a LAN bind stays a deliberate exposure the
-// operator is warned about, never refused.
-func webAccessLoopbackWarning(bind string) string {
-	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is unencrypted", bind)
+// the listener becomes reachable beyond the machine. The message names the
+// effective transport: the TLS-off default is plain HTTP (ADR-090), an
+// enabled web_access.tls (ADR-092) is reported as encrypted; the
+// classification itself stands unchanged either way — a LAN bind stays a
+// deliberate exposure the operator is warned about, never refused.
+func webAccessLoopbackWarning(bind string, tlsEnabled bool) string {
+	transport := "traffic is unencrypted"
+	if tlsEnabled {
+		transport = "the transport is TLS-encrypted"
+	}
+	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, %s", bind, transport)
 }
 
 // defaultWebAccessState is the canonical default section state the fail-soft
@@ -334,7 +338,7 @@ func normalizeWebAccess(cfg *Config) []string {
 	// A reset lands on the loopback default, so this fires exactly for a
 	// surviving valid non-loopback bind — never stacked on the reset warning.
 	if !IsLoopbackBind(cfg.WebAccess.Bind) {
-		warnings = append(warnings, webAccessLoopbackWarning(cfg.WebAccess.Bind))
+		warnings = append(warnings, webAccessLoopbackWarning(cfg.WebAccess.Bind, cfg.WebAccess.TLS.Enabled))
 	}
 	return warnings
 }
