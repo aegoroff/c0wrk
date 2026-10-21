@@ -24,7 +24,7 @@ import {
 } from '@/lib/chatInputLock'
 import { usePromptSuggestions, usePromptSelectedIndex, usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
 import { usePromptSuggestionsSync } from '@/hooks/usePromptSuggestionsSync'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
+import { ensureActiveSession } from '@/lib/ensureActiveSession'
 import { listAgents } from '@/api/agents'
 import { listSkills } from '@/api/skills'
 import { getCapabilityModes } from '@/api/capabilities'
@@ -140,15 +140,16 @@ export function useChatInputController(): ChatInputController {
   const clearPendingInsertion = useInputModeStore((s) => s.clearPendingInsertion)
 
   // Wrapped setMode that implicitly creates a session when switching to
-  // terminal mode so the user never sees "Start a conversation…". Opening
-  // the terminal is a draft-committing action: an armed branch draft
-  // provisions the managed worktree here.
+  // terminal mode so the user never sees "Start a conversation…". The
+  // no-session fallback is a plain LOCAL session (ADR-091): the terminal
+  // needs a PTY in a workspace, and a fresh local row is the cheapest one —
+  // never a worktree provisioning.
   const setMode = useCallback(async (newMode: 'chat' | 'terminal') => {
     if (newMode === 'terminal') {
       const sid = useSessionStore.getState().activeSessionId
       if (!sid) {
         try {
-          await createSessionFromDraft()
+          await ensureActiveSession()
         } catch (err) {
           logger.error('Failed to implicitly create session for terminal:', err)
           // Keyed to the origin context (no session was active — that is why

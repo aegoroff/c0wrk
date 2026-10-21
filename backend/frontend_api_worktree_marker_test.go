@@ -21,10 +21,7 @@ func TestManagedWorktreeCreateIgnoresLegacyContainerJunk(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), legacy); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	info, err := h.api.CreateManagedSession("junk-safe", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession(legacy junk) = %v, want success", err)
-	}
+	info := h.api.mustManagedSession(t, "junk-safe", true, "")
 	want := filepath.Join(canonicalWorktreeRoot(h.agentDir), "projects", h.project.ID, "worktrees")
 	if got := filepath.Dir(info.WorkspaceBinding.WorkspacePath); got != want {
 		t.Fatalf("tree container = %q, want %q", got, want)
@@ -40,10 +37,7 @@ func TestManagedWorktreeDurableBindingWithoutMarker(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	ctx := context.Background()
 
-	info, err := h.api.CreateManagedSession("nomarker", true, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	info := h.api.mustManagedSession(t, "nomarker", true, "")
 	path := info.WorkspaceBinding.WorkspacePath
 	container := filepath.Dir(path)
 

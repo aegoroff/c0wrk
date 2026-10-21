@@ -10,7 +10,8 @@ import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStor
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
 import { isE2SSendEnabled } from '@/lib/e2sGate'
 import { sendMessage, cancelTask } from '@/api/chat'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
+import { ensureActiveSession } from '@/lib/ensureActiveSession'
+import { useSessionWorkspaceStore, pendingWorkspaceToWire } from '@/stores/sessionWorkspaceStore'
 import { generateMessageId } from '@/lib/ids'
 import { logger } from '@/lib/logger'
 
@@ -58,20 +59,30 @@ export function useMessageSender(): UseMessageSenderResult {
 
     // The pinned origin session wins; only an explicitly null origin (the
     // no-session scratch space) falls through to the auto-create flow —
-    // unless the caller forced a fresh session (research Shift-click). Both
-    // paths honor an armed session draft: the first real action commits it,
-    // creating the session on the project checkout (local) or provisioning
-    // its managed worktree (branch draft) via CreateManagedSession.
+    // unless the caller forced a fresh session (research Shift-click). The
+    // fallback creates a plain LOCAL session exactly like CHAT mode's
+    // auto-create (ADR-091): fast, never provisioning a worktree.
     let sessionId = originSessionId ?? useSessionStore.getState().activeSessionId
     if (options?.newSession || !sessionId) {
       try {
-        const newSession = await createSessionFromDraft()
+        const newSession = await ensureActiveSession()
         sessionId = newSession.id
       } catch (error) {
         setIsProcessing(false)
         throw error // let caller restore text
       }
     }
+
+    // The fresh window's workspace choice rides on this message: a pending
+    // branch choice (picked in the toolbar's workspace selector, or preset
+    // by the per-branch gesture) makes THIS send provision the managed
+    // worktree and bind the session before the task starts. A local choice
+    // (or none) sends null — the session is already local. A choice only
+    // exists on a fresh session, so continuations and nudges always send
+    // null here.
+    const workspace = pendingWorkspaceToWire(
+      useSessionWorkspaceStore.getState().choices[sessionId],
+    )
 
     // A message sent while a task is cooperatively paused is a nudge-resume:
     // the backend's SendMessage detects the paused task and routes to
@@ -143,7 +154,35 @@ export function useMessageSender(): UseMessageSenderResult {
       const modelOverride = useInputModeStore.getState().selectedModel ?? ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
       const goalBudget = useInputModeStore.getState().goalBudget
-      await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled)
+      // The consumption window brackets the RPC: the toolbar's workspace
+      // selector shows the "Preparing worktree…" hint while the choice is
+      // on the wire (backend provisioning can take a while — a full
+      // checkout). Always settled, success or failure.
+      if (workspace !== null) {
+        useSessionWorkspaceStore.getState().beginConsumption(sessionId)
+      }
+      try {
+        await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled, false, workspace)
+      } finally {
+        if (workspace !== null) {
+          useSessionWorkspaceStore.getState().endConsumption()
+        }
+      }
+      if (workspace !== null) {
+        // The workspace choice was consumed: the session is now bound to its
+        // managed worktree. Clear the pending slice and mirror the pin
+        // optimistically (the workspace chip reads kind + branch; the next
+        // sessions refresh fills the derived path/name fields).
+        useSessionWorkspaceStore.getState().clearChoice(sessionId)
+        useSessionStore.getState().updateSession(sessionId, {
+          workspace_binding: {
+            kind: 'managed_worktree',
+            workspace_path: '',
+            worktree_name: '',
+            branch: workspace.branch,
+          },
+        })
+      }
       // A confirmed fresh non-E2S task supersedes any prior E2S run in this
       // session: drop the stale Σ snapshot so the Execution State panel does
       // not shadow the plan view for the new task (E2S is selected per

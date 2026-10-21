@@ -142,7 +142,7 @@ describe('useMessageSender optimistic metadata', () => {
     })
 
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's-origin', 'review this', [], [], [], '', '', false, '', false,
+      's-origin', 'review this', [], [], [], '', '', false, '', false, false, null,
     )
     expect(userMessages('s-origin')).toHaveLength(1)
     expect(userMessages('s-other')).toHaveLength(0)
@@ -161,7 +161,7 @@ describe('useMessageSender optimistic metadata', () => {
     expect(useInputModeStore.getState().goalEnabled).toBe(false)
     expect(useInputModeStore.getState().goalBudget).toBe('')
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false,
+      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false, false, null,
     )
   })
 
@@ -180,7 +180,7 @@ describe('useMessageSender optimistic metadata', () => {
     // e2s rides after goalBudget (position 10) — and goal must NOT be
     // re-armed by the send.
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'run with explicit state', [], [], [], '', '', false, '', true,
+      's1', 'run with explicit state', [], [], [], '', '', false, '', true, false, null,
     )
     // E2S is per-task opt-in: the toggle resets after the defining message.
     expect(useInputModeStore.getState().e2sEnabled).toBe(false)
@@ -199,7 +199,7 @@ describe('useMessageSender optimistic metadata', () => {
       await capturedSend!('plain message')
     })
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'plain message', [], [], [], '', '', false, '', false,
+      's1', 'plain message', [], [], [], '', '', false, '', false, false, null,
     )
   })
 

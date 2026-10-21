@@ -15,6 +15,13 @@ import (
 	"github.com/v0lka/c0wrk/backend/project"
 )
 
+// ErrSessionNotFresh reports that a session's workspace can no longer be
+// chosen: the fresh window (no transcript, no task rows) has closed. The
+// send-time workspace binding (the draft-free creation flow) fails with this
+// error so the caller can surface an actionable message instead of a raw
+// store failure.
+var ErrSessionNotFresh = errors.New("session is no longer fresh — its workspace can only be chosen before the first message")
+
 // WorkspaceEnsurer guarantees the execution workspace named by a managed
 // binding physically exists on its pinned branch before a restored session's
 // orchestrator is built on top of it. It is the seam through which the

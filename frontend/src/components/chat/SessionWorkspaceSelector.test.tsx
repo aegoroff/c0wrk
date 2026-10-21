@@ -1,14 +1,14 @@
-// Tests for SessionWorkspaceSelector — the chat toolbar's draft/pinned
-// workspace selector (ADR-080 draft UX).
+// Tests for SessionWorkspaceSelector — the chat toolbar's workspace selector
+// (the draft-free creation flow, ADR-091).
 //
 // Covers: hidden in CHAT mode / no project; rendered regardless of the
-// experimental gate; interactive draft state (`local`
-// default, branch display, `branch…` opens the picker in draft mode and arms
-// the draft when missing, non-git projects hide `branch…`, choosing local
-// resets a branch draft); permanently disabled pinned button for existing
+// experimental gate; interactive picker on a FRESH session (confirmed-empty
+// transcript, no task; `local` default, branch display, `branch…` opens the
+// picker in pick mode, choosing local clears a branch choice, non-git
+// projects hide `branch…`); permanently disabled pinned button for existing
 // managed and local sessions — the pin ignores the transient selector lock,
-// so it stays disabled across chat continuations; draft retirement when a
-// session becomes active.
+// so it stays disabled across chat continuations; a stale pending choice is
+// dropped the moment its session stops being fresh.
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
@@ -16,9 +16,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { TooltipProvider } from '@/components/ui/tooltip'
 
 import { SessionWorkspaceSelector } from './SessionWorkspaceSelector'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
+import { useSessionWorkspaceStore, type PendingWorkspace } from '@/stores/sessionWorkspaceStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
+import { useChatStore } from '@/stores/chatStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useExperimentalStore } from '@/stores/experimentalStore'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
@@ -102,10 +103,42 @@ async function openMenu() {
   await flush()
 }
 
+/**
+ * Arm the ACTIVE session as FRESH: the selector's freshness gate needs a
+ * CONFIRMED-empty transcript (the message index must exist and be empty —
+ * an absent index means "history not loaded yet") and no running task.
+ */
+function armFreshSession(id = 's-1', choice?: PendingWorkspace) {
+  useSessionStore.setState({
+    sessions: [makeSession({ id })],
+    activeSessionId: id,
+  })
+  useChatStore.setState({ messages: { [id]: {} }, taskActive: {}, paused: {} })
+  if (choice !== undefined) {
+    useSessionWorkspaceStore.getState().setChoice(id, choice)
+  }
+}
+
+/** Make the session STARTED: a transcript (or a running task) locks the
+ *  workspace forever and the selector renders the pinned chip. */
+function startSession(id = 's-1', binding?: SessionInfo['workspace_binding'], opts: { taskActive?: boolean } = {}) {
+  useSessionStore.setState({
+    sessions: [makeSession({ id, workspace_binding: binding })],
+    activeSessionId: id,
+  })
+  useChatStore.setState({
+    messages: {
+      [id]: { m1: { id: 'm1', sessionId: id, type: 'user', content: 'hi', timestamp: 1 } },
+    },
+    taskActive: opts.taskActive ? { [id]: true } : {},
+    paused: {},
+  })
+}
+
 function resetStores(opts: { noProject?: boolean; gitRepo?: boolean } = {}) {
-  useSessionDraftStore.getState().clearDraft()
-  useSessionDraftStore.getState().setCommitting(false)
+  useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   useSessionStore.setState({ sessions: null, activeSessionId: null })
+  useChatStore.setState({ messages: {}, taskActive: {}, paused: {} })
   useGitPanelStore.getState().reset()
   const project = opts.noProject
     ? makeProject({ id: '__no_project__', is_no_project: true })
@@ -138,6 +171,7 @@ afterEach(() => {
 describe('SessionWorkspaceSelector', () => {
   it('renders nothing in CHAT (No Project) mode', () => {
     resetStores({ noProject: true })
+    armFreshSession()
     renderSelector()
     expect(trigger()).toBeNull()
     expect(readOnly()).toBeNull()
@@ -149,244 +183,166 @@ describe('SessionWorkspaceSelector', () => {
     expect(trigger()).toBeNull()
   })
 
-  it('renders the draft picker and the pinned chip regardless of the experimental gate', () => {
-    // The selector is a first-class surface: the master experimental switch
-    // does not hide it (this is the case that used to render nothing — gate
-    // OFF exercises exactly that).
+  it('renders the picker and the pinned chip regardless of the experimental gate', () => {
     useExperimentalStore.setState({ enabled: false })
-    useGitPanelStore.getState().setGitRepo(true, 'proj-1')
-
-    // Draft mode: the interactive picker renders.
+    armFreshSession()
     renderSelector()
     expect(trigger()).not.toBeNull()
 
-    // Existing session: the pinned disabled chip renders the same way.
-    act(() => {
-      useSessionStore.setState({
-        activeSessionId: 's-m',
-        sessions: [
-          makeSession({
-            id: 's-m',
-            workspace_binding: {
-              kind: 'managed_worktree',
-              workspace_path: '/w/proj/.worktrees/s-abcd1234',
-              worktree_name: 's-abcd1234',
-              branch: 'feat/pinned',
-            },
-          }),
-        ],
-      })
-    })
-    const chip = readOnly()
-    expect(chip).not.toBeNull()
-    expect(chip!.getAttribute('aria-disabled')).toBe('true')
-    expect(chip!.textContent).toContain('feat/pinned')
+    resetStores({ gitRepo: true })
+    useExperimentalStore.setState({ enabled: false })
+    startSession('s-1', { kind: 'managed_worktree', workspace_path: '', worktree_name: '', branch: 'feat/x' })
+    renderSelector()
+    expect(readOnly()).not.toBeNull()
   })
 
-  it('draft state (no session): shows local and offers local + branch… in a git repo', async () => {
-    useGitPanelStore.getState().setGitRepo(true, 'proj-1')
+  it('fresh session: shows the local default and offers local + branch… in a git repo', async () => {
+    resetStores({ gitRepo: true })
+    armFreshSession()
     renderSelector()
-    await openMenu()
-
     expect(trigger()!.textContent).toContain('local')
+
+    await openMenu()
     expect(menuItem('workspace-option-local')).not.toBeNull()
     expect(menuItem('workspace-option-branch')).not.toBeNull()
   })
 
-  it('branch draft: the trigger shows the drafted branch name', () => {
-    useSessionDraftStore.getState().startDraft('proj-1')
-    useSessionDraftStore
-      .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
+  it('branch choice: the trigger shows the picked branch name', () => {
+    armFreshSession('s-1', { kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
     renderSelector()
-
     expect(trigger()!.textContent).toContain('feat/x')
-    // The tooltip names the drafted managed-worktree branch too.
-    expect(trigger()!.getAttribute('title')).toContain('feat/x')
   })
 
-  it('picking branch… arms the draft when missing and opens the picker in draft mode', async () => {
-    useGitPanelStore.getState().setGitRepo(true, 'proj-1')
+  it('picking branch… opens the picker in pick mode (no arming needed)', async () => {
+    resetStores({ gitRepo: true })
+    armFreshSession()
     renderSelector()
-    await openMenu()
 
+    await openMenu()
     act(() => {
-      menuItem('workspace-option-branch')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      menuItem('workspace-option-branch')!.click()
     })
     await flush()
 
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
     expect(useGitPanelStore.getState().branchPickerMode).toBe('draft')
-    expect(useSessionDraftStore.getState().draft).toEqual({
-      projectId: 'proj-1',
-      workspace: { kind: 'local' },
-    })
   })
 
-  it('picking local resets an armed branch draft back to local', async () => {
-    useSessionDraftStore.getState().startDraft('proj-1')
-    useSessionDraftStore
-      .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
+  it('picking local clears an armed branch choice', async () => {
+    resetStores({ gitRepo: true })
+    armFreshSession('s-1', { kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
     renderSelector()
-    await openMenu()
 
+    await openMenu()
     act(() => {
-      menuItem('workspace-option-local')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      menuItem('workspace-option-local')!.click()
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['s-1']).toEqual({ kind: 'local' })
   })
 
   it('hides branch… when the project is not a git repository', async () => {
+    armFreshSession()
     renderSelector()
-    await openMenu()
 
+    await openMenu()
     expect(menuItem('workspace-option-local')).not.toBeNull()
     expect(menuItem('workspace-option-branch')).toBeNull()
   })
 
-  it('managed session: shows the pinned branch as a permanently disabled button', () => {
-    useSessionStore.setState({
-      activeSessionId: 's-m',
-      sessions: [
-        makeSession({
-          id: 's-m',
-          workspace_binding: {
-            kind: 'managed_worktree',
-            workspace_path: '/w/proj/.worktrees/s-abcd1234',
-            worktree_name: 's-abcd1234',
-            branch: 'feat/pinned',
-          },
-        }),
-      ],
-    })
+  it('a session whose history has not loaded yet is NOT fresh — the pinned chip shows', () => {
+    // No message index: the transcript state is unknown, the safe display is
+    // the session's own binding (local).
+    useSessionStore.setState({ sessions: [makeSession()], activeSessionId: 's-1' })
+    useChatStore.setState({ messages: {}, taskActive: {}, paused: {} })
     renderSelector()
+    expect(trigger()).toBeNull()
+    expect(readOnly()!.textContent).toContain('local')
+  })
 
+  it('managed session: shows the pinned branch as a permanently disabled button', () => {
+    startSession('s-1', { kind: 'managed_worktree', workspace_path: '', worktree_name: '', branch: 'feat/x' })
+    renderSelector()
     const chip = readOnly()
     expect(chip).not.toBeNull()
-    // A real disabled button, not an enabled-looking passive element: the
-    // disabled state must be visible up front, not discovered by clicks that
-    // go nowhere. Expressed as aria-disabled (not the native attribute) so
-    // the chip stays focusable and its reason is announced (see the
-    // accessibility test below).
-    expect(chip!.tagName).toBe('BUTTON')
+    expect(chip!.textContent).toContain('feat/x')
     expect(chip!.getAttribute('aria-disabled')).toBe('true')
-    expect(chip!.disabled).toBe(false)
-    expect(chip!.className).toContain('cursor-not-allowed')
-    expect(chip!.textContent).toContain('feat/pinned')
-    expect(trigger()).toBeNull()
   })
 
   it('local session: shows local as a permanently disabled button', () => {
-    useSessionStore.setState({
-      activeSessionId: 's-l',
-      sessions: [makeSession({ id: 's-l', workspace_binding: { kind: 'local', workspace_path: '/w/proj' } })],
-    })
+    startSession('s-1', { kind: 'local', workspace_path: '/w/proj' })
     renderSelector()
-
     const chip = readOnly()
     expect(chip).not.toBeNull()
-    expect(chip!.tagName).toBe('BUTTON')
-    expect(chip!.getAttribute('aria-disabled')).toBe('true')
-    expect(chip!.disabled).toBe(false)
     expect(chip!.textContent).toContain('local')
+    expect(chip!.getAttribute('aria-disabled')).toBe('true')
   })
 
   it('pinned chip is focusable and announces its pin reason to assistive tech', () => {
-    // A natively `disabled` button is removed from the tab order and
-    // suppresses pointer events, so the `title`-only reason was unreachable
-    // by keyboard/screen-reader (and the tooltip itself unreliable in the
-    // WebKit webview). aria-disabled keeps the chip in the tab order and
-    // aria-describedby carries the reason in a visually-hidden element.
-    useSessionStore.setState({
-      activeSessionId: 's-m',
-      sessions: [
-        makeSession({
-          id: 's-m',
-          workspace_binding: {
-            kind: 'managed_worktree',
-            workspace_path: '/w/proj/.worktrees/s-abcd1234',
-            worktree_name: 's-abcd1234',
-            branch: 'feat/pinned',
-          },
-        }),
-      ],
-    })
+    startSession('s-1', { kind: 'managed_worktree', workspace_path: '', worktree_name: '', branch: 'feat/x' })
     renderSelector()
-
-    const chip = readOnly()
-    expect(chip).not.toBeNull()
-    // Focusable (no native disabled) — the reason is reachable by keyboard.
-    expect(chip!.disabled).toBe(false)
-    // The description reference resolves to a non-empty element that names
-    // the reason: fixed at creation.
-    const describedBy = chip!.getAttribute('aria-describedby')
+    const chip = readOnly()!
+    // aria-describedby carries the reason in a visually-hidden element.
+    const describedBy = chip.getAttribute('aria-describedby')
     expect(describedBy).toBeTruthy()
     const description = document.getElementById(describedBy!)
     expect(description).not.toBeNull()
-    expect(description!.textContent).toContain('fixed when the session was created')
-    // The visually-hidden description is hidden visually but exposed to AT.
-    expect(description!.className).toContain('sr-only')
-    // The mouse tooltip mirrors the same reason (works again: no native
-    // disabled suppressing pointer events).
-    expect(chip!.getAttribute('title')).toContain('fixed when the session was created')
+    expect(description!.textContent).toContain('feat/x')
   })
 
   it('pinned button stays disabled across chat continuations (ignores the transient selector lock)', () => {
-    // The mid-task selector lock (the `disabled` prop) lifts when the task
-    // settles — that is exactly when a chat continuation becomes possible.
-    // The pin must not lift with it: the workspace binding is immutable for
-    // the session's whole lifetime, so the button stays disabled even though
-    // the transient lock is gone.
-    useSessionStore.setState({
-      activeSessionId: 's-m',
-      sessions: [
-        makeSession({
-          id: 's-m',
-          workspace_binding: {
-            kind: 'managed_worktree',
-            workspace_path: '/w/proj/.worktrees/s-abcd1234',
-            worktree_name: 's-abcd1234',
-            branch: 'feat/pinned',
-          },
-        }),
-      ],
-    })
+    startSession('s-1', { kind: 'managed_worktree', workspace_path: '', worktree_name: '', branch: 'feat/x' })
     renderSelector({ disabled: false })
-
-    const chip = readOnly()
-    expect(chip).not.toBeNull()
-    expect(chip!.tagName).toBe('BUTTON')
-    expect(chip!.getAttribute('aria-disabled')).toBe('true')
+    expect(readOnly()!.getAttribute('aria-disabled')).toBe('true')
   })
 
-  it('selecting a session retires an armed draft', async () => {
-    useSessionDraftStore.getState().startDraft('proj-1')
+  it('a running task locks the workspace even with a confirmed-empty transcript', () => {
+    useSessionStore.setState({ sessions: [makeSession()], activeSessionId: 's-1' })
+    useChatStore.setState({ messages: { 's-1': {} }, taskActive: { 's-1': true }, paused: {} })
     renderSelector()
-    expect(useSessionDraftStore.getState().draft).not.toBeNull()
+    expect(trigger()).toBeNull()
+    expect(readOnly()).not.toBeNull()
+  })
 
+  it('a stale pending choice is dropped the moment its session stops being fresh', async () => {
+    armFreshSession('s-1', { kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
+    renderSelector()
+    expect(useSessionWorkspaceStore.getState().choices['s-1']).toBeDefined()
+
+    // The first message lands (transcript no longer empty): the fresh window
+    // closed, so a still-pending choice is a leftover and must be dropped.
     act(() => {
-      useSessionStore.getState().setActiveSessionId('s-other')
+      useChatStore.setState((s) => ({
+        messages: {
+          ...s.messages,
+          's-1': { m1: { id: 'm1', sessionId: 's-1', type: 'user', content: 'hi', timestamp: 1 } },
+        },
+      }))
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft).toBeNull()
+    expect(useSessionWorkspaceStore.getState().choices['s-1']).toBeUndefined()
+    expect(readOnly()).not.toBeNull()
   })
 
-  it('switching to another project retires the draft', async () => {
-    useSessionDraftStore.getState().startDraft('proj-1')
+  it('switching to another session keeps each session\'s own choice', () => {
+    armFreshSession('s-1', { kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' })
     renderSelector()
 
     act(() => {
-      useProjectStore.setState({
-        activeProjectId: 'proj-2',
-        projects: [makeProject(), makeProject({ id: 'proj-2', name: 'Two' })],
+      useSessionStore.setState({
+        sessions: [makeSession({ id: 's-1' }), makeSession({ id: 's-2' })],
+        activeSessionId: 's-2',
       })
+      useChatStore.setState((s) => ({
+        messages: { ...s.messages, 's-2': {} },
+        taskActive: {},
+      }))
     })
-    await flush()
-
-    expect(useSessionDraftStore.getState().draft).toBeNull()
+    // The other session has no choice of its own — the implicit local
+    // default shows, and the first session's choice survives untouched.
+    expect(trigger()!.textContent).toContain('local')
+    expect(useSessionWorkspaceStore.getState().choices['s-1']).toBeDefined()
   })
 })

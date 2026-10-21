@@ -33,7 +33,7 @@ import {
   failAttachmentUploads,
 } from '@/lib/attachmentUploads'
 import type { AttachmentUploadUI } from '@/types/models'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
+import { ensureActiveSession } from '@/lib/ensureActiveSession'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
 import { getInputState, useChatInputStore } from '@/stores/chatInputStore'
@@ -95,7 +95,7 @@ export function usePasteHandler(editor: ChatEditorAPI): {
         // one.
         let sessionId = useSessionStore.getState().activeSessionId
         if (!sessionId) {
-          const newSession = await createSessionFromDraft()
+          const newSession = await ensureActiveSession()
           sessionId = newSession.id
         }
 

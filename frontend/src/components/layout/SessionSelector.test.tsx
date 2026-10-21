@@ -108,10 +108,10 @@ vi.mock('@/stores/chatStore', () => ({
 }))
 
 import { SessionSelector } from './SessionSelector'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useUIStore } from '@/stores/uiStore'
 import { usePinnedGroupsStore } from '@/stores/pinnedGroupsStore'
 import { useProjectStore } from '@/stores/projectStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import type { ProjectInfo } from '@/types/models'
 
 const NOW = Date.now()
@@ -1271,9 +1271,10 @@ describe('SessionSelector — branch new-session action', () => {
   }
 
   beforeEach(() => {
-    // The real stores behind the branch-button draft flow.
+    // The real stores behind the branch-button gesture (eager creation +
+    // the fresh window's pending workspace choice).
     useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
-    useSessionDraftStore.getState().clearDraft()
+    useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   })
 
   it('offers the button on every managed branch row — and nowhere else', async () => {
@@ -1303,26 +1304,33 @@ describe('SessionSelector — branch new-session action', () => {
     ).toHaveLength(0)
   })
 
-  it('clicking arms the branch draft, clears the active session and closes the menu', async () => {
+  it('clicking eagerly creates the session, presets its branch choice and closes the menu', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = newSessionFixture()
     sessionMocks.activeSessionId = 'm1'
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
     await click(newSessionAction(menu, 'feat-a'))
 
-    // The menu closed so the chat area's draft state becomes visible...
+    // The menu closed...
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    // ...the draft is armed for the branch (createBranch=false — the branch
-    // exists, CreateManagedSession adopts its managed tree), ...
-    expect(useSessionDraftStore.getState().draft).toEqual({
-      projectId: 'proj-1',
-      workspace: { kind: 'branch', branch: 'feat-a', createBranch: false, startPoint: '' },
+    // ...the row was born immediately (ADR-091 eager creation — no draft
+    // state, the session exists from the gesture onward), ...
+    expect(apiMocks.createSession).toHaveBeenCalledOnce()
+    expect(sessionMocks.addSession).toHaveBeenCalledWith(expect.objectContaining({ id: 's-new' }))
+    // ...and the fresh window's pending choice pins the branch
+    // (createBranch=false — the branch exists, the first send adopts its
+    // managed tree per ADR-082).
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
+      kind: 'branch',
+      branch: 'feat-a',
+      createBranch: false,
+      startPoint: '',
     })
-    // ...and the active selection was cleared (draft and selection are
-    // mutually exclusive — same contract as the New Session gesture).
-    expect(sessionMocks.selectSession).toHaveBeenCalledWith(null)
+    // The new session became the visible active one.
+    expect(sessionMocks.selectSession).toHaveBeenCalledWith('s-new', 'proj-1')
   })
 
   it('clicking never toggles the collapse state — even a collapsed branch arms its draft', async () => {
@@ -1336,10 +1344,12 @@ describe('SessionSelector — branch new-session action', () => {
     menu = document.body.querySelector('[role="menu"]') as HTMLElement
     expect(menuText(menu)).not.toContain('Feat A one')
 
-    // The + button stays reachable on the collapsed row and arms the draft...
+    // The + button stays reachable on the collapsed row and records the
+    // choice for the eagerly created session...
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     await click(newSessionAction(menu, 'feat-a'))
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
       kind: 'branch',
       branch: 'feat-a',
       createBranch: false,
@@ -1457,12 +1467,12 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     expect(menuText(menu)).toContain('Feat A two')
   })
 
-  it('Enter on a branch "+" arms the branch draft and closes the menu', async () => {
-    // The real stores behind the branch-draft flow.
+  it('Enter on a branch "+" eagerly creates the session with its branch choice', async () => {
+    // The real stores behind the branch-button gesture.
     useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
-    useSessionDraftStore.getState().clearDraft()
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = kbFixture()
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
@@ -1477,7 +1487,7 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     // The "+" select is NOT prevented — Radix's default close fires (and the
     // onOpenChange path clears the search).
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
       kind: 'branch',
       branch: 'feat-a',
       createBranch: false,
@@ -1485,6 +1495,6 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     })
     // The active selection was cleared (draft and selection are mutually
     // exclusive — same contract as the click path).
-    expect(sessionMocks.selectSession).toHaveBeenCalledWith(null)
+    expect(sessionMocks.selectSession).toHaveBeenCalledWith('s-new', 'proj-1')
   })
 })

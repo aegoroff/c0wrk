@@ -3,12 +3,15 @@
 // deliberately stateless; this file is the "Git lifecycle owner" that drives
 // it from the session RPC flows:
 //
-//   - CreateManagedSession: reserve identity (SessionDraft) → provision the
-//     tree → commit the runtime session → persist the binding, compensating
-//     (releasing the fresh tree) when the runtime or DB step fails. An
-//     adopted (shared) tree commits its binding and re-validates the tree
+//   - SendMessage's send-time workspace binding (bindSessionWorkspace): the
+//     first message of a FRESH session provisions the tree → persists the
+//     binding inside the fresh window (no transcript, no task rows — one
+//     atomic store statement) → evicts the in-memory session so the send's
+//     own access restores an orchestrator built for the new workspace,
+//     compensating (releasing the fresh tree) when a later step fails. An
+//     adopted (shared) tree persists its binding and re-validates the tree
 //     inside the adoption↔deletion critical section (managedTreeMu), rolling
-//     the just-committed session back when the last owner's deletion removed
+//     the just-persisted binding back when the last owner's deletion removed
 //     the tree in between.
 //   - ensureManagedWorkspace (installed as the manager's WorkspaceEnsurer):
 //     lazy restore recreates a missing tree from the pinned branch at the
@@ -31,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/v0lka/c0wrk/backend/config"
@@ -210,148 +214,214 @@ func (f *FrontendAPI) ensureManagedWorkspace(ctx context.Context, repoRoot strin
 	return missing, nil
 }
 
-// CreateManagedSession creates a new CODE session bound to a managed
-// worktree in the configured project container before any orchestrator,
-// logger, or persisted row exists (ADR-080).
+// SessionWorkspaceChoice is the send-time workspace request of the
+// draft-free creation flow: the first message of a fresh session may carry
+// the workspace choice the user made in the chat toolbar's selector. The
+// backend provisions (or adopts) the managed worktree, persists the
+// binding inside the fresh window, and lets the send's own session access
+// restore an orchestrator built for the new workspace. A nil choice (the
+// zero value the frontend passes for every ordinary send) is a no-op.
+type SessionWorkspaceChoice struct {
+	// Branch is the picked branch. Empty with CreateBranch=true derives a
+	// session-scoped branch name, mirroring the former CreateManagedSession.
+	Branch string `json:"branch"`
+	// CreateBranch requests that a MISSING branch be created at StartPoint
+	// (empty = repository HEAD); an EXISTING branch is never re-created —
+	// the request then behaves exactly like an existing-branch pick (git
+	// DWIM semantics, the same contract the former CreateManagedSession had).
+	CreateBranch bool `json:"create_branch"`
+	// StartPoint is the creation start point for a missing branch; a
+	// remote-tracking pick lands here ("origin/x" creates local x from the
+	// remote ref).
+	StartPoint string `json:"start_point"`
+}
+
+// bindSessionWorkspace applies a send-time workspace choice to a FRESH
+// session (no transcript, no task rows — enforced atomically by the store's
+// BindSessionWorkspace). The branch-holder dispatch mirrors the former
+// CreateManagedSession: a branch held by an existing managed tree ADOPTS
+// that tree (shared trees, ADR-082), a branch held by the project checkout
+// is a deliberate no-op success (the session already executes exactly
+// there — the caller keeps the local binding and clears the pending
+// choice), and a branch held by an external worktree is a typed
+// ErrBranchBusy refusal. A provisioned-fresh tree is compensated on every
+// later failure; adopted trees are never touched.
 //
-// branch names the git branch the tree checks out. When createBranch is
-// true, the branch is CREATED at startPoint (empty startPoint = the
-// repository's current HEAD) when it does not exist yet — that is how a
-// remote-tracking pick lands: the draft records branch "x" with start
-// point "origin/x", and provisioning creates local x from that remote
-// ref. An ALREADY EXISTING branch is never re-created: the request then
-// behaves exactly like an existing-branch pick (git DWIM semantics), so a
-// colliding create can never reset or fork the branch under the user.
-//
-// A branch can be checked out in at most one worktree, so an existing holder
-// decides what "create a session on this branch" means (the shared-tree
-// revision of ADR-080):
-//   - a managed tree already holds the branch → the new session is bound to
-//     THAT tree (several sessions may execute in one tree, mirroring how
-//     local sessions share the checkout);
-//   - the main checkout holds the branch → a plain local session is created
-//     (a managed tree can never hold a branch the checkout holds);
-//   - an external (non-c0wrk) linked worktree holds the branch → explicit
-//     ErrBranchBusy refusal.
-//
-// On success the persisted session row carries the managed binding (the
-// binding is durable before the session is claimed). If the runtime session
-// or the persistence step fails after provisioning a FRESH tree, that tree
-// is released again (compensation); adopted trees are never touched. The
-// created branch is kept — no operation in this path ever deletes a branch.
-func (f *FrontendAPI) CreateManagedSession(branch string, createBranch bool, startPoint string) (*session.SessionInfo, error) {
+// The binding write is followed by an in-memory eviction so the send's own
+// session access lazily restores with an orchestrator built for the NEW
+// workspace — the orchestrator captures its workspace at construction, so
+// a binding write alone would not retarget execution.
+func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choice *SessionWorkspaceChoice) error {
+	if choice == nil {
+		return nil
+	}
 	if f.appCell() == nil || f.app.Manager() == nil {
-		return nil, errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
+		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
 	}
 	if f.store == nil {
-		return nil, errors.New("session store not initialized")
+		return errors.New("session store not initialized")
 	}
+	// The same generous provisioning budget the sibling managed flows get:
+	// a wedged git fails the send explicitly instead of hanging it.
+	ctx, cancel := context.WithTimeout(ctx, managedProvisionTimeout)
+	defer cancel()
 
-	f.activeProjectMu.RLock()
-	projectID := f.activeProjectID
-	storedRoot := f.activeProjectPath
-	f.activeProjectMu.RUnlock()
-
-	if projectID == "" {
-		return nil, errors.New("no active project — create or select a project first")
+	info, err := f.store.LoadSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load session for workspace binding: %w", err)
 	}
+	if info == nil {
+		return fmt.Errorf("session %s not found", id)
+	}
+	projectID := info.ProjectID
 	if projectID == project.NoProjectID {
-		return nil, errors.New("CHAT (No Project) sessions cannot own a managed worktree")
+		return errors.New("CHAT (No Project) sessions cannot own a managed worktree")
 	}
-	// Canonicalize the provisioning root for the git primitives (fail-soft
-	// to the stored form — see canonicalWorktreeRoot). The stored form stays
-	// untouched: the checkout-held fallback below binds a session's identity
-	// to it, and identity (unlike git operands) is stored-form keyed.
-	repoRoot := canonicalWorktreeRoot(storedRoot)
+	if info.HasUnfinishedTask {
+		return fmt.Errorf("%w: the session already has an unfinished task", session.ErrSessionNotFresh)
+	}
+	// Refuse a session that is running something before any git runs (the
+	// store guard below remains the authoritative race-closer).
+	if status, statusErr := f.app.Manager().GetSessionRuntimeStatus(id); statusErr == nil && status.Active {
+		return fmt.Errorf("%w: the session has an active task", session.ErrSessionNotFresh)
+	}
 
-	draft := session.NewSessionDraft(projectID, nil)
-	if createBranch && branch == "" {
-		branch = "session-" + shortIdentity(draft.ID)
+	branch := strings.TrimSpace(choice.Branch)
+	if choice.CreateBranch && branch == "" {
+		branch = "session-" + shortIdentity(id)
 	}
 	if branch == "" {
-		return nil, errors.New("a branch is required — name an existing branch or pass createBranch=true")
+		return errors.New("a branch is required — name an existing branch or pass create_branch=true")
 	}
-	treeName := managedTreeName(draft.ID)
+	// Canonicalize the provisioning root for the git primitives
+	// (canonicalWorktreeRoot), the same split the sibling flows use.
+	repoRoot, err := f.resolveProjectRoot(ctx, projectID)
+	if err != nil {
+		return err
+	}
 	binding := &session.WorkspaceBinding{
 		Kind:         session.WorkspaceManagedWorktree,
-		WorktreeName: treeName,
+		WorktreeName: managedTreeName(id),
 		Branch:       branch,
 	}
 	// Validate the whole binding (branch syntax, tree name, containment)
 	// BEFORE any git runs, so a malformed request never provisions anything.
 	if _, err := session.NormalizeWorkspaceBinding(projectID, repoRoot, binding); err != nil {
-		return nil, fmt.Errorf("invalid managed session request: %w", err)
+		return fmt.Errorf("invalid workspace choice: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(f.ctx(), managedProvisionTimeout)
-	defer cancel()
-
-	// DWIM (git switch semantics): a create request naming an ALREADY
-	// EXISTING local branch behaves exactly like an existing-branch pick —
-	// the branch is reused when it is free, shared through its managed
-	// tree, served by the checkout fallback, or refused with the typed
-	// busy error — never re-created. This is what a remote-tracking pick
-	// (branch "x" from start point "origin/x") lands on when a local x is
-	// already present.
 	createExisting := false
-	if createBranch {
+	if choice.CreateBranch {
 		exists, err := workspace.BranchExists(ctx, repoRoot, branch)
 		if err != nil {
-			return nil, fmt.Errorf("checking branch %s: %w", branch, err)
+			return fmt.Errorf("checking branch %s: %w", branch, err)
 		}
 		createExisting = exists
 	}
-
 	owner := f.worktreeOwner()
-	if !createBranch || createExisting {
+	if !choice.CreateBranch || createExisting {
 		trees, err := owner.List(ctx, repoRoot)
 		if err != nil {
-			return nil, fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
+			return fmt.Errorf("listing worktrees of %s: %w", repoRoot, err)
 		}
 		if holder := branchHolder(trees, branch); holder != nil {
 			switch holder.Kind {
 			case workspace.WorktreeManaged:
-				return f.adoptManagedTree(ctx, owner, repoRoot, projectID, branch, holder)
+				return f.bindAdoptedTree(ctx, owner, repoRoot, id, projectID, branch, holder, info.WorkspaceBinding)
 			case workspace.WorktreeMain:
-				// The fallback binds the session to the checkout itself —
-				// an identity, not a git operand: the session's stored
-				// WorkspacePath must keep the registration form. The
-				// vector registry's AGENT routing matches it against the
-				// project row by plain string compare (no symlink
-				// resolution), so the canonical form would strand the
-				// session without a vector target on legacy rows.
-				return f.createLocalFallbackSession(projectID, storedRoot, branch)
+				// The checkout holds the branch: the fresh session already
+				// executes exactly there, so the choice lands as-is — keep
+				// the local binding (an identity, never re-derived into a
+				// managed one) and report success.
+				return nil
 			default:
-				return nil, fmt.Errorf("%w: branch %s is checked out in external worktree %s — created outside c0wrk; use a local session or remove that tree first", workspace.ErrBranchBusy, branch, holder.Path)
+				return fmt.Errorf("%w: branch %s is checked out in external worktree %s — created outside c0wrk; use a local session or remove that tree first", workspace.ErrBranchBusy, branch, holder.Path)
 			}
 		}
 	}
 
-	owner, err := f.newWorktreeOwner(projectID)
+	provOwner, err := f.newWorktreeOwner(projectID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	draft.WorkspaceBinding = binding
 	var provisioned workspace.WorktreeInfo
-	if createBranch && !createExisting {
-		provisioned, err = owner.ProvisionNewBranch(ctx, repoRoot, treeName, branch, startPoint)
+	if choice.CreateBranch && !createExisting {
+		provisioned, err = provOwner.ProvisionNewBranch(ctx, repoRoot, binding.WorktreeName, branch, choice.StartPoint)
 	} else {
-		provisioned, err = owner.ProvisionBranch(ctx, repoRoot, treeName, branch)
+		provisioned, err = provOwner.ProvisionBranch(ctx, repoRoot, binding.WorktreeName, branch)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	binding.WorkspacePath = provisioned.Path
-	info, err := f.commitManagedDraft(ctx, draft, repoRoot, treeName)
-	if err != nil {
-		return nil, err
+	if err := f.store.BindSessionWorkspace(ctx, id, projectID, binding); err != nil {
+		f.compensateProvisionedTree(ctx, repoRoot, binding.WorktreeName, "workspace binding failed")
+		return err
+	}
+	if err := f.app.Manager().EvictSession(id); err != nil {
+		// Roll the persisted binding back so the store agrees with the
+		// in-memory session that refused eviction, then release the tree.
+		f.rollbackSessionBinding(ctx, id, projectID, info.WorkspaceBinding, binding.WorktreeName)
+		f.compensateProvisionedTree(ctx, repoRoot, binding.WorktreeName, "session eviction failed")
+		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", err)
 	}
 	// Seed the tree's embedding cache from the checkout's — after the success
-	// point (a failed creation must leave no seeded state) and before the RPC
-	// returns (the frontend switches to the new session immediately, and that
-	// focus move builds the tree's vector manager with this cache root).
-	f.seedWorktreeEmbeddingCache(projectID, treeName)
-	return info, nil
+	// point and before the send proceeds (the task's vector manager builds
+	// against the new workspace root).
+	f.seedWorktreeEmbeddingCache(projectID, binding.WorktreeName)
+	return nil
+}
+
+// bindAdoptedTree re-binds a fresh session to an EXISTING managed worktree
+// (the shared-tree revision of ADR-080), mirroring the adoption-creation
+// race protocol: Recreate, the binding persist, and the eviction all run
+// inside the adoption↔deletion critical section (managedTreeMu), and the
+// tree is re-validated after the persist — a concurrent last-owner deletion
+// either counts this session's committed binding (release skipped) or
+// removed the tree BEFORE the write, in which case the just-persisted
+// binding is rolled back and the session restores on its previous
+// workspace. Adopted trees are never released or compensated.
+func (f *FrontendAPI) bindAdoptedTree(ctx context.Context, owner *worktrees.Owner, repoRoot, id, projectID, branch string, holder *workspace.WorktreeInfo, prevBinding *session.WorkspaceBinding) error {
+	f.managedTreeMu.Lock()
+	defer f.managedTreeMu.Unlock()
+	if _, err := owner.Recreate(ctx, repoRoot, holder.Name, branch, holder.Path); err != nil {
+		return err
+	}
+	binding := &session.WorkspaceBinding{
+		Kind:          session.WorkspaceManagedWorktree,
+		WorkspacePath: holder.Path,
+		WorktreeName:  holder.Name,
+		Branch:        branch,
+	}
+	if err := f.store.BindSessionWorkspace(ctx, id, projectID, binding); err != nil {
+		return err
+	}
+	if err := f.app.Manager().EvictSession(id); err != nil {
+		f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name)
+		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", err)
+	}
+	if _, err := owner.Inspect(ctx, repoRoot, holder.Name); err != nil {
+		f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name)
+		return fmt.Errorf("managed worktree %q was gone at the post-bind re-validation (removed by a concurrent last-owner deletion); the previous workspace was restored — retry the send to provision a fresh tree: %w", holder.Name, err)
+	}
+	// Idempotent: the tree's first session seeded the cache already; a fresh
+	// seed keeps adopted (previously orphaned) trees warm too.
+	f.seedWorktreeEmbeddingCache(projectID, holder.Name)
+	return nil
+}
+
+// rollbackSessionBinding restores a session's previous persisted workspace
+// binding after a post-write step (eviction refusal, adoption re-validation)
+// failed. Best-effort but loud: a failed rollback self-heals only on the
+// next restore of the affected session, so the error is logged at Error.
+func (f *FrontendAPI) rollbackSessionBinding(ctx context.Context, id, projectID string, prev *session.WorkspaceBinding, treeName string) {
+	if prev == nil {
+		return
+	}
+	if err := f.store.BindSessionWorkspace(ctx, id, projectID, prev); err != nil {
+		f.log().Error("failed to roll back the persisted workspace binding",
+			"session_id", id, "worktree", treeName, "error", err)
+	}
 }
 
 // branchHolder returns the worktree entry currently holding branch, or nil
@@ -364,136 +434,6 @@ func branchHolder(trees []workspace.WorktreeInfo, branch string) *workspace.Work
 	}
 	return nil
 }
-
-// adoptManagedTree binds a new session to an EXISTING managed worktree (the
-// shared-tree revision of ADR-080): the binding carries the tree's own name,
-// so the derived execution path is the tree already holding the branch.
-// owner.Recreate re-validates the tree at adoption time — a no-op for a live
-// tree on the pinned branch, a prune+recreate for stale metadata, and an
-// explicit mismatch/missing-branch failure when the world moved between the
-// listing above and here. The commit itself re-validates the tree after the
-// binding is persisted (see bindAdoptedSession): the last owner's deletion
-// may release the tree between the Recreate above and the commit, and a
-// session bound to a tree that no longer exists would have no self-healing
-// until restart. Nothing is compensated: the tree pre-existed with its own
-// sessions and is never touched by this creation's failures.
-func (f *FrontendAPI) adoptManagedTree(ctx context.Context, owner *worktrees.Owner, repoRoot, projectID, branch string, holder *workspace.WorktreeInfo) (*session.SessionInfo, error) {
-	if _, err := owner.Recreate(ctx, repoRoot, holder.Name, branch, holder.Path); err != nil {
-		return nil, err
-	}
-	draft := session.NewSessionDraft(projectID, &session.WorkspaceBinding{
-		Kind:          session.WorkspaceManagedWorktree,
-		WorkspacePath: holder.Path,
-		WorktreeName:  holder.Name,
-		Branch:        branch,
-	})
-	info, err := f.bindAdoptedSession(ctx, owner, repoRoot, draft, holder.Name)
-	if err != nil {
-		return nil, err
-	}
-	// Idempotent: the tree's first session seeded the cache already; a fresh
-	// seed keeps adopted (previously orphaned) trees warm too.
-	f.seedWorktreeEmbeddingCache(projectID, holder.Name)
-	return info, nil
-}
-
-// bindAdoptedSession commits the adopted-tree draft and re-validates the
-// tree inside the adoption↔deletion critical section (managedTreeMu). The
-// re-validation is what closes the shared-tree race: the release's
-// [count co-owners → remove tree] pair runs under the same mutex
-// (releaseTreeIfLastOwnerLocked), so a concurrent last-owner deletion either
-// counts this session's committed binding (release skipped) or removes the
-// tree BEFORE this binding is committed — in which case the re-validation
-// below fails and the just-committed session is rolled back instead of
-// surviving bound to a removed tree.
-func (f *FrontendAPI) bindAdoptedSession(ctx context.Context, owner *worktrees.Owner, repoRoot string, draft session.SessionDraft, treeName string) (*session.SessionInfo, error) {
-	f.managedTreeMu.Lock()
-	defer f.managedTreeMu.Unlock()
-	return f.bindAdoptedSessionLocked(ctx, owner, repoRoot, draft, treeName)
-}
-
-// bindAdoptedSessionLocked is bindAdoptedSession without the locking; the
-// caller must hold managedTreeMu (tests call it directly while holding the
-// mutex to pin the interleaving the lock excludes).
-func (f *FrontendAPI) bindAdoptedSessionLocked(ctx context.Context, owner *worktrees.Owner, repoRoot string, draft session.SessionDraft, treeName string) (*session.SessionInfo, error) {
-	info, err := f.commitManagedDraft(ctx, draft, repoRoot, "")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := owner.Inspect(ctx, repoRoot, treeName); err != nil {
-		f.rollbackAdoptedSession(ctx, info, treeName, err)
-		return nil, fmt.Errorf("managed worktree %q was gone at the post-commit re-validation (removed by a concurrent last-owner deletion); the session was rolled back — retry the creation to provision a fresh tree: %w", treeName, err)
-	}
-	return info, nil
-}
-
-// rollbackAdoptedSession undoes a just-committed adoption whose tree was
-// removed concurrently by the last owner's deletion. Both halves of the
-// session go: the persisted row (it would restore into a missing tree) and
-// the in-memory session (the restore ensurer never runs for in-memory
-// sessions, so it could not self-heal before restart). Best-effort but loud:
-// a row that survives a failed delete self-heals on the next restore (the
-// ensurer re-provisions the tree from the pinned branch), and the branch is
-// never touched.
-func (f *FrontendAPI) rollbackAdoptedSession(ctx context.Context, info *session.SessionInfo, treeName string, cause error) {
-	if err := f.store.DeleteSession(ctx, info.ID); err != nil {
-		f.log().Error("failed to roll back the persisted binding of an adopted session whose tree was removed",
-			"session_id", info.ID, "worktree", treeName, "error", err)
-	}
-	if err := f.app.Manager().DeleteSession(info.ID); err != nil {
-		f.log().Warn("failed to remove the in-memory session of an adopted session whose tree was removed",
-			"session_id", info.ID, "worktree", treeName, "error", err)
-	}
-	f.log().Info("rolled back adopted session: its tree was removed by the last owner's deletion during creation",
-		"session_id", info.ID, "worktree", treeName, "cause", cause)
-}
-
-// createLocalFallbackSession serves a managed-session request whose branch is
-// checked out in the project's MAIN worktree: a managed tree can never hold
-// that branch, so the session runs in the checkout itself — exactly what a
-// plain local session does. Persistence stays best-effort (the CreateSession
-// contract): nothing was provisioned, so there is nothing to roll back.
-func (f *FrontendAPI) createLocalFallbackSession(projectID, repoRoot, branch string) (*session.SessionInfo, error) {
-	info, err := f.app.Manager().CreateSession(projectID, repoRoot)
-	if err != nil {
-		return nil, fmt.Errorf("branch %s is held by the project checkout and the local fallback session failed: %w", branch, err)
-	}
-	if f.store != nil {
-		if err := f.store.SaveSession(context.Background(), *info); err != nil {
-			f.log().Error("failed to save local fallback session to store", "error", err)
-		}
-	}
-	return info, nil
-}
-
-// commitManagedDraft turns a validated managed draft into a runtime session
-// and persists its binding. Persistence is REQUIRED, not best-effort: a
-// managed session that exists only in memory would restore nowhere after a
-// restart, so a store failure rolls the whole creation back. The freshly
-// provisioned tree named by compensateTreeName is released on any failure —
-// pass "" for an ADOPTED tree, which pre-existed and must never be touched.
-func (f *FrontendAPI) commitManagedDraft(ctx context.Context, draft session.SessionDraft, repoRoot, compensateTreeName string) (*session.SessionInfo, error) {
-	info, err := f.app.Manager().CreateSessionFromDraft(draft, repoRoot)
-	if err != nil {
-		f.compensateProvisionedTree(ctx, repoRoot, compensateTreeName, "session commit failed")
-		return nil, err
-	}
-	if err := f.store.SaveSession(ctx, *info); err != nil {
-		f.compensateProvisionedTree(ctx, repoRoot, compensateTreeName, "session persistence failed")
-		if delErr := f.app.Manager().DeleteSession(info.ID); delErr != nil {
-			f.log().Warn("failed to remove unpersisted session after store failure", "session_id", info.ID, "error", delErr)
-		}
-		return nil, fmt.Errorf("failed to persist managed session binding: %w", err)
-	}
-	return info, nil
-}
-
-// compensateProvisionedTree releases a just-provisioned tree after a later
-// step of creation failed. Best-effort but loud: the primitives keep
-// branches alive, so a failed compensation leaves an empty tree on a fresh
-// branch — visible in the worktree list, never silent data loss. The fresh
-// tree is clean by construction, so no Force is passed; if it is somehow
-// dirty the release refuses and the warning says so.
 func (f *FrontendAPI) compensateProvisionedTree(ctx context.Context, repoRoot, treeName, cause string) {
 	if treeName == "" {
 		return // an adopted tree: it pre-existed and is never touched
@@ -569,7 +509,7 @@ func (f *FrontendAPI) forkManagedSession(ctx context.Context, src *session.Sessi
 		f.compensateProvisionedTree(provisionCtx, repoRoot, treeName, "fork persistence failed")
 		return nil, err
 	}
-	// Same contract as CreateManagedSession: after the success point, before
+	// Same contract as bindSessionWorkspace: after the success point, before
 	// the RPC returns and the frontend focuses the fork's tree. A fork's tree
 	// starts at the source's committed HEAD, so the checkout cache is a
 	// near-perfect match for its first index pass.
@@ -694,7 +634,7 @@ func (f *FrontendAPI) prepareManagedTreeDeletion(ctx context.Context, id string,
 
 	// 3. The [co-owner count → own-row removal → release] protocol runs
 	// inside the adoption↔deletion critical section (managedTreeMu, see
-	// bindAdoptedSession): an adoption that is committing its binding either
+	// bindAdoptedTree): an adoption that is committing its binding either
 	// finishes first and is counted below, or commits after the release and
 	// re-validates against the already-removed tree, rolling itself back —
 	// and a concurrent co-owner deletion either observes this session's row
@@ -731,7 +671,7 @@ func (f *FrontendAPI) prepareManagedTreeDeletion(ctx context.Context, id string,
 // (retryable) instead of risking a shared tree's removal. The caller must
 // hold managedTreeMu so this [count → row removal → release] protocol cannot
 // interleave with an adoption's [commit binding → re-validate tree] pair
-// (bindAdoptedSession) or with another deletion's protocol.
+// (bindAdoptedTree) or with another deletion's protocol.
 func (f *FrontendAPI) removeOwnerAndReleaseTreeLocked(ctx context.Context, projectID string, binding *session.WorkspaceBinding, deletingSessionID string, opts SessionDeleteOptions) (released bool, rowGoneProjectID, repoRoot string, err error) {
 	sharers, err := f.store.CountManagedWorktreeSessions(ctx, binding.WorktreeName, deletingSessionID)
 	if err != nil {
