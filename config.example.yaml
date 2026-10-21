@@ -2086,9 +2086,9 @@ notifications:
 # browser tab: the tab IS the desktop UI — anything the desktop app can do,
 # the tab can do. The default bind is loopback-only, so the listener stays
 # reachable from this machine only. A non-loopback bind exposes the listener
-# to the network and the traffic is unencrypted — do not point it at a
-# network you do not fully control (a TLS-protected stage is a future,
-# separate decision).
+# to the network; without TLS the traffic — including the login POST body —
+# travels unencrypted, so do not point it at a network you do not fully
+# control (the tls subsection below adds optional HTTPS; ADR-092).
 #
 #   enabled (default false) — master switch; false starts nothing.
 #
@@ -2125,8 +2125,48 @@ notifications:
 #                            or hit Regenerate to mint a fresh one. The
 #                            token is a durable credential in this file —
 #                            treat it like a password.
-## web_access:
+#
+#   tls (default off)       — optional HTTPS for the sidecar (ADR-092):
+#                              serve the same UI over TLS instead of plain
+#                              HTTP, so a non-loopback bind no longer means
+#                              a token over plaintext.
+#
+#     tls.enabled (default false) — the protocol is its own switch, never
+#                               parsed out of the address field (the URL
+#                               field keeps its host:port grammar; an
+#                               https:// scheme typed there is refused with
+#                               a pointer at this toggle). A TLS 1.2 floor
+#                               is pinned; with TLS off the behavior is
+#                               byte-identical to pre-TLS builds.
+#
+#     tls.cert / tls.key      — paths to the PEM certificate and the PEM
+#                               private key. Turning TLS on with either
+#                               path empty is structurally invalid:
+#                               fail-soft at load (the subsection resets
+#                               to off with a warning and the sidecar
+#                               stays on plain HTTP) and refused at save.
+#                               A configured but unreadable pair (missing
+#                               file, parse error, key/cert mismatch) is
+#                               fail-closed at sidecar start — the
+#                               listener is never silently downgraded to
+#                               plaintext. The standard pair is app-owned
+#                               and fixed: ~/.c0wrk/web-access.crt +
+#                               web-access.key, written by the Generate
+#                               action in Settings → Web Access (a
+#                               self-signed ECDSA P-256 certificate for
+#                               the pinned bind — browsers show their
+#                               one-time warning screen for self-signed
+#                               certs). To use your own certificate, point
+#                               these paths at your PEM files (e.g.
+#                               certbot's fullchain.pem + privkey.pem) by
+#                               editing this file directly.
+#
+# web_access:
 #   enabled: false
 #   bind: "127.0.0.1"
 #   port: 0
 #   token: ""
+#   tls:
+#     enabled: false
+#     cert: ""
+#     key: ""

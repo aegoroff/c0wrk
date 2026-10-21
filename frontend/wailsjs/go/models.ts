@@ -2891,6 +2891,11 @@ export namespace desktop {
 	    bind_is_loopback: boolean;
 	    token: string;
 	    token_pinned: boolean;
+	    tls_enabled: boolean;
+	    tls_cert: string;
+	    tls_key: string;
+	    cert_status: string;
+	    cert_detail: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new WebAccessInfo(source);
@@ -2907,6 +2912,11 @@ export namespace desktop {
 	        this.bind_is_loopback = source["bind_is_loopback"];
 	        this.token = source["token"];
 	        this.token_pinned = source["token_pinned"];
+	        this.tls_enabled = source["tls_enabled"];
+	        this.tls_cert = source["tls_cert"];
+	        this.tls_key = source["tls_key"];
+	        this.cert_status = source["cert_status"];
+	        this.cert_detail = source["cert_detail"];
 	    }
 	}
 	export class wailsLogAdapter {

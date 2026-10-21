@@ -3,6 +3,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -488,5 +489,228 @@ func TestValidateWebAccessToken(t *testing.T) {
 	want := "web_access: token must be at least 8 characters (leave it empty to keep the generated one)"
 	if got := ValidateWebAccessToken("").Error(); got != want {
 		t.Errorf("ValidateWebAccessToken(\"\") = %q, want %q", got, want)
+	}
+}
+
+func TestWebAccessTLS_AbsentSubsectionDefaultsOff(t *testing.T) {
+	// Additivity (ADR-092): a config authored before the tls subsection
+	// existed — or one that simply omits it — loads identically: the zero
+	// subsection, zero warnings, the enabled section untouched.
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  port: 8765
+  token: s3cret-token
+`))
+	if len(warnings) != 0 {
+		t.Fatalf("absent tls subsection must load without warnings, got %v", warnings)
+	}
+	if !cfg.WebAccess.Enabled || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+		t.Errorf("section must be untouched, got %+v", cfg.WebAccess)
+	}
+	if cfg.WebAccess.TLS != (WebAccessTLSConfig{}) {
+		t.Errorf("tls = %+v, want the zero subsection (off, empty paths)", cfg.WebAccess.TLS)
+	}
+}
+
+func TestWebAccessTLS_ValidSubsectionSavesAndRoundTrips(t *testing.T) {
+	// A fully-configured subsection is valid: it saves without error and
+	// reloads warning-free with every value intact — the config layer never
+	// reads the PEM files, so paths need not exist on disk.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := minimalValidConfig()
+	cfg.WebAccess = WebAccessConfig{
+		Enabled: true,
+		Bind:    DefaultWebAccessBind,
+		Port:    8765,
+		TLS: WebAccessTLSConfig{
+			Enabled: true,
+			Cert:    "/etc/pems/fullchain.pem", // deliberately nonexistent
+			Key:     "/etc/pems/privkey.pem",   // deliberately nonexistent
+		},
+	}
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save must accept a fully-configured tls subsection, got %v", err)
+	}
+	loaded, err := LoadWithResult(path)
+	if err != nil {
+		t.Fatalf("LoadWithResult: %v", err)
+	}
+	if len(loaded.LoadErrors) != 0 {
+		t.Fatalf("valid tls must reload warning-free, got %v", loaded.LoadErrors)
+	}
+	if loaded.Config.WebAccess != cfg.WebAccess {
+		t.Errorf("round trip = %+v, want %+v", loaded.Config.WebAccess, cfg.WebAccess)
+	}
+}
+
+func TestWebAccessTLS_DisabledSubsectionAcceptsAnything(t *testing.T) {
+	// An inert subsection (tls.enabled false) accepts any values without
+	// warning — the same doctrine as a disabled web_access section. Nothing
+	// is validated, nothing is reset, values stay as authored.
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 8765
+  tls:
+    enabled: false
+    cert: "not-a-path"
+    key: ""
+`))
+	if len(warnings) != 0 {
+		t.Fatalf("disabled tls subsection must not warn, got %v", warnings)
+	}
+	if !cfg.WebAccess.Enabled {
+		t.Error("section must stay enabled")
+	}
+	want := WebAccessTLSConfig{Enabled: false, Cert: "not-a-path"}
+	if cfg.WebAccess.TLS != want {
+		t.Errorf("tls = %+v, want %+v (preserved as authored)", cfg.WebAccess.TLS, want)
+	}
+}
+
+func TestWebAccessTLS_EmptyPathsFailSoftAtLoad(t *testing.T) {
+	// Structural invalidity (ADR-092, decision 2): tls enabled with either
+	// path empty is fail-soft at load — the SUBSECTION resets alone (the
+	// sidecar stays enabled on plain HTTP), bind/port/token are untouched,
+	// and exactly one warning names the subsection.
+	cases := map[string]WebAccessTLSConfig{
+		"both empty": {},
+		"cert empty": {Key: "/keys/privkey.pem"},
+		"key empty":  {Cert: "/certs/fullchain.pem"},
+	}
+	for name, tlsCfg := range cases {
+		tlsCfg.Enabled = true
+		doc := fmt.Sprintf(`
+web_access:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 8765
+  token: s3cret-token
+  tls:
+    enabled: true
+    cert: %q
+    key: %q
+`, tlsCfg.Cert, tlsCfg.Key)
+		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(doc))
+		if len(warnings) != 1 {
+			t.Fatalf("%s: expected exactly one load warning, got %v", name, warnings)
+		}
+		if !strings.Contains(warnings[0], "web_access.tls") || !strings.Contains(warnings[0], "ignored") {
+			t.Errorf("%s: warning must name the subsection and the reset, got %q", name, warnings[0])
+		}
+		if !cfg.WebAccess.Enabled {
+			t.Errorf("%s: the sidecar must stay enabled — only the subsection resets", name)
+		}
+		if cfg.WebAccess.Bind != DefaultWebAccessBind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+			t.Errorf("%s: section values must be preserved, got %+v", name, cfg.WebAccess)
+		}
+		if cfg.WebAccess.TLS != (WebAccessTLSConfig{}) {
+			t.Errorf("%s: tls = %+v, want the zero subsection", name, cfg.WebAccess.TLS)
+		}
+	}
+}
+
+func TestWebAccessTLS_SectionResetDoesNotStackTLSWarning(t *testing.T) {
+	// A bind/port reset already zeroes the subsection (it resets the whole
+	// section), so a doubly-broken section must produce exactly ONE warning,
+	// never a stacked tls warning on top of the section one.
+	cfg := &Config{WebAccess: WebAccessConfig{
+		Enabled: true,
+		Bind:    "garbage",
+		Port:    8765,
+		TLS:     WebAccessTLSConfig{Enabled: true},
+	}}
+	warnings := normalizeWebAccess(cfg)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly the section-reset warning, got %v", warnings)
+	}
+	if strings.Contains(warnings[0], "tls") {
+		t.Errorf("the section reset must not name tls, got %q", warnings[0])
+	}
+	if cfg.WebAccess != defaultWebAccessState() {
+		t.Errorf("section must reset to the default state, got %+v", cfg.WebAccess)
+	}
+}
+
+func TestWebAccessTLS_SaveRejectsEmptyPaths(t *testing.T) {
+	// Fail-closed (ADR-092, decision 2): an enabled sidecar with a
+	// structurally invalid tls subsection must never be persisted — the load
+	// path resets it before it can be re-saved, so these states are only
+	// reachable through in-memory mutation. The disabled counterpart of the
+	// same subsection saves fine.
+	cases := map[string]WebAccessTLSConfig{
+		"both empty": {},
+		"cert empty": {Key: "/keys/privkey.pem"},
+		"key empty":  {Cert: "/certs/fullchain.pem"},
+	}
+	for name, tlsCfg := range cases {
+		tlsCfg.Enabled = true
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		cfg := minimalValidConfig()
+		cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: DefaultWebAccessBind, TLS: tlsCfg}
+		err := Save(cfg, path)
+		if err == nil {
+			t.Errorf("%s: Save must refuse a structurally invalid tls subsection", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "web_access") {
+			t.Errorf("%s: error must name the section, got %q", name, err.Error())
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("%s: refused save must not create the file", name)
+		}
+		// The disabled counterpart of the same subsection saves fine.
+		tlsCfg.Enabled = false
+		cfg.WebAccess.TLS = tlsCfg
+		if err := Save(cfg, path); err != nil {
+			t.Errorf("%s: the disabled subsection must save fine, got %v", name, err)
+		}
+	}
+}
+
+func TestWebAccessTLS_SaveGateInertWhenSectionDisabled(t *testing.T) {
+	// The subsection is validated only while the sidecar itself is enabled:
+	// a disabled web_access section is inert, subsection included — the same
+	// half-typed subsection saves without error when the sidecar is off.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := minimalValidConfig()
+	cfg.WebAccess = WebAccessConfig{
+		Bind: DefaultWebAccessBind,
+		TLS:  WebAccessTLSConfig{Enabled: true},
+	}
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save must accept a tls subsection under a disabled section, got %v", err)
+	}
+}
+
+func TestValidateWebAccessTLS(t *testing.T) {
+	// The exported mirror of the subsection rule: a disabled subsection is
+	// inert (anything passes), an enabled one needs both PEM paths, and the
+	// messages name the section exactly like the load/save paths.
+	if err := ValidateWebAccessTLS(WebAccessTLSConfig{}); err != nil {
+		t.Errorf("disabled empty = %v, want nil", err)
+	}
+	if err := ValidateWebAccessTLS(WebAccessTLSConfig{Cert: "x", Key: "y"}); err != nil {
+		t.Errorf("disabled with values = %v, want nil", err)
+	}
+	if err := ValidateWebAccessTLS(WebAccessTLSConfig{Enabled: true, Cert: "/c", Key: "/k"}); err != nil {
+		t.Errorf("enabled with both paths = %v, want nil", err)
+	}
+	err := ValidateWebAccessTLS(WebAccessTLSConfig{Enabled: true, Key: "/k"})
+	if err == nil {
+		t.Error("enabled with empty cert = nil, want error")
+	} else if got := err.Error(); got != "web_access: tls.cert is required when tls is enabled (generate a pair in Settings → Web Access or point cert/key at PEM files)" {
+		t.Errorf("enabled with empty cert = %q, want the cert-required message", got)
+	}
+	err = ValidateWebAccessTLS(WebAccessTLSConfig{Enabled: true, Cert: "/c"})
+	if err == nil {
+		t.Error("enabled with empty key = nil, want error")
+	} else if got := err.Error(); got != "web_access: tls.key is required when tls is enabled" {
+		t.Errorf("enabled with empty key = %q, want the key-required message", got)
 	}
 }

@@ -272,20 +272,29 @@ func TestGetWebAccessInfo_BindFields(t *testing.T) {
 // applies to the sidecar's resolved listener address: a wildcard host
 // (0.0.0.0, ::) is rewritten to localhost — the machine-local way into an
 // every-interface listener, which no browser can open by its wildcard name —
-// while every specific address is reported exactly as bound. The live
-// wildcard path through GetWebAccessInfo is pinned by
-// TestGetWebAccessInfo_BindFields; this table pins the mapping itself.
+// while every specific address is reported exactly as bound, and the scheme
+// follows the transport the sidecar actually serves (https under TLS,
+// ADR-092 decision 1). The live wildcard path through GetWebAccessInfo is
+// pinned by TestGetWebAccessInfo_BindFields; this table pins the mapping
+// itself.
 func TestWebAccessBrowserURL(t *testing.T) {
-	cases := []struct{ addr, want string }{
-		{"0.0.0.0:8080", "http://localhost:8080"},
-		{"[::]:9000", "http://localhost:9000"},
-		{"127.0.0.1:41234", "http://127.0.0.1:41234"},
-		{"[::1]:41235", "http://[::1]:41235"},
-		{"192.168.1.10:8080", "http://192.168.1.10:8080"},
+	cases := []struct {
+		addr       string
+		tlsEnabled bool
+		want       string
+	}{
+		{"0.0.0.0:8080", false, "http://localhost:8080"},
+		{"[::]:9000", false, "http://localhost:9000"},
+		{"127.0.0.1:41234", false, "http://127.0.0.1:41234"},
+		{"[::1]:41235", false, "http://[::1]:41235"},
+		{"192.168.1.10:8080", false, "http://192.168.1.10:8080"},
+		{"127.0.0.1:41234", true, "https://127.0.0.1:41234"},
+		{"0.0.0.0:8080", true, "https://localhost:8080"},
+		{"192.168.1.10:8080", true, "https://192.168.1.10:8080"},
 	}
 	for _, tc := range cases {
-		if got := webAccessBrowserURL(tc.addr); got != tc.want {
-			t.Errorf("webAccessBrowserURL(%q) = %q, want %q", tc.addr, got, tc.want)
+		if got := webAccessBrowserURL(tc.addr, tc.tlsEnabled); got != tc.want {
+			t.Errorf("webAccessBrowserURL(%q, %v) = %q, want %q", tc.addr, tc.tlsEnabled, got, tc.want)
 		}
 	}
 }
@@ -488,7 +497,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 		t.Fatal("sidecar did not mount")
 	}
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken", "SetWebAccessTLS", "GenerateWebAccessCertificate"} {
 		if srv.Dispatchable(method) {
 			t.Errorf("%s is dispatchable over the web surface — the control RPC leaked into the reflection target", method)
 		}
@@ -497,7 +506,7 @@ func TestWebClientCannotCallControlRPCs(t *testing.T) {
 	ts := newWebAccessHTTPTest(t, srv)
 	client := loginWebAccessClient(t, ts.URL, srv.AuthToken())
 
-	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken"} {
+	for _, method := range []string{"SetWebAccessEnabled", "GetWebAccessInfo", "SetWebAccessConnection", "RegenerateWebAccessToken", "SetWebAccessToken", "SetWebAccessTLS", "GenerateWebAccessCertificate"} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 			ts.URL+"/api/rpc/"+method, strings.NewReader("[]"))
 		if err != nil {

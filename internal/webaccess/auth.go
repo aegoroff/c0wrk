@@ -182,10 +182,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure is deliberately omitted: the sidecar serves plain HTTP
-		// (no TLS yet). KNOWN LIMITATION — a TLS stage must flip this on.
-		// The loopback default, the startup warning on a non-loopback bind
-		// and the auth token are the compensations.
+		// Secure rides the transport (ADR-092): set exactly when the sidecar
+		// terminates TLS, omitted on plain HTTP — byte-identical to the
+		// pre-ADR-092 behavior there. HttpOnly/SameSite=Strict, the
+		// per-launch session secret and the token gate stay the compensations
+		// on both transports.
+		Secure: s.tls != nil,
 		MaxAge: sessionCookieTTL,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

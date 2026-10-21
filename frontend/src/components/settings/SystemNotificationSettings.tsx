@@ -7,20 +7,24 @@ import {
   checkNotificationAuthorization,
   initSystemNotifications,
   showTestNotification,
+  webNotificationDenialCause,
 } from '@/api/notifications'
 import {
   getNotificationBannerTimeout,
   setNotificationBannerTimeout,
 } from '@/api/config'
 import { sendSystemNotification } from '@/lib/systemNotifications'
-import { ensureNotificationPermission } from '@/api/notifications'
+import { ensureNotificationPermission, NotificationPermissionError } from '@/api/notifications'
 import { isWailsReady, isWebTransport } from '@/api/runtime'
 import { isLinuxHost } from '@/lib/platform'
 import { logger } from '@/lib/logger'
 
-/** Tri-state of the lazy mount-time authorization probe (macOS-only concern:
- *  Linux/Windows always grant, so the probe never yields `denied` there). */
-type PermissionState = 'checking' | 'granted' | 'denied'
+/** Tri-state of the section's permission view. 'checking' while the lazy
+ *  mount probe runs; 'neutral' is every not-blocked state — granted, or an
+ *  UNANSWERED 'default' prompt (not a denial, ADR-090 decision 11: the Test
+ *  button stays the documented retry gesture); 'denied' surfaces the muted
+ *  hint and hides the button. */
+type PermissionState = 'checking' | 'neutral' | 'denied'
 
 /** Banner-lifetime choices, in seconds. The two sentinels are the ends of the
  *  scale: -1 hands the decision to the notification daemon, 0 means the banner
@@ -40,6 +44,24 @@ const bannerTimeoutOptions: { value: number; label: string }[] = [
  *  @/lib/platform.) */
 
 /**
+ * The hint shown while the authorization reads 'denied', per transport and —
+ * web only — per denial cause: an insecure origin (plain HTTP off localhost)
+ * is a browser platform rule NO site setting can lift, so the hint points at
+ * the real fix (open the app via http://localhost:<port>, e.g. an SSH
+ * tunnel); a secure-context denial is the per-site block the site-settings
+ * text describes. The macOS text is unchanged.
+ */
+function deniedHint(): string {
+  if (!isWebTransport()) {
+    return 'Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts'
+  }
+  if (webNotificationDenialCause() === 'insecure-context') {
+    return 'Browsers only allow web notifications on secure origins (HTTPS or localhost) — this page is plain HTTP, so no setting can enable them here. Open c0wrk via http://localhost:<port> (for example, through an SSH tunnel) to receive alerts.'
+  }
+  return 'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts'
+}
+
+/**
  * General-tab control for system (OS-level) notifications, mirroring
  * SoundSettings directly above it. A single master toggle governs ALL
  * banners: turning it on initializes the Go notification bridge (idempotent)
@@ -49,9 +71,11 @@ const bannerTimeoutOptions: { value: number; label: string }[] = [
  *
  * The authorization probe is deliberately lazy: it runs on this section's
  * mount (when the General tab renders it), not at app start, so opening
- * Settings — not launching the app — pays for it. A denial only ever happens
- * on macOS and is surfaced as a muted hint instead of a silently dead
- * channel; previews are suppressed in that state.
+ * Settings — not launching the app — pays for it. A REAL denial (macOS site
+ * setting, browser site setting, insecure web origin) is surfaced as a muted
+ * hint instead of a silently dead channel; previews are suppressed in that
+ * state. A closed-without-answer prompt ('default') is NOT a denial: the
+ * section stays neutral with the Test button as the retry gesture.
  */
 export function SystemNotificationSettings() {
   const enabled = useSystemNotificationStore((s) => s.enabled)
@@ -93,7 +117,7 @@ export function SystemNotificationSettings() {
     if (!isWailsReady() && !isWebTransport()) return
     let cancelled = false
     void checkNotificationAuthorization().then((granted) => {
-      if (!cancelled) setPermission(granted ? 'granted' : 'denied')
+      if (!cancelled) setPermission(granted ? 'neutral' : 'denied')
     })
     return () => {
       cancelled = true
@@ -113,9 +137,14 @@ export function SystemNotificationSettings() {
     // what surfaces that case, so the preview is skipped there.
     void initSystemNotifications().catch(() => {})
     void ensureNotificationPermission()
-      .then((granted) => {
-        setPermission(granted ? 'granted' : 'denied')
-        if (granted && permission !== 'denied') {
+      .then((outcome) => {
+        // Three outcomes: 'granted' previews the confirmation banner; a real
+        // 'denied' flips to the muted hint; 'default' — the prompt was
+        // closed WITHOUT an answer — is NOT a denial (ADR-090, decision 11):
+        // it lands in the neutral state, so no hint shows and the Test
+        // button stays available as the documented retry gesture.
+        setPermission(outcome === 'denied' ? 'denied' : 'neutral')
+        if (outcome === 'granted' && permission !== 'denied') {
           void sendSystemNotification({
             kind: 'success',
             title: 'c0wrk — System notifications enabled',
@@ -129,11 +158,16 @@ export function SystemNotificationSettings() {
   // The test button uses the platform banner (Go-authored ShowTestNotification
   // on the desktop; the browser Notification API in the web transport): it
   // demonstrates click routing too — activating it focuses the window/tab
-  // without navigating anywhere. A web denial flips the section to its hint.
+  // without navigating anywhere. A web rejection carries the gesture's
+  // outcome: only a REAL denial ('denied') flips the section to its hint;
+  // a dismissed prompt ('default', not a denial) keeps the neutral state so
+  // the button stays right here as the retry gesture (ADR-090, decision 11).
   const handleTest = (): void => {
     void showTestNotification().catch((err) => {
       logger.warn('[system-notifications] test notification failed', err)
-      if (isWebTransport()) setPermission('denied')
+      if (isWebTransport() && err instanceof NotificationPermissionError) {
+        setPermission(err.outcome === 'denied' ? 'denied' : 'neutral')
+      }
     })
   }
 
@@ -182,9 +216,7 @@ export function SystemNotificationSettings() {
           className="text-xs text-muted-foreground pl-12"
           data-testid="notification-permission-hint"
         >
-          {isWebTransport()
-            ? 'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts'
-            : 'Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts'}
+          {deniedHint()}
         </p>
       ) : (
         enabled && (

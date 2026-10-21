@@ -52,19 +52,23 @@
 //     (dispatch.go). A browser tab holds full control of the app by design;
 //     the denylist only removes methods that are web-transport hazards.
 //
-// KNOWN LIMITATION: the cookie is issued without the Secure flag because the
-// sidecar serves plain HTTP (no TLS yet). On the loopback default this is a
-// local-machine concern; on a non-loopback bind the missing Secure flag plus
-// the lack of TLS is part of the exposure the startup warning names.
-// HttpOnly/SameSite=Strict, the per-launch session secret and the token gate
-// remain the compensations; a TLS stage must flip Secure on. Websocket origin
-// checks compare Origin against r.Host, which stays correct on any interface.
+// KNOWN LIMITATION (resolved by ADR-092): on plain HTTP the cookie is still
+// issued without the Secure flag — byte-identical to the pre-ADR-092
+// behavior. With web_access.tls enabled the sidecar terminates TLS (New
+// fails closed on an enabled-but-unreadable pair, so a listener configured
+// as encrypted never silently downgrades to plaintext; MinVersion is pinned
+// to TLS 1.2) and the cookie carries Secure. HttpOnly/SameSite=Strict, the
+// per-launch session secret and the token gate remain the compensations on
+// every transport; the non-loopback exposure warning stands unchanged with
+// or without TLS (ADR-092 decision 6). Websocket origin checks compare
+// Origin against r.Host, which stays correct on any interface.
 package webaccess
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -118,7 +122,9 @@ type Options struct {
 	// Config is the resolved `web_access` config section. New refuses a
 	// disabled section (ErrDisabled) and an invalid bind
 	// (config.IsValidWebAccessBind); a valid non-loopback bind is accepted
-	// with a startup warning (network exposure, no TLS).
+	// with a startup warning (network exposure — the warning text stands
+	// unchanged under TLS, ADR-092 decision 6). A TLS-enabled section must
+	// carry a readable cert/key pair; New fails closed otherwise.
 	Config config.WebAccessConfig
 	// Dispatch is the RPC target: at runtime a *backend.FrontendAPI. Only its
 	// exported methods are reachable, minus the denylist (dispatch.go).
@@ -168,6 +174,7 @@ type Server struct {
 
 	limiter *loginLimiter
 	handler http.Handler
+	tls     *tls.Config
 
 	mu       sync.Mutex
 	ln       net.Listener
@@ -198,6 +205,31 @@ func New(opts Options) (*Server, error) {
 	if opts.Config.Port < 0 || opts.Config.Port > 65535 {
 		return nil, fmt.Errorf("webaccess: port %d out of range (0 = auto)", opts.Config.Port)
 	}
+	// TLS termination (ADR-092): an enabled subsection MUST yield a readable,
+	// parseable, matching pair. New refuses to construct the sidecar here —
+	// a listener the operator configured as encrypted never silently
+	// downgrades to plaintext (fail-closed at mount; the persisted switch
+	// stays on and the next launch retries). The structural state (enabled
+	// with an empty path) is already reset fail-soft at config load
+	// (backend/config normalizeWebAccess); the empty-path check here is
+	// belt-and-braces on the package boundary.
+	var tlsCfg *tls.Config
+	if opts.Config.TLS.Enabled {
+		if opts.Config.TLS.Cert == "" || opts.Config.TLS.Key == "" {
+			return nil, errors.New("webaccess: tls is enabled but the cert/key paths are empty")
+		}
+		pair, err := tls.LoadX509KeyPair(opts.Config.TLS.Cert, opts.Config.TLS.Key)
+		if err != nil {
+			return nil, fmt.Errorf("webaccess: tls is enabled but the certificate pair is unreadable: %w", err)
+		}
+		tlsCfg = &tls.Config{
+			// The sidecar's clients are mainstream browsers on the machine's
+			// own network segment; 1.2 is the agreed floor (ADR-092
+			// decision 6).
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{pair},
+		}
+	}
 	if opts.Dispatch == nil {
 		return nil, errors.New("webaccess: Dispatch target is required")
 	}
@@ -220,7 +252,9 @@ func New(opts Options) (*Server, error) {
 	// Stage-2 posture: a valid non-loopback bind puts the listener on the
 	// network. Allowed (the operator owns the exposure decision) but loudly
 	// surfaced — plain HTTP without TLS means the auth token is the only
-	// protection out there.
+	// protection out there. ADR-092 keeps this warning byte-identical with
+	// and without TLS: the exposure classification is about reachability,
+	// never encryption, and ADR-090 decision 12's warn-only model stands.
 	if !config.IsLoopbackBind(opts.Config.Bind) {
 		log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection", opts.Config.Bind))
 	}
@@ -259,6 +293,7 @@ func New(opts Options) (*Server, error) {
 		stopped:       make(chan struct{}),
 		wsConns:       make(map[*WSConn]struct{}),
 		wsInbound:     opts.WSInbound,
+		tls:           tlsCfg,
 	}
 	s.handler = s.buildHandler()
 	return s, nil
@@ -297,6 +332,12 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // never logged and never appears in a URL.
 func (s *Server) AuthToken() string { return s.authToken }
 
+// TLSEnabled reports whether this server terminates TLS on its listener
+// (ADR-092): the desktop surface renders the browser-facing URL's scheme
+// from it. The value is fixed at New — the pair is loaded there, so no
+// synchronization is needed beyond the constructor's happens-before edge.
+func (s *Server) TLSEnabled() bool { return s.tls != nil }
+
 // GenerateToken mints a fresh auth token: 32 bytes of crypto/rand rendered as
 // 64 hex characters — the same entropy the sidecar's per-launch fallback
 // mints. The desktop layer calls it when the persisted token is empty (first
@@ -319,8 +360,11 @@ func (s *Server) Addr() (string, bool) {
 }
 
 // Start binds the configured interface (resolving port 0 to a free port) and
-// serves until Stop or ctx cancellation. It returns after the listener is
-// bound; serve errors after that are logged, not returned.
+// serves until Stop or ctx cancellation. When the config section enables TLS
+// (ADR-092) the same listener terminates TLS with the pair loaded in New
+// (MinVersion 1.2); otherwise it serves plain HTTP exactly as before. It
+// returns after the listener is bound; serve errors after that are logged,
+// not returned.
 func (s *Server) Start(ctx context.Context) error {
 	addr := net.JoinHostPort(s.cfg.Bind, strconv.Itoa(s.cfg.Port))
 	var lc net.ListenConfig
@@ -331,18 +375,34 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.ln = ln
-	s.httpSrv = &http.Server{ //nolint:gosec // plain-HTTP sidecar (TLS is a later stage); timeouts set below
+	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-092), floor 1.2 pinned in New; timeouts set below
 		Handler:           s.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
+		TLSConfig:         s.tls,
+		// Route the stdlib server's internal diagnostics (refused TLS
+		// handshakes, protocol misuse) through the injected slog logger at
+		// Warn level — they are client-triggered and carry no secrets, and
+		// tests can intercept them at the source like every other diagnostic.
+		ErrorLog: slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
 	}
 	srv := s.httpSrv
 	s.mu.Unlock()
 
-	s.log.Info("webaccess: listening", "addr", ln.Addr().String())
+	s.log.Info("webaccess: listening", "addr", ln.Addr().String(), "tls", s.tls != nil)
 
 	go func() {
-		if serr := srv.Serve(ln); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+		var serr error
+		if s.tls != nil {
+			// TLS termination on the same listener (ADR-092): the pair is
+			// preloaded into TLSConfig.Certificates in New, so the file
+			// arguments stay empty and the key material is never re-read
+			// from disk on the serve path.
+			serr = srv.ServeTLS(ln, "", "")
+		} else {
+			serr = srv.Serve(ln)
+		}
+		if serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			s.log.Error("webaccess: serve stopped", "err", serr)
 		}
 	}()

@@ -82,7 +82,7 @@ func TestWebExtraSurfaceIsTheOnlyAppSliceOverTheWeb(t *testing.T) {
 	if !srv.Dispatchable("GetPendingActions") {
 		t.Error("GetPendingActions must be dispatchable through the extra surface")
 	}
-	for _, control := range []string{"GetWebAccessInfo", "SetWebAccessEnabled", "ConfirmExit", "Quit"} {
+	for _, control := range []string{"GetWebAccessInfo", "SetWebAccessEnabled", "SetWebAccessTLS", "GenerateWebAccessCertificate", "ConfirmExit", "Quit"} {
 		if srv.Dispatchable(control) {
 			t.Errorf("%s: an App control method must NOT be dispatchable over the web transport", control)
 		}

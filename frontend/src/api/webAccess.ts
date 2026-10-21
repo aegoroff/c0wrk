@@ -39,6 +39,24 @@ export interface WebAccessInfo {
   /** Whether a static token is persisted in config.yaml (a credential that
    *  survives restarts) as opposed to the ephemeral per-launch secret. */
   readonly tokenPinned: boolean
+  /** The PERSISTED web_access.tls.enabled switch (ADR-092) — the operator's
+   *  HTTPS intent, not the runtime transport (the url field carries the
+   *  sidecar's actual scheme). Absent on an older payload → false. */
+  readonly tlsEnabled: boolean
+  /** The PERSISTED path to the PEM certificate ('' when unconfigured; the
+   *  app-owned pair lives at ~/.c0wrk/web-access.crt). Absent on an older
+   *  payload → ''. */
+  readonly tlsCert: string
+  /** The PERSISTED path to the PEM private key ('' when unconfigured).
+   *  Absent on an older payload → ''. */
+  readonly tlsKey: string
+  /** Classification of the configured certificate against the pinned bind:
+   *  "ok" | "mismatch" | "expired" | "unreadable", or '' when no cert path
+   *  is configured — nothing to classify. Absent on an older payload → ''. */
+  readonly certStatus: string
+  /** The human-readable explanation behind a non-ok certStatus (the fix);
+   *  '' for "ok" and the unconfigured case. Absent on an older payload → ''. */
+  readonly certDetail: string
 }
 
 /** Boundary validator for the GetWebAccessInfo payload — the envelope must be
@@ -68,6 +86,15 @@ export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
     bindIsLoopback: r.bind_is_loopback !== false,
     token: r.token,
     tokenPinned: r.token_pinned === true,
+    // The TLS fields (ADR-092) tolerate a legacy payload the same way the
+    // pin fields do: the pins shipped in one binary with the TLS section, so
+    // absence can only describe "unconfigured, plain HTTP" — never a state
+    // worth guessing at.
+    tlsEnabled: r.tls_enabled === true,
+    tlsCert: typeof r.tls_cert === 'string' ? r.tls_cert : '',
+    tlsKey: typeof r.tls_key === 'string' ? r.tls_key : '',
+    certStatus: typeof r.cert_status === 'string' ? r.cert_status : '',
+    certDetail: typeof r.cert_detail === 'string' ? r.cert_detail : '',
   }
 }
 
@@ -134,6 +161,48 @@ export async function setWebAccessConnection(bind: string, port: number): Promis
 }
 
 /**
+ * Persist the web_access.tls subsection (Settings → Web Access, ADR-092):
+ * the HTTPS switch and the PEM certificate/key paths in one immediate config
+ * write, applied live through the section's restart-or-rollback — a running
+ * sidecar rebuilds onto the new transport or the previous settings are
+ * restored (the error says so). The UI authors only the certificate path and
+ * threads the PERSISTED key path through: an empty key with a non-empty cert
+ * is derived as `<cert-stem>.key` at commit time (decision 4), while a
+ * hand-configured key survives every commit untouched. Enabling with an
+ * empty cert path is refused with the exact load/save rule
+ * (config.ValidateWebAccessTLS); the subsection works while web_access is
+ * disabled (it pins for the next gated start). Throws on failure — the block
+ * surfaces the message and snaps back instead of guessing the state.
+ */
+export async function setWebAccessTLS(enabled: boolean, cert: string, key: string): Promise<void> {
+  try {
+    const app = getApp()
+    await app.SetWebAccessTLS(enabled, cert, key)
+  } catch (err) {
+    logger.error('Failed to set web access TLS:', err)
+    throw err
+  }
+}
+
+/**
+ * Generate the app-owned self-signed certificate pair (Settings → Web
+ * Access): writes ~/.c0wrk/web-access.crt|.key for the currently pinned bind
+ * and persists the pair's paths into the subsection — deliberately never
+ * flipping tls.enabled (minting-is-part-of-configuring, the token
+ * precedent). A running sidecar restarts onto the fresh key material even
+ * when the paths did not change. Throws on failure.
+ */
+export async function generateWebAccessCertificate(): Promise<void> {
+  try {
+    const app = getApp()
+    await app.GenerateWebAccessCertificate()
+  } catch (err) {
+    logger.error('Failed to generate the web access certificate:', err)
+    throw err
+  }
+}
+
+/**
  * Regenerate the persistent access token (Settings → Web Access): mints a
  * fresh credential, persists it through the same config write every settings
  * change uses, and hot-restarts a running sidecar onto it — every open tab
@@ -188,27 +257,26 @@ const WEB_ACCESS_ADDRESS_PATTERN =
 /**
  * Parse the Settings address field into the (bind, port) pair the backend
  * stores. Accepted shapes: "127.0.0.1:8080", "localhost:8080", "[::1]:8080",
- * the same with an explicit "http://" prefix, and the bare host without a
- * port (= auto port). An empty input means the defaults (127.0.0.1 + auto).
- * A missing scheme gains "http://" automatically; "https://" is refused
- * rather than silently downgraded — the sidecar serves plain HTTP. Invalid
- * input yields the error message and the caller must not save.
+ * the same with an explicit "http://" or "https://" prefix, and the bare
+ * host without a port (= auto port). An empty input means the defaults
+ * (127.0.0.1 + auto). A missing scheme gains "http://" automatically; the
+ * scheme is display-only — which transport serves the sidecar is the TLS
+ * switch, not this field — so both are stripped and anything else is
+ * refused. Invalid input yields the error message and the caller must not
+ * save.
  */
 export function parseWebAccessAddress(input: string): WebAccessAddress | { error: string } {
   const value = input.trim()
   if (value === '') return { bind: '', port: 0 }
-  if (/^https:\/\//i.test(value)) {
-    return { error: 'https:// is not supported — the sidecar serves plain HTTP only.' }
-  }
-  // Strip an explicit http://, refuse any other scheme, auto-prepend http://
-  // when none is given — the remainder is host[:port] in every branch, so one
-  // pattern validates all spellings.
+  // Strip an explicit http:// or https://, refuse any other scheme,
+  // auto-prepend http:// when none is given — the remainder is host[:port]
+  // in every branch, so one pattern validates all spellings.
   let hostPort = value
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
-    if (!/^http:\/\//i.test(value)) {
-      return { error: 'Only the http:// scheme is supported — the sidecar serves plain HTTP.' }
+    if (!/^https?:\/\//i.test(value)) {
+      return { error: 'Only the http:// or https:// scheme is supported here — the transport itself is the HTTPS switch below.' }
     }
-    hostPort = value.slice(7)
+    hostPort = value.replace(/^https?:\/\//i, '')
   }
   const match = WEB_ACCESS_ADDRESS_PATTERN.exec(hostPort)
   if (match === null || match[1] === undefined) {

@@ -292,9 +292,10 @@ func TestLoginFlow(t *testing.T) {
 			t.Errorf("Path = %q, want /", c.Path)
 		}
 		if c.Secure {
-			// Documented limitation: the sidecar serves plain HTTP, so the
-			// cookie carries no Secure flag; a TLS stage must flip it on.
-			t.Error("Secure flag unexpected (documented limitation is its ABSENCE — flip this test when TLS lands)")
+			// Plain HTTP keeps the cookie without Secure — byte-identical to
+			// the pre-ADR-092 behavior; Secure rides TLS only (tls_test.go
+			// pins the TLS side of the contract).
+			t.Error("Secure flag unexpected on plain HTTP (Secure rides TLS only, ADR-092)")
 		}
 		if c.Value == srv.cfg.Token {
 			t.Error("cookie must carry the per-launch session secret, not the configured token")

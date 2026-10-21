@@ -23,6 +23,8 @@ import {
   getWebAccessInfo,
   setWebAccessEnabled,
   setWebAccessConnection,
+  setWebAccessTLS,
+  generateWebAccessCertificate,
   regenerateWebAccessToken,
   setWebAccessToken,
   webAccessLogin,
@@ -39,6 +41,11 @@ const validInfo = {
   bind_is_loopback: true,
   token: 'per-launch-token',
   token_pinned: false,
+  tls_enabled: false,
+  tls_cert: '',
+  tls_key: '',
+  cert_status: '',
+  cert_detail: '',
 }
 
 describe('parseWebAccessInfo', () => {
@@ -52,6 +59,11 @@ describe('parseWebAccessInfo', () => {
     bindIsLoopback: true,
     token: 'per-launch-token',
     tokenPinned: false,
+    tlsEnabled: false,
+    tlsCert: '',
+    tlsKey: '',
+    certStatus: '',
+    certDetail: '',
   }
 
   it('accepts a fully valid payload', () => {
@@ -110,7 +122,58 @@ describe('parseWebAccessInfo', () => {
       configuredBind: '',
       bindIsLoopback: true,
       tokenPinned: false,
+      tlsEnabled: false,
+      tlsCert: '',
+      tlsKey: '',
+      certStatus: '',
+      certDetail: '',
     })
+  })
+
+  it('maps the snake_case TLS fields (ADR-092)', () => {
+    expect(
+      parseWebAccessInfo({
+        ...validInfo,
+        tls_enabled: true,
+        tls_cert: '/home/z/.c0wrk/web-access.crt',
+        tls_key: '/home/z/.c0wrk/web-access.key',
+        cert_status: 'ok',
+        cert_detail: '',
+      }),
+    ).toEqual({
+      ...parsedValid,
+      tlsEnabled: true,
+      tlsCert: '/home/z/.c0wrk/web-access.crt',
+      tlsKey: '/home/z/.c0wrk/web-access.key',
+      certStatus: 'ok',
+    })
+  })
+
+  it('passes a non-ok cert status and its detail through verbatim', () => {
+    expect(
+      parseWebAccessInfo({
+        ...validInfo,
+        cert_status: 'mismatch',
+        cert_detail: 'the certificate does not cover 192.0.2.1 — regenerate it',
+      })?.certStatus,
+    ).toBe('mismatch')
+    expect(
+      parseWebAccessInfo({
+        ...validInfo,
+        cert_status: 'expired',
+        cert_detail: 'expired 2026-01-01T00:00:00Z — regenerate',
+      })?.certDetail,
+    ).toBe('expired 2026-01-01T00:00:00Z — regenerate')
+  })
+
+  it('defaults the TLS fields when absent or wrong-typed (stale fixture tolerance)', () => {
+    expect(parseWebAccessInfo({ ...validInfo, tls_cert: 5, tls_key: null })).toEqual({
+      ...parsedValid,
+      tlsCert: '',
+      tlsKey: '',
+    })
+    expect(parseWebAccessInfo({ ...validInfo, tls_enabled: 'yes' })).toEqual(parsedValid)
+    expect(parseWebAccessInfo({ ...validInfo, cert_status: 9, cert_detail: {} })).toEqual(parsedValid)
   })
 
   it('defaults a wrong-typed bind field to the unpinned/loopback shape (stale fixture tolerance)', () => {
@@ -219,6 +282,74 @@ describe('setWebAccessConnection', () => {
   })
 })
 
+describe('setWebAccessTLS', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    for (const key of Object.keys(mockApp)) delete mockApp[key]
+  })
+
+  it('passes the switch and both paths through and resolves on success', async () => {
+    mockApp.SetWebAccessTLS = vi.fn().mockResolvedValue(undefined)
+    await expect(
+      setWebAccessTLS(true, '/home/z/.c0wrk/web-access.crt', '/home/z/.c0wrk/web-access.key'),
+    ).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessTLS).toHaveBeenCalledWith(
+      true,
+      '/home/z/.c0wrk/web-access.crt',
+      '/home/z/.c0wrk/web-access.key',
+    )
+    // The derivation is the backend's job: the UI sends an empty key through
+    // untouched when none is configured.
+    await setWebAccessTLS(true, '/tmp/pair.pem', '')
+    expect(mockApp.SetWebAccessTLS).toHaveBeenLastCalledWith(true, '/tmp/pair.pem', '')
+    await setWebAccessTLS(false, '', '')
+    expect(mockApp.SetWebAccessTLS).toHaveBeenLastCalledWith(false, '', '')
+  })
+
+  it('rethrows on failure (including the rollback message must surface)', async () => {
+    mockApp.SetWebAccessTLS = vi.fn().mockRejectedValue(
+      new Error('web access TLS change not applied: the previous settings were restored'),
+    )
+    await expect(setWebAccessTLS(true, 'cert.pem', 'key.pem')).rejects.toThrow(
+      'previous settings were restored',
+    )
+    expect(logger.error).toHaveBeenCalled()
+  })
+
+  it('surfaces the shared structural refusal for an enabled section without a cert', async () => {
+    mockApp.SetWebAccessTLS = vi.fn().mockRejectedValue(
+      new Error(
+        'web access TLS not applied: web_access: tls.cert is required when tls is enabled (generate a pair in Settings → Web Access or point cert/key at PEM files)',
+      ),
+    )
+    await expect(setWebAccessTLS(true, '', '')).rejects.toThrow('tls.cert is required')
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('generateWebAccessCertificate', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    for (const key of Object.keys(mockApp)) delete mockApp[key]
+  })
+
+  it('calls the generation RPC and resolves on success', async () => {
+    mockApp.GenerateWebAccessCertificate = vi.fn().mockResolvedValue(undefined)
+    await expect(generateWebAccessCertificate()).resolves.toBeUndefined()
+    expect(mockApp.GenerateWebAccessCertificate).toHaveBeenCalledTimes(1)
+  })
+
+  it('rethrows on failure (a rejected generation must surface)', async () => {
+    mockApp.GenerateWebAccessCertificate = vi
+      .fn()
+      .mockRejectedValue(new Error('failed to generate the web access certificate'))
+    await expect(generateWebAccessCertificate()).rejects.toThrow(
+      'failed to generate the web access certificate',
+    )
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
 describe('regenerateWebAccessToken', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -285,16 +416,16 @@ describe('parseWebAccessAddress', () => {
     expect(parseWebAccessAddress('[::1]')).toEqual({ bind: '::1', port: 0 })
   })
 
-  it('refuses https:// instead of silently downgrading', () => {
-    const refused = parseWebAccessAddress('https://127.0.0.1:8080')
-    expect('error' in refused).toBe(true)
-    if ('error' in refused) expect(refused.error).toMatch(/https/i)
+  it('accepts the https:// prefix now that the transport is the TLS switch', () => {
+    expect(parseWebAccessAddress('https://127.0.0.1:8080')).toEqual({ bind: '127.0.0.1', port: 8080 })
+    expect(parseWebAccessAddress('HTTPS://localhost')).toEqual({ bind: 'localhost', port: 0 })
+    expect(parseWebAccessAddress('https://[::1]:9090')).toEqual({ bind: '::1', port: 9090 })
   })
 
-  it('refuses schemes other than http://', () => {
+  it('refuses schemes other than http:// and https://', () => {
     const refused = parseWebAccessAddress('ftp://127.0.0.1:8080')
     expect('error' in refused).toBe(true)
-    if ('error' in refused) expect(refused.error).toMatch(/http/i)
+    if ('error' in refused) expect(refused.error).toMatch(/http/)
   })
 
   it('refuses hostnames other than localhost', () => {

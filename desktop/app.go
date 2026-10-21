@@ -2,12 +2,15 @@ package desktop
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -954,25 +957,65 @@ type WebAccessInfo struct {
 	// means the section never started with an empty token (the next start
 	// would mint one).
 	TokenPinned bool `json:"token_pinned"`
+	// TLSEnabled mirrors the persisted web_access.tls.enabled switch (ADR-092)
+	// — the operator's HTTPS intent, not the runtime transport. The URL field
+	// above carries the running sidecar's actual scheme.
+	TLSEnabled bool `json:"tls_enabled"`
+	// TLSCert is the PERSISTED path to the PEM certificate (empty when the
+	// subsection is unconfigured). The standard app-owned pair lives at
+	// ~/.c0wrk/web-access.crt; an operator-authored certificate is any path.
+	TLSCert string `json:"tls_cert"`
+	// TLSKey is the PERSISTED path to the PEM private key (empty when the
+	// subsection is unconfigured).
+	TLSKey string `json:"tls_key"`
+	// CertStatus classifies the configured certificate against the pinned
+	// bind (ADR-092 decision 5), computed whenever tls_cert is non-empty:
+	// "ok" — the pair loads and the leaf covers the bind's browser-facing
+	// host within its validity window; "mismatch" — the leaf does not cover
+	// that host (the canonical trigger: the bind was changed after the pair
+	// was generated; regenerating is the fix); "expired" — the leaf is past
+	// NotAfter; "unreadable" — the pair cannot be loaded/parsed (missing
+	// file, parse error, key/cert mismatch). Empty when no cert path is
+	// configured — nothing to classify.
+	CertStatus string `json:"cert_status"`
+	// CertDetail is the human-readable explanation behind a non-ok
+	// CertStatus (which certificate failed which check, and the fix); empty
+	// for "ok" and the unconfigured case.
+	CertDetail string `json:"cert_detail"`
+}
+
+// webAccessURLHost maps a listener host to the host a browser opens: an
+// unspecified wildcard host (0.0.0.0, ::) becomes "localhost" — the wildcard
+// names "every interface", not an address a browser can open, and localhost
+// is the machine-local way in; every specific host (IP literal or name) is
+// reported as-is. Shared by the URL renderer and the certificate status
+// check (ADR-092 decision 5) so both name the SAME browser-facing host the
+// certificate's SANs must cover.
+func webAccessURLHost(host string) string {
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return "localhost"
+	}
+	return host
 }
 
 // webAccessBrowserURL renders the URL a browser opens for the sidecar's
-// resolved listener address: plain http (stage 1 carries no TLS) plus
-// host:port, with one rewrite — an unspecified wildcard host (0.0.0.0, ::)
-// becomes "localhost". The wildcard names "every interface", not an address
-// a browser can open, and localhost is the machine-local way in; a specific
-// IP (loopback or LAN) is reported exactly as bound.
-func webAccessBrowserURL(addr string) string {
+// resolved listener address: the scheme follows the transport the sidecar is
+// actually serving (https under web_access.tls, ADR-092 decision 1 — what
+// the operator sees is always what the browser must open) plus host:port,
+// with one rewrite — an unspecified wildcard host becomes "localhost"
+// (webAccessURLHost).
+func webAccessBrowserURL(addr string, tlsEnabled bool) string {
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Not host:port — never expected from a TCP listener address; pass
 		// the raw value through rather than invent a port.
-		return "http://" + addr
+		return scheme + "://" + addr
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		host = "localhost"
-	}
-	return "http://" + net.JoinHostPort(host, port)
+	return scheme + "://" + net.JoinHostPort(webAccessURLHost(host), port)
 }
 
 // GetWebAccessInfo reports the sidecar state for Settings → Web Access.
@@ -986,11 +1029,16 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 		info.BindIsLoopback = config.IsLoopbackBind(cfg.WebAccess.Bind)
 		info.ConfiguredPort = cfg.WebAccess.Port
 		info.TokenPinned = cfg.WebAccess.Token != ""
+		info.TLSEnabled = cfg.WebAccess.TLS.Enabled
+		info.TLSCert = cfg.WebAccess.TLS.Cert
+		info.TLSKey = cfg.WebAccess.TLS.Key
+		info.CertStatus, info.CertDetail = classifyWebAccessCert(
+			cfg.WebAccess.TLS.Cert, cfg.WebAccess.TLS.Key, cfg.WebAccess.Bind)
 	}
 	if srv := a.webAccess.Load(); srv != nil {
 		info.Running = true
 		if addr, ok := srv.Addr(); ok {
-			info.URL = webAccessBrowserURL(addr)
+			info.URL = webAccessBrowserURL(addr, srv.TLSEnabled())
 			if _, port, perr := net.SplitHostPort(addr); perr == nil {
 				info.Port, _ = strconv.Atoi(port)
 			}
@@ -1239,6 +1287,185 @@ func (a *App) SetWebAccessToken(token string) error {
 	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "token change")
 }
 
+// Web-access TLS certificate statuses (ADR-092 decision 5): the exact
+// vocabulary GetWebAccessInfo reports in cert_status. The empty string (the
+// zero value, not a constant) means no cert path is configured — nothing to
+// classify.
+const (
+	webAccessCertStatusOK         = "ok"
+	webAccessCertStatusMismatch   = "mismatch"
+	webAccessCertStatusUnreadable = "unreadable"
+	webAccessCertStatusExpired    = "expired"
+)
+
+// SetWebAccessTLS persists the web_access.tls subsection (the HTTPS switch,
+// ADR-092 decision 1) and applies it live: a running sidecar is hot-restarted
+// onto the new transport. An empty key with a non-empty cert derives the key
+// path from the certificate's stem (<cert-stem>.key, ADR-092 decision 4 —
+// the UI authors the cert path only, the config always carries both). An
+// enabled subsection with empty paths is refused through
+// config.ValidateWebAccessTLS — the exact structural rule the load/save
+// paths enforce; a disabled subsection is inert and accepts anything (the
+// sidecar serves plain HTTP, byte-identical to pre-ADR behavior). A request
+// matching the current subsection is a no-op.
+//
+// Failure ordering mirrors the section's other control RPCs (the
+// SetWebAccessConnection contract): a failed persist rolls the subsection
+// back in memory, and a failed restart — e.g. the configured pair cannot be
+// loaded, which the sidecar refuses FAIL-CLOSED (a listener configured as
+// encrypted never downgrades to plaintext, ADR-092 decision 2) — restores
+// the previous subsection on disk and brings the sidecar back on it. The
+// subsection deliberately does not consult web_access.enabled or the
+// experimental gate: like the bind/port pins it persists regardless and
+// takes effect at the next start whose gates are open. Locking discipline:
+// webAccessMu, exactly like SetWebAccessEnabled (see its comment for the
+// desktop-owned config seam).
+func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	cert = strings.TrimSpace(cert)
+	key = strings.TrimSpace(key)
+	if enabled && cert != "" && key == "" {
+		key = webAccessKeyFromCert(cert)
+	}
+	next := config.WebAccessTLSConfig{Enabled: enabled, Cert: cert, Key: key}
+	if err := config.ValidateWebAccessTLS(next); err != nil {
+		return err
+	}
+	if cfg.WebAccess.TLS == next {
+		return nil
+	}
+
+	prev := cfg.WebAccess
+	cfg.WebAccess.TLS = next
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess.TLS = prev.TLS
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "TLS switch")
+}
+
+// webAccessKeyFromCert derives the key path from the certificate path's stem
+// (ADR-092 decision 4): fullchain.pem → fullchain.key. Applied at commit
+// time when the caller configured a cert but left the key empty.
+func webAccessKeyFromCert(cert string) string {
+	return strings.TrimSuffix(cert, filepath.Ext(cert)) + ".key"
+}
+
+// GenerateWebAccessCertificate regenerates the app-owned self-signed pair for
+// the CURRENTLY pinned bind (ADR-092 decision 3) at the fixed locations
+// ~/.c0wrk/web-access.crt + .key (the backend/config path API), persists the
+// pair's paths into web_access.tls (minting-is-part-of-configuring, the
+// token precedent), and hot-restarts a running sidecar onto the fresh
+// certificate. It never flips tls.enabled and never touches operator-authored
+// paths — clicking Generate overwrites only the standard pair it owns.
+// Works while the sidecar is stopped too: generation plus the persisted
+// paths are the whole effect then (a start with TLS enabled picks the pair
+// up).
+//
+// The files are written BEFORE the config save: the reverse order would
+// persist paths at files that do not exist yet — a fail-closed mount the
+// operator did nothing to deserve. The leftover-files-on-persist-failure
+// direction is harmless: the files are the idempotent standard pair nothing
+// references until the paths persist. Failure ordering mirrors the other
+// control RPCs; locking discipline: webAccessMu.
+func (a *App) GenerateWebAccessCertificate() error {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	agentDir := config.AgentDir()
+	certPath := config.WebAccessCertPath(agentDir)
+	keyPath := config.WebAccessKeyPath(agentDir)
+	if err := webaccess.GenerateWebAccessCertificate(cfg.WebAccess.Bind, certPath, keyPath); err != nil {
+		return err
+	}
+
+	prev := cfg.WebAccess
+	next := config.WebAccessTLSConfig{
+		Enabled: cfg.WebAccess.TLS.Enabled,
+		Cert:    certPath,
+		Key:     keyPath,
+	}
+	if cfg.WebAccess.TLS != next {
+		cfg.WebAccess.TLS = next
+		if err := config.Save(cfg, cfgPath); err != nil {
+			cfg.WebAccess.TLS = prev.TLS
+			return fmt.Errorf("failed to persist web access config: %w", err)
+		}
+	}
+	// Hot-restart even when the persisted paths did not change: regeneration
+	// replaced the key material on disk, and a running sidecar keeps serving
+	// the pair it loaded at start until it is rebuilt.
+	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "certificate generation")
+}
+
+// classifyWebAccessCert computes the cert_status/cert_detail pair of
+// GetWebAccessInfo (ADR-092 decision 5): whenever a cert path is configured,
+// the pair is loaded exactly the way the sidecar loads it
+// (tls.LoadX509KeyPair) and the leaf is checked against the pinned bind —
+// SAN coverage of the bind's browser-facing host (webAccessURLHost: the same
+// rewrite the rendered URL applies, so the status certifies the address the
+// browser actually opens) and expiry (NotAfter). The check order is fixed so
+// the classification is deterministic: unreadable (nothing about an
+// unloadable pair can be judged) → mismatch (deterministic,
+// config-derived — the canonical changed-bind trigger) → expired
+// (clock-derived) → ok. An unconfigured cert path is the empty status with
+// no detail.
+func classifyWebAccessCert(certPath, keyPath, bind string) (status, detail string) {
+	if certPath == "" {
+		return "", ""
+	}
+	host := webAccessURLHost(bind)
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return webAccessCertStatusUnreadable, fmt.Sprintf(
+			"the certificate pair could not be loaded (%v) — the sidecar will refuse to start while this pair is configured; fix the files or regenerate the pair", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return webAccessCertStatusUnreadable, fmt.Sprintf(
+			"the certificate could not be parsed (%v) — the sidecar will refuse to start while this pair is configured; fix the files or regenerate the pair", err)
+	}
+	if !webAccessCertCoversHost(leaf, host) {
+		return webAccessCertStatusMismatch, fmt.Sprintf(
+			"the certificate does not cover %q (the current bind) — regenerate the pair for this address or point cert/key at a pair that covers it", host)
+	}
+	if !time.Now().Before(leaf.NotAfter) {
+		return webAccessCertStatusExpired, fmt.Sprintf(
+			"the certificate expired %s — regenerate the pair to renew it", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
+	return webAccessCertStatusOK, ""
+}
+
+// webAccessCertCoversHost reports whether the leaf's SANs cover host: an IP
+// host must appear among the IP SANs, a name host among the DNS SANs
+// (RFC 6125 — the two lists are not interchangeable).
+func webAccessCertCoversHost(leaf *x509.Certificate, host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		for _, san := range leaf.IPAddresses {
+			if san.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, san := range leaf.DNSNames {
+		if strings.EqualFold(san, host) {
+			return true
+		}
+	}
+	return false
+}
+
 // restartWebAccessOrRollbackLocked hot-restarts a running sidecar onto the
 // just-persisted config state; when the sidecar is not running it is a no-op
 // (the persisted write was the whole effect). If the restart cannot serve
@@ -1365,5 +1592,6 @@ func logWebAccessReady(log *slog.Logger, srv *webaccess.Server) {
 	if !ok {
 		addr = "(unresolved)"
 	}
-	log.Info("web access sidecar ready", "url", "http://"+addr, "token", "(hidden — see Settings → Web Access)")
+	log.Info("web access sidecar ready", "url", webAccessBrowserURL(addr, srv.TLSEnabled()),
+		"token", "(hidden — see Settings → Web Access)")
 }

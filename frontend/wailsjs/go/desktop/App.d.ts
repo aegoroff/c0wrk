@@ -125,6 +125,8 @@ export function ForkSession(arg1:string):Promise<session.SessionInfo>;
 
 export function GenerateCommitMessage():Promise<string>;
 
+export function GenerateWebAccessCertificate():Promise<void>;
+
 export function GetAttachments(arg1:string):Promise<Array<session.AttachmentInfo>>;
 
 export function GetBlackboardAttachmentMarkdown(arg1:string,arg2:string):Promise<string>;
@@ -430,6 +432,8 @@ export function SetWebAccessConnection(arg1:string,arg2:number):Promise<void>;
 export function SetWebAccessEnabled(arg1:boolean):Promise<void>;
 
 export function SetWebAccessStaticFS(arg1:fs.FS):Promise<void>;
+
+export function SetWebAccessTLS(arg1:boolean,arg2:string,arg3:string):Promise<void>;
 
 export function SetWebAccessToken(arg1:string):Promise<void>;
 

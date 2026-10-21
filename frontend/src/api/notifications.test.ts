@@ -14,6 +14,8 @@ import {
   onNotificationClicked,
   checkNotificationAuthorization,
   ensureNotificationPermission,
+  NotificationPermissionError,
+  webNotificationDenialCause,
   __resetPermissionWarnForTest,
 } from './notifications'
 import { setLogLevel } from '@/lib/logger'
@@ -310,27 +312,146 @@ describe('web transport notifications', () => {
     expect(payload.session_id).toBe('')
   })
 
-  it('the test banner rejects when the permission stays denied', async () => {
+  it('the test banner rejects with a denied NotificationPermissionError when blocked', async () => {
     installWeb()
     FakeNotification.permission = 'denied'
-    await expect(showTestNotification()).rejects.toThrow('Notification permission is not granted')
+    const err = await showTestNotification().then(
+      () => {
+        throw new Error('expected rejection')
+      },
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(NotificationPermissionError)
+    expect((err as NotificationPermissionError).outcome).toBe('denied')
+    expect((err as Error).message).toContain('Notification permission is not granted')
+    expect(FakeNotification.instances).toHaveLength(0)
+  })
+
+  it('the test banner rejects with outcome default when the prompt is dismissed', async () => {
+    installWeb()
+    // The prompt was closed without an answer: the permission re-read stays
+    // 'default' — the error must carry THAT, not a denial (ADR-090, decision
+    // 11: the button remains the retry gesture).
+    FakeNotification.requestPermission.mockResolvedValue('default')
+    const err = await showTestNotification().then(
+      () => {
+        throw new Error('expected rejection')
+      },
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(NotificationPermissionError)
+    expect((err as NotificationPermissionError).outcome).toBe('default')
+    expect(FakeNotification.instances).toHaveLength(0)
   })
 
   it('ensureNotificationPermission requests once from a gesture and reports the outcome', async () => {
     installWeb()
-    FakeNotification.requestPermission.mockResolvedValue('granted')
-    await expect(ensureNotificationPermission()).resolves.toBe(true)
-    FakeNotification.requestPermission.mockResolvedValue('denied')
-    await expect(ensureNotificationPermission()).resolves.toBe(false)
+    // A real browser flips the permission static as the prompt settles —
+    // the re-read (not the resolved value) is what the outcome mirrors.
+    FakeNotification.requestPermission.mockImplementation(async () => {
+      FakeNotification.permission = 'granted'
+      return 'granted'
+    })
+    await expect(ensureNotificationPermission()).resolves.toBe('granted')
+    // Back to a fresh browser: a granted permission would short-circuit at
+    // the pre-read and never prompt again.
+    FakeNotification.permission = 'default'
+    FakeNotification.requestPermission.mockImplementation(async () => {
+      FakeNotification.permission = 'denied'
+      return 'denied'
+    })
+    await expect(ensureNotificationPermission()).resolves.toBe('denied')
     // Already granted: no second prompt.
     FakeNotification.permission = 'granted'
-    await expect(ensureNotificationPermission()).resolves.toBe(true)
+    await expect(ensureNotificationPermission()).resolves.toBe('granted')
     expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(2)
   })
 
-  it('ensureNotificationPermission is a desktop no-op that resolves true', async () => {
+  it('ensureNotificationPermission re-reads the permission after the prompt (dismissed = default, not denied)', async () => {
+    installWeb()
+    // Safari resolves requestPermission with undefined (here: a "granted"
+    // lie), and a prompt closed WITHOUT an answer leaves the permission at
+    // 'default'. The re-read is the source of truth: the outcome must be
+    // 'default' — NOT a denial (ADR-090, decision 11) — so the Settings
+    // section keeps the Test button reachable as the retry gesture.
+    FakeNotification.requestPermission.mockImplementation(async () => 'granted')
+    await expect(ensureNotificationPermission()).resolves.toBe('default')
+    expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1)
+  })
+
+  it('ensureNotificationPermission is a desktop no-op that resolves granted', async () => {
     // runtimeMocks.web stays false; no window.go and no Notification global —
     // the desktop path owns authorization through InitNotifications instead.
-    await expect(ensureNotificationPermission()).resolves.toBe(true)
+    await expect(ensureNotificationPermission()).resolves.toBe('granted')
+  })
+})
+
+// --- Web denial causes: WHY is the browser permission 'denied'? ------------
+describe('webNotificationDenialCause', () => {
+  /**
+   * Firefox on an insecure origin: reading the static permission itself
+   * throws SecurityError instead of answering 'denied'.
+   */
+  class FirefoxInsecureNotification {
+    static get permission(): 'default' | 'granted' | 'denied' {
+      throw new DOMException('The operation is insecure', 'SecurityError')
+    }
+    static requestPermission = vi.fn<() => Promise<'default' | 'granted' | 'denied'>>()
+  }
+
+  /** Shadows jsdom's isSecureContext; unstubAllGlobals (afterEach) restores it. */
+  function stubSecureContext(secure: boolean): void {
+    vi.stubGlobal('isSecureContext', secure)
+  }
+
+  it('classifies a secure-context denial as the site-settings cause', () => {
+    vi.stubGlobal('Notification', FakeNotification)
+    stubSecureContext(true)
+    FakeNotification.permission = 'denied'
+    expect(webNotificationDenialCause()).toBe('site-settings')
+  })
+
+  it('classifies an insecure-context denial as the dedicated insecure cause', () => {
+    vi.stubGlobal('Notification', FakeNotification)
+    stubSecureContext(false)
+    FakeNotification.permission = 'denied'
+    expect(webNotificationDenialCause()).toBe('insecure-context')
+  })
+
+  it('treats a SecurityError permission read (Firefox, insecure) as the same insecure cause', () => {
+    vi.stubGlobal('Notification', FirefoxInsecureNotification)
+    stubSecureContext(false)
+    expect(webNotificationDenialCause()).toBe('insecure-context')
+  })
+
+  it('returns null when the permission is not denied', () => {
+    vi.stubGlobal('Notification', FakeNotification)
+    stubSecureContext(true)
+    FakeNotification.permission = 'granted'
+    expect(webNotificationDenialCause()).toBeNull()
+    // 'default' (never asked) has no denial to explain either.
+    FakeNotification.permission = 'default'
+    expect(webNotificationDenialCause()).toBeNull()
+  })
+
+  it('returns null without the Notification API', () => {
+    stubSecureContext(true)
+    expect(webNotificationDenialCause()).toBeNull()
+  })
+
+  it('authorization maps a SecurityError permission read to denied (the probe must not reject)', async () => {
+    // The mount probe chains .then() without a catch — a Firefox-insecure
+    // read that answered "not denied" (or rejected) would strand the section
+    // in 'checking' with an unhandled rejection instead of the hint.
+    runtimeMocks.web = true
+    vi.stubGlobal('Notification', FirefoxInsecureNotification)
+    await expect(checkNotificationAuthorization()).resolves.toBe(false)
+  })
+
+  it('ensureNotificationPermission refuses upfront when the permission read throws', async () => {
+    runtimeMocks.web = true
+    vi.stubGlobal('Notification', FirefoxInsecureNotification)
+    await expect(ensureNotificationPermission()).resolves.toBe('denied')
+    expect(FirefoxInsecureNotification.requestPermission).not.toHaveBeenCalled()
   })
 })

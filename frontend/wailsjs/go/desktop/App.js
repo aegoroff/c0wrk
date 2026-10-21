@@ -234,6 +234,10 @@ export function GenerateCommitMessage() {
   return window['go']['desktop']['App']['GenerateCommitMessage']();
 }
 
+export function GenerateWebAccessCertificate() {
+  return window['go']['desktop']['App']['GenerateWebAccessCertificate']();
+}
+
 export function GetAttachments(arg1) {
   return window['go']['desktop']['App']['GetAttachments'](arg1);
 }
@@ -844,6 +848,10 @@ export function SetWebAccessEnabled(arg1) {
 
 export function SetWebAccessStaticFS(arg1) {
   return window['go']['desktop']['App']['SetWebAccessStaticFS'](arg1);
+}
+
+export function SetWebAccessTLS(arg1, arg2, arg3) {
+  return window['go']['desktop']['App']['SetWebAccessTLS'](arg1, arg2, arg3);
 }
 
 export function SetWebAccessToken(arg1) {

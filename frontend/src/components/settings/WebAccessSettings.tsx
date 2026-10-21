@@ -26,6 +26,7 @@ import { logger } from '@/lib/logger'
 import { generateUUID } from '@/lib/ids'
 import { Input } from '@/components/ui/input'
 import { Toggle } from './ModelProfilesControls'
+import { WebAccessTLSSettings } from './WebAccessTLSSettings'
 
 /**
  * Settings → General → Web Access (ADR-090): the browser sidecar's control
@@ -56,13 +57,15 @@ import { Toggle } from './ModelProfilesControls'
  */
 
 /** Renders the persisted (bind, port) pin as the full URL the single field
- *  displays and edits: "http://" plus the bind (an IPv6 bind bracketed), the
- *  port only when pinned (0 = auto = omitted). Empty bind = the empty default
- *  draft. */
-function formatWebAccessAddress(bind: string, port: number): string {
+ *  displays and edits: the scheme follows the persisted TLS switch (ADR-092
+ *  — what the field shows is the transport the sidecar will serve), plus the
+ *  bind (an IPv6 bind bracketed) and the port only when pinned (0 = auto =
+ *  omitted). Empty bind = the empty default draft. */
+function formatWebAccessAddress(bind: string, port: number, tlsEnabled: boolean): string {
   if (bind === '') return ''
   const host = bind.includes(':') && !bind.startsWith('[') ? `[${bind}]` : bind
-  return port > 0 ? `http://${host}:${port}` : `http://${host}`
+  const scheme = tlsEnabled ? 'https' : 'http'
+  return port > 0 ? `${scheme}://${host}:${port}` : `${scheme}://${host}`
 }
 
 export function WebAccessSettings() {
@@ -97,10 +100,17 @@ export function WebAccessSettings() {
   }, [])
 
   // Seed the drafts once the authoritative read lands (and after every
-  // applied change: the re-read canonicalizes the shapes).
+  // applied change: the re-read canonicalizes the shapes — including the
+  // URL scheme, which follows the TLS switch).
   useEffect(() => {
-    setAddressDraft(formatWebAccessAddress(info?.configuredBind ?? '', info?.configuredPort ?? 0))
-  }, [info?.configuredBind, info?.configuredPort])
+    setAddressDraft(
+      formatWebAccessAddress(
+        info?.configuredBind ?? '',
+        info?.configuredPort ?? 0,
+        info?.tlsEnabled ?? false,
+      ),
+    )
+  }, [info?.configuredBind, info?.configuredPort, info?.tlsEnabled])
   useEffect(() => {
     setTokenDraft(info?.token ?? '')
   }, [info?.token])
@@ -274,7 +284,7 @@ export function WebAccessSettings() {
         onChange={(next) => void handleToggle(next)}
         disabled={info === null || saving}
         label={info?.enabled ? 'Enabled' : 'Disabled'}
-        description="Serve this app's UI to a browser from a local HTTP sidecar (loopback by default). The browser session sees the same chats, projects and tools as the desktop window."
+        description="Serve this app's UI to a browser from a local HTTP or HTTPS sidecar (loopback by default). The browser session sees the same chats, projects and tools as the desktop window."
       />
       <p className="text-xs text-muted-foreground" data-testid="web-access-status">
         {statusLine}
@@ -322,6 +332,8 @@ export function WebAccessSettings() {
           )}
         </div>
       )}
+
+      {info !== null && <WebAccessTLSSettings info={info} onInfo={setInfo} />}
 
       {info !== null && info.token !== '' && (
         <div className="flex flex-col gap-1.5 pl-12" data-testid="web-access-token-block">
@@ -403,7 +415,7 @@ export function WebAccessSettings() {
         </div>
       )}
 
-      {info?.enabled && !info.bindIsLoopback && (
+      {info?.enabled && !info.bindIsLoopback && !info.tlsEnabled && (
         <div
           className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-2 text-xs text-warning"
           data-testid="web-access-warning-network"
@@ -414,6 +426,22 @@ export function WebAccessSettings() {
             its login page is reachable from other machines on this network. Traffic is plain HTTP —
             unencrypted — and the token is the <span className="font-semibold">only protection</span>: keep
             the token secret and never expose this listener across an untrusted network.
+          </span>
+        </div>
+      )}
+
+      {info?.enabled && !info.bindIsLoopback && info.tlsEnabled && (
+        <div
+          className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-2 text-xs text-warning"
+          data-testid="web-access-warning-network"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            <span className="font-semibold">Network exposure:</span> the sidecar listens beyond loopback, so
+            its login page is reachable from other machines on this network. Traffic is TLS-encrypted, but a
+            self-signed certificate still warns every browser — verify it — and the token remains the{' '}
+            <span className="font-semibold">only protection</span>: keep it secret and never expose this
+            listener across an untrusted network.
           </span>
         </div>
       )}

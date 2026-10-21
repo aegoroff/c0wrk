@@ -97,6 +97,20 @@ function webNotificationsAvailable(): boolean {
 }
 
 /**
+ * Read `Notification.permission` without tripping Firefox's SecurityError:
+ * on an insecure origin Firefox throws from the getter itself instead of
+ * answering 'denied'. A null here IS the insecure-origin denial cause (the
+ * browser auto-refuses notifications there) — every caller maps it that way.
+ */
+function readNotificationPermission(): 'default' | 'granted' | 'denied' | null {
+  try {
+    return Notification.permission
+  } catch {
+    return null
+  }
+}
+
+/**
  * One browser banner. The options mirror the Go data map's contract: the
  * ids ride `data` and the click replays `notification_clicked` locally, so
  * useNotificationClicks routes the tab exactly as it routes the desktop
@@ -170,22 +184,39 @@ export function __resetPermissionWarnForTest(): void {
   permissionWarned = false
 }
 
+/** How a web permission request can settle. 'default' means the prompt was
+ *  closed WITHOUT an answer — it is NOT a denial (ADR-090, decision 11): the
+ *  Settings Test button stays the documented retry gesture, so consumers must
+ *  keep it reachable instead of surfacing the blocked hint. */
+export type NotificationPermissionOutcome = 'granted' | 'denied' | 'default'
+
 /**
  * Request the browser notification permission from a USER GESTURE (the
- * Settings master toggle). Resolves granted. Desktop transport: a no-op that
- * resolves true — the OS authorization is owned by InitNotifications.
+ * Settings master toggle or the Test button). Resolves with the resulting
+ * permission state: 'granted' to proceed, 'denied' for a real refusal,
+ * 'default' when the prompt was closed without an answer. Desktop transport:
+ * a no-op that resolves 'granted' — the OS authorization is owned by
+ * InitNotifications.
  */
-export async function ensureNotificationPermission(): Promise<boolean> {
-  if (!isWebTransport()) return true
-  if (!webNotificationsAvailable()) return false
-  if (Notification.permission === 'granted') return true
-  if (Notification.permission === 'denied') return false
+export async function ensureNotificationPermission(): Promise<NotificationPermissionOutcome> {
+  if (!isWebTransport()) return 'granted'
+  if (!webNotificationsAvailable()) return 'denied'
+  const permission = readNotificationPermission()
+  // A SecurityError read (Firefox on an insecure origin) refuses upfront —
+  // requestPermission would be auto-denied there anyway.
+  if (permission === null || permission === 'denied') return 'denied'
+  if (permission === 'granted') return 'granted'
   try {
-    return (await Notification.requestPermission()) === 'granted'
+    await Notification.requestPermission()
   } catch (err) {
     logger.warn('[system-notifications] permission request failed', err)
-    return false
+    return 'denied'
   }
+  // The resolved value is NOT the source of truth (Safari resolves
+  // requestPermission with undefined): re-read the permission after the
+  // prompt settles. A DISMISSED prompt leaves it at 'default' — reported as
+  // 'default', never folded into a denial.
+  return readNotificationPermission() ?? 'denied'
 }
 
 /**
@@ -201,8 +232,12 @@ export async function ensureNotificationPermission(): Promise<boolean> {
 export async function checkNotificationAuthorization(): Promise<boolean> {
   if (isWebTransport()) {
     // Mapping 'default' to "denied" would hide exactly the Test button whose
-    // click is supposed to request the permission — treat only 'denied' as one.
-    return !webNotificationsAvailable() || Notification.permission !== 'denied'
+    // click is supposed to request the permission — treat only 'denied' as
+    // one. A permission read that THROWS (Firefox refuses to even answer on
+    // an insecure origin) IS a denial: requestPermission auto-refuses there.
+    if (!webNotificationsAvailable()) return true
+    const permission = readNotificationPermission()
+    return permission === 'default' || permission === 'granted'
   }
   const app = getApp()
   try {
@@ -213,18 +248,65 @@ export async function checkNotificationAuthorization(): Promise<boolean> {
   }
 }
 
+/** The two user-facing causes of a web-transport 'denied' permission. They
+ *  need DIFFERENT hints: an insecure origin (plain HTTP off localhost) is a
+ *  browser platform rule no site setting can lift — the fix is opening the
+ *  app on a secure origin — while a secure-context denial is the per-site
+ *  block the user CAN lift in the browser's site settings. */
+export type WebNotificationDenialCause = 'insecure-context' | 'site-settings'
+
+/**
+ * Classify a 'denied' browser notification permission for the Settings
+ * hint. Returns null when there is no denial to explain (the API is absent
+ * or the permission is not 'denied'). Both the permission and the
+ * secure-context reads are defensive: on an insecure origin Firefox throws
+ * SecurityError from the `Notification.permission` getter itself — a failed
+ * read is classified as the insecure-origin cause, never as a site-settings
+ * block, because the browser auto-refuses notifications there.
+ */
+export function webNotificationDenialCause(): WebNotificationDenialCause | null {
+  if (!webNotificationsAvailable()) return null
+  const permission = readNotificationPermission()
+  if (permission === null) return 'insecure-context'
+  if (permission !== 'denied') return null
+  try {
+    return window.isSecureContext ? 'site-settings' : 'insecure-context'
+  } catch {
+    // An unreadable isSecureContext counts as the same insecure cause.
+    return 'insecure-context'
+  }
+}
+
+/** Rejected by showTestNotification when the web permission gesture does not
+ *  settle on 'granted'. `outcome` distinguishes the two non-grant results so
+ *  the Settings section can react differently: a REAL 'denied' surfaces the
+ *  blocked hint (the Test button hides), while 'default' — the prompt was
+ *  closed without an answer — is NOT a denial (ADR-090, decision 11): the
+ *  section stays neutral and the button remains the documented retry
+ *  gesture. */
+export class NotificationPermissionError extends Error {
+  constructor(readonly outcome: 'denied' | 'default') {
+    super(
+      outcome === 'denied'
+        ? 'Notification permission is not granted — allow notifications for this site.'
+        : 'Notification permission prompt was dismissed — send the test notification again to retry.',
+    )
+    this.name = 'NotificationPermissionError'
+  }
+}
+
 /** Settings "preview" button: an unattributed banner — activating it focuses
  *  the window/tab but never navigates. Web transport: the click gesture is
- *  the honest moment to request the browser permission; a denial surfaces as
- *  a rejection the button logs (and flips the section's hint). */
+ *  the honest moment to request the browser permission; a non-granted
+ *  outcome rejects with NotificationPermissionError carrying it (a real
+ *  'denied' or a dismissed prompt — 'default', not a denial). */
 export async function showTestNotification(): Promise<void> {
   if (isWebTransport()) {
     // The click IS the documented permission gesture (ADR-090, decision 11):
-    // request first, then send through the granted-only path. A refusal —
-    // a pre-existing 'denied' or a dismissed prompt — rejects so the
-    // Settings section flips to its hint.
-    if (!(await ensureNotificationPermission())) {
-      throw new Error('Notification permission is not granted — allow notifications for this site.')
+    // request first, then send through the granted-only path.
+    const outcome = await ensureNotificationPermission()
+    if (outcome !== 'granted') {
+      throw new NotificationPermissionError(outcome)
     }
     await sendWebNotification(
       'c0wrk — test notification',

@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   setWebAccessConnection: vi.fn(),
   regenerateWebAccessToken: vi.fn(),
   setWebAccessToken: vi.fn(),
+  setWebAccessTLS: vi.fn(),
+  generateWebAccessCertificate: vi.fn(),
   clipboardSetText: vi.fn(),
   emit: vi.fn(),
 }))
@@ -24,6 +26,8 @@ vi.mock('@/api/webAccess', async (importOriginal) => ({
   setWebAccessConnection: mocks.setWebAccessConnection,
   regenerateWebAccessToken: mocks.regenerateWebAccessToken,
   setWebAccessToken: mocks.setWebAccessToken,
+  setWebAccessTLS: mocks.setWebAccessTLS,
+  generateWebAccessCertificate: mocks.generateWebAccessCertificate,
 }))
 
 vi.mock('@/api/runtime', () => ({
@@ -47,6 +51,11 @@ const runningInfo = {
   configuredPort: 8765,
   bindIsLoopback: true,
   token: 'tok-abcdef0123456789',
+  tlsEnabled: false,
+  tlsCert: '',
+  tlsKey: '',
+  certStatus: '',
+  certDetail: '',
 }
 const offInfo = {
   enabled: false,
@@ -57,6 +66,11 @@ const offInfo = {
   configuredPort: 0,
   bindIsLoopback: true,
   token: '',
+  tlsEnabled: false,
+  tlsCert: '',
+  tlsKey: '',
+  certStatus: '',
+  certDetail: '',
 }
 
 let container: HTMLDivElement
@@ -137,6 +151,8 @@ beforeEach(() => {
   mocks.setWebAccessConnection.mockResolvedValue(undefined)
   mocks.regenerateWebAccessToken.mockResolvedValue(undefined)
   mocks.setWebAccessToken.mockResolvedValue(undefined)
+  mocks.setWebAccessTLS.mockResolvedValue(undefined)
+  mocks.generateWebAccessCertificate.mockResolvedValue(undefined)
   mocks.clipboardSetText.mockResolvedValue(true)
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -333,7 +349,86 @@ describe('WebAccessSettings non-loopback bind warnings', () => {
     await flush()
     expect(byTestId('web-access-status')?.textContent).toContain('on this machine.')
   })
+
+  it('drops the plain-HTTP claim from the network warning when TLS is on', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({ ...lanInfo, tlsEnabled: true, url: 'https://192.168.1.10:8765' })
+    render()
+    await flush()
+    const net = byTestId('web-access-warning-network')
+    expect(net).not.toBeNull()
+    expect(net?.textContent).toContain('TLS-encrypted')
+    expect(net?.textContent).not.toContain('plain HTTP')
+    // The loopback-tier banner stays replaced, not duplicated.
+    expect(byTestId('web-access-warning')).toBeNull()
+  })
 })
+
+describe('WebAccessSettings TLS block (ADR-092) integration', () => {
+  /** The section renders two switches now: the section toggle first, the
+   *  TLS toggle last. */
+  function tlsSwitch(): HTMLInputElement {
+    const inputs = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+    const input = inputs[inputs.length - 1]
+    if (!input) throw new Error('tls toggle not found')
+    return input
+  }
+
+  it('renders the TLS block for an authoritative read and hides it when the bridge fails', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(httpsInfo())
+    render()
+    await flush()
+    expect(byTestId('web-access-tls-block')).not.toBeNull()
+    expect(tlsSwitch().checked).toBe(true)
+
+    mocks.getWebAccessInfo.mockResolvedValue(null)
+    act(() => {
+      root.unmount()
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    render()
+    await flush()
+    expect(byTestId('web-access-tls-block')).toBeNull()
+  })
+
+  it('seeds the address field with the https:// scheme while TLS is enabled', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue(httpsInfo())
+    render()
+    await flush()
+    expect(addressInput().value).toBe('https://127.0.0.1:8765')
+  })
+
+  it('wires the child toggle through to the SetWebAccessTLS RPC and re-reads', async () => {
+    mocks.getWebAccessInfo.mockResolvedValue({ ...offInfo, tlsCert: '/tmp/cert.pem' })
+    render()
+    await flush()
+    clickToggle() // the section toggle — unchanged behavior
+    await flush()
+    expect(mocks.setWebAccessEnabled).toHaveBeenCalledWith(true)
+
+    act(() => {
+      tlsSwitch().click()
+    })
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledWith(true, '/tmp/cert.pem', '')
+    // The post-write authoritative re-read (child) on top of the section's own.
+    expect(mocks.getWebAccessInfo.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+/** The TLS-on shape of the authoritative payload: a running sidecar serving
+ *  https with the app-owned pair configured and healthy. */
+function httpsInfo() {
+  return {
+    ...runningInfo,
+    url: 'https://127.0.0.1:8765',
+    tlsEnabled: true,
+    tlsCert: '/home/z/.c0wrk/web-access.crt',
+    tlsKey: '/home/z/.c0wrk/web-access.key',
+    certStatus: 'ok',
+  }
+}
 
 describe('WebAccessSettings address (one URL-style field, commit on Enter/blur)', () => {
   beforeEach(() => {
@@ -440,20 +535,21 @@ describe('WebAccessSettings address (one URL-style field, commit on Enter/blur)'
     expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
   })
 
-  it('refuses https:// and out-of-range ports locally without calling the RPC', async () => {
+  it('accepts the https:// prefix (the scheme is display-only now) and still refuses out-of-range ports locally', async () => {
     render()
     await flush()
     typeInto(addressInput(), 'https://127.0.0.1:8080')
     pressEnter(addressInput())
     await flush()
-    expect(byTestId('web-access-address-error')?.textContent).toContain('https')
-    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+    // The scheme travels as the parsed pair — the transport is the TLS switch.
+    expect(byTestId('web-access-address-error')).toBeNull()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('127.0.0.1', 8080)
 
     typeInto(addressInput(), '127.0.0.1:70000')
     pressEnter(addressInput())
     await flush()
     expect(byTestId('web-access-address-error')?.textContent).toContain('1-65535')
-    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces the backend failure message (including the rollback case)', async () => {
