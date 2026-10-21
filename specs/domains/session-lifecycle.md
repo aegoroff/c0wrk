@@ -838,11 +838,11 @@ User types a message while paused → Send
           into the first resumed turn
 ```
 
-The nudge-resume path is how a user "steers" a paused agent: rather than starting a fresh task, the message resumes the paused one with the user's new input appended next to the pending tool result in the very first resumed LLM call. The nudge renders as a normal user message with a "Nudge" badge (see [frontend/rendering.md](frontend/rendering.md)). The `is_nudge` stamp these messages carry (like live-send interjections, below) also feeds the prompt-suggestions generation filter: nudge-marked messages never enter a suggestion window (see [prompt-suggestions.md](prompt-suggestions.md)).
+The nudge-resume path is how a user "steers" a paused agent: rather than starting a fresh task, the message resumes the paused one with the user's new input appended next to the pending tool result in the very first resumed LLM call. The nudge renders as a normal user message with a "Nudge" badge (see [frontend/rendering.md](frontend/rendering.md)). The badge is not sender-local: the `message_received` echo every surface watching the session receives carries the same `is_nudge` flag as the persisted row, so a card rendered on another connected surface (e.g. a browser tab via web access) shows the badge immediately, not only after a history reload. (The interrupted-task continuation — a send that resumes an unfinished-but-not-**paused** task — is classified fresh: no `is_nudge` stamp in the DB row, no flag in the echo, no badge.) The `is_nudge` stamp these messages carry (like live-send interjections, below) also feeds the prompt-suggestions generation filter: nudge-marked messages never enter a suggestion window (see [prompt-suggestions.md](prompt-suggestions.md)).
 
 **Live-send (sending a message while a task is running):**
 
-A message sent while a task is already executing does NOT pause the task and does NOT wait for completion — it is queued into the running request and delivered to the LLM in the very next request, exactly as a resume-with-nudge would land it.
+A message sent while a task is already executing does NOT pause the task and does NOT wait for completion — it is queued into the running request and delivered to the LLM in the very next request, exactly as a resume-with-nudge would land it. Its `message_received` echo carries `is_nudge: true` (the same stamp the persisted row gets), so surfaces other than the sender render the interjection with the Nudge badge live.
 
 ```
 User types a message while a task runs → Send

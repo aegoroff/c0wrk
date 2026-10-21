@@ -826,6 +826,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 		// Emit message_received so non-optimistic listeners see the user
 		// message (mirrors the normal path; the frontend renders its own
 		// optimistic copy and ignores this event). Carries the echo form.
+		// IsNudge matches the classification the caller will persist
+		// (SendLive → mergeIsNudgeMetadata): other surfaces render their card
+		// from this event and show the Nudge badge immediately.
 		m.emitFunc(Event{
 			SessionID: id,
 			Type:      "message_received",
@@ -833,6 +836,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 				SessionID:    id,
 				Text:         echoText,
 				ClientSendID: clientSendID,
+				IsNudge:      true,
 			},
 		})
 		return SendLive, nil
@@ -858,6 +862,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 	if !goal && !e2s && m.hasPausedUnfinishedTask(id) {
 		// Emit message_received so the UI shows the user message (mirrors the
 		// normal SendMessage path's emission that the goroutine skips).
+		// IsNudge matches the classification this branch returns
+		// (SendNudgeResume → mergeIsNudgeMetadata): other surfaces render
+		// their card from this event and show the Nudge badge immediately.
 		m.emitFunc(Event{
 			SessionID: id,
 			Type:      "message_received",
@@ -865,6 +872,7 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 				SessionID:    id,
 				Text:         echoText,
 				ClientSendID: clientSendID,
+				IsNudge:      true,
 			},
 		})
 		return SendNudgeResume, m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
@@ -955,7 +963,9 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 	// Emit message received event. Skipped for a presented relaunch (the
 	// live-send follow-up): the message was already emitted when it was
 	// queued into the running task, and the frontend renders its own
-	// optimistic copy.
+	// optimistic copy. IsNudge stays absent: a fresh launch persists no
+	// is_nudge stamp (mergeIsNudgeMetadata fires only on non-fresh
+	// classifications), and the event flag must agree with the DB row.
 	if !presented {
 		m.emitFunc(Event{
 			SessionID: id,

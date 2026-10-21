@@ -192,13 +192,18 @@ export function cancelPendingRefresh(): void {
 
 /**
  * Ask GetPendingActions for every live session whose pending-HITL state is
- * not already known locally (neither chatStore's messages nor the override
- * report it — status !== 'pending' covers both) and apply each answer as the
- * pending override. This is the restart path: chatStore starts empty, the DB
- * still says in_progress, and only the backend knows the task is actually
- * blocked on a prompt — the answer upgrades the row (and the badge dot) from
- * green to yellow. Best effort: a failed call yields null, which clears
- * nothing.
+ * not already confirmed by chatStore's live scan, and apply each answer as
+ * the pending override. Rows whose 'pending' status comes from chatStore's
+ * message cards are skipped — their prompts settle through hitl_resolved, not
+ * this sweep. Rows that show pending ONLY through the override bit are
+ * re-polled, so the backend answer stays authoritative and a stale bit (the
+ * prompt was answered while the frontend was down) heals on the next sweep
+ * instead of excluding the row from every future sweep. This is the restart
+ * path: chatStore starts empty, the DB still says in_progress, and only the
+ * backend knows the task is actually blocked on a prompt — the answer
+ * upgrades the row (and the badge dot) from green to yellow. Best effort: a
+ * failed call yields null, which fails the override open (a true bit is
+ * cleared — hasPendingActions(null) is false).
  *
  * Reads the CURRENT snapshot (and chatStore state) directly — it does not
  * fetch; the caller is responsible for loading/freshness (the mount path
@@ -208,17 +213,28 @@ export function cancelPendingRefresh(): void {
 export async function sweepPendingActions(): Promise<void> {
   const store = useActiveSessionsStore.getState()
   const chat = useChatStore.getState()
-  const live = mergePendingOverride(
-    deriveLiveSessionFlags({
-      taskActive: chat.taskActive,
-      paused: chat.paused,
-      messageOrder: chat.messageOrder,
-      messages: chat.messages,
-      unfinishedTaskStatus: chat.unfinishedTaskStatus,
-    }),
-    store.pendingOverride,
-  )
-  const targets = sortedLiveRows(store.sessions, live).filter((row) => row.status !== 'pending')
+  // Live-scan flags WITHOUT the override: telling an override-only pending
+  // from a chatStore-confirmed one (below) needs the pre-merge view.
+  const liveOnly = deriveLiveSessionFlags({
+    taskActive: chat.taskActive,
+    paused: chat.paused,
+    messageOrder: chat.messageOrder,
+    messages: chat.messages,
+    unfinishedTaskStatus: chat.unfinishedTaskStatus,
+  })
+  const live = mergePendingOverride(liveOnly, store.pendingOverride)
+  const targets = sortedLiveRows(store.sessions, live).filter((row) => {
+    if (row.status !== 'pending') return true
+    // 'pending' rows are polled only when the override bit is the sole
+    // signal (no live-scan confirmation). A chatStore-confirmed pending row
+    // settles through hitl_resolved, so polling it is redundant work; an
+    // override-only row must re-ask, or its own stale bit would lock it out
+    // of every future sweep.
+    return (
+      store.pendingOverride[row.session.id] === true &&
+      liveOnly[row.session.id]?.hasPendingHITL !== true
+    )
+  })
   await Promise.all(
     targets.map(async (row) => {
       store.applyPendingActions(row.session.id, await getPendingActions(row.session.id))

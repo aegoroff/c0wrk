@@ -97,6 +97,14 @@ type MessageReceivedData struct {
 	// another surface inside the dedup window still renders. Absent on sends
 	// without an optimistic card.
 	ClientSendID string `json:"client_send_id,omitempty"`
+	// IsNudge mirrors the persisted row's is_nudge metadata stamp
+	// (mergeIsNudgeMetadata): true when the send was classified as a live
+	// interjection or a nudge-resume, absent on fresh tasks. Surfaces without
+	// an optimistic copy render their card from this event, so the flag lets
+	// them show the Nudge badge immediately instead of waiting for a history
+	// reload. The event flag and the DB stamp must agree — both are set from
+	// the same session-locked send classification.
+	IsNudge bool `json:"is_nudge,omitempty"`
 }
 
 // TaskCompleteData is the payload for "task_complete" events.

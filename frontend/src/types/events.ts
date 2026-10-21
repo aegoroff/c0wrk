@@ -500,6 +500,15 @@ export interface MessageReceivedData {
    * Absent on sends that rendered no optimistic card.
    */
   readonly client_send_id?: string
+  /**
+   * Mirrors the persisted row's is_nudge metadata stamp: true when the send
+   * was classified as a live interjection or a nudge-resume, absent on fresh
+   * tasks. Surfaces without an optimistic copy render their card from this
+   * event, so the flag lets them show the Nudge badge immediately instead of
+   * waiting for a history reload. The event flag and the DB stamp agree —
+   * both derive from the same session-locked send classification.
+   */
+  readonly is_nudge?: boolean
 }
 
 /**
@@ -1621,7 +1630,8 @@ export function isMemoryReadData(d: unknown): d is MemoryReadData {
 export function isMessageReceivedData(d: unknown): d is MessageReceivedData {
   if (!isObj(d)) return false
   return typeof d.session_id === 'string' && typeof d.text === 'string' &&
-    (d.client_send_id === undefined || typeof d.client_send_id === 'string')
+    (d.client_send_id === undefined || typeof d.client_send_id === 'string') &&
+    (d.is_nudge === undefined || typeof d.is_nudge === 'boolean')
 }
 
 // --- E2S event type guards ---

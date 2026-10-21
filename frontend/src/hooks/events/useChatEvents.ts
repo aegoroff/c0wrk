@@ -468,7 +468,11 @@ export function useChatEvents(sessionId: string | null): void {
           sessionId,
           type: 'user',
           content: data.text,
-          metadata: { received: true },
+          // is_nudge rides the event when the send was a live interjection or
+          // a nudge-resume (same rule the persisted row is stamped by), so
+          // this card shows the Nudge badge immediately like the sending
+          // surface's optimistic copy does. Absent on fresh tasks.
+          metadata: data.is_nudge === true ? { received: true, is_nudge: true } : { received: true },
           timestamp: Date.now(),
         })
       }),

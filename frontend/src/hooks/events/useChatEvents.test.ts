@@ -646,6 +646,27 @@ describe('useChatEvents message_received', () => {
     const msgs = messages()
     expect(msgs).toHaveLength(1)
     expect(msgs[0]).toMatchObject({ type: 'user', content: 'hello from A' })
+    // A fresh send carries no nudge flag — the card is stamped received-only
+    // so the echo dedup never targets it.
+    expect(msgs[0]!.metadata).toEqual({ received: true })
+  })
+
+  it('stamps is_nudge on the card so the Nudge badge renders on this surface too', () => {
+    // A live interjection / nudge-resume echoes the flag the persisted row is
+    // stamped by; the cross-surface card must show the badge immediately, not
+    // after a history reload.
+    emit('message_received', { session_id: SESSION, text: 'keep going', is_nudge: true })
+
+    const msgs = messages()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]!.metadata).toEqual({ received: true, is_nudge: true })
+  })
+
+  it('drops an event whose is_nudge is not a boolean (strictly typed additive field)', () => {
+    emit('message_received', { session_id: SESSION, text: 'hello', is_nudge: 'yes' })
+
+    expect(messages()).toHaveLength(0)
+    expect(vi.mocked(reportDroppedEvent)).toHaveBeenCalledWith('message_received', { session_id: SESSION, text: 'hello', is_nudge: 'yes' })
   })
 
   it('drops the delivery echo when this surface already rendered the optimistic copy', () => {

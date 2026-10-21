@@ -63,6 +63,9 @@ func TestSendMessage_EchoCarriesRawText_FreshTask(t *testing.T) {
 	if data.Text != raw {
 		t.Errorf("echo text = %q, want the RAW input %q (the processed form would duplicate the optimistic card on the sending surface)", data.Text, raw)
 	}
+	if data.IsNudge {
+		t.Error("echo is_nudge = true, want absent on a FRESH task (the flag must agree with the persisted row's stamp: fresh tasks carry none)")
+	}
 }
 
 // Without WithEchoText the echo carries the dispatch text itself — the
@@ -109,8 +112,12 @@ func TestSendMessage_EchoCarriesRawText_LiveInterjection(t *testing.T) {
 	if got := orch.DrainLiveUserMessages(); got != processed {
 		t.Errorf("drained %q, want the PROCESSED text in the LLM queue", got)
 	}
-	if data := waitForReceived(t, events); data.Text != raw {
+	data := waitForReceived(t, events)
+	if data.Text != raw {
 		t.Errorf("echo text = %q, want the RAW input %q", data.Text, raw)
+	}
+	if !data.IsNudge {
+		t.Error("echo is_nudge absent, want true on a LIVE interjection (other surfaces render the Nudge badge from this event; the DB row is stamped by the same classification)")
 	}
 }
 

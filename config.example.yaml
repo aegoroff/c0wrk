@@ -2140,16 +2140,21 @@ notifications:
 #                               byte-identical to pre-TLS builds.
 #
 #     tls.cert / tls.key      — paths to the PEM certificate and the PEM
-#                               private key. Turning TLS on with either
-#                               path empty is structurally invalid:
-#                               fail-soft at load (the subsection resets
-#                               to off with a warning and the sidecar
-#                               stays on plain HTTP) and refused at save.
-#                               A configured but unreadable pair (missing
-#                               file, parse error, key/cert mismatch) is
-#                               fail-closed at sidecar start — the
-#                               listener is never silently downgraded to
-#                               plaintext. The standard pair is app-owned
+#                               private key. An enabled TLS that cannot
+#                               actually serve — either path empty, or the
+#                               pair failing to load (missing file, parse
+#                               error, key/cert mismatch) — is unusable
+#                               (ADR-094): the config load turns the whole
+#                               web_access section OFF with a warning
+#                               naming the reason (a requested TLS is never
+#                               downgraded to plain HTTP; fix the pair and
+#                               enable web_access again), and enabling the
+#                               sidecar from Settings is refused with the
+#                               same failure. The save gate stays
+#                               structure-only, and the sidecar start keeps
+#                               its fail-closed backstop — the listener is
+#                               never silently downgraded to plaintext.
+#                               The standard pair is app-owned
 #                               and fixed: ~/.c0wrk/web-access.crt +
 #                               web-access.key, written by the Generate
 #                               action in Settings → Web Access (a

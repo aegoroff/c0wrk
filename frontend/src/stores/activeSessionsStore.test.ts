@@ -10,6 +10,32 @@ vi.mock('@/api/chat', () => ({
   getPendingActions: vi.fn(async () => null),
 }))
 
+// Minimal chatStore fake: the sweep reads the five live slices via getState();
+// tests seed them directly to simulate chatStore-confirmed HITL cards (same
+// pattern as useBackgroundSessionWatcher.test.ts).
+const chatStoreState = vi.hoisted(
+ () =>
+   ({
+     taskActive: {},
+     paused: {},
+     messageOrder: {},
+     messages: {},
+     unfinishedTaskStatus: {},
+   }) as {
+     taskActive: Record<string, boolean>
+     paused: Record<string, boolean>
+     messageOrder: Record<string, string[]>
+     messages: Record<string, Record<string, ChatMessageUI>>
+     unfinishedTaskStatus: Record<string, string>
+   },
+)
+vi.mock('@/stores/chatStore', () => ({
+  useChatStore: {
+    getState: () => chatStoreState,
+    setState: (partial: Partial<typeof chatStoreState>) => Object.assign(chatStoreState, partial),
+  },
+}))
+
 import { listAllSessions } from '@/api/sessions'
 import { getPendingActions } from '@/api/chat'
 import {
@@ -18,6 +44,7 @@ import {
   sweepPendingActions,
 } from './activeSessionsStore'
 import type { SessionInfo } from '@/types/models'
+import type { ChatMessageUI } from '@/types/messages'
 
 const mockedList = vi.mocked(listAllSessions)
 const mockedGetPendingActions = vi.mocked(getPendingActions)
@@ -42,9 +69,20 @@ function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   }
 }
 
+/** Unresolved HITL card (ask_user) — metadata.resolved is absent, so
+ *  hasUnresolvedHITL counts it as pending. */
+function hitlCard(sessionId: string, id: string): ChatMessageUI {
+  return { id, sessionId, type: 'ask_user', content: '', timestamp: 0 }
+}
+
 function resetStore(): void {
   cancelPendingRefresh()
   useActiveSessionsStore.setState({ sessions: null, pendingOverride: {}, refreshing: false })
+  chatStoreState.taskActive = {}
+  chatStoreState.paused = {}
+  chatStoreState.messageOrder = {}
+  chatStoreState.messages = {}
+  chatStoreState.unfinishedTaskStatus = {}
 }
 
 describe('activeSessionsStore', () => {
@@ -316,20 +354,82 @@ describe('activeSessionsStore', () => {
   })
 
   describe('sweepPendingActions', () => {
-    it('queries only live sessions whose pending state is unknown', async () => {
+    it('queries live sessions whose pending state is unknown or override-only', async () => {
       useActiveSessionsStore.setState({
         sessions: [
           makeSession({ id: 'unknown', unfinished_task_status: 'in_progress' }),
-          makeSession({ id: 'known', unfinished_task_status: 'in_progress' }),
+          makeSession({ id: 'override-only', unfinished_task_status: 'in_progress' }),
           makeSession({ id: 'idle' }),
         ],
-        pendingOverride: { known: true },
+        pendingOverride: { 'override-only': true },
       })
 
       await sweepPendingActions()
 
-      expect(mockedGetPendingActions).toHaveBeenCalledTimes(1)
+      expect(mockedGetPendingActions).toHaveBeenCalledTimes(2)
       expect(mockedGetPendingActions).toHaveBeenCalledWith('unknown')
+      expect(mockedGetPendingActions).toHaveBeenCalledWith('override-only')
+    })
+
+    it('skips chatStore-confirmed pending rows — even when an override bit exists', async () => {
+      chatStoreState.messageOrder = { live: ['m1'], both: ['m2'] }
+      chatStoreState.messages = {
+        live: { m1: hitlCard('live', 'm1') },
+        both: { m2: hitlCard('both', 'm2') },
+      }
+      useActiveSessionsStore.setState({
+        sessions: [
+          makeSession({ id: 'live', unfinished_task_status: 'in_progress' }),
+          makeSession({ id: 'both', unfinished_task_status: 'in_progress' }),
+        ],
+        pendingOverride: { both: true },
+      })
+
+      await sweepPendingActions()
+
+      // Both rows settle through hitl_resolved, not this sweep — no RPC.
+      expect(mockedGetPendingActions).not.toHaveBeenCalled()
+      expect(useActiveSessionsStore.getState().pendingOverride).toEqual({ both: true })
+    })
+
+    it('heals a stale override bit when the backend answers no pending', async () => {
+      useActiveSessionsStore.setState({
+        sessions: [makeSession({ id: 's1', unfinished_task_status: 'in_progress' })],
+        pendingOverride: { s1: true },
+      })
+      mockedGetPendingActions.mockResolvedValue(null)
+
+      await sweepPendingActions()
+
+      expect(useActiveSessionsStore.getState().pendingOverride).toEqual({})
+    })
+
+    it('re-confirms a really-pending override-only row without reference flapping', async () => {
+      useActiveSessionsStore.setState({
+        sessions: [makeSession({ id: 's1', unfinished_task_status: 'in_progress' })],
+        pendingOverride: { s1: true },
+      })
+      mockedGetPendingActions.mockResolvedValue({
+        tool_confirms: [],
+        step_limits: [],
+        plan_approvals: [],
+        ask_user: [{ request_id: 'r1', questions: [] }],
+        goal_proposals: [],
+        goal_suggestions: [],
+      })
+      const sessionsBefore = useActiveSessionsStore.getState().sessions
+
+      await sweepPendingActions()
+      const afterFirst = useActiveSessionsStore.getState().pendingOverride
+      await sweepPendingActions()
+
+      // Every sweep re-polled the override-only row and it stayed pending.
+      expect(mockedGetPendingActions).toHaveBeenCalledTimes(2)
+      expect(afterFirst).toEqual({ s1: true })
+      // Re-confirming true is a no-op set — the record reference survives
+      // (React #185), and the untouched sessions snapshot does too.
+      expect(useActiveSessionsStore.getState().pendingOverride).toBe(afterFirst)
+      expect(useActiveSessionsStore.getState().sessions).toBe(sessionsBefore)
     })
 
     it('applies a pending response as the override for that session', async () => {

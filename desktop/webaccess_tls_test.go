@@ -18,6 +18,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -107,6 +108,74 @@ func tlsRootPool(t *testing.T, certPath string) *x509.CertPool {
 	return pool
 }
 
+// TestSetWebAccessEnabled_BrokenTLSPairRefused: ADR-094's interactive gate
+// on the enable flip — turning the section on while its TLS subsection
+// points at an unloadable pair is refused before anything is mutated or
+// persisted, so the toggle never produces a persisted-on switch above a
+// silently-down sidecar and never downgrades the requested TLS to plain
+// HTTP.
+func TestSetWebAccessEnabled_BrokenTLSPairRefused(t *testing.T) {
+	dir := t.TempDir()
+	absentCert := filepath.Join(dir, "absent.crt")
+	absentKey := filepath.Join(dir, "absent.key")
+	doc := fmt.Sprintf("web_access:\n  enabled: false\n  tls:\n    enabled: true\n    cert: %q\n    key: %q\n", absentCert, absentKey)
+	cfg, path := writeWebAccessConfig(t, doc)
+	a := newWebAccessTestApp(t, cfg, path)
+
+	err := a.SetWebAccessEnabled(true)
+	if err == nil {
+		t.Fatal("SetWebAccessEnabled onto an unloadable pair: expected an error")
+	}
+	if !strings.Contains(err.Error(), "certificate pair failed to load") {
+		t.Errorf("error must name the load failure, got %q", err.Error())
+	}
+	if cfg.WebAccess.Enabled {
+		t.Errorf("in-memory section must stay disabled, got %+v", cfg.WebAccess)
+	}
+	if !cfg.WebAccess.TLS.Enabled || cfg.WebAccess.TLS.Cert != absentCert || cfg.WebAccess.TLS.Key != absentKey {
+		t.Errorf("in-memory subsection must be preserved as authored, got %+v", cfg.WebAccess.TLS)
+	}
+	if srv := a.webAccess.Load(); srv != nil {
+		t.Errorf("the sidecar must stay down, got %+v", srv)
+	}
+	reloaded, err := config.LoadWithResult(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(reloaded.LoadErrors) != 0 {
+		t.Errorf("the persisted config must be untouched (a disabled section is inert), got %v", reloaded.LoadErrors)
+	}
+	if reloaded.Config.WebAccess.Enabled || !reloaded.Config.WebAccess.TLS.Enabled ||
+		reloaded.Config.WebAccess.TLS.Cert != absentCert || reloaded.Config.WebAccess.TLS.Key != absentKey {
+		t.Errorf("disk section must equal the authored state, got %+v", reloaded.Config.WebAccess)
+	}
+}
+
+// TestSetWebAccessEnabled_UsablePairEnables: the preflight must not
+// over-block — a flip onto a REAL usable pair persists and mounts the
+// sidecar with TLS on.
+func TestSetWebAccessEnabled_UsablePairEnables(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeTLSPairFiles(t, dir, "real.crt", "real.key", time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour), "127.0.0.1")
+	doc := fmt.Sprintf("web_access:\n  enabled: false\n  tls:\n    enabled: true\n    cert: %q\n    key: %q\n", certPath, keyPath)
+	cfg, path := writeWebAccessConfig(t, doc)
+	a := newWebAccessTestApp(t, cfg, path)
+
+	if err := a.SetWebAccessEnabled(true); err != nil {
+		t.Fatalf("SetWebAccessEnabled onto a usable pair: %v", err)
+	}
+	srv := a.webAccess.Load()
+	if srv == nil {
+		t.Fatal("the sidecar must be up after the flip")
+	}
+	if !srv.TLSEnabled() {
+		t.Error("the sidecar must serve TLS")
+	}
+	if !cfg.WebAccess.Enabled {
+		t.Errorf("the in-memory section must be enabled, got %+v", cfg.WebAccess)
+	}
+}
+
 // dialWebAccessTLSLeaf performs a hostname-verified TLS handshake against the
 // sidecar's resolved address and returns the served leaf certificate. The
 // connection is closed before returning — an open conn would stall the next
@@ -156,7 +225,7 @@ func plainHTTPReachable(t *testing.T, addr string) bool {
 }
 
 // TestSetWebAccessTLS_TogglePersistsAndHotRestarts: enabling TLS hot-restarts
-// the running sidecar onto HTTPS with the derived key path persisted; the
+// the running sidecar onto HTTPS with the authored pair persisted; the
 // browser URL renders https; disabling returns the sidecar to plain HTTP and
 // wipes the subsection the request carried.
 func TestSetWebAccessTLS_TogglePersistsAndHotRestarts(t *testing.T) {
@@ -170,8 +239,8 @@ func TestSetWebAccessTLS_TogglePersistsAndHotRestarts(t *testing.T) {
 		t.Fatal("sidecar did not mount")
 	}
 
-	// ── Enable: derived key (empty key argument), live HTTPS restart ──
-	if err := a.SetWebAccessTLS(true, certPath, ""); err != nil {
+	// ── Enable: the explicit pair, live HTTPS restart ──
+	if err := a.SetWebAccessTLS(true, certPath, keyPath); err != nil {
 		t.Fatalf("SetWebAccessTLS(true): %v", err)
 	}
 	sec := a.webAccess.Load()
@@ -193,7 +262,7 @@ func TestSetWebAccessTLS_TogglePersistsAndHotRestarts(t *testing.T) {
 	if !reloaded.WebAccess.TLS.Enabled ||
 		reloaded.WebAccess.TLS.Cert != certPath ||
 		reloaded.WebAccess.TLS.Key != keyPath {
-		t.Errorf("disk TLS subsection = %+v, want enabled with cert %q and the DERIVED key %q",
+		t.Errorf("disk TLS subsection = %+v, want enabled with the authored pair (%q, %q)",
 			reloaded.WebAccess.TLS, certPath, keyPath)
 	}
 	info := a.GetWebAccessInfo()
@@ -256,12 +325,13 @@ func TestSetWebAccessTLS_TogglePersistsAndHotRestarts(t *testing.T) {
 	}
 }
 
-// TestSetWebAccessTLS_UnreadablePairFailsClosedAndRollsBack: a toggle onto a
-// pair the sidecar cannot load must not take the sidecar down — the restart
-// fails closed (plaintext-downgrade is never an outcome, ADR-092 decision 2),
-// the previous subsection is restored on disk, and the sidecar is running
-// again on plain HTTP.
-func TestSetWebAccessTLS_UnreadablePairFailsClosedAndRollsBack(t *testing.T) {
+// TestSetWebAccessTLS_UnreadablePairRejected: a commit onto a pair that
+// cannot be loaded is refused BEFORE anything persists — the config on disk
+// is untouched and a running sidecar is never rebuilt (the pair-load
+// validation runs ahead of the persist and the restart, so the old
+// rollback-on-restart path is not even reached). The mount-time fail-closed
+// check stays as the backstop for hand-edited configs (ADR-092 decision 2).
+func TestSetWebAccessTLS_UnreadablePairRejected(t *testing.T) {
 	dir := t.TempDir()
 	garbageCert := filepath.Join(dir, "garbage.crt")
 	garbageKey := filepath.Join(dir, "garbage.key")
@@ -281,34 +351,77 @@ func TestSetWebAccessTLS_UnreadablePairFailsClosedAndRollsBack(t *testing.T) {
 	for name, cert := range map[string]string{"garbage": garbageCert, "missing": filepath.Join(dir, "absent.crt")} {
 		if err := a.SetWebAccessTLS(true, cert, filepath.Join(dir, "absent.key")); err == nil {
 			t.Fatalf("SetWebAccessTLS with a %s pair: expected an error", name)
-		} else if !strings.Contains(err.Error(), "previous settings were restored") {
-			t.Errorf("SetWebAccessTLS with a %s pair: error = %v, want the restored-previous-settings message", name, err)
+		} else if !strings.Contains(err.Error(), "unreadable") {
+			t.Errorf("SetWebAccessTLS with a %s pair: error = %v, want the unreadable-pair message", name, err)
 		}
-		restored := a.webAccess.Load()
-		if restored == nil {
-			t.Fatalf("%s pair: sidecar did not come back after the rollback", name)
+		// The refusal happens before any restart: the same sidecar instance
+		// keeps serving plain HTTP on the state it started with.
+		if got := a.webAccess.Load(); got != before {
+			t.Errorf("%s pair: the sidecar was rebuilt on a refused commit", name)
 		}
-		if restored.TLSEnabled() {
-			t.Errorf("%s pair: sidecar came back terminating TLS", name)
-		}
-		addr, ok := restored.Addr()
+		addr, ok := before.Addr()
 		if !ok || !plainHTTPReachable(t, addr) {
-			t.Errorf("%s pair: restored sidecar is not serving plain HTTP", name)
+			t.Errorf("%s pair: sidecar is not serving plain HTTP", name)
 		}
 		reloaded, err := config.Load(path)
 		if err != nil {
 			t.Fatalf("reload config: %v", err)
 		}
 		if reloaded.WebAccess.TLS != (config.WebAccessTLSConfig{}) {
-			t.Errorf("%s pair: disk TLS subsection after rollback = %+v, want the zero subsection", name, reloaded.WebAccess.TLS)
+			t.Errorf("%s pair: disk TLS subsection after the refusal = %+v, want the zero subsection", name, reloaded.WebAccess.TLS)
 		}
 	}
 }
 
+// TestSetWebAccessTLS_MismatchPairRejected: a commit whose key does not
+// match its certificate is refused with the mismatch message before
+// anything persists — the config on disk keeps the previous pair and the
+// TLS-serving sidecar keeps serving its certificate.
+func TestSetWebAccessTLS_MismatchPairRejected(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeGeneratedPair(t, dir, "std.crt", "std.key")
+	_, otherKeyPath := writeGeneratedPair(t, dir, "other.crt", "other.key")
+	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n  token: keep-me\n")
+	a := newWebAccessTestApp(t, cfg, path)
+	a.initWebAccess(cfg, a.log())
+	if err := a.SetWebAccessTLS(true, certPath, keyPath); err != nil {
+		t.Fatalf("configure the standard pair: %v", err)
+	}
+	serving := a.webAccess.Load()
+	if serving == nil || !serving.TLSEnabled() {
+		t.Fatal("sidecar is not serving TLS on the standard pair")
+	}
+	served := dialWebAccessTLSLeaf(t, mustSidecarAddr(t, a), tlsRootPool(t, certPath))
+
+	// Valid cert + a foreign (valid, but different) key: the pair loads as
+	// files but the key does not match the certificate — refused as a
+	// mismatch, before the no-op check or any persist.
+	if err := a.SetWebAccessTLS(true, certPath, otherKeyPath); err == nil {
+		t.Fatal("committing a mismatched pair: expected an error")
+	} else if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("error = %v, want the key-does-not-match-certificate message", err)
+	}
+	if got := a.webAccess.Load(); got != serving {
+		t.Error("the sidecar was rebuilt on a refused commit")
+	}
+	if again := dialWebAccessTLSLeaf(t, mustSidecarAddr(t, a), tlsRootPool(t, certPath)); again.SerialNumber.Cmp(served.SerialNumber) != 0 {
+		t.Error("the sidecar is no longer serving the previous certificate")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !reloaded.WebAccess.TLS.Enabled || reloaded.WebAccess.TLS.Cert != certPath || reloaded.WebAccess.TLS.Key != keyPath {
+		t.Errorf("disk TLS subsection after the refusal = %+v, want the previous pair untouched", reloaded.WebAccess.TLS)
+	}
+}
+
 // TestSetWebAccessTLS_ValidationNoopAndGuards: the structural rule runs
-// through config.ValidateWebAccessTLS (enabled ⇒ non-empty cert), a matching
-// request is a no-op that does not rewrite the file, and the RPC shares the
-// other control RPCs' config-ref guard.
+// through config.ValidateWebAccessTLS (enabled ⇒ non-empty cert AND key —
+// the key path is never derived from the cert path), a non-empty pair is
+// loaded (tls.LoadX509KeyPair) ahead of the structural rule and the no-op
+// check, a matching readable request is a no-op that does not rewrite the
+// file, and the RPC shares the other control RPCs' config-ref guard.
 func TestSetWebAccessTLS_ValidationNoopAndGuards(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeGeneratedPair(t, dir, "pair.crt", "pair.key")
@@ -322,6 +435,21 @@ func TestSetWebAccessTLS_ValidationNoopAndGuards(t *testing.T) {
 		t.Errorf("error = %v, want the shared tls.cert message", err)
 	}
 	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.WebAccess.TLS.Enabled {
+		t.Error("a refused request changed the persisted subsection")
+	}
+
+	// Enabled with a cert but no key: the shared structural key message —
+	// no derivation happens at the RPC, both paths must be authored.
+	if err := a.SetWebAccessTLS(true, certPath, ""); err == nil {
+		t.Fatal("expected the structural error for an enabled subsection without a key")
+	} else if !strings.Contains(err.Error(), "tls.key is required") {
+		t.Errorf("error = %v, want the shared tls.key message", err)
+	}
+	reloaded, err = config.Load(path)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
@@ -359,6 +487,26 @@ func TestSetWebAccessTLS_ValidationNoopAndGuards(t *testing.T) {
 	}
 	if !stat.ModTime().Equal(stat2.ModTime()) {
 		t.Error("a matching request rewrote the config file")
+	}
+
+	// The pair-load validation runs ahead of the no-op check: once the
+	// stored pair's key file disappears, re-committing the identical
+	// subsection is refused (unreadable) instead of silently no-oping —
+	// and the file is still not rewritten.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatalf("remove key: %v", err)
+	}
+	if err := a.SetWebAccessTLS(true, certPath, keyPath); err == nil {
+		t.Fatal("re-committing the stored subsection with a deleted key: expected an error")
+	} else if !strings.Contains(err.Error(), "unreadable") {
+		t.Errorf("error = %v, want the unreadable-pair message", err)
+	}
+	stat3, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config after the refused no-op: %v", err)
+	}
+	if !stat.ModTime().Equal(stat3.ModTime()) {
+		t.Error("a refused no-op rewrote the config file")
 	}
 
 	// The config-ref guard mirrors SetWebAccessEnabled.
@@ -459,12 +607,13 @@ func TestGenerateWebAccessCertificate_RestartsLiveSidecarOntoFreshPair(t *testin
 	a.initWebAccess(cfg, a.log())
 
 	// First generation persists the standard paths; the toggle turns TLS on
-	// with them (the derived key resolves to the standard key path).
+	// with them.
 	if err := a.GenerateWebAccessCertificate(); err != nil {
 		t.Fatalf("first GenerateWebAccessCertificate: %v", err)
 	}
 	certPath := config.WebAccessCertPath(agentDir)
-	if err := a.SetWebAccessTLS(true, certPath, ""); err != nil {
+	keyPath := config.WebAccessKeyPath(agentDir)
+	if err := a.SetWebAccessTLS(true, certPath, keyPath); err != nil {
 		t.Fatalf("SetWebAccessTLS(true): %v", err)
 	}
 	before := a.webAccess.Load()
@@ -549,9 +698,15 @@ func TestGetWebAccessInfo_CertStatusMatrix(t *testing.T) {
 		t.Fatalf("status under the wildcard bind = %q (%q), want ok (localhost is covered)", st, detail)
 	}
 
-	// Unloadable pair → unreadable, with the load failure named.
-	if err := a.SetWebAccessTLS(true, filepath.Join(dir, "absent.crt"), filepath.Join(dir, "absent.key")); err != nil {
-		t.Fatalf("configure missing pair: %v", err)
+	// Unloadable pair → unreadable, with the load failure named. Seeded
+	// straight into the live config: SetWebAccessTLS refuses an unloadable
+	// pair before it can persist — the classification still has to name the
+	// state for hand-edited configs that carry it.
+	ref, _ := a.configRef()
+	ref.WebAccess.TLS = config.WebAccessTLSConfig{
+		Enabled: true,
+		Cert:    filepath.Join(dir, "absent.crt"),
+		Key:     filepath.Join(dir, "absent.key"),
 	}
 	st, detail = status()
 	if st != webAccessCertStatusUnreadable || detail == "" {

@@ -165,14 +165,15 @@ export async function setWebAccessConnection(bind: string, port: number): Promis
  * the HTTPS switch and the PEM certificate/key paths in one immediate config
  * write, applied live through the section's restart-or-rollback — a running
  * sidecar rebuilds onto the new transport or the previous settings are
- * restored (the error says so). The UI authors only the certificate path and
- * threads the PERSISTED key path through: an empty key with a non-empty cert
- * is derived as `<cert-stem>.key` at commit time (decision 4), while a
- * hand-configured key survives every commit untouched. Enabling with an
- * empty cert path is refused with the exact load/save rule
- * (config.ValidateWebAccessTLS); the subsection works while web_access is
- * disabled (it pins for the next gated start). Throws on failure — the block
- * surfaces the message and snaps back instead of guessing the state.
+ * restored (the error says so). Both paths are authored explicitly (two
+ * self-committing fields; Generate fills both) and the backend loads the
+ * pair as a unit BEFORE persisting: a mismatched or unreadable pair is
+ * refused with the reason named and nothing is written. Both paths MAY point
+ * at one combined PEM file. Enabling with an empty cert or key path is
+ * refused with the exact load/save rule (config.ValidateWebAccessTLS); the
+ * subsection works while web_access is disabled (it pins for the next gated
+ * start). Throws on failure — the block surfaces the message and keeps the
+ * drafts instead of guessing the state.
  */
 export async function setWebAccessTLS(enabled: boolean, cert: string, key: string): Promise<void> {
   try {

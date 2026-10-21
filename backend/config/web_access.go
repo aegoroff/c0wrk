@@ -21,7 +21,10 @@
 //     IPv4/IPv6 address) or the "localhost" name. The stage-1 loopback-only
 //     rule survives as a WARNING classification (IsLoopbackBind), not as
 //     validity: a valid non-loopback bind is a deliberate LAN-exposed
-//     listener that loads with a visible warning and persists as-is.
+//     listener that persists as-is. The LOAD warning is reserved for the
+//     plain-HTTP combination (ADR-093) — a TLS-encrypted non-loopback bind
+//     loads warning-free, its exposure staying surfaced by the Settings
+//     section banner and the sidecar start log.
 //   - Load-time VALIDITY problems are FAIL-SOFT (the shell_exec precedent):
 //     an invalid section (unparseable bind, out-of-range port) produces a
 //     visible load warning and is reset to the safe default state (disabled,
@@ -39,19 +42,23 @@
 //     crypto/rand token at the first start and persists it back here through
 //     the same config save every other setting uses — the credential is
 //     stable across restarts from then on (ADR-090, decision 10).
-//   - TLS (ADR-092): the `web_access.tls` subsection is the explicit HTTPS
-//     switch — the protocol is never parsed out of the address field. The
-//     same validity layering applies one level down: a structurally invalid
-//     subsection (tls enabled with an empty cert or key path) is FAIL-SOFT
-//     at load — it resets ALONE (the sidecar stays on plain HTTP) with a
-//     visible warning — and FAIL-CLOSED at save. A configured-but-unreadable
-//     pair is deliberately NOT this layer's concern: it fails closed at
-//     sidecar mount, where silently downgrading an operator-configured
-//     encryption to plaintext is never an outcome.
+//   - TLS (ADR-092, ADR-094): the `web_access.tls` subsection is the
+//     explicit HTTPS switch — the protocol is never parsed out of the
+//     address field. A TLS subsection the sidecar cannot actually serve —
+//     structurally incomplete (enabled with an empty cert or key path) or
+//     a certificate pair that fails to load from disk — is FAIL-SOFT at
+//     load by turning the WHOLE section off with a visible warning
+//     (ADR-094): a requested TLS is never downgraded to plain HTTP, so no
+//     listener is the only safe state. The same usability predicate
+//     (structure + LoadX509KeyPair) FAIL-CLOSED at the interactive
+//     boundaries — the TLS commit RPC and the enable flip — and the
+//     sidecar mount keeps its fail-closed backstop for the race the load
+//     path cannot see (files vanishing between load and mount).
 
 package config
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -104,12 +111,12 @@ type WebAccessConfig struct {
 type WebAccessTLSConfig struct {
 	// Enabled serves the sidecar over HTTPS. Default false: plain HTTP,
 	// byte-identical to pre-ADR-092 behavior (the session cookie keeps its
-	// plain-HTTP shape; TLS turns `Secure` on and nothing else). Structural
-	// validity (decision 2): enabled with an EMPTY cert or key path is
-	// INVALID — fail-soft at load (this subsection resets alone with a
-	// warning) and fail-closed at save. A non-empty but unreadable pair is
-	// NOT this layer's concern: the config layer never reads the files —
-	// that pair fails closed at sidecar mount.
+	// plain-HTTP shape; TLS turns `Secure` on and nothing else). Usability
+	// is checked as a whole (ADR-094): enabled with an EMPTY cert or key
+	// path — or with a pair that fails to load from disk — makes the
+	// subsection UNUSABLE: the load path turns the whole web_access section
+	// off with a warning (a requested TLS is never downgraded to plain
+	// HTTP), and the interactive TLS commit refuses the state up front.
 	Enabled bool `yaml:"enabled"`
 	// Cert is the path to the PEM-encoded TLS certificate (full chain when
 	// the operator has one). The standard app-owned pair lives at
@@ -122,10 +129,15 @@ type WebAccessTLSConfig struct {
 	Cert string `yaml:"cert"`
 	// Key is the path to the PEM-encoded TLS private key. The standard pair
 	// lives at WebAccessKeyPath (~/.c0wrk/web-access.key). The Settings
-	// surface authors only tls.cert and derives this at commit time
-	// (decision 4); the persisted config always carries both paths, so an
-	// enabled subsection with an empty key is structurally invalid exactly
-	// like an empty cert.
+	// surface authors both paths explicitly — the key path is never derived
+	// from the cert path — and the interactive commit (desktop's
+	// SetWebAccessTLS) loads the pair before anything persists, refusing a
+	// key that does not match its certificate and an unreadable pair. The
+	// persisted config always carries both paths, so an enabled subsection
+	// with an empty key is structurally invalid exactly like an empty cert;
+	// a subsection pointing at files that cannot be loaded is unusable the
+	// same way (ADR-094): both shapes turn the section off at load with a
+	// warning instead of serving plain HTTP.
 	Key string `yaml:"key"`
 }
 
@@ -206,14 +218,14 @@ func ValidateWebAccessBind(bind string) error {
 // on an enabled subsection is fail-soft at load and fail-closed at save; a
 // non-empty but unreadable pair passes here — the config layer never reads
 // the files — and fails closed at sidecar mount instead.
-func validateWebAccessTLS(tls WebAccessTLSConfig) error {
-	if !tls.Enabled {
+func validateWebAccessTLS(tlsCfg WebAccessTLSConfig) error {
+	if !tlsCfg.Enabled {
 		return nil
 	}
-	if tls.Cert == "" {
+	if tlsCfg.Cert == "" {
 		return errors.New("web_access: tls.cert is required when tls is enabled (generate a pair in Settings → Web Access or point cert/key at PEM files)")
 	}
-	if tls.Key == "" {
+	if tlsCfg.Key == "" {
 		return errors.New("web_access: tls.key is required when tls is enabled")
 	}
 	return nil
@@ -225,8 +237,40 @@ func validateWebAccessTLS(tls WebAccessTLSConfig) error {
 // (desktop's SetWebAccessTLS) and want the exact same message the load/save
 // paths produce: an enabled subsection needs both PEM paths, a disabled one
 // accepts anything (inert, like the whole section when it is off).
-func ValidateWebAccessTLS(tls WebAccessTLSConfig) error {
-	return validateWebAccessTLS(tls)
+func ValidateWebAccessTLS(tlsCfg WebAccessTLSConfig) error {
+	return validateWebAccessTLS(tlsCfg)
+}
+
+// webAccessTLSPairError is the usability predicate of a tls subsection
+// (ADR-094): structural completeness first (validateWebAccessTLS), then —
+// for an enabled subsection — the pair itself: the config layer READS the
+// certificate files here, the deliberate ADR-094 reversal of the
+// never-reads-the-files doctrine. A subsection that fails either check is
+// UNUSABLE: the sidecar it configures cannot honor the requested TLS, and
+// ADR-094 forbids downgrading a requested TLS to plain HTTP. A disabled
+// subsection is usable by definition — inert, exactly like the whole
+// section when web_access.enabled is off.
+func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
+	if err := validateWebAccessTLS(tlsCfg); err != nil {
+		return err
+	}
+	if !tlsCfg.Enabled {
+		return nil
+	}
+	if _, err := tls.LoadX509KeyPair(tlsCfg.Cert, tlsCfg.Key); err != nil {
+		return fmt.Errorf("certificate pair failed to load: %w", err)
+	}
+	return nil
+}
+
+// ValidateWebAccessTLSPair is the exported form of the subsection's
+// usability rule (ADR-094) for callers outside the package that turn the
+// sidecar on at runtime (desktop's SetWebAccessEnabled): an enabled
+// subsection must be structurally complete AND its certificate pair must
+// load — a flip onto an unusable TLS is refused before anything persists,
+// because the sidecar must never come up on plain HTTP in its place.
+func ValidateWebAccessTLSPair(tlsCfg WebAccessTLSConfig) error {
+	return webAccessTLSPairError(tlsCfg)
 }
 
 // Web access token input bounds (ADR-090): the interactive entry points —
@@ -259,18 +303,16 @@ func ValidateWebAccessToken(token string) error {
 	return nil
 }
 
-// webAccessLoopbackWarning is the load warning for a valid non-loopback bind:
-// the listener becomes reachable beyond the machine. The message names the
-// effective transport: the TLS-off default is plain HTTP (ADR-090), an
-// enabled web_access.tls (ADR-092) is reported as encrypted; the
-// classification itself stands unchanged either way — a LAN bind stays a
-// deliberate exposure the operator is warned about, never refused.
-func webAccessLoopbackWarning(bind string, tlsEnabled bool) string {
-	transport := "traffic is unencrypted"
-	if tlsEnabled {
-		transport = "the transport is TLS-encrypted"
-	}
-	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, %s", bind, transport)
+// webAccessLoopbackWarning is the load warning for a valid non-loopback bind
+// served over PLAIN HTTP: the listener becomes reachable beyond the machine
+// while the traffic stays unencrypted — the token-over-plaintext combination
+// is the one exposure shape that belongs in the UI's config_errors banner.
+// A TLS-encrypted non-loopback bind (ADR-092) deliberately does NOT draw this
+// warning: it loads warning-free, its exposure staying surfaced by the
+// Settings → Web Access section banner and the sidecar start log (ADR-093).
+// The classification is a warned operator decision either way — never a gate.
+func webAccessLoopbackWarning(bind string) string {
+	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS", bind)
 }
 
 // defaultWebAccessState is the canonical default section state the fail-soft
@@ -295,16 +337,21 @@ func defaultWebAccessState() WebAccessConfig {
 // default state (the sidecar stays off), never fatal — a broken section must
 // not keep the app from starting, and must not leave a half-applied unsafe
 // listener either. A VALID non-loopback bind is not a validity problem: the
-// section stays enabled and draws the network-exposure warning (a stage-2
-// LAN listener; IsLoopbackBind classifies it). A disabled section is inert
-// and accepts anything, exactly like an inactive shell_exec override.
+// section stays enabled and draws the network-exposure warning while the
+// effective transport is plain HTTP (a stage-2 LAN listener; IsLoopbackBind
+// classifies it, ADR-093 scopes the warning to TLS-off). A disabled section
+// is inert and accepts anything, exactly like an inactive shell_exec
+// override.
 //
-// The tls subsection (ADR-092) is validated one level down with the same
-// layering: a structurally invalid subsection (enabled with an empty cert or
-// key path) resets ALONE — the subsection zeroes, the sidecar stays enabled
-// on plain HTTP — while a valid or disabled subsection is preserved as
-// authored. Must run AFTER ApplyDefaults (which seeds the default bind) and
-// BEFORE validate, so the persisted shape is always valid.
+// The tls subsection (ADR-092, ADR-094) is validated one level down: a
+// subsection the sidecar cannot serve — structurally incomplete, or a pair
+// that fails to load from disk — turns the whole section OFF with a visible
+// warning, the subsection itself preserved as authored (the operator's
+// paths survive the reset; a disabled section is inert, so the persisted
+// shape stays valid). A requested TLS is never downgraded to plain HTTP, so
+// no listener is the only safe state. Must run AFTER ApplyDefaults (which
+// seeds the default bind) and BEFORE validate, so the persisted shape is
+// always valid.
 func normalizeWebAccess(cfg *Config) []string {
 	if !cfg.WebAccess.Enabled {
 		return nil
@@ -323,22 +370,29 @@ func normalizeWebAccess(cfg *Config) []string {
 		cfg.WebAccess = defaultWebAccessState()
 		warnings = append(warnings, warning)
 	}
-	// ADR-092: a structurally invalid tls subsection resets by itself — the
-	// sidecar keeps running on plain HTTP instead of losing the whole
-	// section to a half-typed subsection. The validator is inert on a
-	// disabled subsection, which also covers the whole-section reset above:
-	// it zeroes the subsection, so a bad bind never stacks a second tls
+	// ADR-094: a tls subsection the sidecar cannot serve — structurally
+	// incomplete, or a pair that fails to load from disk — turns the whole
+	// section off: a requested TLS is never downgraded to plain HTTP, so no
+	// listener is the only safe state. The subsection is preserved as
+	// authored (the operator's paths survive; a disabled section is inert),
+	// and the warning names the reason. The whole-section reset above
+	// zeroes the subsection, so a bad bind never stacks a second tls
 	// warning on top.
-	if err := validateWebAccessTLS(cfg.WebAccess.TLS); err != nil {
-		warning := "web_access.tls ignored (the sidecar stays on plain HTTP; set both tls.cert and tls.key, or turn tls off): " +
+	if err := webAccessTLSPairError(cfg.WebAccess.TLS); err != nil {
+		warning := "web_access.tls unusable (the sidecar stays disabled — a configured TLS is never downgraded to plain HTTP; fix the certificate pair or turn tls off, then enable web_access again): " +
 			err.Error()
-		cfg.WebAccess.TLS = WebAccessTLSConfig{}
+		cfg.WebAccess.Enabled = false
 		warnings = append(warnings, warning)
 	}
-	// A reset lands on the loopback default, so this fires exactly for a
-	// surviving valid non-loopback bind — never stacked on the reset warning.
-	if !IsLoopbackBind(cfg.WebAccess.Bind) {
-		warnings = append(warnings, webAccessLoopbackWarning(cfg.WebAccess.Bind, cfg.WebAccess.TLS.Enabled))
+	// Fires only for a SURVIVING enabled section — the resets above leave
+	// either the loopback default or a disabled master switch. ADR-093: only
+	// the PLAIN-HTTP combination warns here — a TLS-encrypted non-loopback
+	// bind loads warning-free (its exposure stays surfaced by the Settings
+	// section banner and the sidecar start log). An unusable TLS never
+	// reaches this gate: its section is disabled above, so there is no
+	// listener left to expose.
+	if cfg.WebAccess.Enabled && !IsLoopbackBind(cfg.WebAccess.Bind) && !cfg.WebAccess.TLS.Enabled {
+		warnings = append(warnings, webAccessLoopbackWarning(cfg.WebAccess.Bind))
 	}
 	return warnings
 }
@@ -352,6 +406,12 @@ func normalizeWebAccess(cfg *Config) []string {
 // validity problem. The load path resets invalid states before they can be
 // re-saved, so this only fires on in-memory mutations — and refusing the
 // write keeps config.yaml from ever becoming the source of a broken listener.
+//
+// The certificate pair's on-disk usability is deliberately NOT a save gate
+// (ADR-094): filesystem state must never brick an unrelated settings save.
+// The pair is checked fail-soft at load (the section turns off with a
+// warning), fail-closed at the interactive boundaries (the TLS commit and
+// the enable flip), and fail-closed again at sidecar mount.
 func validateWebAccessForSave(cfg *Config) error {
 	if !cfg.WebAccess.Enabled {
 		return nil

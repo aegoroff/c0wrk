@@ -498,6 +498,13 @@ describe('ActiveSessionsIndicator dropdown', () => {
       ],
       pendingOverride: { 'pending-older': true },
     })
+    // 'pending-older' is pending ONLY through its override bit (chatStore is
+    // empty), so the open sweep re-polls it — the backend answer re-confirms
+    // the pending (hasPendingActions → true) and the bit survives. The other
+    // polled rows get null, a no-op for sessions without a bit.
+    vi.mocked(getPendingActions).mockImplementation(async (id: string) =>
+      id === 'pending-older' ? pendingToolConfirm() : null,
+    )
     const container = renderIndicator()
     await openMenu(container)
     expect(menuItems().map(rowName)).toEqual(['Pending older', 'Failed recent', 'Paused newest', 'Running old'])
@@ -596,7 +603,9 @@ describe('ActiveSessionsIndicator dropdown', () => {
       ],
       pendingOverride: { s2: true },
     })
-    vi.mocked(getPendingActions).mockImplementation(async (id: string) => (id === 's1' ? pendingToolConfirm() : null))
+    vi.mocked(getPendingActions).mockImplementation(async (id: string) =>
+      id === 's1' || id === 's2' ? pendingToolConfirm() : null,
+    )
 
     // The mount sweep runs before the dropdown is ever opened: chatStore
     // starts empty, the DB still says in_progress, and only the backend knows
@@ -604,16 +613,22 @@ describe('ActiveSessionsIndicator dropdown', () => {
     // loader, so render that composition (indicator + loader).
     const container = render(<IndicatorWithAppLoader />)
 
-    // Only the unknown-pending live session is queried: s2 is already known
-    // (override), the idle session is not live.
-    expect(vi.mocked(getPendingActions)).toHaveBeenCalledTimes(1)
+    // Both live pending rows are queried: s1 is unknown-pending (the restart
+    // case this test is about) and s2 shows pending only through its override
+    // bit, so the sweep re-confirms it — a stale bit must not lock the row
+    // out of every future sweep. The idle session is not live. All calls are
+    // issued synchronously by the sweep.
+    expect(vi.mocked(getPendingActions)).toHaveBeenCalledTimes(2)
     expect(vi.mocked(getPendingActions)).toHaveBeenCalledWith('s1')
+    expect(vi.mocked(getPendingActions)).toHaveBeenCalledWith('s2')
 
     await act(async () => {
       await vi.waitFor(() => {
         expect(useActiveSessionsStore.getState().pendingOverride.s1).toBe(true)
       })
     })
+    // s2's re-poll re-confirmed its override bit (backend answer is pending).
+    expect(useActiveSessionsStore.getState().pendingOverride.s2).toBe(true)
     // After the sweep s1 is pending too — both rows collapse into a single
     // yellow dot (the user's response is the next step for both).
     const classes = dots(radarButton(container)).map((d) => d.className)

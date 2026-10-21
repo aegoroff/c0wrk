@@ -3,12 +3,31 @@
 // must retire the local card immediately, converge a raced local decision on
 // the effective one, and never wipe a NEWER goal-store prompt.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { useGoalStore } from '@/stores/goalStore'
+import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
+import { getPendingActions, type PendingActionsResponse } from '@/api/chat'
 import { handleToolConfirmEvent, handleAskUserEvent, handleStepLimitEvent, handlePlanReviewEvent, handleHitlResolvedEvent, resolveConfirmForToolResult } from './hitlHandlers'
 import { handleGoalProposalEvent, handleGoalSuggestionEvent } from './goalHandlers'
 import type { HitlResolvedData } from '@/types/events'
+
+// Scoped logger spies: the reconcile's failure path logs at debug level and is
+// asserted below; every other logger use in the import graph lands here instead
+// of on the console.
+const loggerMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+}))
+vi.mock('@/lib/logger', () => ({ logger: loggerMocks, setLogLevel: vi.fn() }))
+
+// The re-query goes through the api wrapper; the activeSessionsStore itself
+// stays REAL so the assertions cover the actual applyPendingActions path.
+vi.mock('@/api/chat', () => ({
+  getPendingActions: vi.fn(async () => null),
+}))
 
 let idc = 0
 
@@ -260,5 +279,110 @@ describe('handleHitlResolvedEvent — goal store convergence', () => {
 
     expect(useGoalStore.getState().pendingSuggestion[sessionId]).toBeUndefined()
     expect(findMsg(sessionId, 'goal-suggestion-gs-1')?.metadata?.resolved).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Pending-HITL override reconcile — a hitl_resolved broadcast must retire the
+// sticky pendingOverride bit in activeSessionsStore (its only `false` writer —
+// THIS surface answering the prompt itself — cannot run when ANOTHER surface
+// resolved the prompt), applying the backend's authoritative answer rather
+// than blindly clearing (a second prompt may already be pending).
+// ---------------------------------------------------------------------------
+
+const mockedGetPendingActions = vi.mocked(getPendingActions)
+
+const EMPTY_PENDING: PendingActionsResponse = {
+  tool_confirms: [],
+  step_limits: [],
+  plan_approvals: [],
+  ask_user: [],
+  goal_proposals: [],
+  goal_suggestions: [],
+}
+
+describe('handleHitlResolvedEvent — pending-override reconcile', () => {
+  /** Drain the fire-and-forget `.then()` tail of the reconcile. */
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  beforeEach(() => {
+    mockedGetPendingActions.mockReset()
+    mockedGetPendingActions.mockResolvedValue(EMPTY_PENDING)
+    useActiveSessionsStore.setState({ pendingOverride: {} })
+    loggerMocks.error.mockClear()
+    loggerMocks.warn.mockClear()
+    loggerMocks.info.mockClear()
+    loggerMocks.debug.mockClear()
+  })
+
+  // Every test here adds NO card to chatStore: the reconcile must run before
+  // the chat-card early return, i.e. exactly when the card was never rendered
+  // on this surface (criterion 4).
+  it.each([
+    'tool_confirm',
+    'ask_user',
+    'step_limit',
+    'plan_review',
+    'goal_proposal',
+    'goal_suggestion',
+  ] as const)(
+    'reconciles a sticky override for %s: exactly one re-query, empty answer clears the bit (no card needed)',
+    async (kind) => {
+      const sessionId = `sess-reconcile-${idc++}`
+      useActiveSessionsStore.getState().setPendingOverride(sessionId, true)
+
+      resolve(sessionId, { kind, id: 'whatever' })
+
+      // The re-query is scheduled synchronously, before the card lookup — the
+      // empty chatStore in this test proves the early return cannot prevent it.
+      expect(mockedGetPendingActions).toHaveBeenCalledTimes(1)
+      expect(mockedGetPendingActions).toHaveBeenCalledWith(sessionId)
+
+      await flush()
+      // Empty authoritative answer → bit removed (the KEY is deleted, not
+      // stored as false), and exactly one RPC per event.
+      expect(useActiveSessionsStore.getState().pendingOverride[sessionId]).toBeUndefined()
+      expect(mockedGetPendingActions).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('keeps the bit when the authoritative answer still carries a pending prompt', async () => {
+    const sessionId = `sess-reconcile-${idc++}`
+    useActiveSessionsStore.getState().setPendingOverride(sessionId, true)
+    mockedGetPendingActions.mockResolvedValue({
+      ...EMPTY_PENDING,
+      ask_user: [{ request_id: 'au-second', questions: [] }],
+    })
+
+    resolve(sessionId, { kind: 'ask_user', id: 'au-second' })
+    await flush()
+
+    expect(useActiveSessionsStore.getState().pendingOverride[sessionId]).toBe(true)
+    expect(mockedGetPendingActions).toHaveBeenCalledTimes(1)
+  })
+
+  it('never re-queries when the override bit is absent (or false)', () => {
+    const sessionId = `sess-reconcile-${idc++}`
+
+    resolve(sessionId, { kind: 'tool_confirm', id: 'ghost' })
+
+    expect(mockedGetPendingActions).not.toHaveBeenCalled()
+  })
+
+  it('keeps the bit and logs at debug when the re-query fails (null is not authoritative)', async () => {
+    const sessionId = `sess-reconcile-${idc++}`
+    useActiveSessionsStore.getState().setPendingOverride(sessionId, true)
+    mockedGetPendingActions.mockResolvedValue(null)
+
+    resolve(sessionId, { kind: 'tool_confirm', id: 'ghost' })
+    await flush()
+
+    expect(useActiveSessionsStore.getState().pendingOverride[sessionId]).toBe(true)
+    expect(loggerMocks.debug).toHaveBeenCalledTimes(1)
+    expect(loggerMocks.debug).toHaveBeenCalledWith(expect.stringContaining('keeping override'), sessionId)
+    expect(loggerMocks.error).not.toHaveBeenCalled()
+    expect(loggerMocks.warn).not.toHaveBeenCalled()
   })
 })

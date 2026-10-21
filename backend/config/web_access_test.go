@@ -3,12 +3,20 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // loadWebAccessYAML loads a config from an in-memory YAML document through
@@ -42,6 +50,44 @@ llm:
 		doc += "\n" + webAccess + "\n"
 	}
 	return doc
+}
+
+// writeWebAccessTLSPair generates a real self-signed certificate/key pair
+// (ECDSA P-256) into dir and returns the two PEM paths. The load path reads
+// and parses the pair (ADR-094), so tests exercising an enabled subsection
+// need real, loadable files on disk.
+func writeWebAccessTLSPair(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "web_access_test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	return certPath, keyPath
 }
 
 func TestWebAccess_AbsentSectionDefaultsOff(t *testing.T) {
@@ -139,12 +185,88 @@ web_access:
 			!strings.Contains(warnings[0], "network-accessible") {
 			t.Errorf("bind %q: warning must name the section and the network exposure, got %q", bind, warnings[0])
 		}
+		// ADR-093: the load warning exists only for the plain-HTTP
+		// combination, so the message names the transport and must never
+		// carry the retired TLS-encrypted variant.
+		if !strings.Contains(warnings[0], "plain HTTP without TLS") {
+			t.Errorf("bind %q: warning must name the plain-HTTP transport, got %q", bind, warnings[0])
+		}
+		if strings.Contains(warnings[0], "TLS-encrypted") {
+			t.Errorf("bind %q: plain-HTTP warning must not mention TLS encryption, got %q", bind, warnings[0])
+		}
 		if !cfg.WebAccess.Enabled {
 			t.Errorf("bind %q: a valid non-loopback section must stay enabled", bind)
 		}
 		if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
 			t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
 		}
+	}
+}
+
+func TestWebAccessTLS_NonLoopbackBindLoadsWarningFree(t *testing.T) {
+	// ADR-093 + ADR-094: the config-load exposure warning is reserved for
+	// the plain-HTTP combination, and an enabled subsection must carry a
+	// pair that actually loads (the config layer reads the files). A
+	// TLS-encrypted non-loopback bind over a REAL usable pair is a
+	// deliberate, encrypted LAN listener: it loads WARNING-FREE, with the
+	// section and the subsection preserved verbatim.
+	certPath, keyPath := writeWebAccessTLSPair(t, t.TempDir())
+	doc := fmt.Sprintf(`
+web_access:
+  enabled: true
+  bind: "192.168.1.10"
+  port: 8765
+  token: s3cret-token
+  tls:
+    enabled: true
+    cert: %q
+    key: %q
+`, certPath, keyPath)
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(doc))
+	if len(warnings) != 0 {
+		t.Fatalf("TLS-encrypted non-loopback bind over a usable pair must load warning-free, got %v", warnings)
+	}
+	if !cfg.WebAccess.Enabled || cfg.WebAccess.Bind != "192.168.1.10" || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+		t.Errorf("section must be preserved verbatim, got %+v", cfg.WebAccess)
+	}
+	if !cfg.WebAccess.TLS.Enabled || cfg.WebAccess.TLS.Cert != certPath || cfg.WebAccess.TLS.Key != keyPath {
+		t.Errorf("tls subsection must be preserved verbatim, got %+v", cfg.WebAccess.TLS)
+	}
+}
+
+func TestWebAccessTLS_NonLoopbackBindBrokenTLSStaysDisabled(t *testing.T) {
+	// ADR-094: a TLS subsection the sidecar cannot serve — here the
+	// structural shape, empty paths — never downgrades the listener to
+	// plain HTTP. The whole section turns OFF with exactly one warning
+	// naming the subsection, and the non-loopback bind draws NO exposure
+	// warning: there is no listener left to expose.
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  bind: "192.168.1.10"
+  port: 8765
+  token: s3cret-token
+  tls:
+    enabled: true
+    cert: ""
+    key: ""
+`))
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly the tls-unusable warning, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0], "web_access.tls unusable") ||
+		!strings.Contains(warnings[0], "the sidecar stays disabled") ||
+		!strings.Contains(warnings[0], "never downgraded to plain HTTP") {
+		t.Errorf("warning must name the unusable TLS and the no-plain-HTTP rule, got %q", warnings[0])
+	}
+	if cfg.WebAccess.Enabled {
+		t.Errorf("the section must be disabled — a requested TLS is never downgraded to plain HTTP, got %+v", cfg.WebAccess)
+	}
+	if cfg.WebAccess.Bind != "192.168.1.10" || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+		t.Errorf("connection values must be preserved for the fix-and-re-enable flow, got %+v", cfg.WebAccess)
+	}
+	if !cfg.WebAccess.TLS.Enabled {
+		t.Errorf("the tls subsection itself must be preserved as authored, got %+v", cfg.WebAccess.TLS)
 	}
 }
 
@@ -514,10 +636,11 @@ web_access:
 }
 
 func TestWebAccessTLS_ValidSubsectionSavesAndRoundTrips(t *testing.T) {
-	// A fully-configured subsection is valid: it saves without error and
-	// reloads warning-free with every value intact — the config layer never
-	// reads the PEM files, so paths need not exist on disk.
+	// A fully-configured subsection over a REAL usable pair (ADR-094: the
+	// load path reads and parses the files) is valid: it saves without
+	// error and reloads warning-free with every value intact.
 	dir := t.TempDir()
+	certPath, keyPath := writeWebAccessTLSPair(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	cfg := minimalValidConfig()
 	cfg.WebAccess = WebAccessConfig{
@@ -526,8 +649,8 @@ func TestWebAccessTLS_ValidSubsectionSavesAndRoundTrips(t *testing.T) {
 		Port:    8765,
 		TLS: WebAccessTLSConfig{
 			Enabled: true,
-			Cert:    "/etc/pems/fullchain.pem", // deliberately nonexistent
-			Key:     "/etc/pems/privkey.pem",   // deliberately nonexistent
+			Cert:    certPath,
+			Key:     keyPath,
 		},
 	}
 	if err := Save(cfg, path); err != nil {
@@ -571,11 +694,12 @@ web_access:
 	}
 }
 
-func TestWebAccessTLS_EmptyPathsFailSoftAtLoad(t *testing.T) {
-	// Structural invalidity (ADR-092, decision 2): tls enabled with either
-	// path empty is fail-soft at load — the SUBSECTION resets alone (the
-	// sidecar stays enabled on plain HTTP), bind/port/token are untouched,
-	// and exactly one warning names the subsection.
+func TestWebAccessTLS_EmptyPathsDisableAtLoad(t *testing.T) {
+	// ADR-094 (structural half of the usability rule): tls enabled with
+	// either path empty is UNUSABLE at load — the section turns off (the
+	// sidecar never serves plain HTTP in its place), the subsection and the
+	// connection values are preserved for the fix-and-re-enable flow, and
+	// exactly one warning names the subsection.
 	cases := map[string]WebAccessTLSConfig{
 		"both empty": {},
 		"cert empty": {Key: "/keys/privkey.pem"},
@@ -598,18 +722,117 @@ web_access:
 		if len(warnings) != 1 {
 			t.Fatalf("%s: expected exactly one load warning, got %v", name, warnings)
 		}
-		if !strings.Contains(warnings[0], "web_access.tls") || !strings.Contains(warnings[0], "ignored") {
-			t.Errorf("%s: warning must name the subsection and the reset, got %q", name, warnings[0])
+		if !strings.Contains(warnings[0], "web_access.tls unusable") || !strings.Contains(warnings[0], "the sidecar stays disabled") {
+			t.Errorf("%s: warning must name the unusable subsection, got %q", name, warnings[0])
 		}
-		if !cfg.WebAccess.Enabled {
-			t.Errorf("%s: the sidecar must stay enabled — only the subsection resets", name)
+		if cfg.WebAccess.Enabled {
+			t.Errorf("%s: the section must be disabled — plain-HTTP fallback is not allowed, got %+v", name, cfg.WebAccess)
 		}
 		if cfg.WebAccess.Bind != DefaultWebAccessBind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
 			t.Errorf("%s: section values must be preserved, got %+v", name, cfg.WebAccess)
 		}
-		if cfg.WebAccess.TLS != (WebAccessTLSConfig{}) {
-			t.Errorf("%s: tls = %+v, want the zero subsection", name, cfg.WebAccess.TLS)
+		if cfg.WebAccess.TLS != tlsCfg {
+			t.Errorf("%s: tls = %+v, want the subsection preserved as authored (%+v)", name, cfg.WebAccess.TLS, tlsCfg)
 		}
+	}
+}
+
+func TestWebAccessTLS_BrokenPairFilesDisableAtLoad(t *testing.T) {
+	// ADR-094 (file half of the usability rule): an enabled subsection
+	// whose pair does not load — missing files, garbage PEM, a key that
+	// does not match its certificate — is UNUSABLE: the section turns off
+	// with exactly one warning naming the reason, the subsection is
+	// preserved as authored, and a non-loopback bind draws NO exposure
+	// warning (no listener is left to expose).
+	dir := t.TempDir()
+	certPath, keyPath := writeWebAccessTLSPair(t, dir)
+	otherCertPath, otherKeyPath := writeWebAccessTLSPair(t, t.TempDir())
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("this is not a PEM block\n"), 0o644); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	cases := []struct {
+		name       string
+		cert, key  string
+		wantReason string
+	}{
+		{"missing cert", filepath.Join(dir, "absent.crt"), keyPath, "no such file"},
+		{"missing key", certPath, filepath.Join(dir, "absent.key"), "no such file"},
+		{"garbage cert", garbage, keyPath, "failed to load"},
+		{"mismatched pair", certPath, otherKeyPath, "failed to load"},
+		{"mismatched pair (other side)", otherCertPath, keyPath, "failed to load"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := fmt.Sprintf(`
+web_access:
+  enabled: true
+  bind: "192.168.1.10"
+  port: 8765
+  token: s3cret-token
+  tls:
+    enabled: true
+    cert: %q
+    key: %q
+`, tc.cert, tc.key)
+			cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(doc))
+			if len(warnings) != 1 {
+				t.Fatalf("expected exactly one load warning, got %v", warnings)
+			}
+			if !strings.Contains(warnings[0], "web_access.tls unusable") || !strings.Contains(warnings[0], "the sidecar stays disabled") {
+				t.Errorf("warning must name the unusable subsection, got %q", warnings[0])
+			}
+			if !strings.Contains(warnings[0], tc.wantReason) {
+				t.Errorf("warning must name the reason (%s), got %q", tc.wantReason, warnings[0])
+			}
+			if cfg.WebAccess.Enabled {
+				t.Errorf("the section must be disabled — plain-HTTP fallback is not allowed, got %+v", cfg.WebAccess)
+			}
+			if cfg.WebAccess.Bind != "192.168.1.10" || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+				t.Errorf("connection values must be preserved, got %+v", cfg.WebAccess)
+			}
+			if !cfg.WebAccess.TLS.Enabled || cfg.WebAccess.TLS.Cert != tc.cert || cfg.WebAccess.TLS.Key != tc.key {
+				t.Errorf("tls subsection must be preserved as authored, got %+v", cfg.WebAccess.TLS)
+			}
+		})
+	}
+}
+
+func TestWebAccessTLS_SaveGateIgnoresFiles(t *testing.T) {
+	// The save gate is deliberately NOT a file gate (ADR-094): filesystem
+	// state must never brick an unrelated settings save. An enabled section
+	// with a structurally valid subsection pointing at nonexistent files
+	// saves fine — the unusable pair is the load path's fail-soft concern
+	// and the interactive boundaries' fail-closed concern. The reload of
+	// that same file heals the section to disabled with exactly one
+	// warning.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := minimalValidConfig()
+	cfg.WebAccess = WebAccessConfig{
+		Enabled: true,
+		Bind:    DefaultWebAccessBind,
+		TLS: WebAccessTLSConfig{
+			Enabled: true,
+			Cert:    filepath.Join(dir, "deliberately-absent.crt"),
+			Key:     filepath.Join(dir, "deliberately-absent.key"),
+		},
+	}
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save must not gate on the pair's on-disk usability, got %v", err)
+	}
+	loaded, err := LoadWithResult(path)
+	if err != nil {
+		t.Fatalf("LoadWithResult: %v", err)
+	}
+	if len(loaded.LoadErrors) != 1 {
+		t.Fatalf("the reload of the unusable pair must draw exactly one warning, got %v", loaded.LoadErrors)
+	}
+	if loaded.Config.WebAccess.Enabled {
+		t.Errorf("the reload must heal the section to disabled (ADR-094), got %+v", loaded.Config.WebAccess)
+	}
+	if !loaded.Config.WebAccess.TLS.Enabled {
+		t.Errorf("the subsection must survive the healing untouched, got %+v", loaded.Config.WebAccess.TLS)
 	}
 }
 
@@ -712,5 +935,31 @@ func TestValidateWebAccessTLS(t *testing.T) {
 		t.Error("enabled with empty key = nil, want error")
 	} else if got := err.Error(); got != "web_access: tls.key is required when tls is enabled" {
 		t.Errorf("enabled with empty key = %q, want the key-required message", got)
+	}
+}
+
+func TestValidateWebAccessTLSPair(t *testing.T) {
+	// The exported usability mirror (ADR-094): a disabled subsection is
+	// inert, structural incompleteness fails with the same messages as
+	// ValidateWebAccessTLS, an unloadable pair fails with the load reason,
+	// and a real pair on disk passes.
+	dir := t.TempDir()
+	certPath, keyPath := writeWebAccessTLSPair(t, dir)
+	if err := ValidateWebAccessTLSPair(WebAccessTLSConfig{}); err != nil {
+		t.Errorf("disabled empty = %v, want nil", err)
+	}
+	if err := ValidateWebAccessTLSPair(WebAccessTLSConfig{Cert: "x", Key: "y"}); err != nil {
+		t.Errorf("disabled with values = %v, want nil", err)
+	}
+	err := ValidateWebAccessTLSPair(WebAccessTLSConfig{Enabled: true, Key: "/k"})
+	if err == nil || !strings.Contains(err.Error(), "tls.cert is required") {
+		t.Errorf("enabled with empty cert = %v, want the structural cert message", err)
+	}
+	err = ValidateWebAccessTLSPair(WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: filepath.Join(dir, "absent.key")})
+	if err == nil || !strings.Contains(err.Error(), "certificate pair failed to load") {
+		t.Errorf("enabled with a missing key file = %v, want the load failure", err)
+	}
+	if err := ValidateWebAccessTLSPair(WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath}); err != nil {
+		t.Errorf("enabled with a real usable pair = %v, want nil", err)
 	}
 }

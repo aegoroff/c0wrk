@@ -197,9 +197,15 @@ func TestSendMessage_UnfinishedTask_ContinuesCycle(t *testing.T) {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
 
-	// message_received should fire so the UI shows the user message.
-	if _, ok := waitForEvent(eventChan, "message_received", 2*time.Second); !ok {
-		t.Fatal("timeout waiting for message_received event")
+	// message_received should fire so the UI shows the user message. This is
+	// the INTERRUPTED-task continuation (task status in_progress, not paused):
+	// it is classified SendFresh — the persisted row gets no is_nudge stamp
+	// (mergeIsNudgeMetadata fires only on non-fresh classifications) and the
+	// frontend's optimistic card is unmarked in this flow, so the event flag
+	// must stay absent to agree with both.
+	received := waitForReceived(t, eventChan)
+	if received.IsNudge {
+		t.Error("echo is_nudge = true, want absent: an interrupted-task continuation is classified SendFresh (only the paused-status resume takes the SendNudgeResume branch)")
 	}
 
 	complete, ok := waitForEvent(eventChan, "task_complete", 5*time.Second)
@@ -284,6 +290,71 @@ func TestSendMessage_UnfinishedTask_ContinuesCycle(t *testing.T) {
 				t.Errorf("conversation history must not contain the nudge as a user turn (found at idx %d) — resume records assistant-side only", i)
 			}
 		}
+	}
+}
+
+// TestSendMessage_PausedTask_NudgeResumeEchoCarriesIsNudge drives the true
+// paused-status nudge-resume branch (hasPausedUnfinishedTask → SendNudgeResume,
+// distinct from the interrupted-task continuation above, which is SendFresh):
+// the message_received echo must carry is_nudge so surfaces without an
+// optimistic copy render the Nudge badge immediately — the same stamp the
+// persisted row receives (mergeIsNudgeMetadata fires on every non-fresh
+// classification).
+func TestSendMessage_PausedTask_NudgeResumeEchoCarriesIsNudge(t *testing.T) {
+	const (
+		nudge  = "continue from the checkpoint"
+		taskID = "task-paused-nudge-echo"
+	)
+
+	store := &resumeTaskStore{
+		task: &TaskRecord{
+			ID: taskID, SessionID: "ignored", OriginalRequest: "long running task",
+			Status: "paused",
+		},
+		trajectory: func() json.RawMessage {
+			trajSteps := []agent.Step{
+				{Thought: "step one", Action: llm.ToolCall{ID: "pc1", Name: "read_file", Input: json.RawMessage(`{}`)}, Observation: "PRIOR-1"},
+			}
+			out, _ := json.Marshal(trajSteps)
+			return out
+		}(),
+	}
+
+	caller := &scriptedLLM{scripted: []*llm.ChatResponse{
+		finishResponse("resumed-and-finished"),
+	}}
+	var orch *core.Orchestrator
+	eventChan := make(chan Event, 100)
+	mgr := NewManager(capturingFunctionalFactory(caller, &orch), func(e Event) { eventChan <- e }, runtimeTempDir(t))
+	t.Cleanup(mgr.Shutdown)
+
+	info, err := mgr.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	store.mu.Lock()
+	store.task.SessionID = info.ID
+	store.mu.Unlock()
+	mgr.SetTaskStore(store)
+
+	classification, err := mgr.SendMessageClassified(context.Background(), info.ID, nudge, nil, nil, nil, "", "", false, "", false, false)
+	if err != nil {
+		t.Fatalf("SendMessageClassified failed: %v", err)
+	}
+	if classification != SendNudgeResume {
+		t.Fatalf("classification = %v, want SendNudgeResume for a send into a paused task", classification)
+	}
+
+	received := waitForReceived(t, eventChan)
+	if received.Text != nudge {
+		t.Errorf("echo text = %q, want the nudge %q", received.Text, nudge)
+	}
+	if !received.IsNudge {
+		t.Error("echo is_nudge absent, want true on a SendNudgeResume send (the event flag must agree with the persisted row's stamp)")
+	}
+
+	if _, ok := waitForEvent(eventChan, "task_complete", 5*time.Second); !ok {
+		t.Fatal("timeout waiting for task_complete event")
 	}
 }
 

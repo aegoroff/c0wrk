@@ -5,6 +5,9 @@
 
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { useGoalStore } from '@/stores/goalStore'
+import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
+import { getPendingActions } from '@/api/chat'
+import { logger } from '@/lib/logger'
 import { generateMessageId } from '@/lib/ids'
 import { autonomyDecisionContent } from '@/lib/autonomyDecision'
 import {
@@ -192,8 +195,9 @@ export function handleToolJudgeFinishedEvent(sessionId: string, _data: ToolJudge
  * Idempotent by design: a surface that performed the resolution already
  * marked its card resolved locally and skips the redundant write; a missing
  * card (never rendered, or already reconciled) is a no-op FOR THE CHAT — the
- * goal-store mirror is still settled below, because it lives independently of
- * the message list (progress panel / status badge).
+ * goal-store mirror is still settled above, because it lives independently of
+ * the message list (progress panel / status badge), and the sticky
+ * pending-HITL override bit is reconciled below for the same reason.
  */
 export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedData): void {
   // The goal store mirrors the pending prompt for the progress panel / badge:
@@ -208,6 +212,27 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
     } else if (goal.pendingSuggestion[sessionId]?.request_id === data.id) {
       goal.clearPendingSuggestion(sessionId)
     }
+  }
+
+  // Pending-HITL override reconcile: a sticky `true` bit in
+  // activeSessionsStore means this surface believes the session still blocks
+  // on a prompt, yet a resolution broadcast just landed — the bit's only
+  // `false` writer (this surface answering the prompt itself) is unreachable
+  // here, so without this the bit would stick forever (yellow badge with no
+  // actual prompt). Re-query the backend and apply the AUTHORITATIVE answer —
+  // NOT a blind clear: a second prompt may already be pending. Runs BEFORE
+  // the chat-card early return: the reconcile must also work when this
+  // surface never rendered the card. Fire-and-forget keeps the handler sync;
+  // a null result (RPC failure — getPendingActions never rejects) is not
+  // authoritative and keeps the bit.
+  if (useActiveSessionsStore.getState().pendingOverride[sessionId] === true) {
+    void getPendingActions(sessionId).then(pending => {
+      if (pending === null) {
+        logger.debug('hitl_resolved: pending-actions re-query failed, keeping override for', sessionId)
+        return
+      }
+      useActiveSessionsStore.getState().applyPendingActions(sessionId, pending)
+    })
   }
 
   const store = useChatStore.getState()

@@ -87,6 +87,12 @@ function certInput(): HTMLInputElement {
   return el
 }
 
+function keyInput(): HTMLInputElement {
+  const el = byTestId('web-access-key-input')
+  if (!(el instanceof HTMLInputElement)) throw new Error('key input not found')
+  return el
+}
+
 function generateButton(): HTMLButtonElement {
   const el = byTestId('web-access-cert-generate')
   if (!(el instanceof HTMLButtonElement)) throw new Error('generate button not found')
@@ -150,16 +156,18 @@ describe('WebAccessTLSSettings', () => {
     expect(tlsToggle().checked).toBe(false)
     expect(container.textContent).toContain('Plain HTTP')
     expect(certInput().value).toBe('')
+    expect(keyInput().value).toBe('')
     expect(byTestId('web-access-cert-warning')).toBeNull()
     expect(byTestId('web-access-tls-error')).toBeNull()
   })
 
-  it('renders the enabled state: switch on, seeded path, no warning for a good certificate', async () => {
+  it('renders the enabled state: switch on, seeded paths, no warning for a good certificate', async () => {
     render(httpsInfo)
     await flush()
     expect(tlsToggle().checked).toBe(true)
     expect(container.textContent).toContain('HTTPS')
     expect(certInput().value).toBe('/home/z/.c0wrk/web-access.crt')
+    expect(keyInput().value).toBe('/home/z/.c0wrk/web-access.key')
     expect(byTestId('web-access-cert-warning')).toBeNull()
   })
 
@@ -177,7 +185,7 @@ describe('WebAccessTLSSettings', () => {
     expect(tlsToggle().checked).toBe(true)
   })
 
-  it('threads the persisted key path through so the derivation never clobbers it', async () => {
+  it('threads the persisted pair through when toggling', async () => {
     render(httpsInfo)
     await flush()
     clickToggle()
@@ -252,6 +260,34 @@ describe('WebAccessTLSSettings', () => {
     expect(mocks.setWebAccessTLS).toHaveBeenCalledTimes(1)
   })
 
+  it('commits the key path independently: Enter and focus loss, certificate riding along', async () => {
+    render(httpsInfo)
+    await flush()
+    typeInto(keyInput(), '/tmp/rover.key')
+    pressEnter(keyInput())
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledWith(
+      true,
+      '/home/z/.c0wrk/web-access.crt',
+      '/tmp/rover.key',
+    )
+    // The post-commit re-read returns the NEWLY persisted key.
+    mocks.getWebAccessInfo.mockResolvedValueOnce({ ...httpsInfo, tlsKey: '/tmp/rover.key' })
+    typeInto(keyInput(), '  /tmp/other.key  ')
+    blurField(keyInput())
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenLastCalledWith(
+      true,
+      '/home/z/.c0wrk/web-access.crt',
+      '/tmp/other.key',
+    )
+    // An unchanged key field saves nothing on Enter or focus loss.
+    blurField(keyInput())
+    pressEnter(keyInput())
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledTimes(2)
+  })
+
   it('surfaces a rejected path commit and keeps the draft', async () => {
     mocks.setWebAccessTLS.mockRejectedValue(
       new Error('web access TLS change not applied: the previous settings were restored'),
@@ -262,6 +298,35 @@ describe('WebAccessTLSSettings', () => {
     pressEnter(certInput())
     await flush()
     expect(byTestId('web-access-tls-error')?.textContent).toContain('previous settings were restored')
+  })
+
+  it('surfaces a backend pair-validation refusal on a key commit and keeps the draft', async () => {
+    mocks.setWebAccessTLS.mockRejectedValue(
+      new Error(
+        'web access: TLS private key "/tmp/stray.key" does not match the certificate "/home/z/.c0wrk/web-access.crt": mismatch',
+      ),
+    )
+    render(httpsInfo)
+    await flush()
+    typeInto(keyInput(), '/tmp/stray.key')
+    pressEnter(keyInput())
+    await flush()
+    expect(byTestId('web-access-tls-error')?.textContent).toContain('does not match')
+    // The draft stays in the field for the operator to correct.
+    expect(keyInput().value).toBe('/tmp/stray.key')
+    expect(mocks.getWebAccessInfo).not.toHaveBeenCalled()
+  })
+
+  it('Generate fills both path fields from the post-mint re-read', async () => {
+    render(plainInfo)
+    await flush()
+    // beforeEach mocks the post-write re-read with httpsInfo — the generated
+    // pair's persisted paths.
+    clickGenerate()
+    await flush()
+    expect(mocks.generateWebAccessCertificate).toHaveBeenCalledTimes(1)
+    expect(certInput().value).toBe('/home/z/.c0wrk/web-access.crt')
+    expect(keyInput().value).toBe('/home/z/.c0wrk/web-access.key')
   })
 
   it('generates the app-owned pair: busy button, RPC, re-read, error surfaced on failure', async () => {
@@ -277,6 +342,7 @@ describe('WebAccessTLSSettings', () => {
     clickGenerate()
     expect(generateButton().disabled).toBe(true)
     expect(certInput().disabled).toBe(true)
+    expect(keyInput().disabled).toBe(true)
     await act(async () => {
       resolveGen()
     })

@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1059,6 +1058,13 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 // flip back so a rejected toggle is indistinguishable from a rejected
 // request (the SetModelProfilesEnabled contract).
 //
+// Enabling onto a configured-but-unusable TLS (ADR-094) is refused before
+// anything is mutated or persisted: the pair is loaded exactly like the
+// sidecar would load it (config.ValidateWebAccessTLSPair), so a broken
+// certificate leaves the section OFF with the reason in the toggle's error
+// — never a listener downgraded to plain HTTP, never a persisted-on switch
+// above a silently-down sidecar.
+//
 // Locking discipline: webAccessMu serializes the whole transition — config
 // flip, persist, start/stop — against the startup mount and the Shutdown
 // stop, so a toggle can never race a teardown into a leaked listener. The
@@ -1078,6 +1084,15 @@ func (a *App) SetWebAccessEnabled(on bool) error {
 	}
 	if cfg.WebAccess.Enabled == on {
 		return nil
+	}
+
+	// ADR-094: a flip onto an unusable TLS is refused up front — the same
+	// usability predicate the load path heals by, fail-closed here because
+	// this is an interactive boundary, not a broken config file.
+	if on && cfg.WebAccess.TLS.Enabled {
+		if err := config.ValidateWebAccessTLSPair(cfg.WebAccess.TLS); err != nil {
+			return fmt.Errorf("cannot enable web access: %w", err)
+		}
 	}
 
 	prev := cfg.WebAccess
@@ -1301,26 +1316,32 @@ const (
 
 // SetWebAccessTLS persists the web_access.tls subsection (the HTTPS switch,
 // ADR-092 decision 1) and applies it live: a running sidecar is hot-restarted
-// onto the new transport. An empty key with a non-empty cert derives the key
-// path from the certificate's stem (<cert-stem>.key, ADR-092 decision 4 —
-// the UI authors the cert path only, the config always carries both). An
+// onto the new transport. The caller authors both PEM paths explicitly —
+// cert and key — the key path is never derived from the cert path. An
 // enabled subsection with empty paths is refused through
 // config.ValidateWebAccessTLS — the exact structural rule the load/save
-// paths enforce; a disabled subsection is inert and accepts anything (the
-// sidecar serves plain HTTP, byte-identical to pre-ADR behavior). A request
-// matching the current subsection is a no-op.
+// paths enforce; a disabled subsection is inert for that rule (the sidecar
+// serves plain HTTP, byte-identical to pre-ADR behavior).
+//
+// A non-empty cert+key pair is loaded with tls.LoadX509KeyPair — the same
+// load the sidecar performs at mount — BEFORE the no-op check and any
+// persist, so a broken pair never reaches disk or the sidecar: a key that
+// does not match its certificate is refused with the mismatch message
+// ("does not match"), everything else (missing files, unparseable PEM) with
+// the unreadable message. The mount-time FAIL-CLOSED check stays as the
+// backstop for hand-edited configs — a listener configured as encrypted
+// never downgrades to plaintext (ADR-092 decision 2) — but through this RPC
+// the operator is stopped at the door. A request matching the current
+// subsection remains a no-op (after the pair has loaded).
 //
 // Failure ordering mirrors the section's other control RPCs (the
 // SetWebAccessConnection contract): a failed persist rolls the subsection
-// back in memory, and a failed restart — e.g. the configured pair cannot be
-// loaded, which the sidecar refuses FAIL-CLOSED (a listener configured as
-// encrypted never downgrades to plaintext, ADR-092 decision 2) — restores
-// the previous subsection on disk and brings the sidecar back on it. The
-// subsection deliberately does not consult web_access.enabled or the
-// experimental gate: like the bind/port pins it persists regardless and
-// takes effect at the next start whose gates are open. Locking discipline:
-// webAccessMu, exactly like SetWebAccessEnabled (see its comment for the
-// desktop-owned config seam).
+// back in memory, and a failed restart restores the previous subsection on
+// disk and brings the sidecar back on it. The subsection deliberately does
+// not consult web_access.enabled or the experimental gate: like the
+// bind/port pins it persists regardless and takes effect at the next start
+// whose gates are open. Locking discipline: webAccessMu, exactly like
+// SetWebAccessEnabled (see its comment for the desktop-owned config seam).
 func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
 	a.webAccessMu.Lock()
 	defer a.webAccessMu.Unlock()
@@ -1331,8 +1352,17 @@ func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
 	}
 	cert = strings.TrimSpace(cert)
 	key = strings.TrimSpace(key)
-	if enabled && cert != "" && key == "" {
-		key = webAccessKeyFromCert(cert)
+	if cert != "" && key != "" {
+		// Refuse an unloadable pair before the no-op check or any persist,
+		// classified the way cert_status classifies it: a key that does not
+		// match its certificate is a mismatch, every other load failure is
+		// an unreadable pair.
+		if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+			if strings.Contains(err.Error(), "does not match") {
+				return fmt.Errorf("web access: TLS private key %q does not match the certificate %q: %w", key, cert, err)
+			}
+			return fmt.Errorf("web access: TLS certificate/key pair (%q, %q) is unreadable: %w", cert, key, err)
+		}
 	}
 	next := config.WebAccessTLSConfig{Enabled: enabled, Cert: cert, Key: key}
 	if err := config.ValidateWebAccessTLS(next); err != nil {
@@ -1349,13 +1379,6 @@ func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
 		return fmt.Errorf("failed to persist web access config: %w", err)
 	}
 	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "TLS switch")
-}
-
-// webAccessKeyFromCert derives the key path from the certificate path's stem
-// (ADR-092 decision 4): fullchain.pem → fullchain.key. Applied at commit
-// time when the caller configured a cert but left the key empty.
-func webAccessKeyFromCert(cert string) string {
-	return strings.TrimSuffix(cert, filepath.Ext(cert)) + ".key"
 }
 
 // GenerateWebAccessCertificate regenerates the app-owned self-signed pair for
