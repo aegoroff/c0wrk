@@ -491,8 +491,29 @@ export function useChatInputController(): ChatInputController {
           return
         }
         effectiveText = expansion.text
-        commandAgent = expansion.agent
         commandModel = expansion.model
+        // The frontmatter agent binding is explicit, so it validates against
+        // the FULL agent catalog — not the kind-filtered mentionable set a
+        // plain /agent mention resolves through: hidden and capability-
+        // disabled profiles stay bindable, but a typo (or a renamed profile)
+        // must not ride into the task as a requested subagent the Conductor
+        // cannot delegate to (ADR-037 resolves catalog references fail-
+        // closed). On a miss the binding is dropped with a warning and the
+        // message sends without it; a failed catalog fetch is fail-closed
+        // the same way (fetch already warned).
+        if (expansion.agent !== '') {
+          const catalog = await listAgents().catch((err) => {
+            logger.warn('Could not load the agent catalog to validate the command agent; sending without the binding:', err)
+            return null
+          })
+          if (catalog?.some((a) => a.name === expansion.agent)) {
+            commandAgent = expansion.agent
+          } else if (catalog !== null) {
+            logger.warn(
+              `Command /${resolution.command.name} declares agent "${expansion.agent}" which is not in the agent catalog — sending without the binding`,
+            )
+          }
+        }
         // The template replaced the leading token: re-extract so mentions
         // INSIDE the template (skills/agents/MCP servers) partition normally.
         refs = extractRefs(effectiveText)

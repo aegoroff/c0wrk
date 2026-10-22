@@ -37,6 +37,24 @@ describe('parseLeadingCommandToken', () => {
     })
   })
 
+  it('tolerates a run of spaces or tabs after the qualified colon', () => {
+    expect(parseLeadingCommandToken('/command:   deploy arg')).toEqual({
+      name: 'deploy',
+      args: 'arg',
+      qualified: true,
+    })
+    expect(parseLeadingCommandToken('/command:\tdeploy')).toEqual({
+      name: 'deploy',
+      args: '',
+      qualified: true,
+    })
+  })
+
+  it('still rejects a qualified colon followed only by whitespace', () => {
+    expect(parseLeadingCommandToken('/command:   ')).toBeNull()
+    expect(parseLeadingCommandToken('/command:\t')).toBeNull()
+  })
+
   it('skips leading whitespace', () => {
     expect(parseLeadingCommandToken('  /deploy')).toEqual({ name: 'deploy', args: '', qualified: false })
   })
@@ -118,6 +136,16 @@ describe('splitPositionalArgs', () => {
       'src',
       '{ "key": "value" }',
     ])
+  })
+
+  it('unescapes exactly the two documented escapes inside quotes', () => {
+    expect(splitPositionalArgs('"\\"quoted\\""')).toEqual(['"quoted"'])
+    expect(splitPositionalArgs('"a\\\\b"')).toEqual(['a\\b'])
+  })
+
+  it('a backslash before any other character survives verbatim', () => {
+    expect(splitPositionalArgs('"C:\\Users\\zab\\report.md"')).toEqual(['C:\\Users\\zab\\report.md'])
+    expect(splitPositionalArgs('"x\\ny"')).toEqual(['x\\ny'])
   })
 
   it('an empty quoted run is a positional argument', () => {

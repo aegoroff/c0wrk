@@ -733,7 +733,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// workspace). Changes invalidate the skill cache and emit skills:changed
 	// so the frontend autocomplete refreshes without an app restart.
 	if cfg.Config != nil && len(cfg.Config.Skills.Dirs) > 0 {
-		dirs := resolveSkillDirs(cfg.Config.Skills.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		dirs := resolveCatalogDirs(cfg.Config.Skills.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
 		f.startSkillsWatchers(dirs)
 		warnIfSeedDirUndiscovered(f.logger, "skills", seedSkillsDir, dirs)
 	} else {
@@ -744,7 +744,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// skill watchers: changes invalidate the agent cache and emit
 	// agents:changed so the frontend #-autocomplete refreshes.
 	if cfg.Config != nil && len(cfg.Config.Agents.Dirs) > 0 {
-		dirs := resolveSkillDirs(cfg.Config.Agents.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		dirs := resolveCatalogDirs(cfg.Config.Agents.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
 		f.startAgentsWatchers(dirs)
 		warnIfSeedDirUndiscovered(f.logger, "agents", seedAgentsDir, dirs)
 	} else {
@@ -757,7 +757,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// list also seeds ListCommands's discovery — the backend owns command
 	// scanning (core never consumes commands).
 	if cfg.Config != nil && len(cfg.Config.Commands.Dirs) > 0 {
-		dirs := resolveSkillDirs(cfg.Config.Commands.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		dirs := resolveCatalogDirs(cfg.Config.Commands.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
 		f.setCommandBaseDirs(dirs)
 		f.startCommandsWatchers(dirs)
 	} else {

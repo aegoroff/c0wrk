@@ -67,8 +67,11 @@ frontend cache.
   ADR-076 ambiguous no-op (hint names `/command:` fourth); exactly commands →
   expand; exactly one mention catalog → the mention pipeline; none → the
   permissive skill passthrough.
-- Qualified `/command: name args…` (both colon spellings) — always valid;
-  an unknown id is preserved verbatim.
+- Qualified `/command: name args…` (both colon spellings; ANY run of spaces
+  or tabs after the colon — a deliberate divergence from the ADR-076 mention
+  grammar, which keeps its single optional space for `/agent:`/`/skill:`/
+  `/mcp:` and is unchanged) — always valid; an unknown id, or a colon
+  followed by no name at all, is preserved verbatim as plain text.
 - The expanded text REPLACES the message and flows through the ordinary send
   path: mention refs inside the template are re-extracted and partitioned
   normally, `@file` references resolve via the existing fileref pipeline, and
@@ -118,6 +121,31 @@ commands simply do not exist without a project).
 - The frontend consumes commands only through `@/api/commands` with the
   boundary guard; every catalog cache invalidates on the same transitions as
   the sibling catalogs plus `commands:changed`.
+
+## Security Considerations
+
+Command templates are UNTRUSTED CONTENT (the ADR-020 framing): the
+project-local root `<workspace>/.agents/commands/` sits inside the workspace
+and is agent-writable (the `local_write` group), so a model can plant a
+command file whose template fires as a USER message the next time the
+operator invokes `/name` — a durable, session-surviving injection channel in
+the same accepted-risk class as the skills/AGENTS.md catalogs (an ASI01-class
+persistence vector). The posture is ADR-020's: record the trade-off
+explicitly rather than pretend the content is trusted. What bounds the
+vector:
+
+- **Invocation is user-typed or user-picked only.** A leading token the user
+  typed, or a completion entry the user accepted, is the only trigger; the
+  model cannot hallucinate or activate a command, and the backend mention
+  pipeline / `SendMessage` contract never see one.
+- **The expansion is transparent.** The expanded template REPLACES the
+  message and is persisted in the transcript as the user turn — the model
+  receives exactly the text the operator can read, with no hidden channel
+  (one-pass literal substitution; no shell injection in v1).
+- **No new execution capability.** A template is prompt text, not code;
+  frontmatter `agent`/`model` ride the ordinary consent surfaces (a requested
+  subagent the user could have typed; a model fallback the explicit toolbar
+  selection always overrides).
 
 ## Related Specs
 

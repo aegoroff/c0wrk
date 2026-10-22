@@ -79,7 +79,11 @@ A template may use the ordinary message machinery:
 - If the name exists in more than one catalog (say a skill and a command are
   both called `test`), a plain `/test` is an ambiguous no-op with a hint —
   use the qualified form `/command: test` to invoke the command.
-- `/command:` is always valid, even without a collision.
+- `/command:` is always valid, even without a collision. It accepts any
+  number of spaces or tabs after the colon (`/command:   test` still invokes
+  `test`) — a deliberate widening so extra spacing in hand-typed input cannot
+  degrade an invocation; mentions (`/agent:`, `/skill:`, `/mcp:`) still
+  accept at most one space after the colon.
 - A command named `goal` shadows the built-in `/goal` (same rule as a skill
   named `goal`) — rename the file if you still need goal mode.
 

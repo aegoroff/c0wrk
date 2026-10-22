@@ -53,7 +53,10 @@ they are not mentions.**
    `workspace:tree_changed`.
 3. **Invocation.** Only a LEADING token (after whitespace) invokes: plain
    `/name args…` or the collision-qualified `/command: name args…` (both
-   colon spellings; the spaced form is the canonical dropdown emission).
+   colon spellings; the spaced form is the canonical dropdown emission; ANY
+   run of spaces/tabs after the colon is accepted — a deliberate divergence
+   from the ADR-076 mention grammar, whose single optional space is unchanged
+   for `/agent:`/`/skill:`/`/mcp:`).
    Commands are an invocation, not a mention: the token is replaced by the
    expanded template BEFORE the mention pipeline runs, so
    `PreprocessMessageText`, the `SendMessage` positional contract, and

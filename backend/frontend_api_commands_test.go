@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -227,11 +226,18 @@ func TestStartCommandsWatchers_InvalidatesCacheAndEmits(t *testing.T) {
 	globalDir := t.TempDir()
 	writeCommandMD(t, globalDir, "first.md", "First body.\n")
 
-	var emitted atomic.Int32
+	// Event barrier: the emitEvent double signals the channel instead of
+	// bumping a counter, so the wait below blocks on a real event rather
+	// than polling with time.Sleep. Buffered + non-blocking send keeps the
+	// watcher callback safe if more than one emission arrives.
+	changed := make(chan struct{}, 1)
 	f := &FrontendAPI{
 		emitEvent: func(name string, _ ...any) {
 			if name == EventCommandsChanged {
-				emitted.Add(1)
+				select {
+				case changed <- struct{}{}:
+				default:
+				}
 			}
 		},
 	}
@@ -252,15 +258,13 @@ func TestStartCommandsWatchers_InvalidatesCacheAndEmits(t *testing.T) {
 	writeCommandMD(t, globalDir, "first.md", "Updated body.\n")
 
 	// Wait for the debounced commands:changed emission (fsnotify latency on
-	// macOS + the watcher debounce window).
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if emitted.Load() >= 1 {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if emitted.Load() < 1 {
+	// macOS + the watcher debounce window) by selecting on the barrier vs a
+	// bounded timeout.
+	timer := time.NewTimer(3 * time.Second)
+	t.Cleanup(func() { timer.Stop() })
+	select {
+	case <-changed:
+	case <-timer.C:
 		t.Fatal("expected commands:changed emission after command file modification")
 	}
 

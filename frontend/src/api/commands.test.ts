@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { listCommands } from './commands'
 import { logger } from '@/lib/logger'
 
@@ -19,6 +19,10 @@ describe('listCommands', () => {
     getAppMock.mockReset()
     vi.spyOn(logger, 'warn').mockImplementation(() => {})
     vi.spyOn(logger, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('passes a fully valid catalog through', async () => {

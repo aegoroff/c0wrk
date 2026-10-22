@@ -16,9 +16,12 @@ const BOUNDARY = '[ \\t\\n\\r\\f]'
 // final Unicode line separator, which Go does not treat as a boundary.
 const EOF = '(?![\\s\\S])'
 
-// Qualified form: /command: name or /command:name — the name ends at a
-// boundary or EOF, mirroring the ADR-076 qualified-ref grammar.
-const QUALIFIED_TOKEN_SOURCE = String.raw`\/command:[ \t]?([\w-]+)(?=${BOUNDARY}|${EOF})`
+// Qualified form: /command:name with an OPTIONAL RUN of spaces/tabs after
+// the colon (`/command:  name` — a deliberate widening of the ADR-076
+// single-space mention grammar: docs/commands.md invites typing /command: by
+// hand, and an extra space must not degrade the invocation into a phantom
+// plain `command` skill ref). The name ends at a boundary or EOF.
+const QUALIFIED_TOKEN_SOURCE = String.raw`\/command:[ \t]*([\w-]+)(?=${BOUNDARY}|${EOF})`
 // Plain form: /name with the same boundary rule.
 const PLAIN_TOKEN_SOURCE = String.raw`\/([\w-]+)(?=${BOUNDARY}|${EOF})`
 const QUALIFIED_TOKEN_RE = new RegExp(`^${QUALIFIED_TOKEN_SOURCE}`)
@@ -128,9 +131,12 @@ export function expandCommand(command: CommandDescriptor, args: string): Command
 
 /**
  * Split the argument remainder into positional arguments: whitespace-separated
- * tokens, where a double-quoted run groups as ONE argument (backslash escapes
- * work inside quotes: \" for a literal quote, \\ for a backslash). Bare
- * tokens keep their characters verbatim — no shell semantics beyond grouping.
+ * tokens, where a double-quoted run groups as ONE argument (POSIX-style
+ * backslash escapes inside quotes: \" for a literal quote, \\ for a
+ * backslash — a backslash before ANY other character survives verbatim, so
+ * quoted Windows paths and `\n`-style literals pass through untouched).
+ * Bare tokens keep their characters verbatim — no shell semantics beyond
+ * grouping.
  */
 export function splitPositionalArgs(argsString: string): string[] {
   const out: string[] = []
@@ -141,9 +147,9 @@ export function splitPositionalArgs(argsString: string): string[] {
   let m: RegExpExecArray | null
   while ((m = re.exec(argsString)) !== null) {
     if (m[1] !== undefined) {
-      out.push(m[1].replace(/\\(.)/g, '$1'))
+      out.push(m[1].replace(/\\(["\\])/g, '$1'))
     } else if (m[2] !== undefined) {
-      out.push(m[2].replace(/\\(.)/g, '$1'))
+      out.push(m[2].replace(/\\(["\\])/g, '$1'))
     } else if (m[3] !== undefined) {
       out.push(m[3])
     }

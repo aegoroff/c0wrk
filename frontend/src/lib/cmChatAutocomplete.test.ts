@@ -641,6 +641,43 @@ describe('cmChatAutocomplete unified /-source', () => {
     listCommandsMock.mockResolvedValue([])
   })
 
+  it('renders command rows with the command-item class, never the file fallback', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-command-item' })
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([])
+    getMCPMentionableServersMock.mockResolvedValue([])
+    listCommandsMock.mockResolvedValue([
+      { name: 'deploy', description: 'Deploy the service', agent: '', model: '', template: 'T' },
+    ])
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'deploy'),
+      'commands to appear',
+    )
+    // optionClass lands on the rendered tooltip li.
+    await until(() => document.querySelector('li.command-item') !== null, 'command row to render')
+
+    const commandRow = document.querySelector('li.command-item')!
+    expect(commandRow.textContent).toContain('deploy')
+    // The mention sibling keeps its own class — file-item stays file-only.
+    expect(document.querySelector('li.agent-item')).not.toBeNull()
+    expect(commandRow.className).not.toContain('file-item')
+
+    // index.css pins the label tint for the new kind (token-based, sibling style).
+    const css = readFileSync('src/index.css', 'utf8')
+    const rule = css.match(/\.cm-tooltip-autocomplete li\.command-item \.cm-completionLabel\s*\{[^}]+\}/)?.[0]
+    expect(rule).toBeDefined()
+    expect(rule).toContain('var(--color-warning)')
+
+    await vi.advanceTimersByTimeAsync(100)
+    acceptCompletion(view)
+    expect(view.state.doc.toString()).toBe('/deploy ')
+    // Per-fixture-override convention (see the sibling test above).
+    listCommandsMock.mockResolvedValue([])
+  })
+
   it('offers auto+manual servers and hides disabled ones for the ACTIVE session kind (chat)', async () => {
     useProjectStore.setState({ projects: [], activeProjectId: 'slash-mcp-modes-chat' })
     activateSession('sess-chat', NO_PROJECT_ID)

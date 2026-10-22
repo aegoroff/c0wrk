@@ -1033,6 +1033,16 @@ body {
     color: var(--color-info);
 }
 
+/* Command items (unified /-list, ADR-092): label tinted with the theme's
+   warning color — the fourth visual kind alongside agents, skills and MCP
+   servers. Commands are invocations (the template replaces the message on
+   send), not mentions, so unlike the three mention kinds there is no chat
+   chip color to mirror; warning keeps the invocation rows distinct from
+   everything mentionable. */
+.cm-tooltip-autocomplete li.command-item .cm-completionLabel {
+    color: var(--color-warning);
+}
+
 /* File items: nerd font icon */
 .cm-completion-nerd-icon {
     font-family: var(--font-icon);

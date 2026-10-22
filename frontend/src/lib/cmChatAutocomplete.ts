@@ -619,7 +619,9 @@ export function createChatAutocomplete(): Extension {
             ? 'skill-item'
             : completion.type === 'mcp'
               ? 'mcp-item'
-              : 'file-item',
+              : completion.type === 'command'
+                ? 'command-item'
+                : 'file-item',
       addToOptions: [
         {
           render: (completion: Completion) => {
