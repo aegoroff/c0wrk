@@ -151,6 +151,16 @@ afterEach(() => {
 // --- rendered bar ---
 
 describe('TabBar', () => {
+  it('carries no Settings affordance — the strip stays tab-scoped (ADR-093)', () => {
+    renderBar()
+    // ADR-093: the gear lives in the sidebar header in BOTH flag states, the
+    // strip keeps only tab-scoped affordances («+», close). While the sidebar
+    // is collapsed there is NO entry point at all — Sidebar.test.tsx locks
+    // that half of the parity; this locks the strip's half.
+    expect(container.querySelector('button[aria-label="Settings"]')).toBeNull()
+    expect(container.querySelector('[title="Settings"]')).toBeNull()
+  })
+
   it('renders an ARIA tablist with live titles and roving tabindex', () => {
     const chatTab = createTab()
     const projTab = createTab({ projectId: PROJ.id, sessionId: SESS.id })

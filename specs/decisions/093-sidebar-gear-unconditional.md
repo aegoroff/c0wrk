@@ -16,9 +16,9 @@ The sidebar header's Settings gear is unconditional: `frontend/src/components/la
 
 Positive: Settings stays in one place regardless of the tab mode; the tab strip keeps only tab-scoped affordances («+», close); one fewer flag-driven render branch in the shell.
 
-Negative: the "exactly one Settings entry point" symmetry argument from ADR-085 is dropped — the cost is a static duplicate-free header, not a functional one, since the strip simply no longer duplicates the affordance.
+Negative: the "exactly one Settings entry point" symmetry argument from ADR-085 is dropped — the cost is a static duplicate-free header, not a functional one, since the strip simply no longer duplicates the affordance. Concretely: while the sidebar is collapsed, Settings has NO UI entry point — the collapsed `Sidebar` branch mounts only the expand affordance and no `SidebarHeader` (whose gear is the app's one general entry point), and the strip carries no gear either. This is the deliberate restoration of the pre-tab-bar status quo, not a regression introduced here: the same shell state had no Settings entry before ADR-085 either (the collapsed branch has been header-free since before tabs, and the collapsed state persists across restarts, so the gap was equally reachable then) — the strip-borne gear that briefly covered it was born together with the tab bar and dies with it. Reaching Settings from a collapsed sidebar means expanding it first; if that ever changes, it is an explicit ADR-093-revisiting decision.
 
-Tests: `SidebarHeader.test.tsx` asserts the gear in both flag states and the default-tab open; the former TabBar Settings-button test was removed with the button.
+Tests: `SidebarHeader.test.tsx` asserts the gear in both flag states and the default-tab open; the former TabBar Settings-button test was removed with the button. The collapsed parity is guarded negatively: `Sidebar.test.tsx` asserts the collapsed shell mounts no Settings entry point, and `TabBar.test.tsx` asserts the strip carries none — re-adding either is a test-breaking, ADR-revisiting change.
 
 ## Alternatives Considered
 
