@@ -1510,16 +1510,20 @@ describe('SessionSelector — grouped order with an active session', () => {
 
   /**
    * Document order of the given labels across the menu's `[role="menuitem"]`
-   * rows (each matched against an item's full text, first match wins).
-   * Missing labels are dropped from the result — flat-mode assertions use
-   * that to prove branch rows are absent.
+   * rows. A label matching a row's full text exactly (section headers) binds
+   * there; otherwise it falls back to a substring match (session rows carry
+   * extra text), first match wins. Missing labels are dropped from the
+   * result — flat-mode assertions use that to prove branch rows are absent.
    */
   function itemOrder(menu: HTMLElement, labels: string[]): string[] {
     const texts = Array.from(menu.querySelectorAll('[role="menuitem"]')).map((el) =>
       (el.textContent ?? '').trim(),
     )
     return labels
-      .map((label) => ({ label, idx: texts.findIndex((t) => t.includes(label)) }))
+      .map((label) => {
+        const exact = texts.findIndex((t) => t === label)
+        return { label, idx: exact >= 0 ? exact : texts.findIndex((t) => t.includes(label)) }
+      })
       .filter((hit) => hit.idx >= 0)
       .sort((a, b) => a.idx - b.idx)
       .map((hit) => hit.label)
