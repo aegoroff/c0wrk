@@ -61,6 +61,7 @@ type Config struct {
 	Security   SecurityConfig   `yaml:"security"`
 	Skills     SkillsConfig     `yaml:"skills"`
 	Agents     AgentsConfig     `yaml:"agents"`
+	Commands   CommandsConfig   `yaml:"commands"`
 	Search     SearchConfig     `yaml:"search"`
 	ToolLimits ToolLimitsConfig `yaml:"toolLimits"`
 	Timeouts   TimeoutsConfig   `yaml:"timeouts"`
@@ -2537,6 +2538,18 @@ type AgentsConfig struct {
 	// lifecycle events (and the burst of concurrent LLM calls / tool
 	// executions) without changing results or their order.
 	MaxParallelSubagents int `yaml:"max_parallel_subagents"`
+}
+
+// CommandsConfig holds custom command discovery configuration (ADR-092).
+// Custom commands are markdown prompt templates invoked with a leading
+// /name token in the chat input.
+type CommandsConfig struct {
+	// Dirs lists command discovery directories in priority order (highest
+	// first). Paths may be absolute or relative to the agent directory
+	// (~/.c0wrk). Mirrors SkillsConfig: the project-local `.agents/commands`
+	// directory is always scanned automatically (see backend/frontend_api_commands.go)
+	// and does NOT need to be listed here.
+	Dirs []string `yaml:"dirs"`
 }
 
 // envVarPattern matches ${ENV_VAR} patterns for substitution.

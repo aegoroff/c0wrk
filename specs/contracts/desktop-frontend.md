@@ -329,6 +329,12 @@ System-introspection RPCs that share one house rule: "the probe does not exist h
 | `ListSkills` | —          | []SkillDescriptorDTO | List available skills (name+description) |
 | `RefreshSkills` | —       | []SkillDescriptorDTO | Manual re-discovery behind the Capabilities tab's `Reload skills` button: bumps the catalog cache generation and re-scans the skill directories, then returns the fresh descriptors in the `ListSkills` shape. Plain `ListSkills` is cache-served, and the directory watchers never see directories created after startup, so this is the only manual catch-up path |
 
+### Commands (`backend/frontend_api_commands.go`)
+
+| Method         | Parameters | Returns                | Description                                                                                                                                                                                            |
+| -------------- | ---------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ListCommands` | —          | []CommandDescriptorDTO | List custom command templates (ADR-092): name, description, frontmatter `agent`/`model` bindings and the full template body, merged across the three discovery levels (project `.agents/commands` first, then `commands.dirs`; first name wins). Cache-served; invalidated on project switches and by the global-dir watchers (`commands:changed`) |
+
 ### Goal (`backend/frontend_api_goal.go`)
 
 | Method          | Parameters                              | Returns | Description                                                                                          |

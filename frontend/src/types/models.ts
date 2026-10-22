@@ -454,6 +454,20 @@ export interface AgentDescriptor {
   description: string
 }
 
+/**
+ * A custom command descriptor (ADR-092): a markdown prompt template invoked
+ * with a leading /name token. The full template ships in the descriptor —
+ * expansion happens in the chat-input send path. agent/model are the optional
+ * frontmatter bindings (a requested subagent and a model override).
+ */
+export interface CommandDescriptor {
+  name: string
+  description: string
+  agent: string
+  model: string
+  template: string
+}
+
 // --- Config types ---
 
 export interface ConfigProviderFull {

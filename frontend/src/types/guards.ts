@@ -28,6 +28,7 @@ import type {
     ModelProfilesToolGroup,
     AgentDescriptor,
     SkillDescriptor,
+    CommandDescriptor,
     ToolInfo,
     GPUDeviceResponse,
     VectorStoreEntry,
@@ -151,6 +152,17 @@ export function isAgentDescriptor(v: unknown): v is AgentDescriptor {
  *  shape as isAgentDescriptor. */
 export function isSkillDescriptor(v: unknown): v is SkillDescriptor {
     return isObj(v) && typeof v.name === 'string' && typeof v.description === 'string'
+}
+
+/** Element guard for ListCommands (ADR-092): every field is consumed by the
+ *  completion list or the send-path expansion, so all five must be strings. */
+export function isCommandDescriptor(v: unknown): v is CommandDescriptor {
+    return isObj(v)
+        && typeof v.name === 'string'
+        && typeof v.description === 'string'
+        && typeof v.agent === 'string'
+        && typeof v.model === 'string'
+        && typeof v.template === 'string'
 }
 
 /** Element guard for GetToolList (Settings → Tools). Every field is rendered

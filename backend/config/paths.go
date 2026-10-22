@@ -703,6 +703,13 @@ func ProjectAgentsPath(workspacePath string) string {
 	return filepath.Join(workspacePath, ".agents", "agents")
 }
 
+// ProjectCommandsPath returns the project-local custom commands directory.
+// This is <workspacePath>/.agents/commands. Mirrors ProjectSkillsPath and
+// ProjectAgentsPath for the command template discovery (ADR-092).
+func ProjectCommandsPath(workspacePath string) string {
+	return filepath.Join(workspacePath, ".agents", "commands")
+}
+
 // ProjectResearchPath returns the project-local research workspace directory.
 // This is <workspacePath>/.research — the canonical research root for every
 // real project (RESEARCH is always on for real projects). The directory is

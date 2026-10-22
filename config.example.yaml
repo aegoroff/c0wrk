@@ -692,6 +692,25 @@ agents:
   max_parallel_subagents: 4
 
 # ---------------------------------------------------------------------------
+# Custom Commands Discovery
+# ---------------------------------------------------------------------------
+# Custom commands are markdown prompt templates invoked with a leading
+# /name token in the chat input: `.agents/commands/<name>.md` with an
+# optional YAML frontmatter (`description`, `agent`, `model`) and the
+# template body supporting $ARGUMENTS and $1..$N positional placeholders.
+#
+# Paths may be absolute or relative to the agent directory (~/.c0wrk).
+# Directories are scanned in priority order (highest first).
+# Omitting the key entirely keeps the defaults below; an explicit empty
+# list opts out of the base directories (mirrors `skills.dirs`).
+commands:
+  dirs:
+    - "~/.c0wrk/.agents/commands" # c0wrk-specific commands directory (outranks user-wide)
+    - "~/.agents/commands" # user-wide commands directory
+  # Note: in addition to the directories above, the current project's
+  # `.agents/commands` directory is always scanned automatically (highest priority).
+
+# ---------------------------------------------------------------------------
 # Memory / Persistence
 # ---------------------------------------------------------------------------
 # The SQLite database is always stored at ~/.c0wrk/database.db

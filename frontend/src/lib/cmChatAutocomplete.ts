@@ -7,6 +7,7 @@ import {
 import type { Extension } from '@codemirror/state'
 import { listSkills } from '@/api/skills'
 import { listAgents } from '@/api/agents'
+import { listCommands } from '@/api/commands'
 import { getMCPMentionableServers } from '@/api/mcp'
 import { getCapabilityModes } from '@/api/capabilities'
 import { listDirectory, getSessionWorkspace } from '@/api/workspace'
@@ -21,7 +22,7 @@ import { formatFileRefPath } from '@/lib/parseReferences'
 import { isMentionableInContext, mentionableNamesInContext } from './capabilityModes'
 import { activeSessionKind } from './sessionKind'
 import { mentionTooltip, type MentionCompletion } from './cmMentionTooltip'
-import type { SkillDescriptor, AgentDescriptor, CapabilitiesInfo, MCPMentionableServer, FileEntry } from '@/types/models'
+import type { SkillDescriptor, AgentDescriptor, CommandDescriptor, CapabilitiesInfo, MCPMentionableServer, FileEntry } from '@/types/models'
 
 const DEFAULT_FILE_ICON = '\uf15b'
 const DEFAULT_FOLDER_ICON = '\uf07b'
@@ -36,6 +37,9 @@ let skillsLoaded = false
 
 let agentsCache: AgentDescriptor[] = []
 let agentsLoaded = false
+
+let commandsCache: CommandDescriptor[] = []
+let commandsLoaded = false
 
 let mcpCache: MCPMentionableServer[] = []
 let mcpLoaded = false
@@ -126,6 +130,10 @@ function invalidateAgentsCache() {
   agentsLoaded = false
 }
 
+function invalidateCommandsCache() {
+  commandsLoaded = false
+}
+
 function invalidateMCPCache() {
   mcpLoaded = false
 }
@@ -151,6 +159,7 @@ function ensureRootSubscription() {
       invalidateFilesCache()
       invalidateSkillsCache()
       invalidateAgentsCache()
+      invalidateCommandsCache()
       invalidateMCPCache()
       invalidateCapabilitiesCache()
     }
@@ -167,6 +176,7 @@ function ensureRootSubscription() {
       invalidateFilesCache()
       invalidateSkillsCache()
       invalidateAgentsCache()
+      invalidateCommandsCache()
       invalidateMCPCache()
       invalidateCapabilitiesCache()
     }
@@ -178,6 +188,7 @@ function ensureRootSubscription() {
       invalidateFilesCache()
       invalidateSkillsCache()
       invalidateAgentsCache()
+      invalidateCommandsCache()
       invalidateMCPCache()
       invalidateCapabilitiesCache()
     }
@@ -189,6 +200,7 @@ function ensureRootSubscription() {
     invalidateFilesCache()
     invalidateSkillsCache()
     invalidateAgentsCache()
+    invalidateCommandsCache()
     invalidateMCPCache()
     invalidateCapabilitiesCache()
   })
@@ -201,6 +213,11 @@ function ensureRootSubscription() {
   // invalidate the agents cache only.
   subscribe('agents:changed', () => {
     invalidateAgentsCache()
+  })
+  // Global custom command directory changes (outside the workspace)
+  // invalidate the commands cache only (ADR-092).
+  subscribe('commands:changed', () => {
+    invalidateCommandsCache()
   })
   // The MCP gateway finishing its (re)start is the one MCP lifecycle event
   // the backend emits — a fresh mentionable set is cheapest to pick up here.
@@ -230,6 +247,19 @@ async function getAgents(): Promise<AgentDescriptor[]> {
     agentsCache = []
   }
   return agentsCache
+}
+
+async function getCommands(): Promise<CommandDescriptor[]> {
+  if (commandsLoaded) return commandsCache
+  try {
+    commandsCache = await listCommands()
+    commandsLoaded = true
+  } catch {
+    // A transient RPC hiccup hides the section for one trigger, never
+    // blocks the others.
+    commandsCache = []
+  }
+  return commandsCache
 }
 
 async function getMCPServers(): Promise<MCPMentionableServer[]> {
@@ -331,17 +361,22 @@ function chatApplyPath(absPath: string, rootPath: string | null, suffix: string,
 }
 
 // One `/` source for ALL capability kinds (issue #110 + the MCP mention
-// flow): subagents, MCP servers and skills share the single slash trigger,
-// presented as three labelled sections (Subagents, MCP Servers, Skills). A
-// name present in more than one catalog is a collision — every colliding
+// flow): commands, subagents, MCP servers and skills share the single slash
+// trigger, presented as four labelled sections (Commands, Subagents, MCP
+// Servers, Skills). Commands are invocations (ADR-092): a picked command
+// inserts its /name (or the collision-qualified /command: name when the name
+// collides with a mention catalog) and the send path expands the template —
+// they are not session-kind filtered (no capability modes exist for them;
+// project-local commands simply do not exist in a No-Project session).
+// A name present in more than one catalog is a collision — every colliding
 // entry is offered in its collision-qualified spelling (`/agent: name`,
-// `/mcp: name`, `/skill: name`, the canonical spaced form) so the applied
-// text is unambiguous on the send path. The sets are SESSION-KIND-AWARE:
-// the kind of the ACTIVE session (No Project → chat, a real project → code)
-// picks the capabilities column, so `auto` + `manual` entries are offered
-// and `disabled` ones are hidden — mirroring what the backend would honor
-// for a task started from this input. A session switch re-reads the kind on
-// the next trigger and flips the offered sets.
+// `/mcp: name`, `/skill: name`, `/command: name`, the canonical spaced form)
+// so the applied text is unambiguous on the send path. The mention sets are
+// SESSION-KIND-AWARE: the kind of the ACTIVE session (No Project → chat, a
+// real project → code) picks the capabilities column, so `auto` + `manual`
+// entries are offered and `disabled` ones are hidden — mirroring what the
+// backend would honor for a task started from this input. A session switch
+// re-reads the kind on the next trigger and flips the offered sets.
 async function slashSource(ctx: CompletionContext): Promise<CompletionResult | null> {
   // Scan backward for '/' trigger.
   const line = ctx.state.doc.lineAt(ctx.pos)
@@ -365,11 +400,12 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
   const query = textBefore.slice(triggerIdx + 1)
 
   const kind = activeSessionKind()
-  const [agents, mcpServers, skills, caps] = await Promise.all([
+  const [agents, mcpServers, skills, caps, commands] = await Promise.all([
     getAgents(),
     getMCPServers(),
     getSkills(),
     getCapabilities(),
+    getCommands(),
   ])
   const visibleAgentNames = new Set(mentionableNamesInContext(agents.map((a) => a.name), caps?.agents, kind))
   const visibleSkillNames = new Set(mentionableNamesInContext(skills.map((s) => s.name), caps?.skills, kind))
@@ -384,30 +420,49 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
 
   const options: MentionCompletion[] = []
 
-  // Subagents first: section rank 0 orders the section above MCP Servers and
+  // Commands first: section rank 0 — the "run this" affordance answers the
+  // `/` trigger like opencode's command palette (ADR-092). A command whose
+  // name collides with a visible mention catalog entry is offered in its
+  // collision-qualified spelling so the send path resolves it as a command
+  // (the plain spelling would be the ambiguous no-op). No session-kind
+  // filter: commands have no capability modes.
+  for (const c of fuzzyFilter(query, commands, (c) => c.name)) {
+    const collides = agentNames.has(c.name) || skillNames.has(c.name) || mcpNames.has(c.name)
+    const detail = c.description !== '' ? c.description : 'Custom command'
+    options.push({
+      label: collides ? `/command: ${c.name}` : c.name,
+      detail,
+      mentionMarkdown: detail,
+      type: 'command',
+      section: { name: 'Commands', rank: 0 },
+      apply: (collides ? `command: ${c.name}` : c.name) + ' ',
+    })
+  }
+
+  // Subagents: section rank 1 orders the section above MCP Servers and
   // Skills, and the array order keeps agents ahead within the unfiltered
   // list.
   for (const a of fuzzyFilter(query, agents.filter((a) => agentNames.has(a.name)), (a) => a.name)) {
-    const collides = skillNames.has(a.name) || mcpNames.has(a.name)
+    const collides = skillNames.has(a.name) || mcpNames.has(a.name) || commands.some((c) => c.name === a.name)
     options.push({
       label: collides ? `/agent: ${a.name}` : a.name,
       detail: a.description,
       // Full description for the hover/selection markdown pane (cmMentionTooltip).
       mentionMarkdown: a.description,
       type: 'agent',
-      section: { name: 'Subagents', rank: 0 },
+      section: { name: 'Subagents', rank: 1 },
       // The replacement range starts AFTER the typed '/', so the applied
       // text must not repeat it.
       apply: (collides ? `agent: ${a.name}` : a.name) + ' ',
     })
   }
-  // MCP Servers between Subagents and Skills (rank 1): the kind-aware filter
+  // MCP Servers between Subagents and Skills (rank 2): the kind-aware filter
   // above already dropped servers disabled for the active session's kind; a
   // server parked in `manual` THERE is the mention-triggered one (the detail
   // says so), an auto server is always connected but still mentionable to
   // surface the soft directive.
   for (const m of fuzzyFilter(query, visibleMCPServers, (m) => m.name)) {
-    const collides = agentNames.has(m.name) || skillNames.has(m.name)
+    const collides = agentNames.has(m.name) || skillNames.has(m.name) || commands.some((c) => c.name === m.name)
     const manual = (kind === 'chat' ? m.chat_mode : m.code_mode) === 'manual'
     const summary = manual ? 'MCP server — mention to enable' : 'MCP server'
     options.push({
@@ -415,18 +470,18 @@ async function slashSource(ctx: CompletionContext): Promise<CompletionResult | n
       detail: summary,
       mentionMarkdown: summary,
       type: 'mcp',
-      section: { name: 'MCP Servers', rank: 1 },
+      section: { name: 'MCP Servers', rank: 2 },
       apply: (collides ? `mcp: ${m.name}` : m.name) + ' ',
     })
   }
   for (const s of fuzzyFilter(query, skills.filter((s) => skillNames.has(s.name)), (s) => s.name)) {
-    const collides = agentNames.has(s.name) || mcpNames.has(s.name)
+    const collides = agentNames.has(s.name) || mcpNames.has(s.name) || commands.some((c) => c.name === s.name)
     options.push({
       label: collides ? `/skill: ${s.name}` : s.name,
       detail: s.description,
       mentionMarkdown: s.description,
       type: 'skill',
-      section: { name: 'Skills', rank: 2 },
+      section: { name: 'Skills', rank: 3 },
       apply: (collides ? `skill: ${s.name}` : s.name) + ' ',
     })
   }

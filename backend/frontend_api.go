@@ -297,6 +297,24 @@ type FrontendAPI struct {
 	agentWatchers   []*workspace.Watcher
 	agentWatchersMu sync.Mutex
 
+	// Command cache (invalidated on project switch). Mirrors the skill cache
+	// for custom command template discovery (ADR-092).
+	commandCache            []CommandDescriptorDTO
+	commandCacheGen         uint64 // atomic — bumped to invalidate
+	commandCacheGenSnapshot uint64
+	commandCacheProjectDir  string
+	commandCacheMu          sync.Mutex
+
+	// commandDirs holds the resolved global command directories (the same
+	// list the watchers get), stored once at startup; guarded by
+	// commandWatchersMu.
+	commandDirs []string
+
+	// Command directory watchers monitor global command dirs (outside any
+	// workspace) for changes. Mirrors skillWatchers.
+	commandWatchers   []*workspace.Watcher
+	commandWatchersMu sync.Mutex
+
 	// Vector search: the per-root registry (ADR-080). One manager per
 	// workspace root, created on demand through the late-bound factory;
 	// vectorRootsMu guards the lazy construction of the registry itself
@@ -733,6 +751,19 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 		warnIfSeedDirUndiscovered(f.logger, "agents", seedAgentsDir, nil)
 	}
 
+	// Start watchers for global custom command directories (ADR-092). Mirrors
+	// the skill watchers: changes invalidate the command cache and emit
+	// commands:changed so the frontend autocomplete refreshes. The resolved
+	// list also seeds ListCommands's discovery — the backend owns command
+	// scanning (core never consumes commands).
+	if cfg.Config != nil && len(cfg.Config.Commands.Dirs) > 0 {
+		dirs := resolveSkillDirs(cfg.Config.Commands.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		f.setCommandBaseDirs(dirs)
+		f.startCommandsWatchers(dirs)
+	} else {
+		f.setCommandBaseDirs(nil)
+	}
+
 	// Route the session manager's one-shot service LLM requests (session title
 	// generation) through the embedded readiness gate.
 	f.installServiceLLMGate()
@@ -968,6 +999,7 @@ func (l *FrontendAPILifecycle) Cleanup() {
 	cleanupStep("workspaceWatcherClose")
 	f.closeSkillsWatchers()
 	f.closeAgentsWatchers()
+	f.closeCommandsWatchers()
 	cleanupStep("skillAgentWatchersClose")
 	if f.store != nil {
 		if err := f.store.Close(); err != nil {

@@ -9,6 +9,8 @@ import { useMessageSender } from '@/hooks/useMessageSender'
 import { useChatEditor, type ChatEditorAPI, type ChatSuggestionNavAction } from '@/hooks/useChatEditor'
 import { usePasteHandler } from '@/hooks/usePasteHandler'
 import { extractRefs, partitionRefs } from '@/lib/parseReferences'
+import { listCommands } from '@/api/commands'
+import { parseLeadingCommandToken, resolveLeadingCommand, expandCommand } from '@/lib/commandsExpand'
 import { mentionableNamesInContext } from '@/lib/capabilityModes'
 import { sessionKindForSession } from '@/lib/sessionKind'
 import { resolveUnfinishedStatus } from '@/lib/activeSessions'
@@ -380,8 +382,13 @@ export function useChatInputController(): ChatInputController {
     }
     // Unified /-refs (issue #110 + the MCP mention flow): extract every slash
     // ref (plain and collision-qualified), then partition them against the
-    // three catalogs.
-    const refs = extractRefs(messageText)
+    // three catalogs. A leading custom-command token (ADR-092) is resolved
+    // separately below — it is an invocation that REPLACES the message, not
+    // a mention.
+    let refs = extractRefs(messageText)
+    // ADR-092: parse the leading command token structurally (pure, no I/O);
+    // the catalog fetches below resolve it.
+    const leadingCommand = parseLeadingCommandToken(messageText)
     // Clear the editor SYNCHRONOUSLY before any async work. A message with
     // plain /-refs awaits the catalogs below; clearing first means a second
     // Enter press during that fetch reads an empty editor and returns early
@@ -438,6 +445,59 @@ export function useChatInputController(): ChatInputController {
       skillNames = mentionableNamesInContext(skillCatalog, caps?.skills, kind)
       mcpNames = mcpCatalog
     }
+    // ADR-092: leading-command invocation. A token at the very start that
+    // resolves to a command REPLACES the message with the expanded template
+    // (frontmatter agent → an extra requested subagent, model → the fallback
+    // model override); a collision with a mention catalog stays the ADR-076
+    // visible no-op; anything else falls through to the mention pipeline
+    // unchanged.
+    let effectiveText = messageText
+    let commandAgent = ''
+    let commandModel = ''
+    if (leadingCommand !== null) {
+      const commands = await listCommands().catch((err) => {
+        logger.warn('Could not load the command catalog; command invocation skipped:', err)
+        return []
+      })
+      const resolution = resolveLeadingCommand(leadingCommand, {
+        commands: new Map(commands.map((c) => [c.name, c])),
+        agentNames: new Set(agentNames),
+        skillNames: new Set(skillNames),
+        mcpNames: new Set(mcpNames),
+      })
+      if (resolution.kind === 'ambiguous') {
+        if (resolution.catalogs.includes('command')) {
+          // A command-involved collision is new here — partitionRefs below
+          // cannot see the command catalog, so this no-op is owned locally
+          // (a mention-only collision keeps the standard hint path).
+          const q = resolution.name
+          useChatInputStore.getState().setSendError(
+            originSessionId ?? NULL_SESSION_KEY,
+            `Ambiguous mention: /${q} matches more than one catalog (${resolution.catalogs.join(', ')}) — use /agent: ${q}, /skill: ${q}, /mcp: ${q} or /command: ${q}`,
+          )
+          writeTextToSession(originSessionId, messageText)
+          return
+        }
+        // Mention-only collision: partitionRefs reports it with the standard
+        // hint whether or not the token led the message.
+      } else if (resolution.kind === 'command') {
+        const expansion = expandCommand(resolution.command, resolution.args)
+        if (!expansion.text.trim()) {
+          useChatInputStore.getState().setSendError(
+            originSessionId ?? NULL_SESSION_KEY,
+            `Command /${resolution.command.name} expanded to an empty prompt — add a template body to the command file`,
+          )
+          writeTextToSession(originSessionId, messageText)
+          return
+        }
+        effectiveText = expansion.text
+        commandAgent = expansion.agent
+        commandModel = expansion.model
+        // The template replaced the leading token: re-extract so mentions
+        // INSIDE the template (skills/agents/MCP servers) partition normally.
+        refs = extractRefs(effectiveText)
+      }
+    }
     const { agents, skills, mcpServers, ambiguous } = partitionRefs(refs, agentNames, skillNames, mcpNames)
     // A plain /name present in MORE THAN ONE catalog cannot be partitioned
     // without guessing. The send is a no-op: nothing is activated or
@@ -449,7 +509,7 @@ export function useChatInputController(): ChatInputController {
       const list = ambiguous.map((name) => `/${name}`).join(', ')
       useChatInputStore.getState().setSendError(
         originSessionId ?? NULL_SESSION_KEY,
-        `Ambiguous mention: ${list} matches more than one catalog — use /agent: ${ambiguous[0]}, /skill: ${ambiguous[0]} or /mcp: ${ambiguous[0]}`,
+        `Ambiguous mention: ${list} matches more than one catalog — use /agent: ${ambiguous[0]}, /skill: ${ambiguous[0]}, /mcp: ${ambiguous[0]} or /command: ${ambiguous[0]}`,
       )
       writeTextToSession(originSessionId, messageText)
       return
@@ -458,8 +518,18 @@ export function useChatInputController(): ChatInputController {
       // Pin the send to the ORIGIN session: the catalog await above means
       // the user may have switched sessions since pressing Enter — sending
       // into the now-active session would misroute the message (and bypass
-      // the origin's in-flight-uploads guard checked above).
-      await send(messageText, skills, agents, mcpServers, originSessionId)
+      // the origin's in-flight-uploads guard checked above). A command
+      // frontmatter model rides along as a FALLBACK override — the user's
+      // explicit toolbar selection still wins (ADR-092). The options
+      // argument is passed only when a binding exists so a plain send keeps
+      // its historical shape.
+      const mergedAgents =
+        commandAgent !== '' && !agents.includes(commandAgent) ? [...agents, commandAgent] : agents
+      if (commandModel !== '') {
+        await send(effectiveText, skills, mergedAgents, mcpServers, originSessionId, { commandModel })
+      } else {
+        await send(effectiveText, skills, mergedAgents, mcpServers, originSessionId)
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       // Both the error and the restored text are keyed to the session the

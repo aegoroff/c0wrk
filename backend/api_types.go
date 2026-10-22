@@ -983,3 +983,16 @@ type AgentDescriptorDTO struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
+
+// CommandDescriptorDTO is a custom command descriptor exposed to the frontend
+// for /-autocomplete and send-time template expansion (ADR-092). The full
+// template ships in the descriptor: expansion happens in the chat-input send
+// path, which needs the body; command files are small, so a separate
+// GetCommand RPC is not warranted.
+type CommandDescriptorDTO struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Agent       string `json:"agent"`
+	Model       string `json:"model"`
+	Template    string `json:"template"`
+}

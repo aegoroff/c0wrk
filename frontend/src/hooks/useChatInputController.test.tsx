@@ -31,6 +31,7 @@ const { apiMocks, sendMock } = vi.hoisted(() => ({
     agents: { listAgents: vi.fn().mockResolvedValue([]) },
     workspace: { listDirectory: vi.fn().mockResolvedValue([]) },
     skills: { listSkills: vi.fn().mockResolvedValue([]) },
+    commands: { listCommands: vi.fn().mockResolvedValue([]) },
     mcp: {
       getMCPMentionableServers: vi.fn().mockResolvedValue([]),
       // Pure helper mirrored verbatim (production behavior under test): the
@@ -57,6 +58,7 @@ vi.mock('@/api/sessions', () => apiMocks.sessions)
 vi.mock('@/api/agents', () => apiMocks.agents)
 vi.mock('@/api/workspace', () => apiMocks.workspace)
 vi.mock('@/api/skills', () => apiMocks.skills)
+vi.mock('@/api/commands', () => apiMocks.commands)
 vi.mock('@/api/mcp', () => apiMocks.mcp)
 vi.mock('@/api/capabilities', () => apiMocks.capabilities)
 vi.mock('@/api/runtime', () => apiMocks.runtime)
@@ -780,6 +782,135 @@ describe('handleSend /-ref partitioning', () => {
     // through as skills (server-side resolution), exactly like the historical
     // extractSkillRefs behavior.
     expect(sendMock).toHaveBeenCalledWith('use /commit now', ['commit'], [], [], 'sess-a')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom command invocation on the send path (ADR-092): a leading /name that
+// resolves to a command REPLACES the message with the expanded template
+// (frontmatter agent → an extra requested subagent, model → the fallback
+// model override); a collision with a mention catalog stays the ADR-076
+// visible no-op; an unknown leading name keeps the permissive passthrough.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('handleSend custom command invocation', () => {
+  beforeEach(() => {
+    apiMocks.agents.listAgents.mockResolvedValue([])
+    apiMocks.skills.listSkills.mockResolvedValue([])
+    apiMocks.mcp.getMCPMentionableServers.mockResolvedValue([])
+    apiMocks.commands.listCommands.mockResolvedValue([])
+    sendMock.mockResolvedValue(undefined)
+  })
+
+  it('expands a leading command and sends the template with $ARGUMENTS bound', async () => {
+    render()
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'deploy', description: 'Deploy', agent: '', model: '', template: 'Deploy $ARGUMENTS with care.' },
+    ])
+    await type('/deploy prod')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).toHaveBeenCalledOnce()
+    expect(sendMock).toHaveBeenCalledWith('Deploy prod with care.', [], [], [], 'sess-a')
+    // The invocation was consumed: the editor is empty after the send.
+    expect(editorText()).toBe('')
+  })
+
+  it('threads the frontmatter agent and model binding', async () => {
+    render()
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'deploy', description: '', agent: 'code-reviewer', model: 'gpt-x', template: 'Go.' },
+    ])
+    await type('/deploy')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).toHaveBeenCalledWith('Go.', [], ['code-reviewer'], [], 'sess-a', { commandModel: 'gpt-x' })
+  })
+
+  it('the user-selected model wins over the command binding', async () => {
+    render()
+    useInputModeStore.getState().setSelectedModel('user-model')
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'deploy', description: '', agent: '', model: 'gpt-x', template: 'Go.' },
+    ])
+    await type('/deploy')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).toHaveBeenCalledWith('Go.', [], [], [], 'sess-a', { commandModel: 'gpt-x' })
+    // useMessageSender (stubbed here) owns the fallback precedence; the
+    // binding travels so the real implementation can apply it.
+    expect(apiMocks.commands.listCommands).toHaveBeenCalled()
+    useInputModeStore.getState().setSelectedModel(null)
+  })
+
+  it('a skill+command collision is a no-op with the four-catalog hint', async () => {
+    render()
+    apiMocks.skills.listSkills.mockResolvedValue([{ name: 'test', description: 'Skill test' }])
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'test', description: 'Command test', agent: '', model: '', template: 'T' },
+    ])
+    await type('/test run everything')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(editorText()).toBe('/test run everything')
+    const hint = slice('sess-a')?.sendError
+    expect(hint).toContain('Ambiguous')
+    expect(hint).toContain('/command: test')
+  })
+
+  it('the qualified /command: form resolves a colliding name', async () => {
+    render()
+    apiMocks.skills.listSkills.mockResolvedValue([{ name: 'test', description: 'Skill test' }])
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'test', description: 'Command test', agent: '', model: '', template: 'Run [$ARGUMENTS]' },
+    ])
+    await type('/command: test run everything')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).toHaveBeenCalledOnce()
+    expect(sendMock).toHaveBeenCalledWith('Run [run everything]', [], [], [], 'sess-a')
+  })
+
+  it('an unknown leading name keeps the permissive skill passthrough', async () => {
+    render()
+    await type('/ghost args')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).toHaveBeenCalledWith('/ghost args', ['ghost'], [], [], 'sess-a')
+  })
+
+  it('an empty expansion is a no-op with a hint', async () => {
+    render()
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'blank', description: '', agent: '', model: '', template: '   ' },
+    ])
+    await type('/blank')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(sendMock).not.toHaveBeenCalled()
+    expect(editorText()).toBe('/blank')
+    expect(slice('sess-a')?.sendError).toContain('expanded to an empty prompt')
+  })
+
+  it('a failed send restores the ORIGINAL invocation text', async () => {
+    render()
+    apiMocks.commands.listCommands.mockResolvedValue([
+      { name: 'deploy', description: '', agent: '', model: '', template: 'Expanded.' },
+    ])
+    sendMock.mockRejectedValue(new Error('rpc down'))
+    await type('/deploy prod')
+    await act(async () => {
+      await controllerRef.current!.handleSend()
+    })
+    expect(editorText()).toBe('/deploy prod')
+    expect(slice('sess-a')?.sendError).toContain('rpc down')
   })
 })
 

@@ -50,6 +50,10 @@ export interface SendOptions {
    *  message there instead of the active/origin one (e.g. the research
    *  panel's Shift-click gesture). */
   newSession?: boolean
+  /** A custom command's frontmatter model binding (ADR-092): a FALLBACK
+   *  override used only when the user has no explicit model selected in the
+   *  toolbar — an explicit selection always wins. */
+  commandModel?: string
 }
 
 export interface UseMessageSenderResult {
@@ -207,7 +211,7 @@ export function useMessageSender(): UseMessageSenderResult {
     }
 
     try {
-      const modelOverride = useInputModeStore.getState().selectedModel ?? ''
+      const modelOverride = useInputModeStore.getState().selectedModel || options?.commandModel || ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
       const goalBudget = useInputModeStore.getState().goalBudget
       // The consumption window is already held — taken before the

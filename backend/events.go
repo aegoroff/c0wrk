@@ -95,6 +95,12 @@ const EventSkillsChanged = "skills:changed"
 // instead. Mirrors EventSkillsChanged for AGENT.md discovery.
 const EventAgentsChanged = "agents:changed"
 
+// EventCommandsChanged is emitted when custom command directories outside the
+// workspace (e.g. ~/.agents/commands, ~/.c0wrk/.agents/commands) are modified.
+// Workspace-local command changes are surfaced via EventWorkspaceTreeChanged
+// instead. Mirrors EventSkillsChanged for command template discovery (ADR-092).
+const EventCommandsChanged = "commands:changed"
+
 // EventGitStatusChanged is emitted when the git staging area changes
 // (stage, unstage, commit). The payload is the repository path so the
 // frontend knows which project was affected.
