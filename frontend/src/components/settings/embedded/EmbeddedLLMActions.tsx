@@ -39,11 +39,24 @@ import { cn } from '@/lib/utils'
 import type { EmbeddedLLMBusyAction } from '@/stores/embeddedLLMStore'
 import type { EmbeddedLLMRemoveScope } from '@/api/embedded'
 
+/** The artifact groups a scoped removal can address, as the parents compute
+ *  them from the status snapshot. A scope with `false` renders disabled.
+ *  `projectionRefusal` is the exceptional disabled reason: when set, the
+ *  projection entry is off for a reason that is NOT "nothing on disk" (the
+ *  mtplx engine has no separately removable vision projector), and the text is
+ *  rendered as the item's title and suffix instead of "(none on disk)". */
+export interface EmbeddedLLMRemoveScopes {
+  runtime: boolean
+  weights: boolean
+  projection: boolean
+  projectionRefusal?: string
+}
+
 export interface EmbeddedLLMSplitRemoveButtonProps {
   busy: EmbeddedLLMBusyAction | null
   /** Which artifact groups are on disk right now. A scope with nothing to
    *  delete renders disabled. */
-  leftovers: { runtime: boolean; weights: boolean; projection: boolean }
+  leftovers: EmbeddedLLMRemoveScopes
   /** Opens the confirmation dialog for the chosen scope; the parent runs the
    *  RPC. */
   onRemove: (scope: EmbeddedLLMRemoveScope) => void
@@ -115,11 +128,12 @@ export function EmbeddedLLMSplitRemoveButton({
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={busyNow || !leftovers.projection}
+            title={leftovers.projection ? undefined : leftovers.projectionRefusal ?? 'Nothing on disk'}
             onClick={() => onRemove('projection')}
             data-testid={`${idPrefix}-projection`}
           >
             Remove vision projector only
-            {!leftovers.projection && ' (none on disk)'}
+            {!leftovers.projection && (leftovers.projectionRefusal ?? ' (none on disk)')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -142,7 +156,7 @@ export interface EmbeddedLLMActionsProps {
   onRemove: (scope: EmbeddedLLMRemoveScope) => void
   /** Which artifact groups are on disk right now (an installed model has all
    *  three). A scope with nothing to delete renders disabled. */
-  leftovers: { runtime: boolean; weights: boolean; projection: boolean }
+  leftovers: EmbeddedLLMRemoveScopes
 }
 
 export function EmbeddedLLMActions({
@@ -251,7 +265,7 @@ export function EmbeddedLLMInstallAction({
 export interface EmbeddedLLMCleanupActionProps {
   busy: EmbeddedLLMBusyAction | null
   /** Which artifact groups survived a scoped removal. */
-  leftovers: { runtime: boolean; weights: boolean; projection: boolean }
+  leftovers: EmbeddedLLMRemoveScopes
   /** Opens the confirmation dialog for the chosen scope; the parent runs the
    *  RPC. */
   onRemove: (scope: EmbeddedLLMRemoveScope) => void

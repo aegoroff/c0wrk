@@ -352,7 +352,14 @@ func (f *FrontendAPI) PinSession(id string) error {
 // reviewMode, when true, marks the message as carrying code review feedback the
 // agent must address (review status == "submitted"); the system prompt gains a
 // Code Review section directing the agent to edit code.
-func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool) error {
+// workspace, when non-nil, carries the send-time workspace choice of the
+// draft-free creation flow: the FIRST message of a fresh session (no
+// transcript, no task) may ask for a managed worktree on the chosen branch.
+// The backend provisions or adopts the tree, persists the binding, and lets
+// this send's own session access restore an orchestrator built for the new
+// workspace; a provisioning failure rejects the send before any state is
+// touched. A nil choice (every ordinary send, every continuation) is a no-op.
+func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool, workspace *SessionWorkspaceChoice) error {
 	// E2S and goal are alternative task modes with incompatible loop
 	// semantics; the frontend store enforces exclusivity, this is the
 	// server-side defense so a hand-crafted call cannot arm both. Checked
@@ -409,6 +416,16 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, a
 	}
 	if f.appCell() == nil || f.app.Manager() == nil {
 		return errors.New("session manager not initialized - check startup logs for LLM router or configuration errors")
+	}
+	// Send-time workspace binding (the fresh window): a non-nil choice rides
+	// only on the first message of a brand-new session. Provisioning and
+	// adoption failures reject the send BEFORE any state is touched — no
+	// activity bump, no persisted message, no task — so the user can fix the
+	// choice (or pick another branch) and resend.
+	if workspace != nil {
+		if err := f.bindSessionWorkspace(f.ctx(), id, workspace); err != nil {
+			return err
+		}
 	}
 	// Update session activity timestamp
 	// Best-effort persistence: log and continue to avoid disrupting the user session.

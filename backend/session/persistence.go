@@ -85,6 +85,14 @@ type SessionBookmark struct {
 type SessionStore interface {
 	// Session CRUD
 	SaveSession(ctx context.Context, info SessionInfo) error
+	// BindSessionWorkspace writes the execution-workspace binding of a session
+	// that is still FRESH — the single sanctioned binding mutation. The
+	// freshness guard (no transcript rows, no task rows) is part of the
+	// UPDATE's WHERE, so the check and the write are one atomic statement;
+	// a guard refusal fails with ErrSessionNotFresh (a missing session fails
+	// with a not-found error). The session-lifecycle owner provisions the
+	// managed tree first and passes the full binding.
+	BindSessionWorkspace(ctx context.Context, sessionID, projectID string, binding *WorkspaceBinding) error
 	LoadSession(ctx context.Context, id string) (*SessionInfo, error)
 	ListSessions(ctx context.Context) ([]SessionInfo, error)
 	ListSessionsByProject(ctx context.Context, projectID string) ([]SessionInfo, error)

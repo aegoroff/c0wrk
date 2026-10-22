@@ -8,6 +8,7 @@ package backend
 // tests in frontend_api_worktrees_test.go.
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -24,10 +25,7 @@ import (
 // and pinned branch.
 func focusTestTree(t *testing.T, h *wtHarness) (tree, pinned string) {
 	t.Helper()
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	return info.WorkspaceBinding.WorkspacePath, info.WorkspaceBinding.Branch
 }
 
@@ -488,28 +486,29 @@ func TestPinnedBranchGuard_LegacySymlinkedRoot(t *testing.T) {
 	}
 }
 
-// TestCreateManagedSession_LocalFallbackKeepsStoredRootOnLegacyRow pins the
-// fallback identity: when the requested branch is held by the project
-// checkout, the local fallback session's stored WorkspacePath must keep the
-// registration form (the symlink alias on a legacy row) — the vector
-// registry's AGENT routing matches it against the project row by plain
-// string compare, so the canonicalized form would strand the session
+// TestBindSessionWorkspace_CheckoutHeldChoiceKeepsStoredRootOnLegacyRow
+// pins the local identity on a legacy row: choosing the branch the checkout
+// holds is a no-op (the session already executes exactly there), and the
+// session's RUNTIME workspace keeps the registration (alias) form — the
+// vector registry's AGENT routing matches it against the project row by
+// plain string compare, so the canonicalized form would strand the session
 // without a vector target.
-func TestCreateManagedSession_LocalFallbackKeepsStoredRootOnLegacyRow(t *testing.T) {
+func TestBindSessionWorkspace_CheckoutHeldChoiceKeepsStoredRootOnLegacyRow(t *testing.T) {
 	h, alias := legacyAliasHarness(t)
 
 	// The branch the checkout holds right now.
 	branch := wtGit(t, h.repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 
-	info, err := h.api.CreateManagedSession(branch, false, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession(%q) on the checkout-held branch: %v", branch, err)
+	fresh := newFreshLocalSession(t, h)
+	if err := h.api.bindSessionWorkspace(context.Background(), fresh.ID, &SessionWorkspaceChoice{Branch: branch}); err != nil {
+		t.Fatalf("bindSessionWorkspace on the checkout-held branch: %v", err)
 	}
-	if info.WorkspaceBinding == nil || info.WorkspaceBinding.Kind != session.WorkspaceLocal {
-		t.Fatalf("fallback session binding = %+v, want a local binding", info.WorkspaceBinding)
+	// The no-op keeps the local binding and the runtime alias identity.
+	if got, ok := h.manager.GetSessionWorkspacePath(fresh.ID); !ok || got != alias {
+		t.Fatalf("runtime WorkspacePath = %q (ok=%v), want the stored (alias) form %q", got, ok, alias)
 	}
-	if got := info.WorkspaceBinding.WorkspacePath; got != alias {
-		t.Fatalf("fallback session WorkspacePath = %q, want the stored (alias) form %q", got, alias)
+	if binding := managedBindingOf(t, h.store, fresh.ID); binding == nil || binding.Kind != session.WorkspaceLocal {
+		t.Fatalf("binding must stay local, got %+v", binding)
 	}
 }
 

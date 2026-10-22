@@ -31,7 +31,8 @@ interface LocalBranchRowProps {
    * the text doubles as the row tooltip. The picker passes it ONLY for the
    * branch checked out in the MAIN checkout — git allows a branch in at
    * most one worktree. Branches held by existing managed worktrees stay
-   * selectable (the draft commit adopts the existing tree, ADR-082) even
+   * selectable (the choice's first send adopts the existing tree,
+   * ADR-082) even
    * when they are `is_current` — that flag follows the Git panel's focus
    * (GetBranches runs in the focused tree), not the main checkout.
    */
@@ -99,10 +100,11 @@ export function LocalBranchRow({
   const isPinned = !draftSelect && (pinned ?? false)
   // A row is blocked when any operation is running on it OR elsewhere.
   const blocked = disabled || inFlight !== null
-  // Draft mode: blocked only when the picker says so — the MAIN checkout's
-  // branch (git enforces one worktree per branch). `is_current` deliberately
-  // does not block here: it follows the Git panel's focus, and a branch held
-  // by an existing managed worktree is adopted at draft commit (ADR-082).
+  // Workspace-pick mode: blocked only when the picker says so — the MAIN
+  // checkout's branch (git enforces one worktree per branch). `is_current`
+  // deliberately does not block here: it follows the Git panel's focus, and
+  // a branch held by an existing managed worktree is adopted by the first
+  // send (ADR-082).
   const draftBlocked = draftSelect !== undefined && !!draftBlockedReason
   // Managed-focus gate: manage mode only — the row's checkout is refused
   // while the panel's focus sits on a managed session tree.

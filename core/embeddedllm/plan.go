@@ -780,6 +780,16 @@ func insufficientMemory(g gateBudgets, best gateAttempt, ctx int) *InsufficientM
 // A nil `Topology` is legal and means "no device probe answered", which takes
 // the derived-budget path rather than failing.
 func CheckMemoryBudget(in ResolveInput) error {
+	// The mtplx engine gates through its own planner: one measured pool, the
+	// pack's own terms, and the same first-check contract (mlxplan.go).
+	if in.Engine == EngineMTPLX {
+		terms, err := PinnedMLXMemoryTerms()
+		if err != nil {
+			return err
+		}
+		_, err = PlanMLX(in.RAMGiB, in.Tuning, terms)
+		return err
+	}
 	profile, err := PinnedMemoryProfile()
 	if err != nil {
 		return fmt.Errorf("embeddedllm: memory profile: %w", err)

@@ -41,11 +41,12 @@ interface NewBranchSectionProps {
    */
   pendingBase?: string | null
   /**
-   * Session-draft mode (ADR-080): when set, submitting records the drafted
-   * new-branch choice instead of running CreateBranch. No git operation runs
-   * at pick time — the branch is created and checked out in the new session's
-   * managed worktree at draft commit (CreateManagedSession), so the working
-   * tree is never touched here.
+   * Workspace pick mode (ADR-091): when set, submitting records the picked
+   * new-branch choice (the fresh session's pending workspace) instead of
+   * running CreateBranch. No git operation runs at pick time — the branch is
+   * created and checked out in the session's managed worktree at the FIRST
+   * send (SendMessage's workspace argument), so the working tree is never
+   * touched here.
    */
   onDraftCreate?: (name: string, startPoint: string) => void
   /**
@@ -141,11 +142,12 @@ export function NewBranchSection({
     const trimmed = name.trim()
     if (!trimmed || creating || createBlocked) return
     if (onDraftCreate) {
-      // Draft mode: the branch itself is created at draft commit inside the
-      // session's managed worktree provisioning — where commit-time DWIM
-      // would silently REUSE an already existing local branch and ignore the
-      // explicitly chosen base. Refuse the submit up front instead of
-      // recording a draft that cannot do what it promises; the input stays
+      // Workspace-pick mode: the branch itself is created by the FIRST
+      // SEND's provisioning inside the session's managed worktree — where
+      // send-time DWIM would silently REUSE an already existing local
+      // branch and ignore the explicitly chosen base. Refuse the submit up
+      // front instead of recording a choice that cannot do what it promises;
+      // the input stays
       // intact so the user can rename or pick the existing branch above.
       if (existingLocalBranches?.includes(trimmed)) {
         onError(`A branch named "${trimmed}" already exists — pick it from the list or choose another name`)

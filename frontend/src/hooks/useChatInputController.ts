@@ -24,7 +24,7 @@ import {
 } from '@/lib/chatInputLock'
 import { usePromptSuggestions, usePromptSelectedIndex, usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
 import { usePromptSuggestionsSync } from '@/hooks/usePromptSuggestionsSync'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
+import { ensureActiveSession } from '@/lib/ensureActiveSession'
 import { listAgents } from '@/api/agents'
 import { listSkills } from '@/api/skills'
 import { getCapabilityModes } from '@/api/capabilities'
@@ -140,15 +140,16 @@ export function useChatInputController(): ChatInputController {
   const clearPendingInsertion = useInputModeStore((s) => s.clearPendingInsertion)
 
   // Wrapped setMode that implicitly creates a session when switching to
-  // terminal mode so the user never sees "Start a conversation…". Opening
-  // the terminal is a draft-committing action: an armed branch draft
-  // provisions the managed worktree here.
+  // terminal mode so the user never sees "Start a conversation…". The
+  // no-session fallback is a plain LOCAL session (ADR-091): the terminal
+  // needs a PTY in a workspace, and a fresh local row is the cheapest one —
+  // never a worktree provisioning.
   const setMode = useCallback(async (newMode: 'chat' | 'terminal') => {
     if (newMode === 'terminal') {
       const sid = useSessionStore.getState().activeSessionId
       if (!sid) {
         try {
-          await createSessionFromDraft()
+          await ensureActiveSession()
         } catch (err) {
           logger.error('Failed to implicitly create session for terminal:', err)
           // Keyed to the origin context (no session was active — that is why
@@ -192,13 +193,13 @@ export function useChatInputController(): ChatInputController {
   const showCancel = taskActive || paused || isProcessing || compacting
 
   // Prompt suggestions (ADR-088): the store's single-slot snapshot, keyed to
-  // the active session — or, while a CODE project's New-Session draft is
-  // armed (no session row), to the DRAFT surface under the empty key: the
-  // project's new_session set (see usePromptSuggestionsSync). Selectors
-  // return the stable empty set / -1 while the store still holds another
-  // context's snapshot. A non-empty set in the idle state takes over the
-  // placeholder (the multi-line browse hint); the refs feed the arrow keymap
-  // below.
+  // the active session — or, while NO session is active in a real project
+  // (the eager flow still has session-less states: fresh app start, last
+  // session deleted), to the backend's new-session surface under the empty
+  // key (see usePromptSuggestionsSync). Selectors return the stable empty
+  // set / -1 while the store still holds another context's snapshot. A
+  // non-empty set in the idle state takes over the placeholder (the
+  // multi-line browse hint); the refs feed the arrow keymap below.
   const suggestionKey = activeSessionId ?? ''
   const suggestions = usePromptSuggestions(suggestionKey)
   const selectedIndex = usePromptSelectedIndex(suggestionKey)
@@ -264,8 +265,9 @@ export function useChatInputController(): ChatInputController {
   })
 
   // Suggestion keyboard navigation (ADR-088): armed only while the ACTIVE
-  // context's suggestion set (the active session's, or the armed draft's
-  // project surface) is non-empty AND the input is in the same idle state
+  // context's suggestion set (the active session's, or the session-less
+  // project surface the backend serves under the empty key) is non-empty AND
+  // the input is in the same idle state
   // whose placeholder carries the browse hint — the keys do
   // exactly what the placeholder says, nothing more (a compacting/pausing/
   // working window keeps its own placeholder and must never let → inject

@@ -1,6 +1,6 @@
 module github.com/v0lka/c0wrk
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/UserExistsError/conpty v0.1.4
@@ -16,7 +16,7 @@ require (
 	github.com/openai/openai-go v1.12.0
 	github.com/philippgille/chromem-go v0.7.0
 	github.com/shirou/gopsutil/v4 v4.26.8
-	github.com/v0lka/sp4rk v0.15.1-0.20261018105837-48b680f7d8eb
+	github.com/v0lka/sp4rk v0.15.1-0.20261020050412-4d570b3a8731
 	github.com/wailsapp/wails/v2 v2.16.0
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/image v0.45.0

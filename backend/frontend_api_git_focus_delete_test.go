@@ -103,10 +103,7 @@ func TestDeleteWorktree_CleanExternal(t *testing.T) {
 
 func TestDeleteWorktree_CleanManaged(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	tree := info.WorkspaceBinding.WorkspacePath
 	name := info.WorkspaceBinding.WorktreeName
 

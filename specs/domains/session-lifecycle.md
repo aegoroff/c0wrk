@@ -21,11 +21,11 @@ Manages the lifecycle of user sessions: creation, message handling, task executi
 - `backend/session/manager_promote.go` — `Manager.EvictSession` (in-memory drop without fs changes, single-flight-aware) and `Manager.MoveSessionStorage`/`UndoMoveSessionStorage` (the two-hop rename move of the session directory + workspace lift, best-effort rollback)
 - `backend/frontend_api_session_promote.go` — `FrontendAPI.PromoteSessionToProject`: guards, internal project creation, terminal stop → evict → move → store tx, pointer swap, fail-soft `git init`, compensation
 - `frontend/src/components/layout/PromoteSessionDialog.tsx` + `frontend/src/api/sessions.ts` (`promoteSessionToProject`) — the chat-side promotion UX (ADR-less; see § Session Promotion)
-- `backend/frontend_api_worktrees.go` — the Git lifecycle owner RPC surface for managed sessions (ADR-080): `CreateManagedSession` (draft → provision → commit → persist, with compensation), the restore `WorkspaceEnsurer` installed on the manager, `ForkSession`'s managed branch, and the `DeleteSession`/`DeleteSessionWithOptions` tree-release protocol
-- `backend/session/workspace_binding.go` — typed immutable `WorkspaceBinding` (`local` / `managed_worktree` / nil for CHAT), `NormalizeWorkspaceBinding`, `SessionDraft`; see [session-worktrees.md](session-worktrees.md)
-- `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX (ADR-080): the pending New-Session draft state and `createSessionFromDraft()` — the single commit path shared by send / attachment staging / paste / terminal open (`CreateManagedSession` for a branch draft, `CreateSession` otherwise)
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` — the chat toolbar's workspace selector: interactive `local` / `branch…` while a draft is pending, read-only pinned display for an existing session
-- `frontend/src/components/GitPanel/BranchPicker.tsx` — the switch-branch dialog with its intent-separated draft mode (`branchPickerMode: 'draft'`): rows record the drafted branch (remote-tracking rows too — a remote pick records a create-branch draft from the remote-tracking start point), creation defers to the managed provisioning path, no in-place checkout
+- `backend/frontend_api_worktrees.go` — the Git lifecycle owner RPC surface for managed sessions (ADR-080/ADR-091): `SendMessage`'s send-time workspace binding (`bindSessionWorkspace`: provision/adopt → persist inside the fresh window → evict → lazily restore, compensated on failure), the restore `WorkspaceEnsurer` installed on the manager, `ForkSession`'s managed branch, and the `DeleteSession`/`DeleteSessionWithOptions` tree-release protocol
+- `backend/session/workspace_binding.go` — typed immutable `WorkspaceBinding` (`local` / `managed_worktree` / nil for CHAT), `NormalizeWorkspaceBinding`, `SessionDraft` (the internal identity seam behind `Manager.CreateSession` and managed forks); see [session-worktrees.md](session-worktrees.md)
+- `frontend/src/stores/sessionWorkspaceStore.ts` — the chat-side pending-choice state (ADR-091): a transient per-fresh-session `choices` map plus the single-slot `consumingFor` consumption window; cleared when the send settles (success consumes the choice; a bind refusal re-arms it)
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` — the chat toolbar's workspace selector: interactive `local` / `branch…` while the ACTIVE session is FRESH (confirmed-empty transcript, no task), the preparing hint while a send consumes the choice, and the read-only pinned display for an existing session
+- `frontend/src/components/GitPanel/BranchPicker.tsx` — the switch-branch dialog with its intent-separated pick mode (`branchPickerMode: 'draft'`): rows record the pending workspace choice of the active FRESH session (remote-tracking rows too — a remote pick records a create-branch request from the remote-tracking start point); nothing provisions at pick time, and no in-place checkout ever runs
 - `backend/session/workspace_context.go` — `ResolveSessionContexts`: project identity vs execution workspace vs Git-panel target (never interchangeable)
 - `backend/session/persistence_binding.go` — `sessions.workspace_binding` migration + binding encode/decode shared by load/list queries
 - `backend/session/events.go` — event data structs (session lifecycle + plan review)
@@ -66,30 +66,42 @@ Manages the lifecycle of user sessions: creation, message handling, task executi
 ### Session Creation
 
 ```
-CODE project — New Session arms a DRAFT (ADR-080 chat-side draft UX):
+CODE project — New Session creates the row EAGERLY (ADR-091):
 User clicks "New Session"
-  → Frontend: sessionDraftStore.startDraft(projectId) — no RPC, no row,
-    no orchestrator; the active session is cleared in memory only (the
-    project's saved_session_id is untouched, so a restart restores the
-    previous session and an un-committed draft simply evaporates)
-  → Chat toolbar shows the workspace selector: `local` (project working
-    tree) or `branch…` (opens the BranchPicker in draft mode — selecting
-    an existing branch or creating a new one RECORDS the choice; no
-    checkout runs at pick time)
-  → First send / attachment / paste / terminal open commits the draft
-    through lib/sessionDraft.createSessionFromDraft():
-      ├─ branch draft → CreateManagedSession(branch, createBranch, startPoint)
-      │   (backend: validate → provision managed worktree → commit →
-      │   persist, compensated on failure — see session-worktrees.md)
-      └─ local draft (or none) → CreateSession()
-    → sessionStore.addSession() + selectSession(id, projectId)
-    → draft cleared on success; on failure it stays armed (sendError
-      surfaces the reason, the user may re-pick the branch)
-  → After creation the toolbar selector shows the session's pinned
-    workspace read-only — branch/workspace is immutable for an existing
-    session (workspace chosen only at creation)
+  → Frontend: CreateSession RPC — a plain LOCAL session row + in-memory
+    session (orchestrator built for the project checkout) right away:
+    fast, nothing provisioned. The row is selected and persisted as the
+    project's saved session; an abandoned click just leaves an empty
+    local session, same as CHAT mode.
+  → Chat toolbar shows the workspace selector while the session is FRESH
+    (confirmed-empty transcript, no task): `local` (project working
+    tree) or `branch…` (opens the BranchPicker in pick mode — selecting
+    an existing branch or creating a new one RECORDS the pending choice
+    in sessionWorkspaceStore; no checkout runs at pick time). The same
+    choice can be preset by the "new session on branch X" gesture.
+  → FIRST send carries the choice as SendMessage's `workspace` argument
+    (a local choice — or none — sends null and stays the local session
+    it already is):
+      ├─ branch choice → bindSessionWorkspace: validate → provision (or
+      │   adopt) the managed worktree → persist the binding inside the
+      │   fresh window (one atomic statement) → stop the terminal →
+      │   evict the in-memory session (staged attachments carried over),
+      │   so the send's own access lazily restores an orchestrator built
+      │   for the NEW workspace — compensated on failure; provisioning
+      │   failures reject the send before any state is touched
+      └─ null → the send proceeds in the checkout
+    → on success the frontend refreshes the session row (the binding
+      mirrors the backend FACT) and drops the consumed choice; a bind
+      refusal keeps the session fresh and the choice armed for a resend
+      (the reason surfaces as a transcript error card; a send refused while
+      the consumption window is busy throws instead — the typed text is
+      restored and the sendError hint names the reason — so the user can
+      re-pick the branch and resend)
+  → After the window closes the toolbar selector shows the session's
+    pinned workspace read-only — branch/workspace is immutable for an
+    existing session (workspace chosen once per fresh session)
 
-CHAT (No Project) — the gesture keeps the legacy eager creation:
+CHAT (No Project) — the same eager creation:
 User clicks "New Chat" (or first message in empty state)
   → Frontend: CreateSession()
   → Backend: FrontendAPI.CreateSession()
@@ -196,20 +208,30 @@ Every session carries a persisted, immutable workspace binding
 - `nil` — CHAT (No Project) sessions keep their per-session workspace under
   `~/.c0wrk/projects/__no_project__/`, unchanged.
 
-Creation may go through `SessionDraft` (`NewSessionDraft` +
-`Manager.CreateSessionFromDraft`) so a managed tree can be provisioned before
-any orchestrator, log file, or persisted row exists — `FrontendAPI.CreateManagedSession`
-drives that flow: reserve identity → look up the requested branch's holder (a
-managed tree is ADOPTED — the session binds to the existing tree, ADR-082; the
-main checkout silently degrades the request to a plain local session; an
-external linked tree is a typed refusal) → provision a fresh tree via
-`worktrees.Owner` when nobody holds the branch (new branch at a start point,
-or checkout of an existing one) → commit the runtime session via
-`CreateSessionFromDraft` → persist the binding. The
-persisted binding is REQUIRED for a managed session: a store failure rolls
-the whole creation back (in-memory session removed, freshly provisioned tree
-released — adopted trees are never touched; the
-created branch is kept — no path ever deletes branches). Lazy restore and
+Creation always runs through `SessionDraft` (`NewSessionDraft` +
+`Manager.CreateSession`) — the draft is the manager's internal identity seam,
+not a user-facing state: it reserves the identity so a managed tree can be
+provisioned before any orchestrator, log file, or persisted row exists (today
+only the managed fork mints its identity that way — `ForkSessionWithBinding`).
+The eager "New Session" RPC (`FrontendAPI.CreateSession`) creates a plain
+LOCAL session directly. The branch/workspace choice belongs to the FIRST SEND
+(ADR-091): `SendMessage`'s `workspace` argument drives `bindSessionWorkspace`
+— look up the requested branch's holder (a managed tree is ADOPTED — the
+session binds to the existing tree, ADR-082; the main checkout is a deliberate
+no-op success: the session already executes exactly there; an external linked
+tree is a typed refusal) → provision a fresh tree via `worktrees.Owner` when
+nobody holds the branch (new branch at a start point, or checkout of an
+existing one) → persist the binding inside the fresh window → stop the
+session's terminal → evict the in-memory session (staged attachments carried
+across), so the send's own access lazily restores an orchestrator built for
+the new workspace. The persisted binding is REQUIRED before the eviction: a
+store failure compensates the freshly provisioned tree away, and a failed
+eviction rolls the binding back (a refused rollback keeps the tree — it is
+still named by the persisted binding; adopted trees are never touched, the
+created branch is kept — no path ever deletes branches). The fresh window is
+enforced atomically by the store (no transcript, no task rows), one bind at a
+time per session, and an already-bound window accepts only the SAME choice
+again. Lazy restore and
 `WorkspacePathFor` resolve the execution path from the stored binding — never
 from the ambient active-project state. A managed session forks only through
 `ForkSessionWithBinding` with a new tree name and derived branch; local forks
@@ -1275,9 +1297,9 @@ type HandleResult struct {
 - **"Busy" = any non-idle derived status.** Both the row's Fork guard (`SessionListItem`) and the non-render `isSessionBusy` used by archive/delete confirmation treat `active`/`paused`/`failed` **and** `pending` as busy: a task blocked on a HITL prompt is still running (`taskActive` true, DB task `in_progress`), so Fork would be server-rejected and archiving/deleting it would cancel live work.
 - An optimistic fresh/nudge send or resume pins the live overlay to `''` via `setTaskActive(true)`; if the send/resume RPC is rejected, the caller restores the captured pre-send overlay value — passing `undefined` (the pre-send key was absent) DELETES the entry so the DB snapshot drives again, rather than fabricating a defined `''` that would mask a real unfinished task.
 - Every session-activating flow (list pick, New Session, fork, implicit create on send/paste/attach/terminal) persists `saved_session_id` immediately (`sessionStore.selectSession` → `SaveProjectActiveSession`, fire-and-forget, keyed under the session's owning project id); restore paths apply the persisted value via `setActiveSessionId` and never echo it back to the backend
-- In a CODE project, the New Session gesture arms a draft instead of creating a session: no RPC, no session row, and no orchestrator exist while a draft is armed. The draft commits exactly once — through `createSessionFromDraft` on the first send/attachment/paste/terminal-open — and a failed commit keeps it armed and retryable (with a re-pickable branch). CHAT (No Project) keeps the legacy eager creation
-- The session workspace is chosen only at creation: while a draft is pending the toolbar selector is interactive (`local` / `branch…`); once a session exists it renders the pinned `local`/branch read-only, mirroring the immutable `WorkspaceBinding`
-- An armed draft belongs to the project it was armed in: switching projects or explicitly selecting an existing session retires it, and an un-committed draft never persists across restarts (transient store, no backend identity)
+- In a CODE project, the New Session gesture eagerly creates a plain LOCAL session (ADR-091): one fast RPC, the row + in-memory session exist from the gesture onward, and an abandoned click leaves an empty local session exactly like CHAT mode. A managed worktree is NEVER provisioned by the gesture — the workspace belongs to the FIRST SEND, which carries the pending choice as SendMessage's `workspace` argument (a null choice sends as the local session it already is). Provisioning/adoption failures reject the send before any state is touched, leaving the session fresh and the choice armed for a corrected resend
+- The session workspace is chosen once per fresh session: while the active session is FRESH (confirmed-empty transcript, no task) the toolbar selector is interactive (`local` / `branch…`); once the window closes (a persisted row, a task) it renders the pinned `local`/branch read-only, mirroring the immutable `WorkspaceBinding`. Frontend-only error cards of a rejected first send never close the window (the backend wrote nothing), so the selector stays armed alongside the re-armed choice
+- The pending choice is transient (`sessionWorkspaceStore`): keyed per fresh session, dropped when its session is deleted, cleared by the consuming send's success teardown, and re-armed by the send-path catch on a bind refusal — it never persists across restarts (an un-sent choice has no durable meaning; the session row itself is local until the send)
 - Startup restores the exact last active context: `useProjectLoader` reopens the `last_active_project_id` from `app_state` when the project still exists (including `__no_project__` → CHAT), otherwise falls back to the most recently active real project (CODE-first), then to the Create Project dialog; No Project is never auto-selected by the fallback, and a failed restore RPC never blocks startup
 - User messages are persisted after the authoritative dispatch, not on receive: the `is_nudge` flag is written only once the live-send/fresh classification is known, and a rejected send (pause window, goal gate, attachment gate) never reaches the store
 - Archived sessions are read-only history: the session-manager choke point rejects both new `SendMessage` execution and failed/paused task resume until the session is unarchived

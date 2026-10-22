@@ -13,9 +13,11 @@ import { createRoot, type Root } from 'react-dom/client'
 
 import { ProjectSelector } from './ProjectSelector'
 import { useProjectStore } from '@/stores/projectStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
 import { useUIStore } from '@/stores/uiStore'
-import type { ProjectInfo } from '@/types/models'
+import type { ProjectInfo, SessionInfo } from '@/types/models'
 
 const { switchProjectWithStateMock, deleteProjectMock, renameProjectMock, dropProjectSnapshotMock } = vi.hoisted(() => ({
   switchProjectWithStateMock: vi.fn<(id: string) => Promise<void>>(),
@@ -201,5 +203,52 @@ describe('ProjectSelector — per-project tab cleanup', () => {
     // ...while every other project's entries are untouched.
     expect(useGitPanelStore.getState().activeTabByProject['p2']).toBe('history')
     expect(useUIStore.getState().workspaceTabByProject['p2']).toBe('semantics')
+  })
+})
+
+describe('ProjectSelector — per-session workspace-choice cleanup', () => {
+  const makeSession = (id: string, projectId: string): SessionInfo => ({
+    id,
+    project_id: projectId,
+    name: id,
+    created_at: '2026-01-01T00:00:00Z',
+    last_active_at: '2026-01-01T00:00:00Z',
+    archived: false,
+    pinned: false,
+    active: false,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    model: '',
+    family: '',
+    has_unfinished_task: false,
+  })
+
+  beforeEach(() => {
+    useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
+    useSessionStore.setState({ sessions: [], activeSessionId: null })
+  })
+
+  it('deleting a project drops the deleted sessions workspace choices, leaving other sessions intact', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-p1', 'p1'), makeSession('s-p2', 'p2')],
+    })
+    useSessionWorkspaceStore.getState().setChoice('s-p1', { kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
+    useSessionWorkspaceStore.getState().setChoice('s-p2', { kind: 'branch', branch: 'feat/y', createBranch: false, startPoint: '' })
+
+    const container = await render(<ProjectSelector />)
+    const menu = await openMenu(container)
+    const alphaRow = menuItems(menu).find((i) => i.textContent?.includes('Alpha'))!
+    const deleteButton = alphaRow.querySelector<HTMLButtonElement>('button[title="Delete"]')!
+
+    await selectItem(deleteButton)
+
+    expect(deleteProjectMock).toHaveBeenCalledWith('p1')
+    // The deleted project's sessions' transient choices are gone — a deleted
+    // session can never send them, so the entries would go stale.
+    expect(useSessionWorkspaceStore.getState().choices['s-p1']).toBeUndefined()
+    // The surviving project's fresh sessions keep their choices.
+    expect(useSessionWorkspaceStore.getState().choices['s-p2']).toEqual({
+      kind: 'branch', branch: 'feat/y', createBranch: false, startPoint: '',
+    })
   })
 })

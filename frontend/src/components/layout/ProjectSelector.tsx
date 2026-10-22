@@ -8,6 +8,7 @@ import { useChatInputStore } from "@/stores/chatInputStore";
 import { useAttachmentsStore } from "@/stores/attachmentsStore";
 import { useChatStore } from "@/stores/chatStore";
 import { useE2SStore } from "@/stores/e2sStore";
+import { useSessionWorkspaceStore } from "@/stores/sessionWorkspaceStore";
 import { renameProject, deleteProject } from "@/api/projects";
 import { useProjectSwitchState } from "@/hooks/useProjectSwitchState";
 import { drop as dropProjectSnapshot } from "@/lib/projectSnapshotCache";
@@ -91,6 +92,12 @@ export function ProjectSelector() {
           // context_fill, so the entries would go stale and keep the
           // per-session maps unbounded).
           useChatStore.getState().dropSessions(removedSessionIds);
+          // Drop the deleted fresh sessions' pending workspace choices
+          // (live-only transient state — a deleted session can never send
+          // the choice, so the entries would go stale and keep the
+          // per-session map unbounded; same contract as the delete-session
+          // path in useSessionActions).
+          useSessionWorkspaceStore.getState().dropSessions(removedSessionIds);
         }
         removeProject(id);
         // Drop the deleted project's transient commit-box state (draft

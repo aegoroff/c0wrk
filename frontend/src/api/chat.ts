@@ -5,6 +5,7 @@ import { logger } from '@/lib/logger'
 import { isChatMessage, isTokenInfo, isArrayOf, isObj } from '@/types/guards'
 import { isCompactionAvailability } from '@/types/events'
 import type { ChatMessage, TokenInfo, CompactionAvailability } from '@/types/models'
+import type { WorkspaceChoiceWire } from '@/stores/sessionWorkspaceStore'
 
 /**
  * Send a user message to the session's agent.
@@ -26,6 +27,12 @@ import type { ChatMessage, TokenInfo, CompactionAvailability } from '@/types/mod
  *                   first message of a task. Mutually exclusive with goal.
  * @param reviewMode Marks the message as code review feedback the agent must
  *                   address (the system prompt gains a Code Review section).
+ * @param workspace  The fresh window's workspace choice (ADR-091): a pending
+ *                   branch pick makes THIS send provision the managed
+ *                   worktree and bind the session before the task starts.
+ *                   Null (every ordinary send, continuation, nudge) is a
+ *                   no-op; a choice on a non-fresh session is refused by the
+ *                   backend with a typed not-fresh error.
  */
 export async function sendMessage(
   sessionId: string,
@@ -39,14 +46,15 @@ export async function sendMessage(
   goalBudget: string = '',
   e2s: boolean = false,
   reviewMode: boolean = false,
+  workspace: WorkspaceChoiceWire | null = null,
 ): Promise<void> {
   try {
     const app = getApp()
     // Positional args must match the Go SendMessage binding EXACTLY
     // (id, text, skills, agents, mcpServers, modelOverride, reasoning, goal,
-    // goalBudget, e2s, reviewMode) — a drift silently drops mode flags
-    // before they reach HandleOptions.
-    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode)
+    // goalBudget, e2s, reviewMode, workspace) — a drift silently drops mode
+    // flags before they reach HandleOptions.
+    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode, workspace)
   } catch (err) {
     logger.error('Failed to send message:', err)
     throw err

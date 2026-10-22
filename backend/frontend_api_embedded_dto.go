@@ -59,7 +59,20 @@ type EmbeddedLLMStatus struct {
 	// Loaded reports a serving model: /v1/models answered with a non-empty
 	// model list.
 	Loaded bool `json:"loaded"`
-	// Packing is the ternary quantization on disk ("PQ2_0" | "PTQ1_0").
+	// Engine is the runtime family on disk: "" (a pre-engine install, llama),
+	// "llama", or "mtplx". The Settings label renders the engine first — it is
+	// the difference a reader needs before the accelerator.
+	Engine string `json:"engine"`
+	// PythonVersion is the managed CPython under the mtplx engine ("" on
+	// the llama family — the key is always on the wire, like every other
+	// field of this DTO).
+	PythonVersion string `json:"python_version"`
+	// PackRevision is the pinned Hugging Face revision of the mtplx weight
+	// pack ("" on the llama family — the key is always on the wire, like
+	// every other field of this DTO).
+	PackRevision string `json:"pack_revision"`
+	// Packing is the ternary quantization on disk ("PQ2_0" | "PTQ1_0"; empty
+	// under the mtplx engine, whose pack ships one quantization).
 	Packing string `json:"packing"`
 	// Backend is the accelerator the runtime was provisioned for.
 	Backend string `json:"backend"`

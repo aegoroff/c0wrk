@@ -119,6 +119,9 @@ function makeStatus(overrides: Partial<EmbeddedLLMStatus> = {}): EmbeddedLLMStat
     installing: false,
     loading: false,
     loaded: false,
+    engine: '',
+    python_version: '',
+    pack_revision: '',
     packing: '',
     backend: '',
     port: 0,
@@ -722,6 +725,41 @@ describe('EmbeddedLLMSettings — Remove is confirmed before it runs', () => {
 
     expect(mocks.removeEmbeddedLLM).toHaveBeenCalledTimes(1)
     expect(q('embedded-llm-error')?.textContent).toContain('the server refused to stop')
+  })
+})
+
+describe('EmbeddedLLMSettings — the projection scope self-disables under mtplx (ADR-090 D7)', () => {
+  async function openRemoveMenu(): Promise<void> {
+    // Radix opens a dropdown on the trigger's POINTERDOWN, not click.
+    act(() => {
+      q('embedded-llm-remove-menu-trigger')?.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true }),
+      )
+    })
+    await flush()
+  }
+
+  it('keeps the projection entry enabled for the llama family', async () => {
+    mocks.getEmbeddedLLMStatus.mockResolvedValue(
+      makeStatus({ state: 'installed', installed: true, packing: 'PQ2_0', backend: 'metal', port: 43211 }),
+    )
+    await render()
+
+    await openRemoveMenu()
+    expect(dq('embedded-llm-remove-projection')?.getAttribute('data-disabled')).toBeNull()
+  })
+
+  it('disables the projection entry with the mtplx reason', async () => {
+    mocks.getEmbeddedLLMStatus.mockResolvedValue(
+      makeStatus({ state: 'installed', installed: true, engine: 'mtplx', packing: '', backend: 'metal', port: 43211 }),
+    )
+    await render()
+
+    await openRemoveMenu()
+    const item = dq('embedded-llm-remove-projection')
+    expect(item?.getAttribute('data-disabled')).not.toBeNull()
+    // The title says WHY, so the disabled entry is not a dead end.
+    expect(item?.getAttribute('title')).toContain('MTPLX')
   })
 })
 

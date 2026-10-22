@@ -2498,6 +2498,10 @@ func (m *mockSessionStoreForRestore) SaveSession(_ context.Context, info Session
 	return nil
 }
 
+func (m *mockSessionStoreForRestore) BindSessionWorkspace(_ context.Context, _, _ string, _ *WorkspaceBinding) error {
+	return nil
+}
+
 func (m *mockSessionStoreForRestore) LoadSession(_ context.Context, id string) (*SessionInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

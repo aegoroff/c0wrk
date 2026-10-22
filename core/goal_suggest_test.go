@@ -33,35 +33,57 @@ func goalSuggestJSON(body string) *llm.ChatResponse {
 }
 
 // TestParseGoalSuggestion covers the verdict parsing contract: valid JSON in
-// both verdicts, reason trimming, the reason reset on suggest=false, and the
-// fail-closed zero value for a model that answers garbage around the JSON.
+// both verdicts, reason trimming, the reason reset on suggest=false, the
+// explicit_criteria pass-through (a missing field decodes to false so the
+// gate fail-closes), and the fail-closed zero value for a model that answers
+// garbage around the JSON.
 func TestParseGoalSuggestion(t *testing.T) {
 	tests := []struct {
-		name       string
-		body       string
-		wantOK     bool
-		wantSugg   bool
-		wantReason string
+		name         string
+		body         string
+		wantOK       bool
+		wantSugg     bool
+		wantExplicit bool
+		wantReason   string
 	}{
 		{
-			name:       "suggest true with reason",
-			body:       `{"suggest": true, "reason": "Запрос описывает задачу с проверяемым критерием"}`,
-			wantOK:     true,
-			wantSugg:   true,
-			wantReason: "Запрос описывает задачу с проверяемым критерием",
+			name:         "suggest true with explicit criteria and reason",
+			body:         `{"suggest": true, "explicit_criteria": true, "reason": "Запрос описывает задачу с проверяемым критерием"}`,
+			wantOK:       true,
+			wantSugg:     true,
+			wantExplicit: true,
+			wantReason:   "Запрос описывает задачу с проверяемым критерием",
 		},
 		{
-			name:     "suggest false resets reason",
-			body:     `{"suggest": false, "reason": "should be dropped"}`,
-			wantOK:   true,
-			wantSugg: false,
+			name:       "suggest false resets reason",
+			body:       `{"suggest": false, "reason": "should be dropped"}`,
+			wantOK:     true,
+			wantSugg:   false,
+			wantReason: "",
 		},
 		{
-			name:       "suggest true reason is trimmed",
-			body:       `{"suggest":true,"reason":"  padded  "}`,
-			wantOK:     true,
-			wantSugg:   true,
-			wantReason: "padded",
+			name:         "suggest true but explicit_criteria false parses raw (the gate drops it)",
+			body:         `{"suggest": true, "explicit_criteria": false, "reason": "implicit goal"}`,
+			wantOK:       true,
+			wantSugg:     true,
+			wantExplicit: false,
+			wantReason:   "implicit goal",
+		},
+		{
+			name:         "suggest true without explicit_criteria fails closed to not-explicit",
+			body:         `{"suggest": true, "reason": "multi-step objective"}`,
+			wantOK:       true,
+			wantSugg:     true,
+			wantExplicit: false,
+			wantReason:   "multi-step objective",
+		},
+		{
+			name:         "suggest true reason is trimmed",
+			body:         `{"suggest":true,"explicit_criteria":true,"reason":"  padded  "}`,
+			wantOK:       true,
+			wantSugg:     true,
+			wantExplicit: true,
+			wantReason:   "padded",
 		},
 		{
 			name:     "garbage around json still parses (zero value is no-suggestion)",
@@ -70,10 +92,9 @@ func TestParseGoalSuggestion(t *testing.T) {
 			wantSugg: false,
 		},
 		{
-			name:     "no json at all is a parse error",
-			body:     "I cannot answer that",
-			wantOK:   false,
-			wantSugg: false,
+			name:   "no json at all is a parse error",
+			body:   "I cannot answer that",
+			wantOK: false,
 		},
 	}
 	for _, tt := range tests {
@@ -85,6 +106,9 @@ func TestParseGoalSuggestion(t *testing.T) {
 				}
 				if got.Suggest != tt.wantSugg {
 					t.Errorf("Suggest = %v, want %v", got.Suggest, tt.wantSugg)
+				}
+				if got.ExplicitCriteria != tt.wantExplicit {
+					t.Errorf("ExplicitCriteria = %v, want %v", got.ExplicitCriteria, tt.wantExplicit)
 				}
 				if got.Reason != tt.wantReason {
 					t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
@@ -103,7 +127,7 @@ func TestParseGoalSuggestion(t *testing.T) {
 // pass-through of the production classifier pass.
 func TestSuggestGoalModeWithCaller(t *testing.T) {
 	caller := &goalSuggestStubCaller{
-		resp: goalSuggestJSON(`{"suggest": true, "reason": "multi-step objective"}`),
+		resp: goalSuggestJSON(`{"suggest": true, "explicit_criteria": true, "reason": "multi-step objective"}`),
 	}
 	routing := &router.RoutingDecision{Domain: router.DomainCode, Complexity: 4}
 
@@ -115,8 +139,8 @@ func TestSuggestGoalModeWithCaller(t *testing.T) {
 	if err != nil {
 		t.Fatalf("suggestGoalModeWithCaller() error = %v", err)
 	}
-	if !got.Suggest || got.Reason != "multi-step objective" {
-		t.Errorf("verdict = %+v, want suggest=true reason=multi-step objective", got)
+	if !got.Suggest || !got.ExplicitCriteria || got.Reason != "multi-step objective" {
+		t.Errorf("verdict = %+v, want suggest=true explicit_criteria=true reason=multi-step objective", got)
 	}
 	if len(caller.gotRequests) != 1 {
 		t.Fatalf("got %d LLM calls, want 1", len(caller.gotRequests))

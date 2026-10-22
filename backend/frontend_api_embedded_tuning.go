@@ -390,9 +390,26 @@ func (f *FrontendAPI) SetEmbeddedLLMTuning(req EmbeddedLLMTuningRequest) error {
 	// Translate BEFORE writing: this is the same check validate() runs on load,
 	// so a patch that would make config.yaml unloadable is refused while the
 	// file is still intact.
-	if _, terr := next.ToTuning(); terr != nil {
+	tuning, terr := next.ToTuning()
+	if terr != nil {
 		f.configMu.Unlock()
 		return fmt.Errorf("invalid embedded LLM tuning: %w", terr)
+	}
+	// The OTHER half of the load-time check: an explicit mtplx engine cannot
+	// carry llama-only tuning (validateEmbeddedLLM refuses the pair at load).
+	// The same cross-check runs here against the PERSISTED engine, so the RPC
+	// cannot write a config the next load rejects — otherwise a tuning write
+	// beside engine: mtplx would answer success and leave a config.yaml that
+	// reports a validation error on every startup. The message is verbatim the
+	// load validator's, so the two surfaces speak with one voice.
+	if embeddedllm.NormalizeEngine(embeddedllm.Engine(f.config.EmbeddedLLM.Engine)) == embeddedllm.EngineMTPLX {
+		if forbidden := embeddedllm.ForbiddenLlamaTuning(tuning); len(forbidden) > 0 {
+			f.configMu.Unlock()
+			return fmt.Errorf(
+				"embedded_llm.tuning.%s does not apply to embedded_llm.engine: mtplx (no offload, no fit pass, no KV or packing choice); remove the key or set engine: llama",
+				forbidden[0],
+			)
+		}
 	}
 	if reflect.DeepEqual(next, stored) {
 		// Nothing moved. A no-op must not rewrite config.yaml, emit

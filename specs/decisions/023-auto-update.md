@@ -6,6 +6,8 @@ Accepted
 
 > **Drift note (2026-08-25, vibespec-check):** The archive-safety claim "skips symlinks during update extraction" now holds only for the tar path (Linux); the zip path (macOS .app) reproduces symlink entries as symlinks via a containment-checked safeCreateSymlink (core/updater/installer.go, TestExtractZip_SymlinkPreserved) because materializing them as regular files produced an unlaunchable bundle.
 
+> **Drift note (2026-10-19, macOS 27 AMFI):** The bare staging copy of the bundle executable is killed at exec on current macOS — amfid rejects a copied Mach-O whose embedded signature is sealed against the original bundle context ("The signature on the file is invalid", AppleMobileFileIntegrityError -420) and SIGKILLs it asynchronously, so `cmd.Start()` still reports success, the app quits, and the update silently never happens (the v0.11.0 → v0.12.0 cycle failed exactly this way). Fixes: `copyExecutable` re-signs the staging copy ad-hoc (`codesign --force --sign -`) so it validates as a standalone binary (the bytes stay the SHA256-verified release's own bytes — no integrity-gate change); `ApplyUpdate` captures the updater's output in `<staging>/updater-output.log` and waits `updaterStartProbeDelay` for an instant child exit, aborting the quit with `update:error` instead of closing the app on a dead updater. The recovery-pull `GetLastUpdateCheck` RPC covers the analogous silent-loss mode on the check side (a startup `update:available` event racing the frontend's event subscription).
+
 ## Context
 
 c0wrk is shipped as three single-tree platform packages (a macOS `.app`

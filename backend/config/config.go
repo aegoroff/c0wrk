@@ -802,10 +802,19 @@ const (
 // EmbeddedLLMConfig is the persisted state of the embedded local model. Most
 // fields are written by the app and document what is on THIS machine (resolved
 // packing, probed backend, allocated port) so a restart can supervise the
-// server without probing hardware or network. The two operator-owned
-// sub-sections — AutoUnload and Tuning — are settings instead: every flow that
+// server without probing hardware or network. The three operator-owned entries
+// — Engine, AutoUnload and Tuning — are settings instead: every flow that
 // rewrites the record carries them through unchanged.
 type EmbeddedLLMConfig struct {
+	// Engine is the runtime-family SETTING: "auto" (the empty or absent
+	// spelling), "mtplx" (MLX on Apple Silicon, macOS 14+), or "llama" (the
+	// pinned PrismML-Eng llama.cpp fork). Auto resolves per platform at
+	// install time — mtplx on darwin/arm64, llama everywhere else — and the
+	// resolution is what Install runs; an explicit value is honored wherever
+	// the platform supports it and refused where it does not. This is one of
+	// the three operator-owned entries in this section (the others are
+	// auto_unload and tuning): install and removal PRESERVE it.
+	Engine string `yaml:"engine,omitempty"`
 	// Installed reports that the runtime and the weights are on disk and
 	// SHA256-verified. It gates the generated provider entry.
 	Installed bool `yaml:"installed"`
@@ -831,9 +840,17 @@ type EmbeddedLLMConfig struct {
 	Port int `yaml:"port"`
 	// ModelFile is the absolute path of the installed GGUF weights.
 	ModelFile string `yaml:"model_file"`
-	// RuntimeVersion is the pinned fork release the runtime came from. A pin
+	// RuntimeVersion is the pinned runtime release the install came from: the
+	// llama fork tag, or the MTPLX version under the mtplx engine. A pin
 	// change forces a runtime re-download and keeps the weights.
 	RuntimeVersion string `yaml:"runtime_version"`
+	// PythonVersion is the managed CPython the mtplx engine was provisioned
+	// with. Informational record (empty on the llama family).
+	PythonVersion string `yaml:"python_version,omitempty"`
+	// PackRevision is the pinned Hugging Face revision of the mtplx engine's
+	// weight pack. Informational record (empty on the llama family, whose
+	// weights pin is ModelRevision recorded through the checksums).
+	PackRevision string `yaml:"pack_revision,omitempty"`
 	// InstalledAt is the RFC 3339 timestamp of the install.
 	InstalledAt string `yaml:"installed_at"`
 	// AutoUnload is the idle budget after which the server process is stopped.
@@ -1513,6 +1530,31 @@ func (c *LLMConfig) copyModelOverridesMap() {
 // reason: a plan the planner cannot honour must be refused at load, not at
 // launch.
 func validateEmbeddedLLM(c *EmbeddedLLMConfig) error {
+	// The engine setting is a closed vocabulary, and an explicit mtplx cannot
+	// carry llama-only tuning: the two halves of one contradiction are named
+	// together. Auto is NOT cross-checked here — its resolution is a platform
+	// fact the install owns, and PlanMLX refuses the same list there.
+	switch embeddedllm.NormalizeEngine(embeddedllm.Engine(c.Engine)) {
+	case embeddedllm.EngineAuto, embeddedllm.EngineLlama, embeddedllm.EngineMTPLX:
+	default:
+		return fmt.Errorf(
+			"embedded_llm.engine %q is not valid; must be one of auto, mtplx, llama (or removed for auto)",
+			c.Engine,
+		)
+	}
+	if embeddedllm.NormalizeEngine(embeddedllm.Engine(c.Engine)) == embeddedllm.EngineMTPLX {
+		tuning, tuningErr := c.Tuning.ToTuning()
+		if tuningErr != nil {
+			return tuningErr
+		}
+		if forbidden := embeddedllm.ForbiddenLlamaTuning(tuning); len(forbidden) > 0 {
+			return fmt.Errorf(
+				"embedded_llm.tuning.%s does not apply to embedded_llm.engine: mtplx (no offload, no fit pass, no KV or packing choice); remove the key or set engine: llama",
+				forbidden[0],
+			)
+		}
+	}
+
 	switch {
 	case c.Port == 0:
 		// 0 means "allocate at install time", which contradicts a completed
@@ -2444,7 +2486,7 @@ type GoalSuggestConfig struct {
 	// true; an explicit false opts out of the suggestion gate entirely.
 	Enabled *bool `yaml:"enabled"`
 	// MinComplexity is the routing-complexity floor below which the
-	// suitability classifier is never consulted. Default 2.
+	// suitability classifier is never consulted. Default 3.
 	MinComplexity int `yaml:"min_complexity"`
 }
 

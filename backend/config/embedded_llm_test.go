@@ -19,8 +19,12 @@ func embeddedIntPtr(v int) *int    { return &v }
 
 // installedEmbeddedState is the canonical "install completed" section: every
 // field populated, so a round-trip or a sync regression shows up immediately.
+// The record is llama-shaped: the engine setting is what a llama install
+// persists, and python_version/pack_revision are mtplx-only records that stay
+// empty here (the mtplx trio is covered by the round-trip's second case).
 func installedEmbeddedState() EmbeddedLLMConfig {
 	return EmbeddedLLMConfig{
+		Engine:         "llama",
 		Installed:      true,
 		Packing:        "PQ2_0",
 		Backend:        "metal",
@@ -55,6 +59,9 @@ func TestEmbeddedLLMYAMLRoundTrip(t *testing.T) {
 	if restored.Installed != original.Installed {
 		t.Errorf("installed = %v, want %v", restored.Installed, original.Installed)
 	}
+	if restored.Engine != original.Engine {
+		t.Errorf("engine = %q, want %q", restored.Engine, original.Engine)
+	}
 	if restored.Packing != original.Packing {
 		t.Errorf("packing = %q, want %q", restored.Packing, original.Packing)
 	}
@@ -82,13 +89,48 @@ func TestEmbeddedLLMYAMLRoundTrip(t *testing.T) {
 
 	// The documented yaml keys, so a renamed tag cannot slip through.
 	for _, key := range []string{
-		"installed:", "packing:", "backend:", "port:", "model_file:",
+		"installed:", "engine:", "packing:", "backend:", "port:", "model_file:",
 		"runtime_version:", "installed_at:", "auto_unload:", "enabled:", "minutes:",
 	} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("marshalled section is missing key %q:\n%s", key, data)
 		}
 	}
+
+	// The mtplx record: the engine choice and the two mtplx-only informational
+	// records (python_version/pack_revision) must survive the round trip with
+	// their yaml tags intact — these are exactly the keys a sink rewrite or a
+	// typo'd tag would silently lose.
+	t.Run("mtplx record", func(t *testing.T) {
+		original := installedEmbeddedState()
+		original.Engine = "mtplx"
+		original.Packing = "" // the mtplx pack ships one quantization
+		original.PythonVersion = "3.12.15"
+		original.PackRevision = "03bd60bb82755f2446f5083426dca9708eb8e0fe"
+
+		data, err := yaml.Marshal(&original)
+		if err != nil {
+			t.Fatalf("yaml.Marshal() failed: %v", err)
+		}
+		var restored EmbeddedLLMConfig
+		if err := yaml.Unmarshal(data, &restored); err != nil {
+			t.Fatalf("yaml.Unmarshal() failed: %v", err)
+		}
+		if restored.Engine != "mtplx" {
+			t.Errorf("engine = %q, want %q", restored.Engine, original.Engine)
+		}
+		if restored.PythonVersion != original.PythonVersion {
+			t.Errorf("python_version = %q, want %q", restored.PythonVersion, original.PythonVersion)
+		}
+		if restored.PackRevision != original.PackRevision {
+			t.Errorf("pack_revision = %q, want %q", restored.PackRevision, original.PackRevision)
+		}
+		for _, key := range []string{"engine:", "python_version:", "pack_revision:"} {
+			if !strings.Contains(string(data), key) {
+				t.Errorf("marshalled section is missing key %q:\n%s", key, data)
+			}
+		}
+	})
 }
 
 // TestEmbeddedLLMConfigRoundTrip verifies the section is reachable from the

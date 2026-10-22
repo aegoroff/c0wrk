@@ -274,6 +274,17 @@ llm:
 # planner `tuning:` overrides).
 #
 # embedded_llm:
+#   # The runtime family the embedded model runs on. One of:
+#   #   "auto"   — mtplx (MLX, Apple Silicon M-series, macOS 14+) on
+#   #              darwin/arm64; the pinned llama.cpp fork (Metal/CUDA/ROCm/
+#   #              Vulkan/CPU) everywhere else. The default.
+#   #   "mtplx"  — force the MLX engine (refused off darwin/arm64).
+#   #   "llama"  — force the llama.cpp fork.
+#   # A choice, not a record: install and removal preserve it. Under "mtplx"
+#   # the tuning keys that name llama-only knobs (offload, fit, kv_cache_type,
+#   # packing, ...) are refused at load.
+#   # Default: auto.
+#   engine: auto
 #   # True once runtime and weights are downloaded, SHA256-verified (fail-closed)
 #   # and recorded in the install manifest. Gates the generated provider entry.
 #   # Default: false.
@@ -324,12 +335,22 @@ llm:
 #   # port 0 is rejected at load (a completed install always has one).
 #   # Default: 0.
 #   port: 0
-#   # Absolute path of the installed GGUF weights. Default: "".
+#   # Absolute path of the installed weights: the GGUF file under the llama
+#   # family, or the MLX weight-pack directory under the mtplx engine.
+#   # Default: "".
 #   model_file: ""
-#   # The pinned fork release the installed runtime came from
-#   # (e.g. "prism-b10735-842b188"). A pin change forces a runtime re-download
-#   # and keeps the weights. Default: "".
+#   # The pinned runtime release the installed runtime came from: the
+#   # llama.cpp fork tag (e.g. "prism-b10735-842b188"), or the MTPLX version
+#   # under the mtplx engine. A pin change forces a runtime re-download and
+#   # keeps the weights. Default: "".
 #   runtime_version: ""
+#   # Informational records of the mtplx install: the managed CPython the
+#   # engine was provisioned with (e.g. "3.12.15") and the pinned Hugging
+#   # Face revision of the weight pack. Both are mtplx-family records and
+#   # stay empty on the llama family; the install flow writes them — a
+#   # record, not a setting. Default: "".
+#   python_version: ""
+#   pack_revision: ""
 #   # RFC 3339 timestamp of the install. Default: "".
 #   installed_at: ""
 #   # Idle auto-unload: stop the server process after N minutes without a
@@ -388,8 +409,8 @@ llm:
 #   # auto_unload), so provisioning or uninstalling the model never resets a
 #   # tuned memory plan, and editing a knob never touches the app-written
 #   # record beside it — `installed`, `packing`, `backend`, `port`,
-#   # `model_file`, `runtime_version` and `installed_at` are all owned by the
-#   # install flow alone.
+#   # `model_file`, `runtime_version`, `python_version`, `pack_revision` and
+#   # `installed_at` are all owned by the install flow alone.
 #   #
 #   # Every knob is validated on load EVEN WHILE IT IS INERT — while the model
 #   # is not installed, while fit is off, while another knob makes it moot —
@@ -1291,17 +1312,17 @@ orchestration:
 # the explicit toggle or a leading /goal.
 #
 #   enabled        (default true)  — master gate for the suggestion feature.
-#   min_complexity (default 2)     — routing-complexity floor below which the
+#   min_complexity (default 3)     — routing-complexity floor below which the
 #                                    classifier is never consulted (0 = use
-#                                    the default; complexity-1 messages such
-#                                    as greetings or factual questions can
-#                                    never be goals).
+#                                    the default; complexity-1-2 messages
+#                                    such as greetings, factual questions or
+#                                    simple edits are virtually never goals).
 #
 # goal_loop:
 #   verification: independent
 #   suggest:
 #     enabled: true
-#     min_complexity: 2
+#     min_complexity: 3
 
 # ---------------------------------------------------------------------------
 # Prompt Suggestions
@@ -1441,21 +1462,26 @@ orchestration:
 #                             # (error_code "vector_openvino_fallback"),
 #                             # and the requested-vs-effective mismatch
 #                             # recorded in every status payload. When the
-#                             # provider does come up, the OpenVINO plugin
-#                             # picks the concrete Intel device itself; the
-#                             # status payload records the externally
-#                             # verified device class in "ov_device"
-#                             # ("gpu" | "cpu", or absent when the xpu-smi
-#                             # probe could not answer).
+#                             # provider does come up, the OpenVINO rung
+#                             # resolves the concrete Intel device itself:
+#                             # it tries the plugin's devices in order and
+#                             # keeps the first that can compile the model
+#                             # (an Intel NPU is skipped — it rejects this
+#                             # model's dynamic shapes — and the integrated
+#                             # GPU runs it); the status payload records
+#                             # the externally verified device class in
+#                             # "ov_device" ("gpu" | "cpu", or absent when
+#                             # the xpu-smi probe could not answer).
 #
 #   device_id: 0              # GPU index used when the CUDA provider is
 #                             # active (default 0 = the first GPU, which
 #                             # is what most machines want; ignored by
 #                             # the CPU provider). Must be >= 0; the
 #                             # OpenVINO provider additionally accepts
-#                             # only 0 — it chooses the concrete Intel
-#                             # device itself, and any other value fails
-#                             # embedder creation (loud CPU fallback).
+#                             # only 0 — 0 lets that rung resolve the
+#                             # concrete Intel device itself, and any
+#                             # other value fails embedder creation
+#                             # (loud CPU fallback).
 #
 # GPU requirements — "auto" and "cuda" only use the GPU when a CUDA-
 # enabled ONNX Runtime build sits next to the executable (the standard

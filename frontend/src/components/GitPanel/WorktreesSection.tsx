@@ -13,11 +13,12 @@ import type { GitWorktree } from '@/types/models'
  * panel's FOCUS to that tree (SetGitPanelFocus) — it never checks anything
  * out, never retargets a session's execution workspace.
  *
- * With `draftSelect` (the chat-side session draft, ADR-080) the rows are
+ * With `draftSelect` (the chat-side workspace pick, ADR-091) the rows are
  * pure selection targets instead: the consumer's onSelect records the
- * drafted workspace (the local checkout row → a local session; a managed
- * tree with a branch → a session on its branch, adopted at draft commit
- * per ADR-082) and the tooltips say so — the focus never moves. Rows the
+ * fresh session's pending workspace choice (the local checkout row → a
+ * local workspace; a managed tree with a branch → a choice of its branch,
+ * whose first send adopts the tree per ADR-082) and the tooltips say so —
+ * the focus never moves. Rows the
  * consumer gates via `draftBlockedReason` (external trees, detached trees)
  * render inert instead: not selection targets, the returned reason is the
  * tooltip, and the delete action stays available.

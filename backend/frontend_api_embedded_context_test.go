@@ -466,7 +466,8 @@ func TestEmbeddedTuningIsFailSoft(t *testing.T) {
 func mustEmbeddedManifestPath(t *testing.T, f *FrontendAPI) string {
 	t.Helper()
 	layout, err := embeddedllm.NewLayout(
-		config.RuntimesDir(f.agentDir), config.EmbeddedModelDir(f.agentDir))
+		config.RuntimesDir(f.agentDir), config.EmbeddedModelDir(f.agentDir),
+		config.EmbeddedMLXModelDir(f.agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}

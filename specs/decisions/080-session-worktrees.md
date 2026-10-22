@@ -4,7 +4,12 @@
 
 Accepted (amended by [ADR-082](./082-shared-managed-worktrees.md): the
 one-session-per-managed-tree rule — the partial unique index — is replaced by
-shared trees with reference-counted release; every other decision stands)
+shared trees with reference-counted release; every other decision stands).
+Decision 5's creation-via-draft flow and the absolute binding-immutability
+reading are superseded by [ADR-091](./091-eager-session-creation.md): sessions
+are created eagerly (born local), the worktree binds at the first send inside
+an atomic fresh window (no transcript, no task rows), and
+`CreateManagedSession`/the chat-side draft UX are removed.
 
 ## Context
 
