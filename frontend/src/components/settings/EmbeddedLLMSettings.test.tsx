@@ -728,7 +728,7 @@ describe('EmbeddedLLMSettings — Remove is confirmed before it runs', () => {
   })
 })
 
-describe('EmbeddedLLMSettings — the projection scope self-disables under mtplx (ADR-090 D7)', () => {
+describe('EmbeddedLLMSettings — the projection scope self-disables under mtplx (ADR-092 D7)', () => {
   async function openRemoveMenu(): Promise<void> {
     // Radix opens a dropdown on the trigger's POINTERDOWN, not click.
     act(() => {

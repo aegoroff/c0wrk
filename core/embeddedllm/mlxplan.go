@@ -1,6 +1,6 @@
 package embeddedllm
 
-// MLX memory planning (ADR-090): the mtplx engine's decision layer.
+// MLX memory planning (ADR-092): the mtplx engine's decision layer.
 //
 // The llama family plans a SPLIT (device weights vs host spill, `-ngl`, KV
 // precision, `--fit` delegation); MLX on Apple Silicon has no split to plan —

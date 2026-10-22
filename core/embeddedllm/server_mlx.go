@@ -1,6 +1,6 @@
 package embeddedllm
 
-// The mtplx engine's supervision surface (ADR-090): the argv, the validation,
+// The mtplx engine's supervision surface (ADR-092): the argv, the validation,
 // the launch identity, the child environment and the /health context
 // readback. The supervisor machinery — the single-instance gate, the readiness
 // polling loop, crash detection, the idle unload, the stop budgets — is
@@ -101,7 +101,7 @@ func (spec LaunchSpec) mlxValidate() error {
 // The SHAPE half is the plan's context window. The install records the plan it
 // made; the launch re-derives it from the SAME pinned terms with the LIVE
 // operator tuning (PlanMLX is pure — no probe, no I/O), so `context.mode:
-// exact` keeps working under this engine exactly as on the llama family (ADR-090
+// exact` keeps working under this engine exactly as on the llama family (ADR-092
 // D5). An infeasible live plan refuses the launch with the gate's own error;
 // a plan the launch cannot price at all (no topology snapshot to take the RAM
 // from — ErrRAMUnknown — or a tuning the planner refuses, which config
@@ -202,7 +202,7 @@ func (s *Server) launchSpecMLX(manifest Manifest, port int) (resolvedLaunch, err
 // PIP_FIND_LINKS would offer pip foreign wheels, PYTHONPATH/PYTHONHOME would
 // shadow the pinned imports, an operator MTPLX_CONFIG could mix standalone
 // state into the pinned tree, and CPython adds the user site-packages to
-// sys.path even with no variable set at all (ADR-090 D1/D3, SECURITY.md
+// sys.path even with no variable set at all (ADR-092 D1/D3, SECURITY.md
 // ASI04). So the parent environment is scrubbed of every PIP_*, PYTHON* and
 // MTPLX_* key (case-sensitive — the documented prefixes) and rebuilt:
 //

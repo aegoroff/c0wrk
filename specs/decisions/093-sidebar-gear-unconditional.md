@@ -1,4 +1,4 @@
-# ADR-090: Sidebar Settings Gear Is Unconditional
+# ADR-093: Sidebar Settings Gear Is Unconditional
 
 ## Status
 

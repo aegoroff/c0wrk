@@ -2,7 +2,7 @@
 
 ## Role
 
-The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible, whether the tab-cycling hotkeys respond, and how notification clicks route (see [ADR-085](../../decisions/085-workspace-tabs-single-engine.md), [ADR-090](../../decisions/090-sidebar-gear-unconditional.md)).
+The workspace tab layer is the outermost context layer of the app shell: each tab remembers which project and which session its workspace view shows plus a snapshot of the UI slices inside it, while exactly one tab — the active one — mirrors the live global stores. The layer always lives; `uiStore.tabsEnabled` only controls whether the tab bar is visible, whether the tab-cycling hotkeys respond, and how notification clicks route (see [ADR-085](../../decisions/085-workspace-tabs-single-engine.md), [ADR-093](../../decisions/093-sidebar-gear-unconditional.md)).
 
 ## Key Files
 
@@ -14,7 +14,7 @@ The workspace tab layer is the outermost context layer of the app shell: each ta
 - `frontend/src/components/layout/AppLayout.tsx` — THE single controller mount for the app plus the `{tabsEnabled && <TabBar/>}` render gate.
 - `frontend/src/components/layout/TabBar.tsx` — the presentational tab strip; every interaction routes through the `TabController` prop; labels and task-status dots derive LIVE from the project/session/chat stores by id, so renames and lifecycle events repaint without a stale copy on the tab.
 - `frontend/src/lib/tabLabel.ts` — `buildTabLabel`, the pure label algebra behind the strip: `Project: Session`, `Project`, `CHAT: Session`, `New Tab` (absent segments are dropped, never rendered as empty text).
-- `frontend/src/components/layout/SidebarHeader.tsx` — keeps its Settings gear in BOTH flag states: the gear is unconditional (it opens Settings on the default tab, as it always has); the ADR-085 gear handoff was dropped by [ADR-090](../../decisions/090-sidebar-gear-unconditional.md).
+- `frontend/src/components/layout/SidebarHeader.tsx` — keeps its Settings gear in BOTH flag states: the gear is unconditional (it opens Settings on the default tab, as it always has); the ADR-085 gear handoff was dropped by [ADR-093](../../decisions/093-sidebar-gear-unconditional.md).
 - `frontend/src/components/settings/TabsSettings.tsx` — the Appearance-tab master switch over `uiStore.tabsEnabled`.
 - `frontend/src/hooks/useNotificationClicks.ts` — the flag-on banner-click routing branch (one of the flag's two behavioral branches, the other being the `useTabHotkeys` early-return; see [system-notifications.md](system-notifications.md)).
 - `frontend/src/hooks/useWindowTitle.ts` — the window title follows the ACTIVE tab's ids, resolved live against the project/session stores.
@@ -31,7 +31,7 @@ The tab layer exists unconditionally. With `uiStore.tabsEnabled` off, the UI nev
 | Notification-click routing (`useNotificationClicks`) | The activation engine (it never reads the flag) |
 | Tab-cycling hotkeys (`useTabHotkeys` — inert early-return when the flag is off) | |
 | | The write-back mirror (runs under any flag value) |
-| | The sidebar Settings gear (`SidebarHeader` — unconditional, [ADR-090](../../decisions/090-sidebar-gear-unconditional.md)) |
+| | The sidebar Settings gear (`SidebarHeader` — unconditional, [ADR-093](../../decisions/093-sidebar-gear-unconditional.md)) |
 
 ### Single engine, one activation path
 
@@ -163,4 +163,4 @@ The rendered strip is itself a keyboard surface: the rows are `role="tab"` insid
 - [system-notifications.md](system-notifications.md) — the flag-on banner-click branch of `useNotificationClicks`
 - [README.md](README.md) — the app shell the tab bar sits above and the project-switch flow the engine drives
 - [ADR-085](../../decisions/085-workspace-tabs-single-engine.md) — the single-engine / disabled-mode-is-one-tab / snapshot-slices decision
-- [ADR-090](../../decisions/090-sidebar-gear-unconditional.md) — the sidebar Settings gear is unconditional; the flag's gate narrowed to tab-bar rendering + hotkey gating + banner-click routing
+- [ADR-093](../../decisions/093-sidebar-gear-unconditional.md) — the sidebar Settings gear is unconditional; the flag's gate narrowed to tab-bar rendering + hotkey gating + banner-click routing
