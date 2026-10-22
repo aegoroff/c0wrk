@@ -19,6 +19,7 @@
 // (session switched mid-flight), whose snapshot never reached the store.
 
 import { getSessionHistory, getSessionRuntimeStatus, getPendingActions, resolveStalePrompt } from '@/api/chat'
+import { generateMessageId } from '@/lib/ids'
 import { chatMessageToUI, isPersistableHistoryMessage, isLegacyReviewPromptRow, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from '@/lib/chatUtils'
 import { restorePlanAndGoalFromHistory } from '@/lib/sessionStoreRestore'
 import { reconcileRuntimeStatus, reconcilePendingActions, reconcileWorkUnits, stalePromptMatchField } from '@/lib/sessionRuntime'
@@ -78,8 +79,42 @@ async function loadAndReconcile(
   isCancelled: () => boolean,
   loadStartedAt: number,
 ): Promise<void> {
-  const history = await getSessionHistory(sessionId)
+  let history: Awaited<ReturnType<typeof getSessionHistory>>
+  try {
+    history = await getSessionHistory(sessionId)
+  } catch (err) {
+    if (isCancelled()) return
+    logger.error('Failed to load session history:', err)
+    useChatStore.getState().addMessage(sessionId, {
+      id: generateMessageId(),
+      sessionId,
+      type: 'error',
+      content: 'Failed to load session history. Please try switching sessions.',
+      // Distinguishes this card from the send-path's failure cards in
+      // the workspace selector's freshness predicate: a load failure
+      // can be the only visible entry of a session WITH persisted rows,
+      // so it must never read as a "confirmed empty" transcript (see
+      // SessionWorkspaceSelector.isFresh).
+      metadata: { historyLoadFailed: true },
+      timestamp: Date.now(),
+    })
+    return
+  }
   if (isCancelled()) return
+
+  // An EMPTY history must NOT go through the merge: its loadStartedAt guard
+  // would drop every stored row older than this load — on a fresh session
+  // that is exactly the frontend-only transcript (a rejected send's error
+  // card, an in-flight optimistic message) — so the empty case only
+  // MATERIALIZES the confirmed-empty index the workspace selector's
+  // freshness contract needs (an absent index reads as "history not loaded
+  // yet" and would keep the workspace picker locked forever). With an index
+  // already present, ensureEmptyTranscript keeps every live row untouched —
+  // it only reaps superseded history-load-failure cards, which this
+  // successful load proves stale.
+  if (history.length === 0) {
+    useChatStore.getState().ensureEmptyTranscript(sessionId)
+  }
 
   if (history.length > 0) {
     // Filter out rows that must never surface in the chat:

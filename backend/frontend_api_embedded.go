@@ -15,6 +15,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/embeddedllm"
+	"runtime"
 )
 
 // The RPC surface of the embedded local model (see
@@ -394,7 +395,7 @@ func (f *FrontendAPI) embeddedBuild() (*embeddedllm.Server, *embeddedllm.Install
 		return nil, nil, errors.New("the embedded LLM is unavailable: no agent directory")
 	}
 	// Roots come from the centralized path API; core never re-derives them.
-	layout, err := embeddedllm.NewLayout(config.RuntimesDir(f.agentDir), config.EmbeddedModelDir(f.agentDir))
+	layout, err := embeddedllm.NewLayout(config.RuntimesDir(f.agentDir), config.EmbeddedModelDir(f.agentDir), config.EmbeddedMLXModelDir(f.agentDir))
 	if err != nil {
 		return nil, nil, fmt.Errorf("embedded LLM storage layout: %w", err)
 	}
@@ -1016,6 +1017,9 @@ func (f *FrontendAPI) GetEmbeddedLLMStatus() EmbeddedLLMStatus {
 		// packing/backend is informational. The port falls back to it as well,
 		// so a status read still reports the endpoint the supervisor would
 		// launch even before the config was synced.
+		status.Engine = string(manifest.Engine)
+		status.PythonVersion = manifest.PythonVersion
+		status.PackRevision = manifest.PackRevision
 		status.Packing = string(manifest.Packing)
 		status.Backend = string(manifest.Backend)
 		status.ContextSize = manifest.ContextSize
@@ -1186,13 +1190,52 @@ func (f *FrontendAPI) InstallEmbeddedLLM() error {
 	// instead of a flat RAM floor: an unreadable ACCELERATOR budget degrades
 	// rather than refuses, while an unreadable RAM total still does
 	// (ErrRAMUnknown), because the host budget is derived from it on every path.
-	hw, err := f.embeddedInstallPreflight()
+	//
+	// The engine resolves FIRST: the gate is engine-shaped (the mtplx engine
+	// gates one unified pool through PlanMLX), and `auto` is a platform
+	// decision made here — once — so the click, the preflight and the
+	// background run all speak of the same engine. A refusal here is a sibling
+	// of the preflight refusals below: the gate is already claimed and the
+	// run's cancel already published, so the error exits through
+	// refuseEmbeddedInstall like every other synchronous refusal — a bare
+	// return would hold the gate (and the published cancel) until restart.
+	engine, err := f.embeddedResolveEngine()
+	if err != nil {
+		f.refuseEmbeddedInstall(err)
+		return err
+	}
+	hw, err := f.embeddedInstallPreflight(engine)
 	if err != nil {
 		return err
 	}
 
-	go f.runEmbeddedInstall(installCtx, server, installer, hw)
+	go f.runEmbeddedInstall(installCtx, server, installer, hw, engine)
 	return nil
+}
+
+// embeddedResolveEngine resolves the operator's `embedded_llm.engine` setting
+// against THIS machine (see embeddedResolveEngineOn).
+func (f *FrontendAPI) embeddedResolveEngine() (embeddedllm.Engine, error) {
+	return f.embeddedResolveEngineOn(runtime.GOOS + "-" + runtime.GOARCH)
+}
+
+// embeddedResolveEngineOn resolves the operator's `embedded_llm.engine` setting
+// against an explicit platform ("goos-goarch"). The empty or absent spelling is
+// the documented writing of auto (NormalizeEngine maps it), an explicit value is
+// honored where the platform supports it and refused with guidance where it does
+// not, and an unknown spelling is a typed refusal — never a silent substitution.
+// The setting is preserved by install and removal (it is a choice, not a
+// record). The platform parameter is the seam the resolution table test uses to
+// exercise the platform-dependent outcomes on any machine; production passes
+// only the running platform, so behavior is identical.
+func (f *FrontendAPI) embeddedResolveEngineOn(platform string) (embeddedllm.Engine, error) {
+	requested := embeddedllm.Engine(f.embeddedConfig().Engine)
+	resolved, err := embeddedllm.ResolveEngine(requested, platform)
+	if err != nil {
+		return "", fmt.Errorf("the embedded LLM engine cannot run on this machine: %w", err)
+	}
+	f.log().Info("embedded LLM engine resolved", "requested", string(requested), "resolved", string(resolved))
+	return resolved, nil
 }
 
 // CancelEmbeddedLLMInstall asks the in-flight background install to stop.
@@ -1243,7 +1286,7 @@ func (f *FrontendAPI) CancelEmbeddedLLMInstall() error {
 // an unguarded panic here would leave the gate claimed for the process lifetime
 // and every embedded RPC refusing until a restart — the same unrecoverable
 // outcome runEmbeddedInstall's own recover exists to prevent.
-func (f *FrontendAPI) embeddedInstallPreflight() (hw embeddedllm.Hardware, err error) {
+func (f *FrontendAPI) embeddedInstallPreflight(engine embeddedllm.Engine) (hw embeddedllm.Hardware, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			panicErr := fmt.Errorf("the embedded LLM install panicked before it started: %v", r)
@@ -1266,6 +1309,14 @@ func (f *FrontendAPI) embeddedInstallPreflight() (hw embeddedllm.Hardware, err e
 			RAMGiB:         hw.RAMGiB,
 			CUDA12Userland: hw.CUDA12Userland,
 		},
+		Engine: engine,
+		// The operator's memory-plan overrides are part of the shape this gate
+		// prices — `Resolve` runs the same gate over the caller's Tuning ("an
+		// operator who pinned a context" is its documented audience), and the
+		// install below plans from this very tuning. Under mtplx the gate IS
+		// PlanMLX(ram, tuning), so a refusal here is the refusal the install
+		// itself would produce, before a single byte is fetched.
+		Tuning: f.embeddedTuning(),
 	}); err != nil {
 		refusal := fmt.Errorf("the embedded LLM install was refused: %w", err)
 		f.refuseEmbeddedInstall(refusal)
@@ -1663,7 +1714,7 @@ func (f *FrontendAPI) embeddedProbe(ctx context.Context) (embeddedllm.Hardware, 
 // under embeddedStopBudget, handed to core as Installer.StopTimeout, because
 // that context carries no deadline and the supervisor's gate is exactly the
 // thing a cold load holds for minutes.
-func (f *FrontendAPI) runEmbeddedInstall(ctx context.Context, server *embeddedllm.Server, installer *embeddedllm.Installer, hw embeddedllm.Hardware) {
+func (f *FrontendAPI) runEmbeddedInstall(ctx context.Context, server *embeddedllm.Server, installer *embeddedllm.Installer, hw embeddedllm.Hardware, engine embeddedllm.Engine) {
 	// The gate release is a DEFER, and it is registered FIRST so it runs LAST
 	// (defers are LIFO, after the panic report below): an observer reads the
 	// gate as "the run is over", so every effect of the run — the config save,
@@ -1723,6 +1774,14 @@ func (f *FrontendAPI) runEmbeddedInstall(ctx context.Context, server *embeddedll
 	opts := embeddedllm.InstallOptions{
 		Platform: hw.Platform,
 		Backend:  hw.Backend,
+		Engine:   engine,
+		// The same tuning the preflight priced, so the plan the install makes,
+		// persists and launches is the plan the operator configured (the mtplx
+		// engine's `context.mode: exact` lives or dies by this; the llama family
+		// ignores it here and replans from the live setting at load). The same
+		// fail-soft accessor the launch seam uses, so both ends of the pair see
+		// one value.
+		Tuning:   f.embeddedTuning(),
 		Progress: f.emitEmbeddedInstallProgress,
 	}
 	// A repair/reinstall keeps the persisted port, so the generated provider
@@ -1913,7 +1972,9 @@ func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.
 
 	autoUnload := f.config.EmbeddedLLM.AutoUnload
 	tuning := f.config.EmbeddedLLM.Tuning
+	engineSetting := f.config.EmbeddedLLM.Engine // a choice, not a record
 	f.config.EmbeddedLLM = config.EmbeddedLLMConfig{
+		Engine:         engineSetting,
 		Installed:      true,
 		Packing:        string(state.Packing),
 		Backend:        string(state.Backend),
@@ -1921,6 +1982,8 @@ func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.
 		ModelFile:      state.ModelFile,
 		RuntimeVersion: state.RuntimeVersion,
 		InstalledAt:    state.InstalledAt,
+		PythonVersion:  state.PythonVersion,
+		PackRevision:   state.PackRevision,
 		AutoUnload:     autoUnload,
 		Tuning:         tuning,
 	}
@@ -1946,8 +2009,8 @@ func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.
 // ApplyRemoved clears the install state, migrates llm.default_model off the
 // embedded composite (an empty default fails validation, so the composite must
 // MOVE to another enabled model rather than simply be cleared) and drops the
-// provider record. The auto-unload and tuning knobs are operator settings, not
-// install state, so both survive.
+// provider record. The engine setting, the auto-unload and the tuning knobs are
+// operator settings, not install state, so all three survive.
 func (s embeddedConfigSink) ApplyRemoved(_ context.Context) error {
 	f := s.f
 	f.saveMu.Lock()
@@ -1981,7 +2044,12 @@ func (s embeddedConfigSink) ApplyRemoved(_ context.Context) error {
 	}
 	autoUnload := f.config.EmbeddedLLM.AutoUnload
 	tuning := f.config.EmbeddedLLM.Tuning
-	f.config.EmbeddedLLM = config.EmbeddedLLMConfig{AutoUnload: autoUnload, Tuning: tuning}
+	engine := f.config.EmbeddedLLM.Engine // a choice, not a record
+	f.config.EmbeddedLLM = config.EmbeddedLLMConfig{
+		Engine:     engine,
+		AutoUnload: autoUnload,
+		Tuning:     tuning,
+	}
 	f.config.LLM.DefaultModel = migrated
 	// contextWindow 0: the override of a removed model is dropped with its
 	// provider record, and no other model's override is touched.

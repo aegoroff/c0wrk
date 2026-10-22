@@ -35,7 +35,9 @@ var _ embeddedllm.ConfigSink = embeddedConfigSink{}
 func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.InstallState) error {
 	autoUnload := s.cfg.EmbeddedLLM.AutoUnload
 	tuning := s.cfg.EmbeddedLLM.Tuning
+	engineSetting := s.cfg.EmbeddedLLM.Engine // a choice, not a record
 	s.cfg.EmbeddedLLM = EmbeddedLLMConfig{
+		Engine:         engineSetting,
 		Installed:      true,
 		Packing:        string(state.Packing),
 		Backend:        string(state.Backend),
@@ -43,6 +45,8 @@ func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.
 		ModelFile:      state.ModelFile,
 		RuntimeVersion: state.RuntimeVersion,
 		InstalledAt:    state.InstalledAt,
+		PythonVersion:  state.PythonVersion,
+		PackRevision:   state.PackRevision,
 		AutoUnload:     autoUnload,
 		Tuning:         tuning,
 	}
@@ -67,9 +71,9 @@ func (s embeddedConfigSink) ApplyInstalled(_ context.Context, state embeddedllm.
 // migration target: the removal is refused and the config is left untouched —
 // the same contract as the production sink — because persisting an empty
 // default would hand the next launch a config that fails validate(). The
-// auto-unload and tuning knobs are operator settings, not install state, so
-// both survive — a reinstall starts from the same memory plan the operator
-// chose, not from a reset one.
+// engine setting, the auto-unload and the tuning knobs are operator settings,
+// not install state, so all three survive — a reinstall starts from the same
+// engine and the same memory plan the operator chose, not from reset ones.
 func (s embeddedConfigSink) ApplyRemoved(_ context.Context) error {
 	composite := EmbeddedLLMProviderName + "/" + EmbeddedLLMModelName
 	// Migrate the default model BEFORE the record disappears: an empty
@@ -84,7 +88,8 @@ func (s embeddedConfigSink) ApplyRemoved(_ context.Context) error {
 	}
 	autoUnload := s.cfg.EmbeddedLLM.AutoUnload
 	tuning := s.cfg.EmbeddedLLM.Tuning
-	s.cfg.EmbeddedLLM = EmbeddedLLMConfig{AutoUnload: autoUnload, Tuning: tuning}
+	engine := s.cfg.EmbeddedLLM.Engine // a choice, not a record
+	s.cfg.EmbeddedLLM = EmbeddedLLMConfig{Engine: engine, AutoUnload: autoUnload, Tuning: tuning}
 	s.cfg.LLM.DefaultModel = migrated
 	s.cfg.SyncEmbeddedLLMProvider(0)
 	return nil
@@ -175,6 +180,43 @@ func TestEmbeddedConfigSinkAppliesInstallState(t *testing.T) {
 	}
 }
 
+// TestEmbeddedConfigSinkAppliesMTPLXInstallState pins the engine half of the
+// contract: the operator's engine choice survives the wholesale rewrite (a
+// choice, not a record), and the mtplx-only records land beside it — the same
+// mutation the production sink in backend/frontend_api_embedded.go performs, so
+// the reference and production halves cannot drift apart.
+func TestEmbeddedConfigSinkAppliesMTPLXInstallState(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.EmbeddedLLM.Engine = "llama" // the operator's explicit choice
+	state := embeddedllm.InstallState{
+		Engine:         embeddedllm.EngineMTPLX,
+		Backend:        "metal",
+		Port:           4321,
+		ModelFile:      "/home/u/.c0wrk/models/bonsai-2-27b-mlx/pack",
+		RuntimeVersion: "2.12.2",
+		InstalledAt:    "2026-10-20T09:00:00Z",
+		ContextSize:    20480,
+		PythonVersion:  "3.12.15",
+		PackRevision:   "03bd60bb82755f2446f5083426dca9708eb8e0fe",
+	}
+
+	if err := (embeddedConfigSink{cfg: cfg}).ApplyInstalled(context.Background(), state); err != nil {
+		t.Fatalf("ApplyInstalled: %v", err)
+	}
+
+	got := cfg.EmbeddedLLM
+	if got.Engine != "llama" {
+		t.Errorf("embedded_llm.engine = %q after an install, want the operator's llama choice preserved", got.Engine)
+	}
+	if got.PythonVersion != state.PythonVersion || got.PackRevision != state.PackRevision {
+		t.Errorf("mtplx records = %q/%q, want %q/%q",
+			got.PythonVersion, got.PackRevision, state.PythonVersion, state.PackRevision)
+	}
+	if err := validate(cfg); err != nil {
+		t.Errorf("validate() after an mtplx install: %v", err)
+	}
+}
+
 // TestEmbeddedConfigSinkPreservesOperatorAutoUnload proves an install does not
 // reset a tuned idle budget: the defaults fill unset knobs only.
 func TestEmbeddedConfigSinkPreservesOperatorAutoUnload(t *testing.T) {
@@ -204,7 +246,7 @@ func TestEmbeddedConfigSinkPreservesOperatorAutoUnload(t *testing.T) {
 // the contract, with both roots built by this package's path API.
 func TestEmbeddedLLMRemoveClearsProviderRecordEndToEnd(t *testing.T) {
 	agentDir := t.TempDir()
-	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir), EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
@@ -326,7 +368,7 @@ func TestEmbeddedLLMRemoveClearsProviderRecordEndToEnd(t *testing.T) {
 // next load; see ApplyRemoved for why that must never be written to disk.
 func TestEmbeddedLLMRemoveWithNoOtherModelIsRefused(t *testing.T) {
 	agentDir := t.TempDir()
-	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(RuntimesDir(agentDir), EmbeddedModelDir(agentDir), EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}
@@ -456,8 +498,11 @@ func TestEmbeddedConfigSinkRemovePreservesOperatorTuning(t *testing.T) {
 	if !reflect.DeepEqual(got.Tuning, want) {
 		t.Errorf("a removal reset the operator's memory plan:\n got %+v\nwant %+v", got.Tuning, want)
 	}
-	// The idle budget survives too — the two operator-owned sub-sections are
-	// preserved by the same rule.
+	// The engine setting and the idle budget survive too — the three
+	// operator-owned entries are preserved by the same rule.
+	if got.Engine != "llama" {
+		t.Errorf("embedded_llm.engine = %q after a removal, want the operator's llama choice", got.Engine)
+	}
 	if got.AutoUnload.Enabled == nil || *got.AutoUnload.Enabled {
 		t.Errorf("auto_unload.enabled = %v, want the operator's explicit false", got.AutoUnload.Enabled)
 	}
@@ -473,6 +518,11 @@ func TestEmbeddedLLMTuningEditDoesNotRewriteInstallState(t *testing.T) {
 
 	cfg := minimalValidConfig()
 	cfg.EmbeddedLLM = installedEmbeddedState()
+	// The engine choice is app-written state the tuning edit must leave
+	// byte-identical; python_version/pack_revision stay at the llama record's
+	// empty values here (the mtplx values + their yaml tags are pinned by the
+	// round-trip test's mtplx case, which this test must not contradict: the
+	// operator tuning applied below is llama-flavored).
 	cfg.LLM.DefaultModel = EmbeddedLLMProviderName + "/" + EmbeddedLLMModelName
 	before := cfg.EmbeddedLLM
 	if err := Save(cfg, path); err != nil {
@@ -502,6 +552,7 @@ func TestEmbeddedLLMTuningEditDoesNotRewriteInstallState(t *testing.T) {
 		got  any
 		want any
 	}{
+		{"engine", after.Engine, before.Engine},
 		{"installed", after.Installed, before.Installed},
 		{"packing", after.Packing, before.Packing},
 		{"backend", after.Backend, before.Backend},
@@ -509,6 +560,8 @@ func TestEmbeddedLLMTuningEditDoesNotRewriteInstallState(t *testing.T) {
 		{"model_file", after.ModelFile, before.ModelFile},
 		{"runtime_version", after.RuntimeVersion, before.RuntimeVersion},
 		{"installed_at", after.InstalledAt, before.InstalledAt},
+		{"python_version", after.PythonVersion, before.PythonVersion},
+		{"pack_revision", after.PackRevision, before.PackRevision},
 	} {
 		if field.got != field.want {
 			t.Errorf("embedded_llm.%s = %v after a tuning edit, want the untouched %v",

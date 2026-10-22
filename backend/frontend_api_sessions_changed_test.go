@@ -97,13 +97,11 @@ func TestForkSessionManaged_EmitsSessionsChanged(t *testing.T) {
 	events := &promoteEventCapture{}
 	h.api.emitEvent = events.emit
 
-	src, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
-	// Managed creation itself commits a draft (commitManagedDraft), so the
-	// event legitimately fires here too; clear the capture so the fork's own
-	// emission is what the assertion below observes.
+	// The managed gesture = eager CreateSession (whose emission is the list
+	// mutation) + the send-time bind, so the event legitimately fires here
+	// too; clear the capture so the fork's own emission is what the
+	// assertion below observes.
+	src := h.api.mustManagedSession(t, "", true, "")
 	events.names = nil
 
 	fork, err := h.api.ForkSession(src.ID)
@@ -118,43 +116,43 @@ func TestForkSessionManaged_EmitsSessionsChanged(t *testing.T) {
 	}
 }
 
-func TestCommitManagedDraft_EmitsSessionsChanged(t *testing.T) {
+func TestManagedSessionCreation_EmitsSessionsChanged(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	defer h.closeDB()
 	events := &promoteEventCapture{}
 	h.api.emitEvent = events.emit
 
-	// compensateTreeName "" = adopted-tree semantics: the commit owns no
-	// provisioned tree, so a failure would roll back without compensation —
-	// the emission must only fire on success.
-	draft := session.NewSessionDraft(h.project.ID, nil)
-	info, err := h.api.commitManagedDraft(context.Background(), draft, h.repoRoot, "")
-	if err != nil {
-		t.Fatalf("commitManagedDraft: %v", err)
-	}
+	// The draft-free managed gesture is eager CreateSession (the list
+	// mutation) followed by the send-time bind (a binding write, not a list
+	// mutation). By the time the gesture completes the capture must hold
+	// the emission.
+	info := h.api.mustManagedSession(t, "", true, "")
 	if info == nil || info.ID == "" {
 		t.Fatalf("invalid session: %+v", info)
 	}
 	if !events.has(EventSessionsChanged) {
-		t.Fatal("sessions:changed must be emitted after commitManagedDraft")
+		t.Fatal("sessions:changed must be emitted after managed session creation")
 	}
 }
 
-func TestCreateLocalFallbackSession_EmitsSessionsChanged(t *testing.T) {
-	h := newProjectSwitchHarness(t)
-	defer h.close(t)
+func TestBindSessionWorkspace_CheckoutNoOp_DoesNotEmitSessionsChanged(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	defer h.closeDB()
 	events := &promoteEventCapture{}
 	h.api.emitEvent = events.emit
 
-	info, err := h.api.createLocalFallbackSession(h.projectID, h.workspace, "main")
-	if err != nil {
-		t.Fatalf("createLocalFallbackSession: %v", err)
+	fresh := newFreshLocalSession(t, h)
+	// Discard the eager creation's own emission: the assertion below must
+	// observe the bind's (non-)emission only.
+	events.names = nil
+	// The checkout-held branch is a deliberate no-op bind: the session
+	// already executes exactly there, the session list does not mutate,
+	// so the bind itself must not fire sessions:changed.
+	if err := h.api.bindSessionWorkspace(context.Background(), fresh.ID, &SessionWorkspaceChoice{Branch: "main"}); err != nil {
+		t.Fatalf("bindSessionWorkspace on checkout-held branch: %v", err)
 	}
-	if info == nil || info.ID == "" {
-		t.Fatalf("invalid session: %+v", info)
-	}
-	if !events.has(EventSessionsChanged) {
-		t.Fatal("sessions:changed must be emitted after the local fallback creation")
+	if events.has(EventSessionsChanged) {
+		t.Fatal("sessions:changed must not be emitted by a no-op checkout bind")
 	}
 }
 

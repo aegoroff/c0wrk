@@ -105,7 +105,8 @@ func TestGoalSuggestRoutingEligible(t *testing.T) {
 // TestRunGoalSuggestionGate_Outcomes drives the gate's decision matrix with a
 // stubbed classifier and proposer: accept, decline (suppresses), classifier
 // failure (fail open, no suppression), proposer failure (fail open, no
-// suppression), and a not-suited verdict (no suppression).
+// suppression), a not-suited verdict (no suppression), and a suggested
+// verdict without explicitly stated criteria (no suppression).
 func TestRunGoalSuggestionGate_Outcomes(t *testing.T) {
 	routing := &router.RoutingDecision{Domain: router.DomainCode, Complexity: 4}
 	tests := []struct {
@@ -119,14 +120,14 @@ func TestRunGoalSuggestionGate_Outcomes(t *testing.T) {
 	}{
 		{
 			name:          "accepted",
-			suggestion:    GoalSuggestion{Suggest: true, Reason: "obvious goal"},
+			suggestion:    GoalSuggestion{Suggest: true, ExplicitCriteria: true, Reason: "obvious goal"},
 			proposer:      &stubGoalSuggestionProposer{accepted: true},
 			want:          gateAccepted,
 			wantProposals: 1,
 		},
 		{
 			name:          "declined suppresses the session",
-			suggestion:    GoalSuggestion{Suggest: true, Reason: "obvious goal"},
+			suggestion:    GoalSuggestion{Suggest: true, ExplicitCriteria: true, Reason: "obvious goal"},
 			proposer:      &stubGoalSuggestionProposer{accepted: false},
 			want:          gateDeclined,
 			wantSupressed: true,
@@ -140,7 +141,7 @@ func TestRunGoalSuggestionGate_Outcomes(t *testing.T) {
 		},
 		{
 			name:          "proposer error fails open without suppression",
-			suggestion:    GoalSuggestion{Suggest: true, Reason: "obvious goal"},
+			suggestion:    GoalSuggestion{Suggest: true, ExplicitCriteria: true, Reason: "obvious goal"},
 			proposer:      &stubGoalSuggestionProposer{err: errors.New("ui gone")},
 			want:          gateNoSuggestion,
 			wantProposals: 1,
@@ -148,6 +149,12 @@ func TestRunGoalSuggestionGate_Outcomes(t *testing.T) {
 		{
 			name:       "not suited never reaches the proposer",
 			suggestion: GoalSuggestion{Suggest: false},
+			proposer:   &stubGoalSuggestionProposer{accepted: true},
+			want:       gateNoSuggestion,
+		},
+		{
+			name:       "suggested without explicit criteria never reaches the proposer",
+			suggestion: GoalSuggestion{Suggest: true, ExplicitCriteria: false, Reason: "implicit goal"},
 			proposer:   &stubGoalSuggestionProposer{accepted: true},
 			want:       gateNoSuggestion,
 		},

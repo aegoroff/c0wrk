@@ -24,10 +24,7 @@ import (
 func TestGetSessionWorkspace_ManagedSessionOfActiveProjectReturnsOwnTree(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 	local, err := h.manager.CreateSession(h.project.ID, h.project.WorkspacePath)
 	if err != nil {
 		t.Fatalf("CreateSession (local): %v", err)
@@ -61,10 +58,7 @@ func TestGetSessionWorkspace_ManagedSessionOfActiveProjectReturnsOwnTree(t *test
 func TestGetSessionWorkspace_ForeignProjectSessionDoesNotLeak(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 
 	foreignPath := filepath.Join(t.TempDir(), "other-project")
 	if err := os.MkdirAll(foreignPath, 0o755); err != nil {
@@ -92,10 +86,7 @@ func TestGetSessionWorkspace_ForeignProjectSessionDoesNotLeak(t *testing.T) {
 func TestGetFileDiff_WorktreeFileDiffsInItsOwnRepo(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 	tree := managed.WorkspaceBinding.WorkspacePath
 
 	// Modify a tracked file (the seed commit's file.txt) inside the tree.
@@ -126,10 +117,7 @@ func TestGetFileDiff_WorktreeFileDiffsInItsOwnRepo(t *testing.T) {
 func TestResolveWorkspacePath_AcceptsWorktreePaths(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 	tree := managed.WorkspaceBinding.WorkspacePath
 	inner := filepath.Join(tree, "src", "app.go")
 
@@ -161,10 +149,7 @@ func TestResolveWorkspacePath_AcceptsWorktreePaths(t *testing.T) {
 // supported by the traversal gate for previously provisioned trees.
 func TestManagedWorktreesDirOutsideRepo(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 	container, err := config.NewManagedWorktreesDir(h.agentDir, h.project.ID, "")
 	if err != nil {
 		t.Fatal(err)
@@ -196,13 +181,18 @@ func TestManagedWorktreesDirOutsideRepo(t *testing.T) {
 func TestGetSessionWorkspace_ResidentSessionWithoutStoreRowFallsBackToMemory(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 
-	managed, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	managed := h.api.mustManagedSession(t, "", true, "")
 	want := managed.WorkspaceBinding.WorkspacePath
 	if want == h.project.WorkspacePath {
 		t.Fatalf("precondition broken: managed workspace equals the checkout")
+	}
+
+	// The bind's eviction leaves the session non-resident by design (the
+	// send's own access restores it); make it resident again — a lazy
+	// restore against the persisted binding — before the row goes. The
+	// fallback under test needs a RESIDENT session.
+	if _, ok := h.manager.GetSession(managed.ID); !ok {
+		t.Fatal("managed session did not restore after the bind eviction")
 	}
 
 	// Remove the persisted row: the managed session stays RESIDENT (in-memory

@@ -20,6 +20,9 @@ const { messagesRef, EMPTY_WORK_UNITS, itemsCaptured, chatStoreFns, chatStoreSta
   chatStoreFns: {
     addMessage: vi.fn(),
     mergeHistoryMessages: vi.fn(),
+    // ChatArea materializes the confirmed-empty transcript for a zero-row
+    // history (ADR-091's freshness contract) alongside the merge.
+    ensureEmptyTranscript: vi.fn(),
     setTaskActive: vi.fn(),
     // The shared loader's finally settles the history-load marker.
     markHistoryLoaded: vi.fn(),

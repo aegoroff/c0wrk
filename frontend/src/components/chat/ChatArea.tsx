@@ -114,7 +114,11 @@ export function ChatArea() {
         sessionId: activeSessionId,
         type: 'error',
         content: 'Failed to load session history. Please try switching sessions.',
-        metadata: {},
+        // Same freshness-predicate contract as the load-phase card inside
+        // reloadSessionHistory: a reload failure (this catch covers the
+        // reconcile phase) must never read as a "confirmed empty"
+        // transcript (see SessionWorkspaceSelector.isFresh).
+        metadata: { historyLoadFailed: true },
         timestamp: Date.now(),
       })
     })

@@ -21,6 +21,9 @@ export function makeEmbeddedStatus(
     installing: false,
     loading: false,
     loaded: false,
+    engine: '',
+    python_version: '',
+    pack_revision: '',
     packing: '',
     backend: '',
     port: 0,
@@ -83,6 +86,7 @@ export function makeColdEmbeddedStatus(
   return makeEmbeddedStatus({
     state: 'installed',
     installed: true,
+    engine: '',
     packing: 'PQ2_0',
     backend: 'metal',
     port: 43211,

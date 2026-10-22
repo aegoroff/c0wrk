@@ -133,7 +133,7 @@ describe('sendMessage forwards MCP server mentions', () => {
     expect(args[4]).toEqual(['context7'])
     // modelOverride stays in position 6 right after the mention lists.
     expect(args[5]).toBe('')
-    expect(args).toHaveLength(12)
+    expect(args).toHaveLength(13)
   })
 
   it('defaults activeMCPServers to an empty array when omitted', async () => {
@@ -147,7 +147,7 @@ describe('sendMessage forwards MCP server mentions', () => {
 
     const args = calls[0]!
     expect(args[4]).toEqual([])
-    expect(args).toHaveLength(12)
+    expect(args).toHaveLength(13)
   })
 })
 
@@ -176,8 +176,9 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     expect(args[8]).toBe('{"max_turns":5}') // goalBudget
     expect(args[9]).toBe(true) // e2s — the wiring under test
     expect(args[10]).toBe(true) // reviewMode
-    expect(args[11]).toBe('') // clientSendId — the LAST arg (echo-dedup id)
-    expect(args).toHaveLength(12)
+    expect(args[11]).toBe('') // clientSendId — the echo-dedup id
+    expect(args[12]).toBeNull() // workspace — null on an ordinary send
+    expect(args).toHaveLength(13)
   })
 
   it('defaults e2s to false (and reviewMode stays false) when omitted', async () => {
@@ -193,14 +194,15 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     expect(args[9]).toBe(false)
     expect(args[10]).toBe(false)
     expect(args[11]).toBe('')
-    expect(args).toHaveLength(12)
+    expect(args[12]).toBeNull() // workspace defaults to null too
+    expect(args).toHaveLength(13)
   })
 })
 
 // clientSendId must land in the EXACT Go-binding argument position 12 (after
 // reviewMode): the message_received echo carries it back and the sending
 // surface dedups the echo by this id. A drift here silently disables the
-// id-based echo dedup — or shifts reviewMode.
+// id-based echo dedup — or shifts reviewMode/workspace.
 describe('sendMessage forwards the client send id positionally', () => {
   beforeEach(() => {
     delete mockApp.SendMessage
@@ -218,7 +220,8 @@ describe('sendMessage forwards the client send id positionally', () => {
     const args = calls[0]!
     expect(args[10]).toBe(false) // reviewMode stays put
     expect(args[11]).toBe('opt-1')
-    expect(args).toHaveLength(12)
+    expect(args[12]).toBeNull() // workspace still closes the list
+    expect(args).toHaveLength(13)
   })
 
   it('defaults clientSendId to an empty string when omitted', async () => {
@@ -232,7 +235,8 @@ describe('sendMessage forwards the client send id positionally', () => {
 
     const args = calls[0]!
     expect(args[11]).toBe('')
-    expect(args).toHaveLength(12)
+    expect(args[12]).toBeNull() // workspace defaults to null too
+    expect(args).toHaveLength(13)
   })
 })
 

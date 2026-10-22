@@ -1,10 +1,11 @@
-// Tests for the New Session gesture's draft flow (useSessionActions).
+// Tests for the session-creation gestures of useSessionActions.
 //
-// In a CODE project, New Session arms a session draft (ADR-080) instead of
-// creating a session row — no RPC runs, no session becomes active; the draft
-// is committed later by the first send / attachment / terminal open (see
-// lib/sessionDraft.test.ts). In CHAT (No Project) mode the gesture keeps
-// the legacy eager creation.
+// Both "New Session" and "new session on branch X" eagerly create the
+// session row (ADR-091): a CODE session is born LOCAL and immediately
+// active, with a CONFIRMED-EMPTY transcript seeded (the workspace picker's
+// freshness contract) and — for the per-branch gesture — the fresh window's
+// pending workspace choice preset. In CHAT (No Project) mode the same eager
+// creation runs.
 //
 // No @testing-library/react in this repo; we follow the established
 // createRoot + jsdom harness pattern (see useMessageSender.test.tsx).
@@ -45,7 +46,7 @@ import { useSessionActions, type PendingSessionAction } from '@/hooks/useSession
 import { SessionActionConfirmDialog } from '@/components/layout/SessionActionConfirmDialog'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useChatStore } from '@/stores/chatStore'
 
 let captured: ReturnType<typeof useSessionActions> | null = null
@@ -95,7 +96,7 @@ beforeEach(() => {
   spies.deleteSession.mockReset().mockResolvedValue(undefined)
   spies.pinSession.mockReset().mockResolvedValue(undefined)
   spies.logError.mockReset()
-  useSessionDraftStore.getState().clearDraft()
+  useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   useSessionStore.setState({ sessions: [], activeSessionId: null })
   // Group actions consult the live busy overlay — start every test from an
   // idle chat state so busy-ness comes only from the fixture under test.
@@ -123,33 +124,35 @@ afterEach(() => {
   captured = null
 })
 
-describe('handleNewSession — draft flow', () => {
-  it('CODE project: arms a local draft and creates NO session', async () => {
+describe('handleNewSession — eager creation (ADR-091)', () => {
+  it('CODE project: eagerly creates a LOCAL session and selects it', async () => {
+    spies.createSession.mockResolvedValue(makeSession('s-new'))
     await act(async () => {
       await captured!.handleNewSession()
     })
 
-    expect(spies.createSession).not.toHaveBeenCalled()
-    expect(useSessionStore.getState().activeSessionId).toBeNull()
-    expect(useSessionDraftStore.getState().draft).toEqual({
-      projectId: 'proj-1',
-      workspace: { kind: 'local' },
-    })
+    expect(spies.createSession).toHaveBeenCalledOnce()
+    expect(useSessionStore.getState().activeSessionId).toBe('s-new')
+    expect(useSessionStore.getState().sessions?.some((s) => s.id === 's-new')).toBe(true)
+    // No workspace choice is armed by the bare gesture — the session is
+    // born local, and a worktree needs an explicit pick.
+    expect(useSessionWorkspaceStore.getState().choices).toEqual({})
   })
 
-  it('CODE project: clears the previously active session in memory (no persistence write)', async () => {
+  it('CODE project: keeps the previously active session in the list', async () => {
+    spies.createSession.mockResolvedValue(makeSession('s-new'))
     useSessionStore.setState({ activeSessionId: 's-prev', sessions: [makeSession('s-prev')] })
 
     await act(async () => {
       await captured!.handleNewSession()
     })
 
-    expect(useSessionStore.getState().activeSessionId).toBeNull()
+    expect(useSessionStore.getState().activeSessionId).toBe('s-new')
     // The previous session stays in the list — only the selection moved.
     expect(useSessionStore.getState().sessions?.some((s) => s.id === 's-prev')).toBe(true)
   })
 
-  it('CHAT (No Project): keeps the legacy eager creation', async () => {
+  it('CHAT (No Project): the same eager creation', async () => {
     spies.createSession.mockResolvedValue(
       makeSession('s-chat', '__no_project__'),
     )
@@ -164,69 +167,70 @@ describe('handleNewSession — draft flow', () => {
 
     expect(spies.createSession).toHaveBeenCalledOnce()
     expect(useSessionStore.getState().activeSessionId).toBe('s-chat')
-    expect(useSessionDraftStore.getState().draft).toBeNull()
   })
 
-  it('re-arming resets the workspace choice — every New Session starts local', async () => {
-    await act(async () => {
-      await captured!.handleNewSession()
-    })
-    useSessionDraftStore
-      .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '' })
-
+  it('surfaces a creation failure as createError', async () => {
+    spies.createSession.mockRejectedValue(new Error('backend down'))
     await act(async () => {
       await captured!.handleNewSession()
     })
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(spies.logError).toHaveBeenCalled()
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
   })
 })
 
-describe('handleNewSessionOnBranch — grouped-view per-branch draft', () => {
-  it('CODE project: arms a branch draft (no createBranch) and creates NO session', () => {
-    act(() => {
-      captured!.handleNewSessionOnBranch('feat/a')
-    })
-
-    // No RPC — the draft commits later, on the first real action.
-    expect(spies.createSession).not.toHaveBeenCalled()
-    // The drafted workspace pins the branch; createBranch=false because the
-    // branch already exists (CreateManagedSession adopts its managed tree).
-    expect(useSessionDraftStore.getState().draft).toEqual({
-      projectId: 'proj-1',
-      workspace: { kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' },
-    })
-  })
-
-  it('CODE project: clears the active session in memory, like New Session', () => {
-    useSessionStore.setState({ activeSessionId: 's-prev', sessions: [makeSession('s-prev')] })
-
-    act(() => {
-      captured!.handleNewSessionOnBranch('feat/a')
-    })
-
-    expect(useSessionStore.getState().activeSessionId).toBeNull()
-  })
-
-  it('replaces an armed draft with the branch choice', async () => {
+describe('handleNewSessionOnBranch — grouped-view per-branch gesture', () => {
+  it('CODE project: eagerly creates the session and presets its branch choice', async () => {
+    spies.createSession.mockResolvedValue(makeSession('s-new'))
     await act(async () => {
-      await captured!.handleNewSession()
+      captured!.handleNewSessionOnBranch('feat/a')
     })
 
-    act(() => {
-      captured!.handleNewSessionOnBranch('feat/b')
-    })
-
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    // The row is born immediately (local) — no draft state.
+    expect(spies.createSession).toHaveBeenCalledOnce()
+    expect(useSessionStore.getState().activeSessionId).toBe('s-new')
+    // The fresh window's pending choice pins the branch; createBranch=false
+    // because the branch already exists (the first send adopts its tree).
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
       kind: 'branch',
-      branch: 'feat/b',
+      branch: 'feat/a',
       createBranch: false,
       startPoint: '',
     })
+    // The transcript is seeded CONFIRMED-EMPTY from birth: the selector's
+    // freshness contract needs the index to EXIST — without it the picker
+    // stays locked behind the permanent pin and the preset choice is
+    // invisible until the history loader settles (the choice itself still
+    // rides the first send, but the user cannot see or change it).
+    const index = useChatStore.getState().messages['s-new']
+    expect(index).toBeDefined()
+    expect(Object.keys(index!)).toHaveLength(0)
   })
 
-  it('CHAT (No Project): deliberate no-op — no draft, no session', () => {
+  it('CODE project: the choice is keyed to the NEW session, not the previous one', async () => {
+    spies.createSession.mockResolvedValue(makeSession('s-new'))
+    useSessionStore.setState({ activeSessionId: 's-prev', sessions: [makeSession('s-prev')] })
+
+    await act(async () => {
+      captured!.handleNewSessionOnBranch('feat/a')
+    })
+
+    expect(useSessionWorkspaceStore.getState().choices['s-prev']).toBeUndefined()
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toBeDefined()
+  })
+
+  it('CODE project: a creation failure leaves no choice behind', async () => {
+    spies.createSession.mockRejectedValue(new Error('backend down'))
+    await act(async () => {
+      captured!.handleNewSessionOnBranch('feat/a')
+    })
+
+    expect(spies.logError).toHaveBeenCalled()
+    expect(useSessionWorkspaceStore.getState().choices).toEqual({})
+  })
+
+  it('CHAT (No Project): deliberate no-op — no session, no choice', () => {
     useProjectStore.setState({
       activeProjectId: '__no_project__',
       projects: [makeProject({ id: '__no_project__', is_no_project: true })],
@@ -236,8 +240,8 @@ describe('handleNewSessionOnBranch — grouped-view per-branch draft', () => {
       captured!.handleNewSessionOnBranch('feat/a')
     })
 
-    expect(useSessionDraftStore.getState().draft).toBeNull()
     expect(spies.createSession).not.toHaveBeenCalled()
+    expect(useSessionWorkspaceStore.getState().choices).toEqual({})
   })
 })
 

@@ -2155,7 +2155,7 @@ goal_loop:
 }
 
 // TestGoalSuggestConfig_DefaultsOn verifies that the goal-mode suggestion
-// gate defaults to ENABLED with the complexity-2 consult floor when the
+// gate defaults to ENABLED with the complexity-3 consult floor when the
 // suggest section is absent.
 func TestGoalSuggestConfig_DefaultsOn(t *testing.T) {
 	content := securityGroupsTestBase
@@ -2169,8 +2169,8 @@ func TestGoalSuggestConfig_DefaultsOn(t *testing.T) {
 	if !cfg.GoalLoop.Suggest.SuggestEnabled() {
 		t.Errorf("expected goal_loop.suggest to default to enabled (nil pointer), got disabled")
 	}
-	if cfg.GoalLoop.Suggest.MinComplexity != 2 {
-		t.Errorf("expected default min_complexity 2, got %d", cfg.GoalLoop.Suggest.MinComplexity)
+	if cfg.GoalLoop.Suggest.MinComplexity != 3 {
+		t.Errorf("expected default min_complexity 3, got %d", cfg.GoalLoop.Suggest.MinComplexity)
 	}
 }
 

@@ -62,6 +62,12 @@ const (
 // renderer failure signatures (the grey/blank-window class, wails#2977).
 const GpuFallbackReasonDmabufFailure = "dmabuf_render_failure"
 
+// GpuFallbackReasonWaylandProtocolError is the fallback reason the next-start
+// post-mortem writes when the previous fresh-auto run died on a fatal Wayland
+// protocol error (GDK exits the process before DomReady, so the in-run
+// watchdog never gets to scan).
+const GpuFallbackReasonWaylandProtocolError = "wayland_protocol_error"
+
 // NormalizeWebviewGpuPolicy parses a WebviewGpuPolicyEnvVar value into the
 // canonical spelling. The env alphabet carries no "auto": the variable is an
 // explicit override, and auto resolution belongs to the persisted setting.

@@ -19,7 +19,7 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 
 - `core/workspace/worktrees.go` — the safe git-worktree primitive service: `ListWorktrees` (strict porcelain parsing, main/managed/external classification), `AddWorktree`/`RecreateWorktree`/`RemoveWorktree`/`PruneWorktrees` with per-repo serialization, branch-occupancy validation, structural path validation and the explicit failure taxonomy; installs the `/.worktrees/` exclusion into the common dir's `info/exclude`
 - `backend/worktrees/owner.go` — `Owner`: the backend ownership coordinator (Provision/Recreate/Release/List/Inspect); every path constructed/validated through centralized config helpers; existing identities resolve independently of the creation root, managed-only mutation, release never deletes branches
-- `backend/frontend_api_worktrees.go` — the Git lifecycle owner driving the coordinator from the session flows: `CreateManagedSession` (draft → provision → `CreateSessionFromDraft` → persist, compensated on runtime/DB failure), the `WorkspaceEnsurer` installed on the session manager (restore validation + recreation warning), `forkManagedSession` (new tree at source committed HEAD), and the deletion protocol (`DeleteSessionWithOptions`, `SessionDeleteBlockedError`)
+- `backend/frontend_api_worktrees.go` — the Git lifecycle owner driving the coordinator from the session flows: `bindSessionWorkspace` (ADR-091's send-time binding — freshness/re-bind guards → provision-or-adopt dispatch → atomic fresh-window persist → terminal stop → eviction, compensated on runtime/DB failure), the `WorkspaceEnsurer` installed on the session manager (restore validation + recreation warning), `forkManagedSession` (new tree at source committed HEAD), and the deletion protocol (`DeleteSessionWithOptions`, `SessionDeleteBlockedError`)
 - `core/pathsegments.go` — `WorktreesRelativePath` (the shared `.worktrees` segment constant)
 - `backend/session/workspace_binding.go` — `WorkspaceKind`, `WorkspaceBinding`, `WorkspaceEnsurer`, `NormalizeWorkspaceBinding`, `SessionDraft`/`NewSessionDraft`, context DTOs (`ProjectContext`, `GitPanelTarget`, `SessionContexts`)
 - `backend/session/workspace_context.go` — `ResolveSessionContexts` (execution workspace vs Git-panel target)
@@ -35,9 +35,9 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `backend/vector_roots.go` — the per-root registry (ADR-081): one `vectorindex.Manager` per workspace root (single-flight creation, LRU-bounded live set with the focus pinned), agent-side routing by the executor context's workspace root, `ApplyFocus`/`LeaveFocus`, `Release`/`ReleaseProject`/`ShutdownAll`, and `Application.buildVectorRouter` (the shared search closures)
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
 - `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
-- `frontend/src/stores/sessionDraftStore.ts` + `frontend/src/lib/sessionDraft.ts` — the chat-side draft UX: the pending New-Session draft (project + drafted workspace) and `createSessionFromDraft()`, the single commit path that routes a branch draft to `CreateManagedSession` and everything else to `CreateSession`
-- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the draft's selection surfaces: the chat toolbar selector (`local` / `branch…`, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — a `createBranch=false` draft, so `CreateManagedSession` adopts the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated draft mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch draft — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in draft mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management; in manage mode both surfaces render the ACTIVE managed session's pin (`frontend/src/hooks/useSessionWorktreePin.ts`) — a lock instead of the check on the pinned branch and the session's own tree row, no delete affordance on either, and a disabled Rename on the pinned branch (see the focus model's pin-rendering bullet)
-- `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the draft commit's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside (not inside) the locked workspace trigger
+- `frontend/src/stores/sessionWorkspaceStore.ts` — the chat-side pending-choice state (ADR-091): per-fresh-session recorded workspace choices plus the single-slot `consumingFor` consumption window; transient by design
+- `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the choice's selection surfaces: the chat toolbar selector (`local` / `branch…` while the active session is FRESH, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — presets a `createBranch=false` choice, so the first send ADOPTS the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated pick mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch request — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in pick mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management; in manage mode both surfaces render the ACTIVE managed session's pin (`frontend/src/hooks/useSessionWorktreePin.ts`) — a lock instead of the check on the pinned branch and the session's own tree row, no delete affordance on either, and a disabled Rename on the pinned branch (see the focus model's pin-rendering bullet)
+- `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the send-time bind's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside the chosen branch label while the consumption window is open
 
 ## Core Types
 
@@ -63,62 +63,70 @@ the frontend API as-is; `Session.WorkspaceBinding()` returns a defensive copy.
 
 ## Flow
 
-### Creation (managed)
+### Binding (managed — the first send, ADR-091)
 
-The chat-side draft UX feeds this RPC: New Session arms a draft
-(`sessionDraftStore`); the chat toolbar's workspace selector, the
-BranchPicker's draft mode, and the session selector's grouped view (each
-managed branch row's "+" action arms a `createBranch=false` draft for that
-branch — `useSessionActions.handleNewSessionOnBranch`) record the choice
-(`local` or a branch — selection never checks out; a REMOTE-tracking pick
-records a create-branch draft: local branch = the remote ref's short name,
-start point = the remote-tracking ref); the first send / attachment / paste /
-terminal open commits it via `lib/sessionDraft.createSessionFromDraft()`,
-which calls `CreateManagedSession` for a branch draft and `CreateSession`
-otherwise.
+The chat-side choice feeds `SendMessage`'s `workspace` argument: New Session
+eagerly creates a plain LOCAL session row; the chat toolbar's workspace
+selector, the BranchPicker's pick mode, and the session selector's grouped
+view (each managed branch row's "+" action presets a `createBranch=false`
+choice for that branch — `useSessionActions.handleNewSessionOnBranch`) record
+the pending choice in `sessionWorkspaceStore` (`local` or a branch —
+selection never checks out; a REMOTE-tracking pick records a create-branch
+request: local branch = the remote ref's short name, start point = the
+remote-tracking ref). The FRESH session's FIRST send carries the choice as
+the `workspace` argument (a local choice — or none — sends null and stays
+local); `bindSessionWorkspace` provisions/adopts, persists the binding inside
+the fresh window, and evicts the in-memory session so the send's own access
+restores an orchestrator built for the new workspace.
 
-The picker's draft mode keeps every offered target provisionable: the
+The picker's pick mode keeps every offered target provisionable: the
 working tree's own branch row is disabled (a worktree needs a free branch),
 and a remote-tracking row whose LOCAL twin (the ref's short name) is that
 branch is disabled the same way — its pick would DWIM-reuse the checkout's
 branch and land the session in the shared checkout instead of a worktree.
 The create form refuses a submit naming an existing local branch (the DWIM
-reuse would silently ignore the explicitly chosen base); the non-draft
+reuse would silently ignore the explicitly chosen base); the non-pick
 Manage-Branches form needs no such guard — the backend refuses with its own
 explicit "branch already exists" error.
 
-While the managed creation RPC is pending, the chat toolbar renders a small
-spinner beside the workspace selector, without a visible label. Its accessible
-name and hover/focus tooltip are `Preparing worktree…`; the accessible name is
+While the send's bind is running, the chat toolbar renders a small spinner
+beside the chosen branch label, without a visible label. Its accessible name
+and hover/focus tooltip are `Preparing worktree…`; the accessible name is
 carried as the `role="status"` live region's own text content (a visually
 hidden `sr-only` span) rather than an `aria-label` — a live region announces its
-content, so screen readers reliably announce it on insertion. The focusable
-indicator is outside the disabled selector trigger, so its hint remains
-reachable while workspace selection is locked. It uses the existing `sessionDraftStore.committing`
-lifecycle, not an independent busy flag. `setCommitting(true)` captures the
-committed draft as `committingDraft` (project and workspace); the spinner is
-shown only for a branch snapshot owned by the active project in draft mode.
-Retiring or replacing the selection draft during navigation never attributes
-an old project's RPC to a new project's draft. The same lifecycle clears both
-`committing` and its snapshot in `finally`, on success or failure. The spinner
-covers the whole RPC wait, including synchronous embedding-cache seeding; it
-neither moves provisioning earlier nor makes the cache seed asynchronous.
-Local creation, another project's RPC, existing-session pinned chips, and
-selectors hidden by the No-Project/no-active-project gates show
-no preparation spinner. Existing-session workspace pins remain immutable.
+content, so screen readers reliably announce it on insertion. The indicator is
+reachable while workspace selection is locked. It uses the store's
+single-slot `consumingFor` consumption window, not an independent busy flag:
+`beginConsumption` opens it only for a send carrying a non-null workspace
+choice (a second concurrent send carrying a choice is refused — one window at
+a time), `endConsumption` settles it in `finally`, on success or failure.
+The window replaces BOTH the fresh picker and the pinned chip with the
+spinner + the chosen branch label: the pre-send binding would assert the
+opposite of what is happening for the whole provisioning wait (a full
+checkout, up to `managedProvisionTimeout`). Local-only sends, another
+session's window, and selectors hidden by the No-Project/no-active-project
+gates show no preparation spinner. Existing-session workspace pins remain
+immutable.
 
 ```
-UI → RPC CreateManagedSession(branch, createBranch, startPoint)
-  → NewSessionDraft(projectID, nil)                 // identity reserved, nothing created
+UI → SendMessage(..., workspace: SessionWorkspaceChoice)
+  → freshness pre-checks (no unfinished task, no runtime task)  // nothing touched yet
+  → re-bind guard: a window whose persisted binding is already
+    managed accepts only the SAME choice (no-op success); a DIFFERENT
+    one is the typed ErrWorkspaceAlreadyChosen refusal — a re-selection
+    can never silently re-provision (orphaning the first tree) or no-op
   → binding validated (NormalizeWorkspaceBinding)   // BEFORE any git runs
   → branch-holder lookup (createBranch=false, or a create request whose
     branch ALREADY exists — the DWIM rule below)    // git allows one worktree per branch
-      managed tree holds it  → ADOPT: binding re-pinned to the holder's tree
-                               name; Owner.Recreate re-validates (no-op /
+      managed tree holds it  → ADOPT: binding persisted to the holder's
+                               tree name; Owner.Recreate re-validates (no-op /
                                prune+recreate / explicit mismatch failure);
-                               no compensation — the tree is not ours
-      main checkout holds it → silent LOCAL fallback (Manager.CreateSession in
-                               the checkout; best-effort persistence)
+                               post-bind Inspect re-validates under the
+                               adoption↔deletion critical section; no
+                               compensation — the tree is not ours
+      main checkout holds it → deliberate no-op success: the fresh session
+                               already executes exactly there; the local
+                               binding stays
       external tree holds it → typed ErrBranchBusy refusal naming the tree
       no holder              → provision below
   → worktrees.Owner.ProvisionNewBranch / ProvisionBranch
@@ -126,9 +134,23 @@ UI → RPC CreateManagedSession(branch, createBranch, startPoint)
                                                     // <base>/<project-id>/worktrees/s-<short id>;
                                                     // branch occupancy validated; legacy
                                                     // /.worktrees/ exclusion retained
-  → Manager.CreateSessionFromDraft(draft, repoRoot) // validates, then builds orchestrator
-  → store.SaveSession(info)                         // persisted binding REQUIRED
+  → store.BindSessionWorkspace(...)                 // persisted binding REQUIRED,
+                                                    // one atomic fresh-window statement
+  → stop the session terminal (session:<id>:terminal_exited — the shell
+    resurrects in the new workspace) → Manager.EvictSessionCarryingAttachments
+    (through FrontendAPI.bindEvict: the staged attachments are captured
+    under the same critical section and re-staged on the restored session)
+    → the send's own session access lazily restores into the tree
 ```
+
+Every failure before the persist leaves NOTHING behind (no activity bump, no
+message row, no task — the send is rejected and the session stays fresh). A
+failure after the persist compensates: the freshly provisioned tree is
+released ONLY on a confirmed binding rollback — a rollback the store refused
+(the fresh window closed: a parallel send started a task) keeps the tree,
+because the persisted binding still names it and releasing it would strand
+the binding on a missing path; adopted trees are never touched; the created
+branch is kept — no path ever deletes branches.
 
 DWIM creation (git switch semantics): `createBranch=true` is an
 ensure-the-branch request, never an unconditional re-create. Before any git
@@ -140,7 +162,7 @@ this is how a remote-tracking pick lands: branch `x` from start point
 ref's commit. An ALREADY EXISTING branch is never re-created or reset: the
 request falls through to the same branch-holder dispatch as an
 existing-branch pick (free → `ProvisionBranch` checks the existing branch
-out in the fresh tree; held → adopt / local fallback / typed busy refusal),
+out in the fresh tree; held → adopt / checkout no-op / typed busy refusal),
 so a colliding create can never move the branch under the user.
 
 Sharing (ADR-082): a branch held by an existing managed tree is REUSED — the
@@ -150,17 +172,20 @@ provisioning and commit, a lost session row) are adopted the same way, and a
 prunable orphan is repaired on adoption. The adoption commit re-validates the
 tree after the binding is persisted, inside the same critical section
 (`FrontendAPI.managedTreeMu`) as the release's [count → remove] pair below:
-when the last owner's deletion removed the tree in between, the
-just-committed session is rolled back (row and in-memory session removed; the
-branch is kept) and the creation fails with an explicit retryable error — a
-session can never survive bound to a tree that no longer exists (an in-memory
-session would get no restore ensurer until restart). Compensation: if the
-runtime commit or the persistence step fails after provisioning a FRESH tree,
-the in-memory session is removed and the fresh tree released (best-effort,
-logged); adopted trees are never touched; the created branch is KEPT — no
-operation in this path ever deletes a branch. `CreateSession(projectID,
-workspacePath)` remains the local/CHAT entry point and wraps the same path
-with a nil binding.
+when the last owner's deletion removed the tree in between, the just-committed
+BINDING is rolled back to the previous one (`rollbackSessionBinding` — a
+store rewrite only: the session row SURVIVES with its pre-bind binding, no
+in-memory session is ever removed) and the send fails with an explicit
+retryable error — a session can never survive bound to a tree that no longer
+exists (the regression test `TestBindSessionWorkspace_AdoptionLosingRaceRollsBack`
+pins the local restored binding and the fresh-tree retry). Compensation on
+the provisioned path: a persist failure releases the fresh tree
+(`compensateProvisionedTree`, best-effort, logged); a post-persist eviction
+failure rolls the binding back and releases the tree ONLY on a confirmed
+rollback (see above); adopted trees are never touched; the created branch is
+KEPT — no operation in this path ever deletes a branch. The eager
+`CreateSession` RPC (no arguments) creates the plain local row; provisioning
+lives exclusively in the first send's `bindSessionWorkspace`.
 
 #### Embedding-cache seeding
 
@@ -351,13 +376,13 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   frontend's Git-focus refresh (`refreshGitFocus`) re-reads the worktree
   list, landing the new tree in the Worktrees section; the tree's embedding
   cache is seeded best-effort, same contract as session provisioning.
-- The Worktrees section is shown in draft mode too: the draft picks a
+- The Worktrees section is shown in pick mode too: the pick records a
   BRANCH, but an existing worktree (e.g. a stale managed tree) can still be
   deleted — through the mandatory `WorktreeDeleteConfirmDialog` — without
-  leaving the chat-side draft picker; the deletion never touches the draft.
-  In draft mode `NewBranchSection`'s Worktree checkbox is disabled ("The
-  session always gets its own worktree"): the drafted session's branch
-  always lands in its own provisioned tree.
+  leaving the chat-side picker; the deletion never touches the recorded
+  choice. In pick mode `NewBranchSection`'s Worktree checkbox is disabled
+  ("The session always gets its own worktree"): the recorded branch always
+  lands in its own provisioned (or adopted) tree.
 - The pinned-branch decision: `CheckoutBranch`, `CreateBranch`,
   `CheckoutRemoteBranch`, and renaming the pinned branch are refused with
   `ErrPinnedWorktreeBranch` while the focus is a managed session worktree
@@ -381,8 +406,8 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   of the immutable binding), and the pinned branch row is a no-op click
   regardless of `is_current`. Focus switching stays allowed on
   every row, the locked ones included; other sessions' managed trees keep
-  their delete affordance. The pin props are dropped in draft mode —
-  `Choose Branch` selects a workspace for a NEW session and no session pin
+  their delete affordance. The pin props are dropped in pick mode —
+  `Choose Branch` selects a workspace for a FRESH session and no session pin
   exists there. This is a UI reflection of the server-side refusal above,
   never a second enforcement layer.
 - The managed-FOCUS refusal is rendered up front too: the same hook exposes
@@ -397,7 +422,7 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   the same reason. Not gated: the rows' hover actions (push, merge, rebase,
   rename, delete — none is focus-scoped), the Worktrees section's focus
   switching, and `NewBranchSection`'s "Worktree" path (it births a fresh
-  tree and never touches the focused one). In draft mode the gate is absent
+  tree and never touches the focused one). In pick mode the gate is absent
   — rows record an intent and nothing is checked out. The gate is a
   pre-emptive mirror of the same server-side refusal (a stale focus
   snapshot can still hit the live backend answer), never a second
@@ -537,17 +562,17 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 
 ## Extension Points
 
-- Frontend UI for the managed lifecycle: the draft-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…`, and the BranchPicker's draft mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch draft from the remote ref) into `sessionDraftStore`; provisioning runs at draft commit via `CreateManagedSession` with no in-place checkout. Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
+- Frontend UI for the managed lifecycle: the send-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…` while the active session is FRESH, and the BranchPicker's pick mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch request from the remote ref) into `sessionWorkspaceStore`; provisioning runs at the session's FIRST send via `SendMessage`'s `workspace` argument with no in-place checkout (ADR-091). Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
   (BranchPicker + BranchDropdown) and the
   follow-the-session sync (`useGitFocusSync`, mounted at the App root) —
   together with the panel-side management RPCs and their UI: `DeleteWorktree`
   behind the Worktrees section's hover delete (mandatory
-  `WorktreeDeleteConfirmDialog`, section shown in draft mode too) and
+  `WorktreeDeleteConfirmDialog`, section shown in pick mode too) and
   `CreateBranchInWorktree` behind `NewBranchSection`'s Worktree checkbox
   (branch + tree created from the base, focus never switched; disabled in
-  draft mode — a drafted session always gets its own worktree).
+  pick mode — the recorded choice always gets its own worktree).
   Extensions keep the same
   contract: the focus target stays UI state resolved server-side and is
   never written back into the session binding; `Owner.List`/`Inspect` back

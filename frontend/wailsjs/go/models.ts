@@ -2357,6 +2357,22 @@ export namespace backend {
 	        this.max_tokens = source["max_tokens"];
 	    }
 	}
+	export class SessionWorkspaceChoice {
+	    branch: string;
+	    create_branch: boolean;
+	    start_point: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionWorkspaceChoice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.branch = source["branch"];
+	        this.create_branch = source["create_branch"];
+	        this.start_point = source["start_point"];
+	    }
+	}
 	export class ShellExecToolSettings {
 	    command: string[];
 	    shell: string;

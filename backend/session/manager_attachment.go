@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -280,6 +281,221 @@ func (m *Manager) HasPendingAttachments(sessionID string) bool {
 	return len(sess.pendingAttachments) > 0 || len(sess.pendingImageAttachments) > 0
 }
 
+// PendingAttachmentSnapshot carries a session's staged (not yet flushed)
+// document and image attachments across an in-memory eviction. The pending
+// lists live only on the in-memory Session struct and are never persisted.
+// The only production producer is the capture inside
+// Manager.EvictSessionCarryingAttachments: the snapshot is taken under the
+// eviction's own critical section, so everything staged up to that point
+// rides along into the lazily restored session (the send's metadata read and
+// task-start snapshot still see it, via RestorePendingAttachments). Never
+// build a separate snapshot-then-evict pair around a plain eviction —
+// attachments staged between the two calls would be silently lost; that
+// race window is exactly why the capture lives inside the eviction.
+type PendingAttachmentSnapshot struct {
+	Docs   []orchestration.Attachment
+	Images []ImageAttachment
+}
+
+// Empty reports whether the snapshot carries nothing worth restoring.
+func (s *PendingAttachmentSnapshot) Empty() bool {
+	return s == nil || (len(s.Docs) == 0 && len(s.Images) == 0)
+}
+
+// SnapshotPendingAttachments copies the session's staged attachments into a
+// transferable snapshot. Test/inspection helper: no production flow calls
+// it, and it must never substitute the capture-carrying eviction — a
+// snapshot taken outside EvictSessionCarryingAttachments's critical section
+// misses anything staged in the race window. Memory-only: it never restores
+// a session as a side effect and returns an empty snapshot when the session
+// is not in memory (nothing staged, or nothing in memory to stage).
+func (m *Manager) SnapshotPendingAttachments(sessionID string) *PendingAttachmentSnapshot {
+	m.mu.RLock()
+	sess := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if sess == nil {
+		return nil
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	snap := &PendingAttachmentSnapshot{
+		Docs:   make([]orchestration.Attachment, len(sess.pendingAttachments)),
+		Images: make([]ImageAttachment, len(sess.pendingImageAttachments)),
+	}
+	copy(snap.Docs, sess.pendingAttachments)
+	copy(snap.Images, sess.pendingImageAttachments)
+	return snap
+}
+
+// RestorePendingAttachments re-stages a snapshot taken before an eviction on
+// the (lazily restored) session. Concurrently STAGED attachments are kept by
+// the staging side itself (appendPendingAttachments re-validates manager
+// membership after each append), and the restore side re-validates its OWN
+// append the same way: a second eviction racing the restore (the retrying
+// send's bind of the still-fresh window) would otherwise leave the snapshot
+// items on the orphaned object with no one left to re-stage them — the
+// second eviction's capture already ran before the items landed. Restoring
+// an empty snapshot is a no-op. The session is restored on demand, so this
+// must run only while the caller knows the restore is wanted (right after
+// the eviction whose flow keeps the attachments alive).
+func (m *Manager) RestorePendingAttachments(sessionID string, snap *PendingAttachmentSnapshot) error {
+	if snap.Empty() {
+		return nil
+	}
+	sess, err := m.getOrRestoreSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("restore staged attachments: %w", err)
+	}
+	if sess == nil {
+		return fmt.Errorf("restore staged attachments: session %q not found", sessionID)
+	}
+	return m.restorePendingAttachments(sessionID, sess, snap)
+}
+
+// restorePendingAttachments appends the snapshot under the membership
+// re-validation loop appendPendingAttachments runs: append under sess.mu,
+// then re-check manager membership AFTER sess.mu is released (never under
+// it: eviction takes m.mu → sess.mu, and inverting the order could
+// deadlock); on a mismatch the lazily restored session gets the snapshot
+// (the held-IDs dedupe keeps either settling order from staging a file
+// twice). The separated session parameter mirrors
+// appendPendingAttachments's signature so tests can drive the
+// orphaned-handle race deterministically.
+func (m *Manager) restorePendingAttachments(sessionID string, sess *Session, snap *PendingAttachmentSnapshot) error {
+	for attempt := 0; ; attempt++ {
+		sess.mu.Lock()
+		held := pendingAttachmentIDs(sess)
+		for _, doc := range snap.Docs {
+			if !held[doc.ID] {
+				sess.pendingAttachments = append(sess.pendingAttachments, doc)
+				held[doc.ID] = true
+			}
+		}
+		for _, img := range snap.Images {
+			if !held[img.ID] {
+				sess.pendingImageAttachments = append(sess.pendingImageAttachments, img)
+				held[img.ID] = true
+			}
+		}
+		sess.mu.Unlock()
+
+		m.mu.RLock()
+		live := m.sessions[sessionID] == sess
+		m.mu.RUnlock()
+		if live {
+			return nil
+		}
+		if attempt > 0 {
+			return errors.New("restore staged attachments: the session's workspace switched twice while restoring — the staged files were lost; re-attach them")
+		}
+		restored, err := m.getOrRestoreSession(sessionID)
+		if err != nil {
+			return fmt.Errorf("restore staged attachments across the workspace switch: %w", err)
+		}
+		if restored == nil {
+			return fmt.Errorf("restore staged attachments: session %q not found", sessionID)
+		}
+		sess = restored
+	}
+}
+
+// pendingAttachmentIDs returns the set of IDs currently staged on the
+// session's pending lists (documents and images alike). Caller holds sess.mu.
+func pendingAttachmentIDs(sess *Session) map[string]bool {
+	ids := make(map[string]bool, len(sess.pendingAttachments)+len(sess.pendingImageAttachments))
+	for _, doc := range sess.pendingAttachments {
+		ids[doc.ID] = true
+	}
+	for _, img := range sess.pendingImageAttachments {
+		ids[img.ID] = true
+	}
+	return ids
+}
+
+// appendPendingAttachments stages items on the session identified by
+// sessionID, guaranteeing they land on the session CURRENTLY registered under
+// that id — never on an orphaned in-memory object. The send-time workspace
+// bind evicts the in-memory session between its attachment snapshot and the
+// eviction itself; an append racing into that window would otherwise die with
+// the evicted object and silently lose the user's file. The re-validation
+// re-checks manager membership AFTER sess.mu is released (never under it:
+// eviction takes m.mu → sess.mu, and inverting the order could deadlock) and
+// re-stages on the lazily restored session when the object was evicted
+// mid-append — mirroring RestorePendingAttachments. Returns the pending-list
+// infos captured under the same critical section as the append plus the LIVE
+// session (which may differ from the passed one), so callers emit UI feedback
+// and derive follow-up state from what actually holds the items.
+func (m *Manager) appendPendingAttachments(sessionID string, sess *Session, docs []orchestration.Attachment, images []ImageAttachment) ([]AttachmentInfo, *Session, error) {
+	for attempt := 0; ; attempt++ {
+		var infos []AttachmentInfo
+		sess.mu.Lock()
+		// Dedupe against what the session already holds: when the re-stage
+		// path runs, the bind's snapshot may have carried these very items
+		// onto the restored session first (RestorePendingAttachments skips
+		// them symmetrically) — either settling order must stage once.
+		held := pendingAttachmentIDs(sess)
+		for _, doc := range docs {
+			if !held[doc.ID] {
+				sess.pendingAttachments = append(sess.pendingAttachments, doc)
+				held[doc.ID] = true
+			}
+		}
+		for _, img := range images {
+			if !held[img.ID] {
+				sess.pendingImageAttachments = append(sess.pendingImageAttachments, img)
+				held[img.ID] = true
+			}
+		}
+		infos = combinedAttachmentInfos(sess.pendingAttachments, sess.pendingImageAttachments)
+		sess.mu.Unlock()
+
+		// Re-validate after releasing sess.mu: if the session was evicted
+		// after our append, the bind's snapshot either captured it (taken
+		// under sess.mu after our append) or missed it — the latter case
+		// re-stages below.
+		m.mu.RLock()
+		live := m.sessions[sessionID] == sess
+		m.mu.RUnlock()
+		if live {
+			return infos, sess, nil
+		}
+		if attempt > 0 {
+			return nil, nil, errors.New("stage attachments: the session's workspace switched twice while attaching — retry the attach")
+		}
+		restored, err := m.getOrRestoreSession(sessionID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("stage attachments across the workspace switch: %w", err)
+		}
+		if restored == nil {
+			return nil, nil, fmt.Errorf("stage attachments: session %q not found", sessionID)
+		}
+		sess = restored
+	}
+}
+
+// EmitStagedAttachmentsLost reports a failed RestorePendingAttachments to the
+// UI. The staged files did not survive the workspace switch, so the backend's
+// pending lists are empty while the frontend chips may still show them; the
+// event carries the session's current pending list (the authoritative memory
+// state — typically empty) plus a per-file failure naming every snapshot item,
+// so the UI drops the stale chips and the user knows to re-attach. Best
+// effort: the send is rejected with the same information in its error text.
+func (m *Manager) EmitStagedAttachmentsLost(sessionID string, snap *PendingAttachmentSnapshot) {
+	if snap.Empty() {
+		return
+	}
+	infos, _ := m.GetSessionAttachments(sessionID)
+	failures := make([]AttachmentFailure, 0, len(snap.Docs)+len(snap.Images))
+	const reason = "could not be carried across the workspace switch — attach it again"
+	for _, doc := range snap.Docs {
+		failures = append(failures, AttachmentFailure{Path: doc.OriginalName, Error: reason})
+	}
+	for _, img := range snap.Images {
+		failures = append(failures, AttachmentFailure{Path: img.OriginalName, Error: reason})
+	}
+	m.emitAttachmentsChanged(sessionID, infos, failures)
+}
+
 // emitAttachmentsChanged emits an "attachments:changed" event for the given
 // session, carrying the current pending list (and optional failures). This is
 // the single emit point so the payload shape stays consistent across
@@ -410,28 +626,37 @@ func (m *Manager) AttachFiles(ctx context.Context, sessionID string, paths []str
 			AttachedAt:      time.Now(),
 		}
 
-		session.mu.Lock()
-		session.pendingAttachments = append(session.pendingAttachments, att)
-		infos := combinedAttachmentInfos(session.pendingAttachments, session.pendingImageAttachments)
-		session.mu.Unlock()
+		infos, live, stageErr := m.appendPendingAttachments(sessionID, session, []orchestration.Attachment{att}, nil)
+		if stageErr != nil {
+			// The append lost a workspace-switch race twice (or could not
+			// re-stage): surface it as a per-file failure instead of
+			// silently dropping the file.
+			failures = append(failures, AttachmentFailure{
+				Path:  filepath.Base(path),
+				Error: stageErr.Error(),
+			})
+			continue
+		}
+		session = live
 
 		// Incremental UI feedback: emit after each successful conversion so
 		// chips appear one-by-one rather than all-at-once after a long batch.
 		m.emitAttachmentsChanged(sessionID, infos, nil)
 	}
 
-	// Surface any per-file failures in a final event. The attachments field is
-	// the full current pending list so the UI store stays consistent.
-	if len(failures) > 0 {
-		session.mu.Lock()
-		infos := combinedAttachmentInfos(session.pendingAttachments, session.pendingImageAttachments)
-		session.mu.Unlock()
-		m.emitAttachmentsChanged(sessionID, infos, failures)
+	// Surface any per-file failures in a final event. The attachments field
+	// is the full current pending list so the UI store stays consistent.
+	// Memory-only authoritative read, shared with the return value: the loop
+	// above may have re-staged a racing append onto a lazily restored
+	// session, so the local reference is not guaranteed to be the registered
+	// one — one read keeps the event and the return consistent.
+	result, err := m.GetSessionAttachments(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list staged attachments: %w", err)
 	}
-
-	session.mu.Lock()
-	result := combinedAttachmentInfos(session.pendingAttachments, session.pendingImageAttachments)
-	session.mu.Unlock()
+	if len(failures) > 0 {
+		m.emitAttachmentsChanged(sessionID, result, failures)
+	}
 	return result, nil
 }
 
@@ -498,10 +723,15 @@ func (m *Manager) attachImage(session *Session, sessionID, path, imagesDir, disp
 		SizeBytes:    sizeBytes,
 	}
 
-	session.mu.Lock()
-	session.pendingImageAttachments = append(session.pendingImageAttachments, imgAtt)
-	infos := combinedAttachmentInfos(session.pendingAttachments, session.pendingImageAttachments)
-	session.mu.Unlock()
+	infos, _, stageErr := m.appendPendingAttachments(sessionID, session, nil, []ImageAttachment{imgAtt})
+	if stageErr != nil {
+		// The processed copy was already written; staging failed, so nothing
+		// references it — remove it or it orphans until session deletion.
+		if rmErr := os.Remove(imgPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			m.log().Debug("failed to remove unstageable image file", "path", imgPath, "error", rmErr)
+		}
+		return stageErr
+	}
 
 	m.emitAttachmentsChanged(sessionID, infos, nil)
 	return nil

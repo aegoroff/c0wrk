@@ -44,9 +44,13 @@ vi.mock('@/stores/sessionStore', () => ({
 }))
 
 // The session item reads live task state via the chat store + status indicator.
-// Provide a no-op chat store so the indicator resolves to 'idle'.
+// Provide a no-op chat store so the indicator resolves to 'idle'. The creation
+// gestures also seed the new session's confirmed-empty transcript through the
+// store's action surface (ADR-091).
 vi.mock('@/stores/chatStore', () => ({
-  useChatStore: () => 'idle',
+  useChatStore: Object.assign(() => 'idle', {
+    getState: () => ({ ensureEmptyTranscript: vi.fn() }),
+  }),
 }))
 
 import { SessionList } from './SessionList'

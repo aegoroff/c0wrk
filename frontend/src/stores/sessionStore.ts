@@ -27,9 +27,30 @@ function sortByActivity(sessions: SessionInfo[]): SessionInfo[] {
 const IGNORED_SESSION_FIELDS: ReadonlySet<string> = new Set(['active'])
 
 /**
+ * WorkspaceBinding equality for `sameSessionContent`: SessionInfo carries one
+ * OBJECT field — `workspace_binding` (ADR-091: the session's execution
+ * workspace, mirrored into the store by the sessions refresh after each
+ * workspace-carrying send) — so the record-wide shallow compare is not exact
+ * for it. Compare field-wise: each list delivery allocates a fresh binding
+ * object, and a reference compare would report every delivery as changed.
+ */
+function sameWorkspaceBinding(
+  a: SessionInfo['workspace_binding'],
+  b: SessionInfo['workspace_binding'],
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.kind === b.kind
+    && a.workspace_path === b.workspace_path
+    && a.worktree_name === b.worktree_name
+    && a.branch === b.branch
+}
+
+/**
  * Shallow content equality for two sessions, ignoring `IGNORED_SESSION_FIELDS`.
- * Every SessionInfo field is a primitive, so a shallow compare is exact. Used
- * by `setSessions` to tell a genuinely refreshed list from a duplicate
+ * Every SessionInfo field is a primitive EXCEPT `workspace_binding`, which is
+ * compared field-wise (see sameWorkspaceBinding) — the compare stays exact.
+ * Used by `setSessions` to tell a genuinely refreshed list from a duplicate
  * delivery of the same list.
  */
 function sameSessionContent(a: SessionInfo, b: SessionInfo): boolean {
@@ -39,6 +60,10 @@ function sameSessionContent(a: SessionInfo, b: SessionInfo): boolean {
   const keys = new Set([...Object.keys(aRecord), ...Object.keys(bRecord)])
   for (const key of keys) {
     if (IGNORED_SESSION_FIELDS.has(key)) continue
+    if (key === 'workspace_binding') {
+      if (!sameWorkspaceBinding(a.workspace_binding, b.workspace_binding)) return false
+      continue
+    }
     if (aRecord[key] !== bRecord[key]) return false
   }
   return true

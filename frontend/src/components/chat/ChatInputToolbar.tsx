@@ -184,9 +184,11 @@ export function ChatInputToolbar({ controller }: ChatInputToolbarProps) {
               the separators too; the controls' native disabled state carries
               the a11y/keyboard semantics. */}
           <div className={cn('flex items-center gap-1', selectorsLocked && 'pointer-events-none opacity-60')}>
-            {/* Draft/pinned workspace selector: interactive only while a
-                session draft is pending (no session yet); read-only once a
-                session exists. Renders nothing in CHAT mode. */}
+            {/* Workspace selector: interactive while the active session is
+                FRESH (confirmed-empty transcript, no task — ADR-091); the
+                pin branch takes over once the fresh window closes. Sessions
+                are created eagerly, so "no session yet" never happens.
+                Renders nothing in CHAT mode. */}
             <SessionWorkspaceSelector disabled={selectorsLocked} />
             <ModelCombobox disabled={selectorsLocked} />
             <ReasoningCombobox disabled={selectorsLocked} />

@@ -140,11 +140,15 @@ describe('reloadSessionHistory', () => {
     expect(useChatStore.getState().messages[SESSION]).toBeUndefined()
   })
 
-  it('rejects when the history RPC fails (the caller owns the error UI)', async () => {
+  it('renders the history-load-failure card itself (the caller never owns the error UI)', async () => {
     vi.mocked(getSessionHistory).mockRejectedValue(new Error('rpc down'))
-    await expect(reloadSessionHistory(SESSION)).rejects.toThrow('rpc down')
-    // Nothing was written.
-    expect(useChatStore.getState().messageOrder[SESSION]).toBeUndefined()
+    await expect(reloadSessionHistory(SESSION)).resolves.toBeUndefined()
+    // The failure card carries the freshness marker: SessionWorkspaceSelector
+    // must never read it as a "confirmed empty" transcript (ADR-091).
+    const cards = Object.values(useChatStore.getState().messages[SESSION] ?? {})
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.type).toBe('error')
+    expect(cards[0]!.metadata).toEqual({ historyLoadFailed: true })
   })
 
   // --- historyLoaded marker (the ChatArea loading spinner) ---
@@ -157,11 +161,11 @@ describe('reloadSessionHistory', () => {
     expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(true)
   })
 
-  it('marks the session history-loaded even when the history RPC rejects (the spinner must not hang)', async () => {
-    // The rejection still propagates to the caller (the error card), but the
-    // wrapper's finally settles the marker either way.
+  it('marks the session history-loaded when the history RPC fails (the spinner must not hang)', async () => {
+    // The load failure is settled inside the helper (the failure card), but
+    // the wrapper's finally settles the marker either way.
     vi.mocked(getSessionHistory).mockRejectedValue(new Error('rpc down'))
-    await expect(reloadSessionHistory(SESSION)).rejects.toThrow('rpc down')
+    await reloadSessionHistory(SESSION)
 
     expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(true)
   })

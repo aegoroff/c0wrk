@@ -78,39 +78,48 @@ type Layout struct {
 	RuntimesRoot string
 	// ModelRoot is <agentDir>/models/bonsai-2-27b — config.EmbeddedModelDir.
 	ModelRoot string
+	// MLXModelRoot is <agentDir>/models/bonsai-2-27b-mlx —
+	// config.EmbeddedMLXModelDir: the mtplx engine's weight pack lives here,
+	// in its own tree, because the two engines' weights are different bytes
+	// for the same model and a scoped removal must be able to take one
+	// without the other.
+	MLXModelRoot string
 }
 
 // NewLayout builds a Layout from the two roots the centralized path API
 // resolved for the agent directory. It fails closed on empty roots, on
 // relative roots (pathutil containment requires absolute paths) and on a
 // nesting that would let one tree's cleanup delete the other.
-func NewLayout(runtimesRoot, modelRoot string) (Layout, error) {
-	if runtimesRoot == "" || modelRoot == "" {
-		return Layout{}, fmt.Errorf("%w: both roots are required (runtimes=%q, models=%q)",
-			ErrLayoutInvalid, runtimesRoot, modelRoot)
-	}
-	if !filepath.IsAbs(runtimesRoot) || !filepath.IsAbs(modelRoot) {
-		return Layout{}, fmt.Errorf("%w: roots must be absolute (runtimes=%q, models=%q)",
-			ErrLayoutInvalid, runtimesRoot, modelRoot)
-	}
-	cleanedRuntimes := filepath.Clean(runtimesRoot)
-	cleanedModel := filepath.Clean(modelRoot)
-	if cleanedRuntimes == cleanedModel {
-		return Layout{}, fmt.Errorf("%w: runtime and model roots are the same directory %q",
-			ErrLayoutInvalid, cleanedRuntimes)
-	}
-	// Neither root may live inside the other: Remove deletes each tree whole,
-	// and a nested layout would let one deletion take the other with it.
-	for _, pair := range [][2]string{{cleanedRuntimes, cleanedModel}, {cleanedModel, cleanedRuntimes}} {
-		inside, err := pathutil.IsWithinPath(pair[0], pair[1])
-		if err != nil {
-			return Layout{}, fmt.Errorf("%w: cannot compare roots: %w", ErrLayoutInvalid, err)
+func NewLayout(runtimesRoot, modelRoot, mlxModelRoot string) (Layout, error) {
+	roots := []string{runtimesRoot, modelRoot, mlxModelRoot}
+	for i, r := range roots {
+		if r == "" {
+			return Layout{}, fmt.Errorf("%w: root %d is required (runtimes=%q, models=%q, mlxModels=%q)",
+				ErrLayoutInvalid, i, runtimesRoot, modelRoot, mlxModelRoot)
 		}
-		if inside {
-			return Layout{}, fmt.Errorf("%w: %q is inside %q", ErrLayoutInvalid, pair[1], pair[0])
+		if !filepath.IsAbs(r) {
+			return Layout{}, fmt.Errorf("%w: roots must be absolute (runtimes=%q, models=%q, mlxModels=%q)",
+				ErrLayoutInvalid, runtimesRoot, modelRoot, mlxModelRoot)
+		}
+		roots[i] = filepath.Clean(r)
+	}
+	// No root may equal or live inside another: Remove deletes each tree
+	// whole, and a nested layout would let one deletion take the other with it.
+	for i := range roots {
+		for j := range roots {
+			if i == j {
+				continue
+			}
+			inside, err := pathutil.IsWithinPath(roots[j], roots[i])
+			if err != nil {
+				return Layout{}, fmt.Errorf("%w: cannot compare roots: %w", ErrLayoutInvalid, err)
+			}
+			if inside {
+				return Layout{}, fmt.Errorf("%w: %q is inside %q", ErrLayoutInvalid, roots[i], roots[j])
+			}
 		}
 	}
-	return Layout{RuntimesRoot: cleanedRuntimes, ModelRoot: cleanedModel}, nil
+	return Layout{RuntimesRoot: roots[0], ModelRoot: roots[1], MLXModelRoot: roots[2]}, nil
 }
 
 // RuntimeDirName is the directory name of one provisioned runtime:
@@ -121,10 +130,90 @@ func RuntimeDirName(backend Backend) string {
 	return runtimeDirPrefix + RuntimeTag + "-" + string(backend)
 }
 
+// mlxRuntimePrefix starts every mtplx-engine runtime directory name:
+// "mtplx-<MTPLXVersion>".
+const mlxRuntimePrefix = "mtplx-"
+
+// MLXRuntimeDirName is the directory name of one provisioned mtplx runtime.
+// Like the llama name it changes with the pin, so a bump never reuses a stale
+// tree. The tree is RELOCATABLE plain files (a pinned CPython, the wheels
+// installed into it, and the pack pointer) — there is no llama-style
+// staging/retire swap, because the engine has no binary whose replacement
+// races a resident process: the step-0 stop guarantees nothing executes from
+// the tree while a rebuild replaces it (ADR-090 records the deviation).
+func MLXRuntimeDirName() string {
+	return mlxRuntimePrefix + MTPLXVersion
+}
+
+// mlxPackDirName is the pack directory inside the MLX model root. The pack is
+// kept one level below the root so manifest.json and future engine metadata
+// never sit inside a directory the engine reads as a model.
+const mlxPackDirName = "pack"
+
 // RuntimeDir is the installed tree for one backend:
 // <runtimesRoot>/llama-<tag>-<backend>.
 func (l Layout) RuntimeDir(backend Backend) (string, error) {
 	return l.safeJoin(l.RuntimesRoot, RuntimeDirName(backend))
+}
+
+// MLXRuntimeDir is the installed mtplx engine tree:
+// <runtimesRoot>/mtplx-<MTPLXVersion>.
+func (l Layout) MLXRuntimeDir() (string, error) {
+	return l.safeJoin(l.RuntimesRoot, MLXRuntimeDirName())
+}
+
+// MLXRuntimeWorkDir is where the mtplx engine tree is built before it replaces
+// MLXRuntimeDir. It plays the staging role (a failed build never touches the
+// previous tree) without the retire/rename swap of a live binary.
+func (l Layout) MLXRuntimeWorkDir() (string, error) {
+	return l.safeJoin(l.RuntimesRoot, MLXRuntimeDirName()+stagingSuffix)
+}
+
+// MLXPackDir is the directory the pinned MLX pack is downloaded into:
+// <mlxModelRoot>/pack. The engine is pointed at this directory with
+// `--model`, so it holds EXACTLY the pinned files and nothing else.
+func (l Layout) MLXPackDir() (string, error) {
+	return l.safeJoin(l.MLXModelRoot, mlxPackDirName)
+}
+
+// MLXPackStagingDir is where the mtplx weight pack is fetched and verified
+// before it replaces MLXPackDir. The pack is a SET of files that must come
+// from one revision, so the whole set is staged and swapped in one atomic
+// rename — a mid-fetch failure leaves the previous pack directory untouched.
+func (l Layout) MLXPackStagingDir() (string, error) {
+	return l.safeJoin(l.MLXModelRoot, mlxPackDirName+stagingSuffix)
+}
+
+// MLXPackRetiredDir is the previous pack directory, parked during the swap so
+// the staged rename can never collide with it and a failed promotion can be
+// deleted without touching the new tree.
+func (l Layout) MLXPackRetiredDir() (string, error) {
+	return l.safeJoin(l.MLXModelRoot, mlxPackDirName+retiredSuffix)
+}
+
+// MLXServerPythonPath is the interpreter a launch runs the engine with:
+// <runtimeDir>/python/bin/python3.12 — the pinned managed CPython, whose
+// site-packages carry the closed wheel set.
+func MLXServerPythonPath(runtimeDir string) (string, error) {
+	if runtimeDir == "" {
+		return "", fmt.Errorf("%w: empty runtime directory", ErrLayoutInvalid)
+	}
+	return l2safeJoin(runtimeDir, filepath.Join("python", "bin", pythonBinName))
+}
+
+// pythonBinName is the interpreter binary inside the extracted managed-CPython
+// tree.
+const pythonBinName = "python3.12"
+
+// l2safeJoin joins a path under a runtime tree and containment-checks the
+// result against that tree (the same defence safeJoin gives the layout roots).
+func l2safeJoin(root, rel string) (string, error) {
+	joined := filepath.Join(root, rel)
+	inside, err := pathutil.IsWithinPath(root, joined)
+	if err != nil || !inside {
+		return "", fmt.Errorf("%w: %q escapes %q", ErrLayoutInvalid, rel, root)
+	}
+	return joined, nil
 }
 
 // RuntimeStagingDir is where a runtime tree is extracted and signed before it
@@ -149,7 +238,9 @@ func (l Layout) ManifestPath() (string, error) {
 	return l.safeJoin(l.ModelRoot, ManifestFileName)
 }
 
-// Destination is the on-disk path one asset is fetched to.
+// Destination is the on-disk path one asset is fetched to — its FINAL layout
+// path (the mtplx pack stages elsewhere and swaps in whole; fetchOneTo takes
+// an explicit destination).
 //
 // Weights (model, mmproj) are downloaded straight to their final path inside
 // the model root: the artifact IS the file, so there is nothing to extract and
@@ -159,12 +250,18 @@ func (l Layout) Destination(asset Asset) (string, error) {
 	switch asset.Component {
 	case ComponentModel, ComponentMMProj:
 		return l.safeJoin(l.ModelRoot, asset.ArchiveName)
-	case ComponentRuntime, ComponentCudart:
+	case ComponentRuntime, ComponentCudart, ComponentPython, ComponentEngineWheels:
 		downloads, err := l.DownloadsDir()
 		if err != nil {
 			return "", err
 		}
 		return l.safeJoin(downloads, asset.ArchiveName)
+	case ComponentMLXPack:
+		packDir, err := l.MLXPackDir()
+		if err != nil {
+			return "", err
+		}
+		return l.safeJoin(packDir, asset.ArchiveName)
 	default:
 		return "", fmt.Errorf("%w: unknown component %q", ErrLayoutInvalid, asset.Component)
 	}
@@ -186,10 +283,10 @@ func (l Layout) ModelFile(packing Packing) (string, error) {
 // anything outside the layout — in particular never the flat embedding-model
 // files that share <agentDir>/models, and never anything under <toolsDir>/bin.
 func (l Layout) Owns(p string) bool {
-	if l.RuntimesRoot == "" || l.ModelRoot == "" || p == "" {
+	if l.RuntimesRoot == "" || l.ModelRoot == "" || l.MLXModelRoot == "" || p == "" {
 		return false
 	}
-	for _, root := range []string{l.RuntimesRoot, l.ModelRoot} {
+	for _, root := range []string{l.RuntimesRoot, l.ModelRoot, l.MLXModelRoot} {
 		inside, err := pathutil.IsWithinPath(root, p)
 		if err != nil {
 			return false
@@ -220,12 +317,27 @@ func (l Layout) OwnsModel(p string) bool {
 	return err == nil && inside
 }
 
+// OwnsMLXPack reports whether p lies inside the MLX pack directory — the
+// containment check a launch applies to the recorded pack directory before it
+// becomes the `--model` argv element (the mtplx engine's OwnsModel twin).
+func (l Layout) OwnsMLXPack(p string) bool {
+	if l.MLXModelRoot == "" || p == "" {
+		return false
+	}
+	packDir, err := l.MLXPackDir()
+	if err != nil {
+		return false
+	}
+	inside, withinErr := pathutil.IsWithinPath(packDir, p)
+	return withinErr == nil && inside
+}
+
 // EnsureRoots creates both roots (and the archive staging area). It is called
 // before the whole-set disk guard so the guard can measure a directory that
 // exists.
 func (l Layout) EnsureRoots() error {
-	dirs := make([]string, 0, 3)
-	for _, dir := range []string{l.RuntimesRoot, l.ModelRoot} {
+	dirs := make([]string, 0, 4)
+	for _, dir := range []string{l.RuntimesRoot, l.ModelRoot, l.MLXModelRoot} {
 		if dir == "" {
 			return fmt.Errorf("%w: empty root", ErrLayoutInvalid)
 		}
@@ -243,7 +355,8 @@ func (l Layout) EnsureRoots() error {
 	// deletions, so a link planted AT a root, or at the shared models
 	// parent, must stop here, before scaffolding lands in its target. A
 	// missing component is fine (created below); a symlinked one is not.
-	for _, dir := range []string{l.RuntimesRoot, filepath.Dir(l.ModelRoot), l.ModelRoot, downloads} {
+	for _, dir := range []string{l.RuntimesRoot, filepath.Dir(l.ModelRoot), l.ModelRoot,
+		filepath.Dir(l.MLXModelRoot), l.MLXModelRoot, downloads} {
 		rel, rerr := filepath.Rel(filepath.Dir(dir), dir)
 		if rerr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			return fmt.Errorf("embeddedllm: root %q is not below its parent", dir)

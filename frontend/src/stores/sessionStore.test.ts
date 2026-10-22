@@ -221,3 +221,57 @@ describe('selectSession', () => {
     expect(warnSpy).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('setSessions workspace_binding comparison (ADR-091)', () => {
+  beforeEach(resetStore)
+
+  it('applies a refreshed binding despite the fresh object identity', () => {
+    // SessionInfo's ONE object field: every list delivery allocates a new
+    // workspace_binding object, so sameSessionContent must compare it
+    // field-wise — a reference compare would report every delivery as a
+    // change, and a shallow "primitives only" compare would DROP real
+    // binding updates.
+    useSessionStore.getState().setSessions([makeSession({ id: 'a' })])
+    useSessionStore.getState().setSessions([
+      makeSession({
+        id: 'a',
+        workspace_binding: { kind: 'managed_worktree', workspace_path: '/w/trees/s-1', worktree_name: 's-abc', branch: 'feat/x' },
+      }),
+    ])
+
+    expect(useSessionStore.getState().sessions![0]!.workspace_binding).toEqual({
+      kind: 'managed_worktree',
+      workspace_path: '/w/trees/s-1',
+      worktree_name: 's-abc',
+      branch: 'feat/x',
+    })
+  })
+
+  it('keeps the sessions reference when only the binding OBJECT identity differs', () => {
+    // A duplicate delivery with an equal (freshly allocated) binding must be
+    // a no-op — the stable-reference guarantee every `sessions` subscriber
+    // relies on.
+    const binding = { kind: 'managed_worktree' as const, workspace_path: '/w/trees/s-1', worktree_name: 's-abc', branch: 'feat/x' }
+    useSessionStore.getState().setSessions([makeSession({ id: 'a', workspace_binding: binding })])
+    const before = useSessionStore.getState().sessions
+
+    useSessionStore.getState().setSessions([
+      makeSession({ id: 'a', workspace_binding: { ...binding } }),
+    ])
+
+    expect(useSessionStore.getState().sessions).toBe(before)
+  })
+
+  it('treats a binding-vs-none difference as a change', () => {
+    useSessionStore.getState().setSessions([makeSession({ id: 'a' })])
+    const before = useSessionStore.getState().sessions
+
+    useSessionStore.getState().setSessions([makeSession({ id: 'a' })])
+    expect(useSessionStore.getState().sessions).toBe(before)
+
+    useSessionStore.getState().setSessions([
+      makeSession({ id: 'a', workspace_binding: { kind: 'local', workspace_path: '/w/proj' } }),
+    ])
+    expect(useSessionStore.getState().sessions!.find((s) => s.id === 'a')!.workspace_binding).toEqual({ kind: 'local', workspace_path: '/w/proj' })
+  })
+})

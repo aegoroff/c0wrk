@@ -550,9 +550,10 @@ func (f *FrontendAPI) ReindexVectorIndex() error {
 //     behavior;
 //   - Intel GPUs via vulkaninfo --summary (provider "openvino"), the hardware
 //     the OpenVINO execution provider runs on. Entries always carry index 0:
-//     the plugin-based OpenVINO surface selects the provider's best device,
-//     so 0 is the only valid device_id — the entry exists to show that the
-//     Intel hardware is present and what the driver calls it.
+//     the plugin-based OpenVINO surface accepts only device_id 0 and resolves
+//     the concrete Intel device itself, so 0 is the only valid device_id — the
+//     entry exists to show that the Intel hardware is present and what the
+//     driver calls it.
 //
 // so the RPC can never block the UI thread indefinitely on a wedged driver.
 //
