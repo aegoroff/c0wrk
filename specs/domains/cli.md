@@ -7,9 +7,9 @@ One parser for the c0wrk binary's command line: `core/cli` turns raw argv (`os.A
 ## Key Files
 
 - `core/cli/cli.go` - the entire grammar: `Parse`, `PrintHelp`, `PrintVersion`; a pure package (no logger, no global state; stdlib + `core/version` only, so `core/updater` can import it without a cycle)
-- `core/cli/cli_test.go` - table-driven contract tests (28 `Parse` cases + print tests), including the self-update round-trip pin shared with `core/updater`
+- `core/cli/cli_test.go` - table-driven contract tests (29 `Parse` cases + print tests)
 - `main.go` - the only consumer: parses exactly once as the process's first action, dispatches on the action, owns the exit codes, and documents the load-bearing startup ordering
-- `core/updater/installer.go` - `SelfUpdateArgs` (builds the re-exec argv) and `ApplySelfUpdate` (consumes `cli.SelfUpdateRequest`); the update-domain logic, no argv grammar
+- `core/updater/installer.go` - `SelfUpdateArgs` (builds the re-exec argv) and `ApplySelfUpdate` (consumes `cli.SelfUpdateRequest`); the update-domain logic, no argv grammar — the argv contract is pinned from the updater side by `TestSelfUpdateArgsRoundTrip` in `installer_test.go`
 
 ## Core Types
 
@@ -66,8 +66,10 @@ Inside `Parse` — a single scan with deferred companion validation:
 scan args ─┬─ action flag (-h/-v/--self-update) → accept(A): FIRST one wins,
            │                                     later action flags ignored
            ├─ companion (--pid/--stage/--target) → consume next arg (last wins),
-           │        value-syntax error NOW ("--pid requires a value",
-           │        "invalid --pid %q"); remember first companion for later
+           │        value-syntax error NOW (missing: "--stage requires a value";
+           │        empty: "--stage requires a non-empty value";
+           │        bad pid: "invalid --pid %q"); remember first companion
+           │        for later
            └─ anything else → error "unknown argument: <arg>"
    │
    ▼
@@ -82,7 +84,7 @@ after that scan, for every other action:
 - **Parse is the process's first action.** The ordering contract in `main.go` is load-bearing: self-update dispatch → CLI diagnostics (`-h`/`-v`/parse error) → GPU-relaunch handover wait → single-instance lock (ADR-075) → crash capture (fd 1/2 redirect). Rationale: (a) diagnostics must reach the REAL stdout/stderr — crash capture redirects fd 1/2 into `<logDir>/stderr.log`, and usage buried in a log file is invisible; (b) a diagnostic exit never touches app state — in particular it happens before the single-instance lock, since a mistyped flag is not a competing app instance; (c) the self-update re-exec path never starts the Wails lifecycle.
 - **Strict grammar, fail-closed.** Any unrecognized argv element — an unknown flag, a bare positional, a `--flag=value` form (never split), or a companion flag without `--self-update` — is an error naming that argument. Nothing is silently ignored.
 - **First-wins actions, last-wins values.** The first action flag selects the action (`--help --self-update` → Help; `--self-update --help` → SelfUpdate, whose missing companions then error); repeated value flags take the last occurrence; companions may appear anywhere on the line.
-- **Companion validation is conditional and deferred.** The `--pid`/`--stage`/`--target` trio is required only when `--self-update` is the selected action; `--pid` must be a strict positive integer (digits only; `+5`/`-5`/`0`/overflow rejected).
+- **Companion validation is conditional and deferred.** The `--pid`/`--stage`/`--target` trio is required only when `--self-update` is the selected action; `--pid` must be a strict positive integer (digits only; `+5`/`-5`/`0`/overflow rejected); an explicitly empty value (`--stage ""`) is a value-syntax error at the flag, not a deferred one.
 - **`--self-update` is hidden.** Help lists only `-h/--help` and `-v/--version`; the re-exec flag and its companions never appear in user-facing output. The flag is produced only by `updater.SelfUpdateArgs`.
 - **Streams and exit codes are fixed.** Help/version → stdout, exit 0. Parse error → `c0wrk: <err>` + usage on stderr, exit 2. `ApplySelfUpdate` failure → `c0wrk self-update failed: …` on stderr, exit 1.
 - **Accepted limitations of strictness.** Arguments injected by unsupervised launchers are now rejected with exit 2 where they were previously swallowed: the `wails dev` harness's own arguments, should any reach the binary, and legacy macOS LaunchServices `-psn_<serial>` process-serial arguments, where still injected. Accepted: the error names the offending argument, and both are development/legacy launch paths, not release paths.

@@ -160,6 +160,21 @@ func TestParse(t *testing.T) {
 			args:    []string{"--self-update", "--pid", "5", "--stage", "/s", "--target"},
 			wantErr: "--target requires a value",
 		},
+		{
+			name:    "pid empty value",
+			args:    []string{"--self-update", "--pid", "", "--stage", "/s", "--target", "/t"},
+			wantErr: `invalid --pid ""`,
+		},
+		{
+			name:    "stage empty value",
+			args:    []string{"--self-update", "--pid", "5", "--stage", ""},
+			wantErr: "--stage requires a non-empty value",
+		},
+		{
+			name:    "target empty value",
+			args:    []string{"--self-update", "--pid", "5", "--stage", "/s", "--target", ""},
+			wantErr: "--target requires a non-empty value",
+		},
 	}
 
 	for _, tt := range tests {

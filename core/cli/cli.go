@@ -58,11 +58,12 @@ type Request struct {
 //
 // The first recognized action flag wins; later action flags are ignored.
 // Repeated flags take the last value. Companion flags (--pid, --stage,
-// --target) may appear anywhere on the line and are validated only once the
-// whole line is parsed: they are required when --self-update is the selected
-// action and an error anywhere else. Any unknown argument — an unrecognized
-// flag, a bare positional, or a companion without --self-update — is an
-// error naming the argument.
+// --target) may appear anywhere on the line; their presence is validated
+// only once the whole line is parsed — required when --self-update is the
+// selected action, an error anywhere else. Value errors (a missing or empty
+// value, a non-positive --pid) abort the scan immediately. Any unknown
+// argument — an unrecognized flag, a bare positional, or a companion without
+// --self-update — is an error naming the argument.
 func Parse(args []string) (Request, error) {
 	req := Request{Action: ActionRun}
 	chosen := false
@@ -107,6 +108,9 @@ func Parse(args []string) (Request, error) {
 			if !ok {
 				return Request{}, errors.New("--stage requires a value")
 			}
+			if val == "" {
+				return Request{}, errors.New("--stage requires a non-empty value")
+			}
 			stage, stageSeen = val, true
 		case "--target":
 			if companion == "" {
@@ -115,6 +119,9 @@ func Parse(args []string) (Request, error) {
 			val, ok := nextArg(args, &i)
 			if !ok {
 				return Request{}, errors.New("--target requires a value")
+			}
+			if val == "" {
+				return Request{}, errors.New("--target requires a non-empty value")
 			}
 			target, targetSeen = val, true
 		default:

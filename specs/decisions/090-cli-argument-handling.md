@@ -92,15 +92,17 @@ captured `updater-output.log` on the re-exec path) and no code parses it.
 was absent (as it ignored everything unrecognized). Under the unified grammar a
 companion without `--self-update` is an unknown-argument error — the first one
 seen is named, checked only after the whole line parses so a genuine
-`--self-update` line is never misjudged. Companion value-syntax errors (missing
-value, non-positive `--pid`) still error immediately during the scan, carried
-over unchanged from the updater parser.
+`--self-update` line is never misjudged. Companion value-syntax errors (a
+missing or empty value, a non-positive `--pid`) still error immediately during
+the scan, carried over from the updater parser: the old code rejected these
+same inputs (empty `--stage`/`--target` post-scan), the unified grammar rejects
+them at the flag itself.
 
 ## Consequences
 
 Positive:
 
-- One grammar, one test suite: 28 table-driven `Parse` cases plus the
+- One grammar, one test suite: 29 table-driven `Parse` cases plus the
   round-trip test pin the user-visible CLI behavior and the two-process
   self-update contract in a single place, testable without building the app.
 - Help and version actually work on the shipped binary (they previously
