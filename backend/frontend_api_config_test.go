@@ -138,8 +138,14 @@ type mockBuilder struct {
 	// RebuildRouter, in call order (guarded by m.mu).
 	rebuildRouterCfgs []string
 
-	getSkillDescriptorsCalls int
-	getSkillDescriptorsRes   []skills.SkillDescriptor
+	getSkillDescriptorsCalls  int
+	getSkillDescriptorsRes    []skills.SkillDescriptor
+	resolveSkillResourceCalls int
+	// resolveSkillResourceArgs captures the last call's
+	// (projectSkillDir, skillName, relPath) for wiring assertions.
+	resolveSkillResourceArgs [3]string
+	resolveSkillResourceRes  string
+	resolveSkillResourceErr  error
 
 	getAgentDescriptorsCalls int
 	getAgentDescriptorsRes   []agents.AgentDescriptor
@@ -354,6 +360,13 @@ func (m *mockBuilder) GetSkillDescriptors(string) []skills.SkillDescriptor {
 	defer m.mu.Unlock()
 	m.getSkillDescriptorsCalls++
 	return m.getSkillDescriptorsRes
+}
+func (m *mockBuilder) ResolveSkillResourcePath(projectSkillDir, skillName, relPath string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolveSkillResourceCalls++
+	m.resolveSkillResourceArgs = [3]string{projectSkillDir, skillName, relPath}
+	return m.resolveSkillResourceRes, m.resolveSkillResourceErr
 }
 func (m *mockBuilder) GetBaseAgentDirs() []string {
 	m.mu.Lock()

@@ -7,6 +7,32 @@ import { ToolCard } from './ToolCard'
 import type { DisplayItem } from '@/types/messages'
 import { TooltipProvider } from '@/components/ui/tooltip'
 
+// The two resolvers ToolCard wires into FileLink, plus the viewer store, are
+// mocked so click tests assert which path reaches the viewer without a Wails
+// runtime: read_skill_resource goes through the backend RPC wrapper, the
+// workspace file tools through the chat workspace root + normalizePath.
+const skillsApiMock = vi.hoisted(() => ({
+  resolveSkillResourcePath: vi.fn(),
+}))
+vi.mock('@/api/skills', () => ({
+  resolveSkillResourcePath: skillsApiMock.resolveSkillResourcePath,
+}))
+
+const chatRootMock = vi.hoisted(() => ({
+  resolveChatWorkspaceRoot: vi.fn(),
+}))
+vi.mock('@/lib/chatWorkspaceRoot', () => ({
+  resolveChatWorkspaceRoot: chatRootMock.resolveChatWorkspaceRoot,
+}))
+
+const fileViewerMock = vi.hoisted(() => ({
+  openFile: vi.fn(),
+  openFileAtLine: vi.fn(),
+}))
+vi.mock('@/stores/fileViewerStore', () => ({
+  useFileViewerStore: { getState: () => fileViewerMock },
+}))
+
 type ToolItem = Extract<DisplayItem, { kind: 'tool' }>
 
 function makeItem(overrides: Partial<ToolItem> & Pick<ToolItem, 'toolName' | 'args'>): ToolItem {
@@ -35,6 +61,10 @@ describe('ToolCard', () => {
       return 0
     })
     vi.stubGlobal('cancelAnimationFrame', () => {})
+    skillsApiMock.resolveSkillResourcePath.mockReset()
+    chatRootMock.resolveChatWorkspaceRoot.mockReset()
+    fileViewerMock.openFile.mockClear()
+    fileViewerMock.openFileAtLine.mockClear()
     container = document.createElement('div')
     document.body.replaceChildren(container)
     root = createRoot(container)
@@ -218,5 +248,112 @@ describe('ToolCard', () => {
       trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(state()).toBe('open')
+  })
+
+  // --- Tool-call link resolution: every path opens against its true base ---
+
+  const clickLink = async (el: HTMLElement) => {
+    await act(async () => {
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      // Flush the resolver's promise chain before leaving act().
+      await Promise.resolve()
+    })
+  }
+
+  it('opens a read_skill_resource path from the skill catalog via the backend RPC', async () => {
+    skillsApiMock.resolveSkillResourcePath.mockResolvedValue(
+      '/home/u/.c0wrk/.agents/skills/vibespec-explore/references/roadmap-format.md',
+    )
+    render(makeItem({
+      toolName: 'read_skill_resource',
+      args: '{"skill":"vibespec-explore","path":"references/roadmap-format.md"}',
+      parsedArgs: { skill: 'vibespec-explore', path: 'references/roadmap-format.md' },
+      result: 'roadmap template body',
+    }))
+    expect(container.textContent).toContain('Read: roadmap-format.md')
+    const link = container.querySelector('span[role="button"]') as HTMLElement
+    await clickLink(link)
+    // The RPC wrapper was called with the skill name and the raw relative
+    // path; the RESOLVED absolute path is what opens in the viewer.
+    expect(skillsApiMock.resolveSkillResourcePath).toHaveBeenCalledWith(
+      'vibespec-explore', 'references/roadmap-format.md',
+    )
+    expect(fileViewerMock.openFile).toHaveBeenCalledTimes(1)
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith(
+      '/home/u/.c0wrk/.agents/skills/vibespec-explore/references/roadmap-format.md',
+    )
+    // The skill catalog — not the workspace — is the base for this tool: the
+    // workspace resolver must stay untouched.
+    expect(chatRootMock.resolveChatWorkspaceRoot).not.toHaveBeenCalled()
+  })
+
+  it('renders a read_skill_resource path as plain text when the RPC fails', async () => {
+    skillsApiMock.resolveSkillResourcePath.mockResolvedValue(null)
+    render(makeItem({
+      toolName: 'read_skill_resource',
+      args: '{"skill":"gone-skill","path":"references/api.md"}',
+      parsedArgs: { skill: 'gone-skill', path: 'references/api.md' },
+      result: 'skill "gone-skill" not found',
+    }))
+    const link = container.querySelector('span[role="button"]') as HTMLElement
+    await clickLink(link)
+    // Failed resolution: no navigation, the link degrades to plain text.
+    expect(fileViewerMock.openFile).not.toHaveBeenCalled()
+    expect(container.querySelector('span[role="button"]')).toBeNull()
+    expect(container.textContent).toContain('Read: api.md')
+  })
+
+  it('resolves a relative read_file arg against the workspace root', async () => {
+    chatRootMock.resolveChatWorkspaceRoot.mockResolvedValue('/home/u/proj')
+    render(makeItem({
+      toolName: 'read_file',
+      args: '{"path":"src/main.ts"}',
+      parsedArgs: { path: 'src/main.ts' },
+      result: 'export {}',
+    }))
+    const link = container.querySelector('span[role="button"]') as HTMLElement
+    await clickLink(link)
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('/home/u/proj/src/main.ts')
+    expect(skillsApiMock.resolveSkillResourcePath).not.toHaveBeenCalled()
+  })
+
+  it('passes absolute and drive paths through without distortion', async () => {
+    chatRootMock.resolveChatWorkspaceRoot.mockResolvedValue('/home/u/proj')
+    render(makeItem({
+      toolName: 'read_file',
+      args: '{"path":"/repo/abs.ts"}',
+      parsedArgs: { path: '/repo/abs.ts' },
+      result: 'content',
+    }))
+    await clickLink(container.querySelector('span[role="button"]') as HTMLElement)
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('/repo/abs.ts')
+
+    fileViewerMock.openFile.mockClear()
+    render(makeItem({
+      toolName: 'edit_file',
+      args: '{"path":"C:\\\\ws\\\\doc.md"}',
+      parsedArgs: { path: 'C:\\ws\\doc.md' },
+      result: 'ok',
+    }))
+    await clickLink(container.querySelector('span[role="button"]') as HTMLElement)
+    // Drive-absolute form is preserved (canonical forward-slash form), never
+    // joined with the POSIX workspace root.
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('C:/ws/doc.md')
+  })
+
+  it('opens the raw path unchanged when no workspace root is available', async () => {
+    chatRootMock.resolveChatWorkspaceRoot.mockResolvedValue(null)
+    render(makeItem({
+      toolName: 'read_file',
+      args: '{"path":"src/main.ts"}',
+      parsedArgs: { path: 'src/main.ts' },
+      result: 'content',
+    }))
+    const link = container.querySelector('span[role="button"]') as HTMLElement
+    await clickLink(link)
+    // Transient no-root state (No Project): the historical behavior — the raw
+    // arg opens as-is rather than the link degrading to text.
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('src/main.ts')
+    expect(container.querySelector('span[role="button"]')).not.toBeNull()
   })
 })

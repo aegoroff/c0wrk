@@ -1,12 +1,14 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/sp4rk/skills"
 )
 
@@ -169,4 +171,74 @@ func TestCloseSkillsWatchers_Idempotent(t *testing.T) {
 	if len(f.skillWatchers) != 0 {
 		t.Errorf("expected 0 watchers after close, got %d", len(f.skillWatchers))
 	}
+}
+
+// TestResolveSkillResourcePath_RPCWiring verifies the RPC-level wiring: the
+// builder receives the active project's .agents/skills directory (the same
+// workspace snapshot ListSkills uses) plus the raw (skill, path) arguments,
+// and its result and error are propagated verbatim. The catalog resolution
+// itself (precedence + SafeResolvePath) is covered by the core builder test
+// TestOrchestratorBuilder_ResolveSkillResourcePath.
+func TestResolveSkillResourcePath_RPCWiring(t *testing.T) {
+	t.Run("no builder", func(t *testing.T) {
+		f := &FrontendAPI{emitEvent: func(string, ...any) {}}
+		f.seedPublished.Store(true)
+		_, err := f.ResolveSkillResourcePath("my-skill", "references/api.md")
+		if err == nil {
+			t.Fatal("expected an error when the backend is not ready")
+		}
+	})
+
+	t.Run("with active project", func(t *testing.T) {
+		mock := &mockBuilder{resolveSkillResourceRes: "/skills/my-skill/references/api.md"}
+		f := &FrontendAPI{emitEvent: func(string, ...any) {}}
+		f.seedPublished.Store(true)
+		f.builderOverride = mock
+		f.activeProjectPath = string(filepath.Separator) + filepath.Join("tmp", "ws")
+
+		got, err := f.ResolveSkillResourcePath("my-skill", "references/api.md")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "/skills/my-skill/references/api.md" {
+			t.Fatalf("result not propagated: %q", got)
+		}
+		if mock.resolveSkillResourceCalls != 1 {
+			t.Fatalf("expected 1 builder call, got %d", mock.resolveSkillResourceCalls)
+		}
+		wantDir := config.ProjectSkillsPath(f.activeProjectPath)
+		if mock.resolveSkillResourceArgs[0] != wantDir {
+			t.Errorf("projectSkillDir = %q, want %q", mock.resolveSkillResourceArgs[0], wantDir)
+		}
+		if mock.resolveSkillResourceArgs[1] != "my-skill" || mock.resolveSkillResourceArgs[2] != "references/api.md" {
+			t.Errorf("args = %v, want [dir my-skill references/api.md]", mock.resolveSkillResourceArgs)
+		}
+	})
+
+	t.Run("without active project", func(t *testing.T) {
+		mock := &mockBuilder{resolveSkillResourceRes: "/global/my-skill/SKILL.md"}
+		f := &FrontendAPI{emitEvent: func(string, ...any) {}}
+		f.seedPublished.Store(true)
+		f.builderOverride = mock
+
+		if _, err := f.ResolveSkillResourcePath("my-skill", "SKILL.md"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mock.resolveSkillResourceArgs[0] != "" {
+			t.Errorf("projectSkillDir = %q, want empty", mock.resolveSkillResourceArgs[0])
+		}
+	})
+
+	t.Run("builder error propagates", func(t *testing.T) {
+		wantErr := errors.New(`skill "nope" not found`)
+		mock := &mockBuilder{resolveSkillResourceErr: wantErr}
+		f := &FrontendAPI{emitEvent: func(string, ...any) {}}
+		f.seedPublished.Store(true)
+		f.builderOverride = mock
+
+		_, err := f.ResolveSkillResourcePath("nope", "references/api.md")
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
+		}
+	})
 }

@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { isLocalFileHref, isExternalUrl, parseLocalFileHref, normalizePath, relativePath } from './localFileLink'
+import {
+  isLocalFileHref,
+  isExternalUrl,
+  parseLocalFileHref,
+  isAbsolutePath,
+  normalizePath,
+  relativePath,
+  resolveFileRefPath,
+} from './localFileLink'
 
 describe('isLocalFileHref', () => {
   it('returns false for http URLs', () => {
@@ -85,6 +93,73 @@ describe('isExternalUrl', () => {
   it('returns false for undefined or empty href', () => {
     expect(isExternalUrl(undefined)).toBe(false)
     expect(isExternalUrl('')).toBe(false)
+  })
+})
+
+describe('windows drive prefixes are never external URLs', () => {
+  // A one-letter + colon prefix (`C:`) is a Windows drive, not an RFC 3986
+  // scheme. Both dispatch sites hand a link to the system browser exactly
+  // when isExternalUrl(href) is true (the markdownConfig anchor handler and
+  // the PaperHtmlView click handler → openExternalURL → BrowserOpenURL), so
+  // isExternalUrl being false for every ^[A-Za-z]: href guarantees that no
+  // drive path can ever reach openExternalURL.
+  const driveHrefs = [
+    'C:\\Documents',
+    'c:\\c:\\Documents',
+    'C:/Documents/file.md',
+    'c:\\ws\\src\\main.ts#L42',
+    'Z:\\deep\\nested\\path.md',
+    'C:', // bare drive — still letter + colon, still not a scheme
+    'C:foo', // drive-relative — same guard
+  ]
+
+  it('never classifies a drive href as external (no openExternalURL dispatch)', () => {
+    for (const href of driveHrefs) {
+      expect(isExternalUrl(href), href).toBe(false)
+    }
+  })
+
+  it('classifies every drive href as a local file link', () => {
+    for (const href of driveHrefs) {
+      expect(isLocalFileHref(href), href).toBe(true)
+    }
+  })
+
+  it('guard is exactly one letter + colon: multi-letter schemes stay external', () => {
+    expect(isExternalUrl('ab:rest-of-scheme')).toBe(true)
+    expect(isLocalFileHref('ab:rest-of-scheme')).toBe(false)
+  })
+})
+
+describe('isAbsolutePath', () => {
+  it('returns true for POSIX absolute paths', () => {
+    expect(isAbsolutePath('/workspace/project')).toBe(true)
+    expect(isAbsolutePath('/a.ts')).toBe(true)
+  })
+
+  it('returns true for Windows drive-rooted paths, both separators', () => {
+    expect(isAbsolutePath('C:\\ws\\project')).toBe(true)
+    expect(isAbsolutePath('C:/ws/project')).toBe(true)
+    expect(isAbsolutePath('c:\\ws')).toBe(true)
+    expect(isAbsolutePath('Z:/file.md')).toBe(true)
+  })
+
+  it('returns true for UNC paths, both separators', () => {
+    expect(isAbsolutePath('\\\\srv\\share\\doc.md')).toBe(true)
+    expect(isAbsolutePath('//srv/share/doc.md')).toBe(true)
+  })
+
+  it('returns false for relative paths', () => {
+    expect(isAbsolutePath('src/main.ts')).toBe(false)
+    expect(isAbsolutePath('./a.ts')).toBe(false)
+    expect(isAbsolutePath('../a.ts')).toBe(false)
+    expect(isAbsolutePath('')).toBe(false)
+  })
+
+  it('returns false for drive-relative paths (colon without separator)', () => {
+    // `C:foo` is drive-relative on Windows (Go filepath.IsAbs semantics) — not absolute
+    expect(isAbsolutePath('C:foo')).toBe(false)
+    expect(isAbsolutePath('C:')).toBe(false)
   })
 })
 
@@ -180,6 +255,47 @@ describe('normalizePath', () => {
   it('handles empty file path as root', () => {
     expect(normalizePath(root, '')).toBe('/workspace/project')
   })
+
+  describe('windows paths', () => {
+    it('normalizes drive-absolute input without joining the workspace root', () => {
+      expect(normalizePath('C:\\ws', 'C:\\Documents\\f.md')).toBe('C:/Documents/f.md')
+      expect(normalizePath('C:\\ws', 'C:/Documents/f.md')).toBe('C:/Documents/f.md')
+      expect(normalizePath('C:\\ws', 'D:\\other\\file.ts')).toBe('D:/other/file.ts')
+    })
+
+    it('joins relative windows paths with the workspace root', () => {
+      expect(normalizePath('C:\\ws', 'src\\a.ts')).toBe('C:/ws/src/a.ts')
+      expect(normalizePath('C:/ws', './src\\.\\b.md')).toBe('C:/ws/src/b.md')
+    })
+
+    it('collapses parent references within a drive path', () => {
+      expect(normalizePath('C:\\ws', 'C:\\ws\\sub\\..\\lib\\u.ts')).toBe('C:/ws/lib/u.ts')
+    })
+
+    it('clamps ".." at the drive root', () => {
+      expect(normalizePath('C:\\ws', 'C:\\..\\..\\etc\\f.md')).toBe('C:/etc/f.md')
+      expect(normalizePath('C:\\ws', '..\\..\\..\\outside.txt')).toBe('C:/outside.txt')
+    })
+
+    it('normalizes UNC absolute input without joining the workspace root', () => {
+      expect(normalizePath('C:\\ws', '\\\\srv\\share\\docs\\f.md')).toBe(
+        '//srv/share/docs/f.md',
+      )
+      expect(normalizePath('\\\\srv\\share', '//srv/share/docs/f.md')).toBe(
+        '//srv/share/docs/f.md',
+      )
+    })
+
+    it('clamps ".." at the UNC share root', () => {
+      expect(normalizePath('//srv/share', '//srv/share/docs/../../x.md')).toBe(
+        '//srv/share/x.md',
+      )
+    })
+
+    it('preserves POSIX absolute input without joining the windows root', () => {
+      expect(normalizePath('C:\\ws', '/etc/passwd')).toBe('/etc/passwd')
+    })
+  })
 })
 
 describe('relativePath', () => {
@@ -228,5 +344,34 @@ describe('relativePath', () => {
 
   it('handles mixed slashes in input', () => {
     expect(relativePath(root, '/workspace\\project/src\\lib.ts')).toBe('src/lib.ts')
+  })
+
+  it('returns drive-form path without leading slash when not under the windows root (regression)', () => {
+    expect(relativePath('C:\\ws', 'C:\\other\\f.md')).toBe('C:/other/f.md')
+    expect(relativePath('/posix/root', 'D:\\data\\f.md')).toBe('D:/data/f.md')
+  })
+})
+
+describe('resolveFileRefPath', () => {
+  it('normalizes a drive-absolute @file path without joining the workspace root', () => {
+    expect(resolveFileRefPath('C:\\ws', 'C:\\Doc\\f.md')).toBe('C:/Doc/f.md')
+    // The root dialect is irrelevant for absolute inputs — never joined.
+    expect(resolveFileRefPath('/home/u/proj', 'C:\\Doc\\f.md')).toBe('C:/Doc/f.md')
+  })
+
+  it('normalizes UNC and POSIX absolute paths in place', () => {
+    expect(resolveFileRefPath('C:\\ws', '\\\\srv\\share\\docs\\f.md')).toBe('//srv/share/docs/f.md')
+    expect(resolveFileRefPath('/repo', '/repo/src/a/../b.ts')).toBe('/repo/src/b.ts')
+  })
+
+  it('joins relative paths with the workspace root (both dialects)', () => {
+    expect(resolveFileRefPath('C:\\ws', 'src\\main.ts')).toBe('C:/ws/src/main.ts')
+    expect(resolveFileRefPath('/repo', 'src/main.ts')).toBe('/repo/src/main.ts')
+  })
+
+  it('returns relative paths unchanged when no root is available', () => {
+    expect(resolveFileRefPath(null, 'src/main.ts')).toBe('src/main.ts')
+    expect(resolveFileRefPath(undefined, 'src\\main.ts')).toBe('src\\main.ts')
+    expect(resolveFileRefPath(null, '')).toBe('')
   })
 })

@@ -34,6 +34,7 @@ type appBuilder interface {
 	GenerateCommitMessage(context.Context, string) (string, error)
 	GetBaseSkillDirs() []string
 	GetSkillDescriptors(projectSkillDir string) []skills.SkillDescriptor
+	ResolveSkillResourcePath(projectSkillDir, skillName, relPath string) (string, error)
 	GetBaseAgentDirs() []string
 	GetAgentDescriptors(projectAgentDir string) []agents.AgentDescriptor
 	ModelRegistry() *llm.ModelRegistry

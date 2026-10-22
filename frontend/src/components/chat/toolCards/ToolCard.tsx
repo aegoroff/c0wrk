@@ -4,8 +4,11 @@ import { CollapsibleBlock } from '@/components/chat/CollapsibleBlock'
 import { bookmarkKey } from '@/lib/bookmarks'
 import type { DisplayItem } from '@/types/messages'
 import { useAttachmentName } from '@/stores/attachmentsStore'
+import { resolveSkillResourcePath } from '@/api/skills'
+import { resolveChatWorkspaceRoot } from '@/lib/chatWorkspaceRoot'
+import { normalizePath } from '@/lib/localFileLink'
 import { resolveCardConfig } from './toolCardRegistry'
-import { extractAttachmentId, extractFileLine } from './extractors'
+import { extractAttachmentId, extractFileLine, extractSkillName } from './extractors'
 import { FileLink } from './shared/FileLink'
 import { EllipsisHint } from './shared/EllipsisHint'
 
@@ -110,6 +113,32 @@ export const ToolCard = React.memo(function ToolCard({ item }: { item: ToolItem 
     [filePath, item.parsedArgs, item.args],
   )
 
+  // Every path is resolved against its TRUE base at click time before the
+  // viewer opens (FileLink falls back to plain text when a resolver returns
+  // null):
+  //   - read_skill_resource: the skill's catalog directory, resolved by the
+  //     backend through the SAME catalog scan + traversal guard the tool used
+  //     (ResolveSkillResourcePath RPC). A missing skill name or a failed
+  //     resolution renders the path as plain text.
+  //   - workspace file tools: the chat workspace root (normalizePath) — a
+  //     relative arg joins the root, an absolute/drive/UNC path passes
+  //     through normalized. Without a root (transient state) the raw path
+  //     opens unchanged, matching the historical behavior.
+  const skillName = useMemo(
+    () => (baseToolName === 'read_skill_resource' ? extractSkillName(item.parsedArgs, item.args) : undefined),
+    [baseToolName, item.parsedArgs, item.args],
+  )
+  const linkResolve = useMemo(() => {
+    if (!isFileTool) return undefined
+    if (baseToolName === 'read_skill_resource') {
+      return (p: string) => (skillName ? resolveSkillResourcePath(skillName, p) : Promise.resolve(null))
+    }
+    return async (p: string) => {
+      const root = await resolveChatWorkspaceRoot()
+      return root ? normalizePath(root, p) : p
+    }
+  }, [isFileTool, baseToolName, skillName])
+
   // fullText mirrors the visible title so the tooltip reveals exactly what the
   // header shows (verb + value) rather than a bare hint. This matters when
   // extractHint omits the value (e.g. bash commands ≤60 chars where the
@@ -127,7 +156,7 @@ export const ToolCard = React.memo(function ToolCard({ item }: { item: ToolItem 
       {filePath ? (
         <>
           <span className="text-muted-foreground">{config.verb}: </span>
-          <FileLink path={filePath} line={fileLine} label={title} className="text-sm" nativeTitle={false} />
+          <FileLink path={filePath} line={fileLine} label={title} className="text-sm" nativeTitle={false} resolve={linkResolve} />
         </>
       ) : title ? (
         <>
@@ -138,7 +167,7 @@ export const ToolCard = React.memo(function ToolCard({ item }: { item: ToolItem 
         <span className="text-muted-foreground">{config.verb}</span>
       )}
     </EllipsisHint>
-  ), [config.verb, filePath, fileLine, title, fullText])
+  ), [config.verb, filePath, fileLine, title, fullText, linkResolve])
 
   const cacheRangeNode = useMemo(() => cacheRange ? (
     <span className="text-xs text-hljs-comment shrink-0 whitespace-nowrap">

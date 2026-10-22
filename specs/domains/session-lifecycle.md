@@ -353,7 +353,9 @@ User sends message
       │   while experimental.enabled is false
       ├─ Preprocess text for orchestrator:
       │   ├─ Strip resolved /skill, /agent and /server references (plain or qualified), catalog-gated and fail-closed
-      │   └─ Convert @file references to fileref:// URIs (relative paths resolved to absolute against the session workspace)
+      │   └─ Convert @file references to fileref:// URIs (path-dialect rules
+      │      in File Reference Path Semantics below; relative paths resolve
+      │      against the session workspace)
       ├─ Get or create Orchestrator for session (via factory)
       ├─ Create emitter (EventEmitter over the combined emitFunc: UI + EventPersister)
       ├─ Enrich task context:
@@ -398,6 +400,51 @@ User sends message
 > prior ReAct cycle instead of routing a new task. A goal request (`/goal`
 > prefix or the goal toggle) supersedes this branch — the interrupted task is
 > abandoned and the goal loop runs instead (see [Continuing an interrupted task with a new message](#continuing-an-interrupted-task-with-a-new-message)).
+
+### File Reference (`fileref://`) Path Semantics
+
+The `@file` → `fileref://` conversion (`resolveFileRefPath` behind
+`PreprocessMessageText` in `core/message_preprocess.go`) recognizes
+absolute paths lexically and GOOS-independently via `core.IsAbsolutePath`
+(`core/pathabs.go`): POSIX leading `/`, Windows drive-rooted
+`^[A-Za-z]:[\\/]` (the required separator keeps drive-relative `C:x`
+relative), and Windows UNC `^[\\/]{2}`. There is no OS-conditional
+branching — a transcript is cross-platform data, and the URI is a logical
+identifier, not an OS path.
+
+| Input class                     | Emitted URI path                                                                                     |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| POSIX-absolute (`/a/b`)         | verbatim — never joined                                                                              |
+| `~`-prefixed                    | verbatim (home expansion unchanged)                                                                  |
+| Windows drive (`C:\Doc\f.md`)   | `C:/Doc/f.md` — canonicalized, never joined to the workspace, independent of `workspacePath` (chat mode included) |
+| Windows UNC (`\\server\share\f.md`) | `//server/share/f.md` (the full URI literal carries four slashes: `fileref:////server/share/f.md`) |
+| Relative (`src/a.ts`)           | joined with the session workspace when one exists; verbatim otherwise                                |
+
+Rules:
+
+- **Canonical form is forward-slash.** Drive/UNC inputs pass through
+  `core.NormalizeAbsPath`: backslashes become `/`, dot segments are
+  removed, and `..` is clamped at the anchored root (filesystem root /
+  drive root / UNC server-share pair) — never a plain `path.Clean`, which
+  would pop across the anchor and collapse the UNC `//` marker. The
+  frontend mirrors the same semantics (`isAbsolutePath` / `normalizePath`
+  in `frontend/src/lib/localFileLink.ts`).
+- **Line anchors survive canonicalization**: `@C:\Docs\f.md#L20-L36` →
+  `fileref://C:/Docs/f.md#L20-L36`.
+- **No database migration.** The rules are additive: POSIX-absolute, `~`,
+  and relative inputs follow byte-for-byte historical paths, so persisted
+  rows resolve as they always did; only Windows-dialect inputs change
+  behavior.
+- **Drive-relative paths are out of scope**: `C:x\f.md` stays relative
+  (joins the workspace when one exists) — an accepted, documented
+  limitation.
+
+Quoted paths with spaces (`@'C:\My Docs\f.md'#L5`) follow the same rules
+after quote stripping. See
+[ADR-092](../decisions/092-chat-file-reference-path-semantics.md) for the
+full decision record, and
+[rendering.md](frontend/rendering.md) § Markdown Element Handling for how
+the frontend consumes these URIs.
 
 ### File Attachments
 
@@ -1485,3 +1532,4 @@ type HandleResult struct {
 - [../contracts/event-catalog.md](../contracts/event-catalog.md) — task lifecycle events
 - [prompt-suggestions.md](prompt-suggestions.md) — proactive chat-input follow-ups generated after task outcomes `full`/`partial`; they consume this domain's `is_nudge` stamp and the task-finish outcome gate
 - [../decisions/030-session-context-restore.md](../decisions/030-session-context-restore.md) — saved-first restore, effective-activity semantics, archived exclusion, last-context startup restore
+- [../decisions/092-chat-file-reference-path-semantics.md](../decisions/092-chat-file-reference-path-semantics.md) — `fileref://` URI emission: GOOS-independent drive/UNC detection, canonical forward-slash forms, no migration
