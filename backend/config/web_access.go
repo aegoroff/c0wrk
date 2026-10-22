@@ -315,6 +315,35 @@ func webAccessLoopbackWarning(bind string) string {
 	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS", bind)
 }
 
+// WebAccessLoadWarnings is the pure, state-only counterpart of the
+// normalizeWebAccess warning tail (ADR-095), for callers that mutate the
+// section at runtime (desktop's control RPCs) and must keep the UI's
+// config-load-warning channel — GetConfig().config_errors → the Settings
+// "Configuration warning" banner — in step with the live section instead of
+// freezing it on the launch-time snapshot. It returns the warnings the
+// section's CURRENT state draws without touching anything, so a runtime
+// recompute is idempotent and safe after failures and rollbacks alike.
+//
+// Only the exposure warning is computable here, and only from state. The
+// interactive writers preflight a TLS pair fail-closed (the TLS commit loads
+// the pair, the enable flip refuses an unusable one), so a runtime-mutated
+// section can never carry an unusable TLS — pair files that rot UNDER an
+// already-persisted usable TLS stay owned by the section's cert_status
+// banner and the sidecar mount's fail-closed backstop, not by this function.
+// Semantics mirror the load pipeline exactly: a disabled section warns
+// nothing (no listener, nothing to expose); an enabled non-loopback bind
+// warns only while the effective transport is plain HTTP (ADR-093) — a
+// TLS-encrypted exposure stays a section-banner + start-log matter.
+func WebAccessLoadWarnings(section WebAccessConfig) []string {
+	if !section.Enabled {
+		return nil
+	}
+	if IsLoopbackBind(section.Bind) || section.TLS.Enabled {
+		return nil
+	}
+	return []string{webAccessLoopbackWarning(section.Bind)}
+}
+
 // defaultWebAccessState is the canonical default section state the fail-soft
 // load path resets an invalid section to: disabled, loopback bind, auto port,
 // empty token (the credential is minted at the first start). Resetting to
@@ -385,15 +414,15 @@ func normalizeWebAccess(cfg *Config) []string {
 		warnings = append(warnings, warning)
 	}
 	// Fires only for a SURVIVING enabled section — the resets above leave
-	// either the loopback default or a disabled master switch. ADR-093: only
-	// the PLAIN-HTTP combination warns here — a TLS-encrypted non-loopback
-	// bind loads warning-free (its exposure stays surfaced by the Settings
-	// section banner and the sidecar start log). An unusable TLS never
-	// reaches this gate: its section is disabled above, so there is no
-	// listener left to expose.
-	if cfg.WebAccess.Enabled && !IsLoopbackBind(cfg.WebAccess.Bind) && !cfg.WebAccess.TLS.Enabled {
-		warnings = append(warnings, webAccessLoopbackWarning(cfg.WebAccess.Bind))
-	}
+	// either the loopback default or a disabled master switch. The tail
+	// delegates to WebAccessLoadWarnings (ADR-095) so the load pipeline and
+	// the runtime recompute can never drift apart in text or condition: an
+	// unusable TLS never reaches this gate (its section is disabled above,
+	// so there is no listener left to expose), and only the PLAIN-HTTP
+	// combination warns — a TLS-encrypted non-loopback bind loads
+	// warning-free (its exposure stays surfaced by the Settings section
+	// banner and the sidecar start log).
+	warnings = append(warnings, WebAccessLoadWarnings(cfg.WebAccess)...)
 	return warnings
 }
 

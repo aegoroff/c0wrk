@@ -1052,6 +1052,19 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 	return info
 }
 
+// The warning-channel refresh (ADR-095): every transport-affecting control
+// RPC recomputes the section's config-load-warning contribution AFTER its
+// webAccessMu critical section — outside the lock on purpose, see
+// RefreshWebAccessLoadWarnings for the lock-order rule. The refresh is
+// idempotent, so it also runs after refusals and rollbacks: it reflects
+// whatever state the attempt left behind. The token and certificate RPCs
+// deliberately do not refresh: neither the credential nor the pair's paths
+// change the section's transport state, so its warning contribution cannot
+// move.
+func (a *App) refreshWebAccessLoadWarnings() {
+	a.frontendAPI().Lifecycle().RefreshWebAccessLoadWarnings()
+}
+
 // SetWebAccessEnabled persists the web_access.enabled switch and applies it
 // live: enabling starts the sidecar, disabling stops it. A request matching
 // the current state is a no-op, and a failed disk write rolls the in-memory
@@ -1073,11 +1086,17 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 // desktop is the sole WRITER of the web_access section (backend code never
 // touches it at runtime), and a concurrent backend config save can only READ
 // the section it persists wholesale — the accepted one-word window of this
-// desktop-owned seam.
+// desktop-owned seam. The warning refresh runs after the unlock, so the
+// never-takes-configMu-under-webAccessMu rule survives (ADR-095).
 func (a *App) SetWebAccessEnabled(on bool) error {
 	a.webAccessMu.Lock()
-	defer a.webAccessMu.Unlock()
+	err := a.setWebAccessEnabledLocked(on)
+	a.webAccessMu.Unlock()
+	a.refreshWebAccessLoadWarnings()
+	return err
+}
 
+func (a *App) setWebAccessEnabledLocked(on bool) error {
 	cfg, cfgPath := a.configRef()
 	if cfg == nil || cfgPath == "" {
 		return errors.New("config not initialized")
@@ -1201,11 +1220,17 @@ func (a *App) applyExperimentalWebAccess(enabled bool) {
 // persisted, and the sidecar is brought back on it — the caller gets an error
 // explaining both, and the app is never left silently without a sidecar it
 // had before the call. Locking discipline: webAccessMu, exactly like
-// SetWebAccessEnabled (see its comment for the desktop-owned config seam).
+// SetWebAccessEnabled (see its comment for the desktop-owned config seam);
+// the warning refresh runs after the unlock (ADR-095, the lock-order rule).
 func (a *App) SetWebAccessConnection(bind string, port int) error {
 	a.webAccessMu.Lock()
-	defer a.webAccessMu.Unlock()
+	err := a.setWebAccessConnectionLocked(bind, port)
+	a.webAccessMu.Unlock()
+	a.refreshWebAccessLoadWarnings()
+	return err
+}
 
+func (a *App) setWebAccessConnectionLocked(bind string, port int) error {
 	cfg, cfgPath := a.configRef()
 	if cfg == nil || cfgPath == "" {
 		return errors.New("config not initialized")
@@ -1341,11 +1366,19 @@ const (
 // not consult web_access.enabled or the experimental gate: like the
 // bind/port pins it persists regardless and takes effect at the next start
 // whose gates are open. Locking discipline: webAccessMu, exactly like
-// SetWebAccessEnabled (see its comment for the desktop-owned config seam).
+// SetWebAccessEnabled (see its comment for the desktop-owned config seam);
+// the warning refresh runs after the unlock (ADR-095, the lock-order rule) —
+// the HTTPS flip is precisely the transition that must move the
+// config-load-warning banner.
 func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
 	a.webAccessMu.Lock()
-	defer a.webAccessMu.Unlock()
+	err := a.setWebAccessTLSLocked(enabled, cert, key)
+	a.webAccessMu.Unlock()
+	a.refreshWebAccessLoadWarnings()
+	return err
+}
 
+func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 	cfg, cfgPath := a.configRef()
 	if cfg == nil || cfgPath == "" {
 		return errors.New("config not initialized")

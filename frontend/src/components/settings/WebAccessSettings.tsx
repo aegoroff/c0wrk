@@ -54,6 +54,12 @@ import { WebAccessTLSSettings } from './WebAccessTLSSettings'
  * controls the whole app — and when the bind leaves loopback, the listener
  * itself is network-reachable over plain HTTP, which carries its own
  * stronger warning.
+ *
+ * ADR-095: the transport-affecting writes (the enable toggle, the address
+ * pin, the TLS switch and its path commits) also refresh the top-of-Settings
+ * config warning banner through onConfigChanged — the backend recomputes the
+ * section's config-load warnings on each, so the banner must re-read them.
+ * The token writes cannot move that warning and stay out.
  */
 
 /** Renders the persisted (bind, port) pin as the full URL the single field
@@ -68,7 +74,7 @@ function formatWebAccessAddress(bind: string, port: number, tlsEnabled: boolean)
   return port > 0 ? `${scheme}://${host}:${port}` : `${scheme}://${host}`
 }
 
-export function WebAccessSettings() {
+export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () => void }) {
   // null until the RPC answers — the toggle stays disabled rather than
   // showing a guessed state.
   const [info, setInfo] = useState<WebAccessInfo | null>(null)
@@ -137,6 +143,10 @@ export function WebAccessSettings() {
       setSaving(true)
       try {
         await setWebAccessEnabled(next)
+        // ADR-095: the enable flip is a transport change, so the backend has
+        // recomputed the section's config-load warnings — tell the banner to
+        // re-read them.
+        onConfigChanged?.()
         // The toggle both persisted and applied: re-read the authoritative
         // state instead of deriving running/url/token locally. A failed
         // re-read rolls the display back — the backend still holds the
@@ -150,7 +160,7 @@ export function WebAccessSettings() {
         setSaving(false)
       }
     },
-    [info],
+    [info, onConfigChanged],
   )
 
   const handleCopy = useCallback(async (key: 'url' | 'token', text: string) => {
@@ -191,6 +201,9 @@ export function WebAccessSettings() {
     setAddressError(null)
     try {
       await setWebAccessConnection(parsed.bind, parsed.port)
+      // ADR-095: a re-bind can move the exposure warning in or out of the
+      // loopback class — the banner re-reads the recomputed warnings.
+      onConfigChanged?.()
       const fresh = await getWebAccessInfo()
       if (fresh) setInfo(fresh)
     } catch (err) {
@@ -198,7 +211,7 @@ export function WebAccessSettings() {
     } finally {
       setPinBusy(false)
     }
-  }, [info, addressDraft, pinBusy])
+  }, [info, addressDraft, pinBusy, onConfigChanged])
 
   /** Commit the token draft (Enter or focus loss), mirroring the address
    *  field: local validation first (trimmed, 8–256 characters), an unchanged
@@ -333,7 +346,7 @@ export function WebAccessSettings() {
         </div>
       )}
 
-      {info !== null && <WebAccessTLSSettings info={info} onInfo={setInfo} />}
+      {info !== null && <WebAccessTLSSettings info={info} onInfo={setInfo} onConfigChanged={onConfigChanged} />}
 
       {info !== null && info.token !== '' && (
         <div className="flex flex-col gap-1.5 pl-12" data-testid="web-access-token-block">

@@ -97,6 +97,10 @@ export function SettingsModal() {
   // without a reload).
   const experimentalEnabled = useExperimentalStore((s) => s.enabled)
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
+  // One banner refresher shared by every writer that can move the
+  // config-load-warning channel: the LLM saves (handleSettingsSaved) and the
+  // Web Access control RPCs (ADR-095 — the banner follows the live section).
+  const refreshBanner = useCallback(() => setBannerRefreshKey((k) => k + 1), [])
   const [closeBlocked, setCloseBlocked] = useState(false)
   const [checkingClose, setCheckingClose] = useState(false)
   const [currentDefaultModel, setCurrentDefaultModel] = useState('')
@@ -105,7 +109,7 @@ export function SettingsModal() {
 
   useEffect(() => {
     if (open && !prevOpenRef.current) {
-      setBannerRefreshKey((k) => k + 1)
+      refreshBanner()
       setCloseBlocked(false)
       // Pessimistically reset the cached default so the close fast-path can't
       // fire on a stale value left over from a previous open. LLMSettings
@@ -114,7 +118,7 @@ export function SettingsModal() {
       setCurrentDefaultModel('')
     }
     prevOpenRef.current = open
-  }, [open])
+  }, [open, refreshBanner])
 
   const handleDefaultModelChange = useCallback((model: string) => {
     setCurrentDefaultModel(model)
@@ -124,7 +128,7 @@ export function SettingsModal() {
   }, [])
 
   const handleSettingsSaved = useCallback(() => {
-    setBannerRefreshKey((k) => k + 1)
+    refreshBanner()
     // A save can REMOVE the default (provider/model deletion), so we cannot
     // blindly clear closeBlocked. But a save that PRESERVES a valid default
     // should not leave a stale "default not configured" banner on screen: if
@@ -136,7 +140,7 @@ export function SettingsModal() {
     if (currentDefaultModel) {
       setCloseBlocked(false)
     }
-  }, [currentDefaultModel])
+  }, [currentDefaultModel, refreshBanner])
 
   const handleOpenChange = useCallback(async (isOpen: boolean) => {
     if (!isOpen) {
@@ -296,7 +300,10 @@ export function SettingsModal() {
                   block. */}
               {experimentalEnabled && !isWebTransport() && (
                 <div className="border-t border-border pt-4">
-                  <WebAccessSettings />
+                  {/* ADR-095: every successful transport-affecting Web Access
+                      write recomputes the section's config-load warnings, so
+                      the banner above must re-read them. */}
+                  <WebAccessSettings onConfigChanged={refreshBanner} />
                 </div>
               )}
               <div className="border-t border-border pt-4">

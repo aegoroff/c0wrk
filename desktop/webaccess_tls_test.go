@@ -11,6 +11,7 @@
 package desktop
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -20,16 +21,19 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/v0lka/c0wrk/backend"
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/internal/webaccess"
 )
@@ -783,4 +787,81 @@ func mustSidecarAddr(t *testing.T, a *App) string {
 		t.Fatal("running sidecar has no resolved address")
 	}
 	return addr
+}
+
+// TestWebAccessControlRPCsRefreshConfigLoadWarnings pins the ADR-095 wire
+// end-to-end: the transport-affecting control RPCs keep the UI's
+// config-load-warning channel (GetConfig().config_errors → the Settings
+// "Configuration warning" banner) in step with the live section — an
+// HTTP→HTTPS flip drops the plain-HTTP exposure warning, the reverse flip
+// and a re-bind onto a LAN address bring it back, a loopback re-bind and the
+// disable drop it, and an unrelated section's load warning survives every
+// transition untouched. The sidecar itself stays unmounted (persist-only
+// transitions: no restart path has a running listener to rebuild), so the
+// test never binds a socket.
+func TestWebAccessControlRPCsRefreshConfigLoadWarnings(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "pair.crt")
+	keyPath := filepath.Join(dir, "pair.key")
+	if err := webaccess.GenerateWebAccessCertificate("192.168.23.2", certPath, keyPath); err != nil {
+		t.Fatalf("generate the app-owned pair: %v", err)
+	}
+	cfg, path := writeWebAccessConfig(t, fmt.Sprintf(`
+web_access:
+  enabled: true
+  bind: 192.168.23.2
+  tls:
+    enabled: false
+    cert: %q
+    key: %q
+`, certPath, keyPath))
+
+	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "192.168.23.2"})[0]
+	unrelated := "autonomy: legacy smart_approve folded into silent_mode"
+
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A standalone (nil-app) FrontendAPI so the channel is observable through
+	// GetConfig; the swap happens before any goroutine, so the published-once
+	// seed invariant is not at play.
+	fapi := backend.NewFrontendAPI(backend.FrontendAPIConfig{Config: cfg, Logger: quiet})
+	a := NewApp()
+	a.FrontendAPI = fapi
+	a.logger = quiet
+	a.setConfigRef(cfg, path)
+	t.Cleanup(func() { a.stopWebAccess(context.Background()) })
+
+	// A plain-HTTP launch hands the exposure warning to the channel.
+	fapi.Lifecycle().SetConfigLoadState([]string{exposure, unrelated})
+	assertChannel := func(phase string, want ...string) {
+		t.Helper()
+		if got := fapi.GetConfig().ConfigErrors; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: ConfigErrors = %v, want %v", phase, got, want)
+		}
+	}
+	assertChannel("seeded", exposure, unrelated)
+
+	if err := a.SetWebAccessTLS(true, certPath, keyPath); err != nil {
+		t.Fatalf("SetWebAccessTLS(on): %v", err)
+	}
+	assertChannel("after TLS on", unrelated)
+
+	if err := a.SetWebAccessTLS(false, certPath, keyPath); err != nil {
+		t.Fatalf("SetWebAccessTLS(off): %v", err)
+	}
+	assertChannel("after TLS off", unrelated, exposure)
+
+	if err := a.SetWebAccessConnection("127.0.0.1", 0); err != nil {
+		t.Fatalf("SetWebAccessConnection(loopback): %v", err)
+	}
+	assertChannel("after re-bind to loopback", unrelated)
+
+	if err := a.SetWebAccessConnection("192.168.23.2", 0); err != nil {
+		t.Fatalf("SetWebAccessConnection(LAN): %v", err)
+	}
+	assertChannel("after re-bind to LAN", unrelated, exposure)
+
+	if err := a.SetWebAccessEnabled(false); err != nil {
+		t.Fatalf("SetWebAccessEnabled(false): %v", err)
+	}
+	assertChannel("after disable", unrelated)
 }

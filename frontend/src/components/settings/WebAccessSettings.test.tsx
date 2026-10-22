@@ -76,9 +76,9 @@ const offInfo = {
 let container: HTMLDivElement
 let root: Root
 
-function render(): void {
+function render(onConfigChanged?: () => void): void {
   act(() => {
-    root.render(<WebAccessSettings />)
+    root.render(<WebAccessSettings onConfigChanged={onConfigChanged} />)
   })
 }
 
@@ -699,5 +699,80 @@ describe('WebAccessSettings token regenerate', () => {
     render()
     await flush()
     expect(byTestId('web-access-token-regenerate')).toBeNull()
+  })
+})
+
+describe('WebAccessSettings config warning banner refresh (ADR-095)', () => {
+  it('fires onConfigChanged after a successful enable toggle', async () => {
+    const onConfigChanged = vi.fn()
+    mocks.getWebAccessInfo.mockResolvedValueOnce(offInfo).mockResolvedValueOnce(runningInfo)
+    render(onConfigChanged)
+    await flush()
+    clickToggle()
+    await flush()
+    expect(mocks.setWebAccessEnabled).toHaveBeenCalledWith(true)
+    expect(onConfigChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire onConfigChanged when the toggle RPC rejects', async () => {
+    const onConfigChanged = vi.fn()
+    mocks.getWebAccessInfo.mockResolvedValue(offInfo)
+    mocks.setWebAccessEnabled.mockRejectedValue(new Error('persist failed'))
+    render(onConfigChanged)
+    await flush()
+    clickToggle()
+    await flush()
+    expect(onConfigChanged).not.toHaveBeenCalled()
+  })
+
+  it('fires onConfigChanged after a committed address change, not for an unchanged field', async () => {
+    const onConfigChanged = vi.fn()
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render(onConfigChanged)
+    await flush()
+    // Unchanged value: nothing saves, nothing fires.
+    blurField(addressInput())
+    await flush()
+    expect(mocks.setWebAccessConnection).not.toHaveBeenCalled()
+    expect(onConfigChanged).not.toHaveBeenCalled()
+    // A real re-bind: the RPC travels and the banner refresh follows.
+    typeInto(addressInput(), 'http://192.168.23.2:8765')
+    pressEnter(addressInput())
+    await flush()
+    expect(mocks.setWebAccessConnection).toHaveBeenCalledWith('192.168.23.2', 8765)
+    expect(onConfigChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('never fires onConfigChanged for token writes (they cannot move the warning)', async () => {
+    const onConfigChanged = vi.fn()
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render(onConfigChanged)
+    await flush()
+    typeInto(tokenInput(), 'tok-0123456789abcdef')
+    pressEnter(tokenInput())
+    await flush()
+    expect(mocks.setWebAccessToken).toHaveBeenCalled()
+    expect(onConfigChanged).not.toHaveBeenCalled()
+    clickButton('web-access-token-regenerate')
+    await flush()
+    expect(mocks.regenerateWebAccessToken).toHaveBeenCalled()
+    expect(onConfigChanged).not.toHaveBeenCalled()
+  })
+
+  it('fires onConfigChanged after a successful TLS toggle from the child block', async () => {
+    const onConfigChanged = vi.fn()
+    mocks.getWebAccessInfo.mockResolvedValue(runningInfo)
+    render(onConfigChanged)
+    await flush()
+    const tlsToggle = container.querySelectorAll<HTMLInputElement>(
+      '[data-testid="web-access-tls-block"] input[type="checkbox"]',
+    )[0]
+    if (!tlsToggle) throw new Error('TLS toggle not found')
+    act(() => {
+      tlsToggle.click()
+    })
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledWith(true, '', '')
+    expect(onConfigChanged).toHaveBeenCalledTimes(1)
   })
 })

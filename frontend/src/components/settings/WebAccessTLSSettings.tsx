@@ -26,9 +26,14 @@ interface WebAccessTLSSettingsProps {
   info: WebAccessInfo
   /** The parent's setter: optimistic updates and post-write re-reads land here. */
   onInfo: (info: WebAccessInfo | null) => void
+  /** ADR-095: fired after a successful transport change — the backend has
+   *  recomputed the section's config-load warnings, and the Settings banner
+   *  must re-read them. The certificate Generate cannot move those warnings
+   *  (paths only) and stays out. */
+  onConfigChanged?: () => void
 }
 
-export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps) {
+export function WebAccessTLSSettings({ info, onInfo, onConfigChanged }: WebAccessTLSSettingsProps) {
   const [certDraft, setCertDraft] = useState(info.tlsCert ?? '')
   const [keyDraft, setKeyDraft] = useState(info.tlsKey ?? '')
   const [tlsBusy, setTlsBusy] = useState(false)
@@ -64,6 +69,9 @@ export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps
       setTlsBusy(true)
       try {
         await setWebAccessTLS(next, info.tlsCert ?? '', info.tlsKey ?? '')
+        // ADR-095: the HTTPS flip is the transition that must move the
+        // config-load-warning banner — the backend has recomputed it.
+        onConfigChanged?.()
         await reread()
       } catch (err) {
         logger.error('Failed to toggle web access TLS:', err)
@@ -73,7 +81,7 @@ export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps
         setTlsBusy(false)
       }
     },
-    [info, onInfo, reread],
+    [info, onInfo, reread, onConfigChanged],
   )
 
   /** Commit one path draft (Enter or focus loss): an unchanged value saves
@@ -92,6 +100,11 @@ export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps
       setTlsError(null)
       try {
         await setWebAccessTLS(info.tlsEnabled, cert, key)
+        // ADR-095: the backend recomputes the section's warnings after every
+        // SetWebAccessTLS (the recompute is state-only and idempotent), so
+        // the commit mirrors it even though a path change alone cannot move
+        // the exposure warning.
+        onConfigChanged?.()
         await reread()
       } catch (err) {
         setTlsError(err instanceof Error ? err.message : 'Failed to apply the TLS paths.')
@@ -99,7 +112,7 @@ export function WebAccessTLSSettings({ info, onInfo }: WebAccessTLSSettingsProps
         setCommitBusy(false)
       }
     },
-    [writeBusy, certDraft, keyDraft, info, reread],
+    [writeBusy, certDraft, keyDraft, info, reread, onConfigChanged],
   )
   const commitCert = useCallback(() => commitPath('cert'), [commitPath])
   const commitKey = useCallback(() => commitPath('key'), [commitPath])

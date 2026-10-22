@@ -963,3 +963,82 @@ func TestValidateWebAccessTLSPair(t *testing.T) {
 		t.Errorf("enabled with a real usable pair = %v, want nil", err)
 	}
 }
+
+func TestWebAccessLoadWarnings(t *testing.T) {
+	// The pure runtime counterpart of the normalizeWebAccess warning tail
+	// (ADR-095): state-only, no mutation, and — for every section state the
+	// load path leaves surviving — byte-identical to what the load pipeline
+	// produces, so the runtime recompute can never drift from the load text.
+	dir := t.TempDir()
+	certPath, keyPath := writeWebAccessTLSPair(t, dir)
+
+	t.Run("disabled section warns nothing even non-loopback plain", func(t *testing.T) {
+		section := WebAccessConfig{Enabled: false, Bind: "192.168.23.2"}
+		if got := WebAccessLoadWarnings(section); got != nil {
+			t.Errorf("disabled non-loopback plain = %v, want nil (no listener, nothing to expose)", got)
+		}
+	})
+
+	t.Run("enabled loopback warns nothing", func(t *testing.T) {
+		section := WebAccessConfig{Enabled: true, Bind: DefaultWebAccessBind}
+		if got := WebAccessLoadWarnings(section); got != nil {
+			t.Errorf("enabled loopback = %v, want nil", got)
+		}
+	})
+
+	t.Run("enabled non-loopback plain draws the exposure warning", func(t *testing.T) {
+		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}
+		got := WebAccessLoadWarnings(section)
+		if len(got) != 1 {
+			t.Fatalf("got %v, want exactly one warning", got)
+		}
+		want := `web_access: bind "192.168.23.2" is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS`
+		if got[0] != want {
+			t.Errorf("warning = %q, want %q", got[0], want)
+		}
+	})
+
+	t.Run("unspecified bind is non-loopback class", func(t *testing.T) {
+		section := WebAccessConfig{Enabled: true, Bind: "0.0.0.0"}
+		if got := WebAccessLoadWarnings(section); len(got) != 1 {
+			t.Errorf("0.0.0.0 plain HTTP = %v, want the exposure warning", got)
+		}
+	})
+
+	t.Run("enabled non-loopback TLS loads warning-free", func(t *testing.T) {
+		section := WebAccessConfig{
+			Enabled: true,
+			Bind:    "192.168.23.2",
+			TLS:     WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath},
+		}
+		if got := WebAccessLoadWarnings(section); got != nil {
+			t.Errorf("TLS-encrypted exposure = %v, want nil (ADR-093)", got)
+		}
+	})
+
+	t.Run("matches the load pipeline for surviving states", func(t *testing.T) {
+		for name, section := range map[string]WebAccessConfig{
+			"loopback plain":     {Enabled: true, Bind: DefaultWebAccessBind},
+			"non-loopback plain": {Enabled: true, Bind: "192.168.23.2"},
+			"non-loopback TLS": {Enabled: true, Bind: "192.168.23.2",
+				TLS: WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath}},
+			"disabled": {Enabled: false, Bind: "192.168.23.2"},
+		} {
+			live := Config{WebAccess: section}
+			loadWarnings := normalizeWebAccess(&live)
+			got := WebAccessLoadWarnings(section)
+			if len(got) != len(loadWarnings) {
+				t.Errorf("%s: runtime = %v, load pipeline = %v", name, got, loadWarnings)
+				continue
+			}
+			for i := range got {
+				if got[i] != loadWarnings[i] {
+					t.Errorf("%s: runtime[%d] = %q, load pipeline = %q", name, i, got[i], loadWarnings[i])
+				}
+			}
+			if section.Enabled && section.Bind != live.WebAccess.Bind {
+				t.Errorf("%s: normalizeWebAccess mutated the section", name)
+			}
+		}
+	})
+}
