@@ -224,8 +224,12 @@ describe('isServiceData / isErrorData / isRoutingData (#141/#142/#143)', () => {
   })
 
   it('isErrorData rejects a present non-string error (rendered message content)', () => {
-    expect(isErrorData({ error: 'boom' })).toBe(true)
+    expect(isErrorData({ error: 'boom', session_id: 's1' })).toBe(true)
     expect(isErrorData({ error: { message: 'boom' } })).toBe(false)
+  })
+
+  it('isErrorData rejects a present non-string session_id (wire contract: always set)', () => {
+    expect(isErrorData({ error: 'boom', session_id: 42 })).toBe(false)
   })
 
   it('isRoutingData rejects a present non-string domain / complexity', () => {

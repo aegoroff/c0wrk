@@ -144,18 +144,40 @@ func TestWebInboundDispatch_PlanApprovalResolves(t *testing.T) {
 	a.pendingPlanApprovals.Store("req-1", &pendingPlanApprovalEntry{ch: ch, sessionID: "sess-1"})
 
 	dispatchInbound(a, webInboundFrame(t, "plan_approval_response",
-		map[string]any{"request_id": "req-1", "decision": "approved", "feedback": "ship it"}), silentUIEmit(), silentLogger())
+		map[string]any{"request_id": "req-1", "decision": "approve", "feedback": "ship it"}), silentUIEmit(), silentLogger())
 
 	select {
 	case got := <-ch:
-		if got.Decision != "approved" || got.Feedback != "ship it" {
-			t.Errorf("got %+v, want {approved ship it}", got)
+		if got.Decision != "approve" || got.Feedback != "ship it" {
+			t.Errorf("got %+v, want {approve ship it}", got)
 		}
 	default:
 		t.Fatal("no plan-approval decision delivered")
 	}
 	if _, ok := a.pendingPlanApprovals.Load("req-1"); ok {
 		t.Error("pending plan approval entry not cleaned up")
+	}
+}
+
+func TestWebInboundDispatch_PlanApprovalRejectsUnknownDecision(t *testing.T) {
+	a := &App{}
+	ch := make(chan planApprovalResponse, 1)
+	a.pendingPlanApprovals.Store("req-1", &pendingPlanApprovalEntry{ch: ch, sessionID: "sess-1"})
+
+	// "approved" is not one of the catalog enum values (approve /
+	// request_changes / abandon) — the malformed response must be dropped.
+	dispatchInbound(a, webInboundFrame(t, "plan_approval_response",
+		map[string]any{"request_id": "req-1", "decision": "approved", "feedback": "ship it"}), silentUIEmit(), silentLogger())
+
+	select {
+	case got := <-ch:
+		t.Fatalf("malformed decision was delivered: %+v", got)
+	default:
+	}
+	// Fail-closed: the malformed response does not consume the pending
+	// approval — a valid retry can still resolve it.
+	if _, ok := a.pendingPlanApprovals.Load("req-1"); !ok {
+		t.Error("pending plan approval entry was consumed by a malformed decision")
 	}
 }
 

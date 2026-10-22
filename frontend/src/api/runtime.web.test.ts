@@ -738,24 +738,48 @@ describe('web capability helpers', () => {
 
   it('emit sends a {name, args} frame once the socket is open and warns-once while not', () => {
     const sock = webSocket()
-    runtime.emit('runtime_error', { id: 'e1', message: 'x' })
+    runtime.emit('tool_judge_request', { confirm_id: 'c1' })
     expect(sock.sent).toHaveLength(0)
     expect(loggerWarn).toHaveBeenCalledTimes(1) // warn-once per outage
-    runtime.emit('runtime_error', { id: 'e2', message: 'y' })
+    runtime.emit('tool_judge_request', { confirm_id: 'c2' })
     expect(loggerWarn).toHaveBeenCalledTimes(1)
 
     sock.serverOpen()
-    runtime.emit('runtime_error', { id: 'e3', message: 'z' })
+    runtime.emit('tool_judge_request', { confirm_id: 'c3' })
     runtime.emit('session:ping')
     expect(sock.sent).toEqual([
-      JSON.stringify({ name: 'runtime_error', args: [{ id: 'e3', message: 'z' }] }),
+      JSON.stringify({ name: 'tool_judge_request', args: [{ confirm_id: 'c3' }] }),
       JSON.stringify({ name: 'session:ping', args: [] }),
     ])
 
     // A fresh outage warns again (the flag reset on open).
     sock.serverClose()
-    runtime.emit('runtime_error', { id: 'e4' })
+    runtime.emit('tool_judge_request', { confirm_id: 'c4' })
     expect(loggerWarn).toHaveBeenCalledTimes(2)
+  })
+
+  it('emit routes runtime_error LOCALLY in the web transport — never over the wire', () => {
+    const sock = webSocket()
+    const seen: unknown[] = []
+    const unsubscribe = runtime.subscribe('runtime_error', (...args: unknown[]) => seen.push(args))
+
+    // Closed socket: the error-toast path must still work — UI-originated
+    // errors fire exactly when the transport is unhappy, and the inbound
+    // whitelist would drop the name server-side anyway.
+    runtime.emit('runtime_error', { id: 'e1', message: 'x' })
+    expect(seen).toEqual([[{ id: 'e1', message: 'x' }]])
+    expect(sock.sent).toHaveLength(0)
+    expect(loggerWarn).not.toHaveBeenCalled()
+
+    // Open socket: still local, still no frame.
+    sock.serverOpen()
+    runtime.emit('runtime_error', { id: 'e2', message: 'y' })
+    expect(seen).toEqual([[{ id: 'e1', message: 'x' }], [{ id: 'e2', message: 'y' }]])
+    expect(sock.sent).toHaveLength(0)
+
+    unsubscribe()
+    runtime.emit('runtime_error', { id: 'e3' })
+    expect(seen).toHaveLength(2)
   })
 })
 

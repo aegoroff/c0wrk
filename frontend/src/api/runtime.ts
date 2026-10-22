@@ -562,6 +562,18 @@ export function subscribe(eventName: string, callback: (...data: unknown[]) => v
  *  would only become an unhandled rejection. */
 export function emit(eventName: string, data?: unknown): void {
   if (transportMode === 'web') {
+    // UI-originated runtime_error stays LOCAL: the inbound whitelist is a
+    // backend→frontend-only authorization (the seven HITL responses) and
+    // drops this name at Debug, and the backend neither listens for it nor
+    // re-emits it — a wire frame would be silently discarded and the error
+    // toast would never fire in a browser tab. Dispatch into the local
+    // listener registry instead — the same replay approach the web
+    // notification click uses (emitLocalEvent) — so the desktop's Wails-bus
+    // round-trip semantics (page-local toast) hold in both transports.
+    if (eventName === 'runtime_error') {
+      emitLocalEvent(eventName, data)
+      return
+    }
     webEmit(eventName, data)
     return
   }

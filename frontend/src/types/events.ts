@@ -29,7 +29,10 @@ export interface ToolResultData {
 
 export interface ThoughtData { step_num: number; content: string; reasoning?: string; plan_step_id?: string }
 export interface StepData { step_num: number }
-export interface ErrorData { error: string }
+/** Payload of the session-scoped `error` event (backend ErrorData,
+ *  backend/session/events.go): both fields are always present on the wire —
+ *  neither carries omitempty. */
+export interface ErrorData { error: string; session_id: string }
 
 export interface PlanStepData { id?: string; description: string; summary?: string; status: string; depends_on?: string[] }
 
@@ -233,14 +236,15 @@ export interface AssistantChunkData { content: string; accumulated_content?: str
  *  than the Conductor's own turn — the frontend must nest it in that block,
  *  never in the root Conductor chat. */
 export interface AssistantDoneData { content: string; input_tokens: number; output_tokens: number; plan_step_id?: string }
+/** Payload of the terminal `task_cancelled` event (backend TaskCancelledData,
+ *  backend/session/events.go): `session_id` is always present — no omitempty. */
+export interface TaskCancelledData { session_id: string }
 export interface TaskCompleteData {
-  session_id?: string; output?: string; attempt_count?: number; routing_decision?: Record<string, unknown>
+  session_id?: string; output?: string; routing_decision?: Record<string, unknown>
   /** Typed success contract: false for partial/failed/aborted executions delivered as task_complete. */
   success?: boolean
   /** Refines the outcome: 'full' | 'partial' | 'failed' | 'aborted'. */
   completion?: string
-  /** Number of plan steps that finished with an error in the final attempt. */
-  failed_steps?: number
 }
 export interface SubAgentLaunchData { step_id: string; description: string; plan_step_id?: string }
 export interface SubAgentCompleteData { step_id: string; success: boolean; duration: number; error?: string; plan_step_id?: string }
@@ -258,6 +262,14 @@ export interface ServiceData { content: string; phase?: string }
 export interface SessionRenamedData { new_name: string; old_name?: string; id?: string }
 export interface TaskFailedResumableData {
   message?: string
+  /** ID of the persisted resumable task (backend TaskFailedResumableData,
+   *  omitempty — absent for failures with no persisted task row). Lets the
+   *  banner be matched and resolved on resume/cancel
+   *  (stalePromptMatchField('task_failed_resumable') → 'task_id'). */
+  task_id?: string
+  /** Concise contextual cause (execution error or completion outcome) so the
+   *  banner explains WHY the task is resumable instead of a generic message. */
+  reason?: string
   /** Unix timestamp (seconds) at which the UI auto-resend countdown reaches
    *  zero. Present only when the backend classified the terminal failure as
    *  a rate-limit/overload error from a provider with a configured retry
@@ -661,7 +673,7 @@ export interface SessionEventMap {
   readonly assistant_done: AssistantDoneData
   readonly error: ErrorData
   readonly task_complete: TaskCompleteData
-  readonly task_cancelled: void
+  readonly task_cancelled: TaskCancelledData
   readonly retry: RetryData
   readonly step_retry: StepRetryData
   readonly service: ServiceData
@@ -981,6 +993,12 @@ export interface GlobalEventMap {
    *  any active R-NNN, unlike `research:file_changed`: the library is a global
    *  subdirectory of the canonical research root for every real project. */
   readonly 'papers:changed': { readonly project_id: string; readonly paths: string }
+  /** A non-workspace Agent Profile directory changed (user `~/.agents/agents`,
+   *  c0wrk global `~/.c0wrk/.agents/agents` — the seeded research packs).
+   *  Workspace-local agent changes surface via `workspace:tree_changed`
+   *  instead. Mirrors `skills:changed` for AGENT.md discovery. No payload —
+   *  consumers re-read the catalog (backend/events.go `EventAgentsChanged`). */
+  readonly 'agents:changed': void
   readonly 'skills:changed': void
   readonly 'git:status_changed': string
   readonly 'vector_index:status': VectorIndexStatus
@@ -996,6 +1014,11 @@ export interface GlobalEventMap {
   readonly 'tool_manager:start': ToolManagerStartData
   readonly 'tool_manager:progress': ToolManagerProgressData
   readonly 'tool_manager:done': ToolManagerDoneData
+  /** MCP gateway finished starting: per-server tool lists are queryable.
+   *  Emitted once by the desktop layer (startMCPReadyNotifier, waiting on the
+   *  builder's WaitMCPStartup) so the settings dialog can refresh its
+   *  transient "Starting…" placeholder without polling. No payload. */
+  readonly 'mcp:ready': void
   /** Embedded local-model install progress: one component's one stage
    *  (runtime, cudart, model, mmproj × downloading, verifying, extracting,
    *  signing, done). Emitted by the background install run started by
@@ -1234,20 +1257,23 @@ export function isAssistantDoneData(d: unknown): d is AssistantDoneData {
 export function isErrorData(d: unknown): d is ErrorData {
   // `error` becomes the rendered error-message content — a truthy non-string
   // would reach a React child slot.
-  return isObj(d) && typeof d.error === 'string'
+  if (!isObj(d) || typeof d.error !== 'string') return false
+  // session_id is always on the wire (ErrorData, no omitempty), but the guard
+  // stays tolerant of its absence (Wails serialization edge cases) while
+  // rejecting a present non-string, mirroring isTaskCompleteData.
+  if ('session_id' in d && d.session_id !== undefined && typeof d.session_id !== 'string') return false
+  return true
 }
 export function isTaskCompleteData(d: unknown): d is TaskCompleteData {
   if (!isObjLocal(d)) return false
   const hasValidOutput = typeof d.output === 'string'
-  const hasValidAttempt = typeof d.attempt_count === 'number'
   const hasValidRouting = isObj(d.routing_decision)
   const hasValidSuccess = typeof d.success === 'boolean'
   // Accept any valid field as sufficient evidence of a task_complete event;
   // a missing output field (e.g. Wails serialization edge case) is tolerable
   // as long as another field validates.
-  if (!(hasValidOutput || hasValidAttempt || hasValidRouting || hasValidSuccess)) return false
+  if (!(hasValidOutput || hasValidRouting || hasValidSuccess)) return false
   if ('completion' in d && d.completion !== undefined && typeof d.completion !== 'string') return false
-  if ('failed_steps' in d && d.failed_steps !== undefined && typeof d.failed_steps !== 'number') return false
   if ('session_id' in d && d.session_id !== undefined && typeof d.session_id !== 'string') return false
   // Allow missing output when other validators pass (defensive fallback).
   if ('output' in d && d.output !== undefined && typeof d.output !== 'string') return false

@@ -91,6 +91,22 @@ func parseStepLimitResponse(v string) (agent.StepLimitResponse, bool) {
 	}
 }
 
+// parsePlanApprovalDecision validates a frontend-supplied plan-review
+// decision string against the known values (PlanApprovalResponsePayload in
+// the event catalog: approve / request_changes / abandon). Returns ok=false
+// on missing or unrecognized values, mirroring parseStepLimitResponse's
+// defense-in-depth discipline: an unrecognized decision is a malformed
+// response, not an implicit rejection, so the pending approval stays alive
+// for a valid retry instead of being consumed.
+func parsePlanApprovalDecision(v string) (string, bool) {
+	switch v {
+	case "approve", "request_changes", "abandon":
+		return v, true
+	default:
+		return "", false
+	}
+}
+
 // stringField extracts a string field from a payload, logging a warning if the
 // field is missing or has the wrong type.
 func stringField(payload map[string]any, key, eventName string, log *slog.Logger) (string, bool) {
@@ -359,7 +375,13 @@ func (a *App) handlePlanApprovalResponse(payload map[string]any, log *slog.Logge
 		return
 	}
 
-	decision, _ := payload["decision"].(string)
+	rawDecision, _ := payload["decision"].(string)
+	decision, ok := parsePlanApprovalDecision(rawDecision)
+	if !ok {
+		log.Warn("plan_approval response has unknown or missing decision",
+			"decision", rawDecision, "request_id", requestID)
+		return
+	}
 	feedback, _ := payload["feedback"].(string)
 
 	chVal, ok := a.pendingPlanApprovals.Load(requestID)

@@ -279,14 +279,11 @@ export function useChatEvents(sessionId: string | null): void {
         // Degraded completion (partial/failed/aborted): surface it explicitly
         // instead of letting the task end look like a clean success.
         if (data.success === false) {
-          const failed = data.failed_steps
-            ? ` (${data.failed_steps} step${data.failed_steps === 1 ? '' : 's'} failed)`
-            : ''
           store.addMessage(sessionId, {
             id: generateMessageId(),
             sessionId,
             type: 'error',
-            content: `Task finished with ${data.completion ?? 'incomplete'} execution${failed}. The output above may be incomplete.`,
+            content: `Task finished with ${data.completion ?? 'incomplete'} execution. The output above may be incomplete.`,
             timestamp: Date.now(),
           })
         }
