@@ -5,11 +5,12 @@ const PROTOCOL_RE = /^[a-z][a-z0-9+.-]*:/i
 
 /**
  * Windows drive prefix: a single ASCII letter followed by a colon (`C:`,
- * `c:`). A one-letter "scheme" is never a real URL scheme (RFC 3986 schemes
- * have at least two characters), so an href starting like this is a local
- * Windows path — drive-rooted (`C:\Documents`), forward-slash (`C:/ws/file`)
- * or drive-relative (`C:foo`). It must never be classified as an external
- * URL and therefore never reach `openExternalURL`/`BrowserOpenURL`.
+ * `c:`). RFC 3986's grammar would accept a one-letter scheme (`C:` parses
+ * as URI scheme "c"), but no real-world scheme is a single letter — every
+ * such spelling is in practice a local Windows path: drive-rooted
+ * (`C:\Documents`), forward-slash (`C:/ws/file`) or drive-relative
+ * (`C:foo`). It must never be classified as an external URL and therefore
+ * never reach `openExternalURL`/`BrowserOpenURL`.
  */
 const WINDOWS_DRIVE_RE = /^[A-Za-z]:/
 
@@ -32,8 +33,9 @@ export function isLocalFileHref(href: string | undefined): boolean {
  * (http, https, mailto, ftp, etc.). Such links must be dispatched to the
  * system browser via `openExternalURL` — the Wails webview ignores
  * `<a target="_blank">` or opens it inside the webview, which cannot render
- * arbitrary web pages. A Windows drive prefix (`C:`) is not a scheme: those
- * hrefs are local file paths and are never external URLs.
+ * arbitrary web pages. A Windows drive prefix (`C:`) parses
+ * as a URI scheme but is never a real one: those hrefs are local file
+ * paths and are never external URLs.
  */
 export function isExternalUrl(href: string | undefined): boolean {
   return !!href && !WINDOWS_DRIVE_RE.test(href) && PROTOCOL_RE.test(href)

@@ -122,8 +122,11 @@ func (f *FrontendAPI) resolveWorkspacePath(filePath string) (absPath, absRoot st
 // starts with "/" is a canonical forward-slash UNC ("//srv/share") and stays
 // intact, as do genuine POSIX-absolute paths. Relative paths keep the
 // historical filepath.Abs resolution against the process CWD. Canonical
-// spellings resolve byte-for-byte exactly as before; only the Windows
-// dialects change behavior (from rooted junk to the native path).
+// spellings resolve byte-for-byte exactly as before; changed behavior is
+// limited to non-canonical ones: the Windows dialects (previously mounted
+// as rooted junk) and dot-segment-carrying POSIX absolutes, which are now
+// returned verbatim instead of filepath.Abs-cleaned — dot-segment
+// canonicalization is the emitter's job (ADR-092 decisions 2 and 8).
 func (f *FrontendAPI) resolveReadablePath(filePath string) (string, error) {
 	cleaned := stripLineAnchor(filePath)
 	if len(cleaned) > 1 && cleaned[0] == '/' && cleaned[1] != '/' &&

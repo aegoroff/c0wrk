@@ -161,6 +161,18 @@ describe('isAbsolutePath', () => {
     expect(isAbsolutePath('C:foo')).toBe(false)
     expect(isAbsolutePath('C:')).toBe(false)
   })
+
+  it('returns false for single-backslash rooted Windows paths (ADR-092 decision 7)', () => {
+    // `\x` is rooted against the current drive's root on Windows; one leading
+    // separator is below the UNC threshold, so it stays "relative" and joins
+    // the workspace root — the accepted, documented limitation (the join
+    // canonicalizes the backslash away, so the rooted meaning is silently
+    // lost). Mirrors the "single leading backslash" row of TestIsAbsolutePath
+    // (core/pathabs_test.go).
+    expect(isAbsolutePath('\\x')).toBe(false)
+    expect(isAbsolutePath('\\ws\\f.md')).toBe(false)
+    expect(normalizePath('/repo', '\\x\\f.md')).toBe('/repo/x/f.md')
+  })
 })
 
 describe('parseLocalFileHref', () => {
@@ -373,5 +385,15 @@ describe('resolveFileRefPath', () => {
     expect(resolveFileRefPath(null, 'src/main.ts')).toBe('src/main.ts')
     expect(resolveFileRefPath(undefined, 'src\\main.ts')).toBe('src\\main.ts')
     expect(resolveFileRefPath(null, '')).toBe('')
+  })
+
+  it('normalizes absolute paths without any root (No-Project markdown links)', () => {
+    // The MarkdownLink no-root path (ADR-092 decision 6): absolute inputs —
+    // POSIX, drive, UNC — resolve without a workspace root; only the drive
+    // href never arrives (cleared upstream by react-markdown's URL transform),
+    // so the pin guards the resolver the component delegates to.
+    expect(resolveFileRefPath(null, '/abs/dir/a.ts')).toBe('/abs/dir/a.ts')
+    expect(resolveFileRefPath(null, 'C:\\Doc\\f.md')).toBe('C:/Doc/f.md')
+    expect(resolveFileRefPath(undefined, '\\\\srv\\share\\f.md')).toBe('//srv/share/f.md')
   })
 })

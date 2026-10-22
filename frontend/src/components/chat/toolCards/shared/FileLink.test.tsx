@@ -95,6 +95,19 @@ describe('FileLink', () => {
     expect(container.textContent).toBe('missing.md')
   })
 
+  it('degrades to plain text when the resolver rejects', async () => {
+    const resolve = vi.fn().mockRejectedValue(new Error('rpc down'))
+    render({ path: 'references/missing.md', resolve })
+    await click(link()!)
+    // A rejection is unresolvable exactly like a null answer — same sticky
+    // downgrade, and the void'd click handler must not leak an unhandled
+    // rejection.
+    expect(fileViewerMock.openFile).not.toHaveBeenCalled()
+    expect(fileViewerMock.openFileAtLine).not.toHaveBeenCalled()
+    expect(link()).toBeNull()
+    expect(container.textContent).toBe('missing.md')
+  })
+
   it('activates via keyboard Enter', async () => {
     render({ path: '/repo/plain.ts' })
     await act(async () => {

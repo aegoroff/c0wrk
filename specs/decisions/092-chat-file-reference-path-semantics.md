@@ -78,8 +78,9 @@ keep old rows readable without a schema migration.
    erasing the drive) and collapse the UNC `//` marker.
 3. **A single-letter scheme guard classifies drive hrefs — not a scheme
    whitelist.** `WINDOWS_DRIVE_RE = /^[A-Za-z]:/` in `localFileLink.ts`:
-   a one-letter "scheme" is never a real URL scheme (RFC 3986 schemes are
-   at least two characters), so any such href is a local Windows path —
+   RFC 3986's grammar would accept a one-letter scheme (`C:` parses as URI
+   scheme `c`), but no real-world scheme is a single letter, so any such
+   href is in practice a local Windows path —
    `isExternalUrl` is false for the whole `^[A-Za-z]:` set (nothing
    reaches `openExternalURL` / `BrowserOpenURL`) and `isLocalFileHref`
    answers true before the protocol test runs. `EXTERNAL_SRC_RE` in
@@ -115,17 +116,29 @@ keep old rows readable without a schema migration.
    `normalizePath(root, arg)` against the chat workspace root. With no
    workspace root available (No-Project / transient window) the raw path
    passes through unchanged. Markdown links and `@file` user-message links
-   resolve against the workspace root — absolute inputs (POSIX, drive,
-   UNC) are recognized by decision 1's classifier and normalized *without*
-   joining; markdown images try the document's directory first, then the
-   workspace root.
-7. **Drive-relative paths are out of scope.** `C:x\f.md` (drive letter +
-   relative remainder) stays "relative" under both classifiers; with a
-   workspace root it joins the root (the historical behavior for relative
-   input), which resolves incorrectly on Windows. The dialect is
-   near-extinct and its correct resolution needs a per-drive CWD concept
-   nothing else in the app has; the limitation is documented rather than
-   solved.
+   resolve through `resolveFileRefPath` against the workspace root —
+   absolute inputs (POSIX, drive, UNC) are recognized by decision 1's
+   classifier and normalized *without* joining, with or without a root (a
+   No-Project window still opens a markdown absolute link); relative
+   inputs need the root — a markdown link without one stays inert rather
+   than open a wrong file. A drive-prefixed markdown link destination
+   (`C:\…`) is additionally cleared upstream by react-markdown's default
+   URL transform (its safe-scheme list has no `c`), so the MarkdownLink
+   classifier only ever sees POSIX-absolute and relative hrefs — the
+   drive/UNC classification guards the tool-card, `@file`, and read-path
+   surfaces. Markdown images try the document's directory
+   first, then the workspace root.
+7. **Drive-relative and rooted Windows paths are out of scope.** `C:x\f.md`
+   (drive letter + relative remainder) stays "relative" under both
+   classifiers; with a workspace root it joins the root (the historical
+   behavior for relative input), which resolves incorrectly on Windows. The
+   single-backslash rooted spelling `\x\f.md` (relative to the current
+   drive's root) falls into the same class: one leading separator is below
+   the UNC threshold, so both classifiers read it as relative and it joins
+   the workspace root the same way (pinned by the classifier tables on both
+   sides — `C:x`, `\x` stay relative). Both dialects are near-extinct and
+   their correct resolution needs a per-drive CWD concept nothing else in
+   the app has; the limitation is documented rather than solved.
 8. **Read-path RPC resolution is lexical and workspace-independent.**
    `resolveReadablePath` (`ReadFile`, `GetFileIcon`, `ReadImageAsDataURL`,
    `GetFileDiff`): strip the trailing line anchor; un-root the legacy
@@ -157,8 +170,9 @@ keep old rows readable without a schema migration.
 - The UNC URI literal carries four slashes (`fileref:////server/...`) —
   visually odd, contractually pinned: the path component keeps the UNC
   identity.
-- Drive-relative paths remain misresolved when a workspace root exists
-  (decision 7) — accepted, documented limitation.
+- Drive-relative and rooted Windows paths (`C:x`, `\x`) remain misresolved
+  when a workspace root exists (decision 7) — accepted, documented
+  limitation.
 - The `ResolveSkillResourcePath` RPC requires Wails binding regeneration
   (`wails build` / `wails dev`) before the runtime proxy exposes it; until
   then the fail-soft wrapper degrades clicks to plain text.

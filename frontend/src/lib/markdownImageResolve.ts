@@ -9,10 +9,12 @@
 import { isAbsolutePath, normalizePath } from './localFileLink'
 
 /**
- * Matches external/data URLs that the webview can load directly. Real URL
- * schemes have at least two characters (RFC 3986), so a single letter plus a
- * colon — a Windows drive prefix (`C:`) — never matches: such srcs are local
- * disk paths and must go through filesystem resolution, not the webview.
+ * Matches external/data URLs that the webview can load directly. The regex
+ * demands at least two characters before the colon: RFC 3986's grammar would
+ * accept a one-letter scheme, but no real-world scheme is a single letter —
+ * a letter plus a colon is a Windows drive prefix (`C:`), so such srcs never
+ * match here: they are local disk paths and must go through filesystem
+ * resolution, not the webview.
  */
 export const EXTERNAL_SRC_RE = /^(data:|[a-z][a-z0-9+.-]+:)/i
 

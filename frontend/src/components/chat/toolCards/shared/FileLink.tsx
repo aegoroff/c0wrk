@@ -47,7 +47,10 @@ export function FileLink({ path, line, label, className, nativeTitle = true, res
       open(useFileViewerStore.getState(), path, line)
       return
     }
-    const resolved = await resolve(path)
+    // A rejecting resolver is exactly as unresolvable as a null answer —
+    // sticky downgrade, and the void'd click never turns into an unhandled
+    // rejection.
+    const resolved = await resolve(path).catch(() => null)
     if (resolved === null) {
       setFailed(true)
       return
