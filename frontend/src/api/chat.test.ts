@@ -132,7 +132,7 @@ describe('sendMessage forwards MCP server mentions', () => {
     expect(args[4]).toEqual(['context7'])
     // modelOverride stays in position 6 right after the mention lists.
     expect(args[5]).toBe('')
-    expect(args).toHaveLength(11)
+    expect(args).toHaveLength(12)
   })
 
   it('defaults activeMCPServers to an empty array when omitted', async () => {
@@ -146,7 +146,7 @@ describe('sendMessage forwards MCP server mentions', () => {
 
     const args = calls[0]!
     expect(args[4]).toEqual([])
-    expect(args).toHaveLength(11)
+    expect(args).toHaveLength(12)
   })
 })
 
@@ -174,8 +174,9 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     expect(args[7]).toBe(false) // goal
     expect(args[8]).toBe('{"max_turns":5}') // goalBudget
     expect(args[9]).toBe(true) // e2s — the wiring under test
-    expect(args[10]).toBe(true) // reviewMode — must stay the LAST arg
-    expect(args).toHaveLength(11)
+    expect(args[10]).toBe(true) // reviewMode
+    expect(args[11]).toBeNull() // workspace — null on an ordinary send
+    expect(args).toHaveLength(12)
   })
 
   it('defaults e2s to false (and reviewMode stays false) when omitted', async () => {
@@ -190,7 +191,7 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     const args = calls[0]!
     expect(args[9]).toBe(false)
     expect(args[10]).toBe(false)
-    expect(args).toHaveLength(11)
+    expect(args).toHaveLength(12)
   })
 })
 

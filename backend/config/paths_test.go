@@ -340,12 +340,14 @@ func TestDefaultAgentDirMirrorsSysproc(t *testing.T) {
 }
 
 // TestEmbeddedLLMDirs pins the embedded-LLM storage roots to the documented
-// shape (~/.c0wrk/runtimes and ~/.c0wrk/models/bonsai-2-27b) and, more
-// importantly, to the agent-isolation invariant: neither root may live under
-// ToolsBinDir, which Manager.PrependToPATH() exposes to the agent's bash_exec
-// (ADR-066 D3, ASI05). The weights must also stay inside a dedicated
-// subdirectory of ModelsDir so removing them can never touch the flat
-// embedding-model files.
+// shape (~/.c0wrk/runtimes, ~/.c0wrk/models/bonsai-2-27b and the mtplx pack
+// root ~/.c0wrk/models/bonsai-2-27b-mlx) and, more importantly, to the
+// agent-isolation invariant: none of the roots may live under ToolsBinDir,
+// which Manager.PrependToPATH() exposes to the agent's bash_exec (ADR-066 D3,
+// ASI05). Both engine families' runtimes share the RuntimesDir root (their
+// per-engine subdirectories live under it), and the weights of either family
+// must stay inside a dedicated subdirectory of ModelsDir so removing them can
+// never touch the flat embedding-model files.
 func TestEmbeddedLLMDirs(t *testing.T) {
 	if got, want := RuntimesDir(testAgentDir), filepath.Join(testAgentDir, "runtimes"); got != want {
 		t.Errorf("RuntimesDir: got %q, want %q", got, want)
@@ -354,11 +356,16 @@ func TestEmbeddedLLMDirs(t *testing.T) {
 		filepath.Join(testAgentDir, "models", "bonsai-2-27b"); got != want {
 		t.Errorf("EmbeddedModelDir: got %q, want %q", got, want)
 	}
+	if got, want := EmbeddedMLXModelDir(testAgentDir),
+		filepath.Join(testAgentDir, "models", "bonsai-2-27b-mlx"); got != want {
+		t.Errorf("EmbeddedMLXModelDir: got %q, want %q", got, want)
+	}
 
 	toolsBin := ToolsBinDir(testAgentDir)
 	for name, dir := range map[string]string{
-		"RuntimesDir":      RuntimesDir(testAgentDir),
-		"EmbeddedModelDir": EmbeddedModelDir(testAgentDir),
+		"RuntimesDir":         RuntimesDir(testAgentDir),
+		"EmbeddedModelDir":    EmbeddedModelDir(testAgentDir),
+		"EmbeddedMLXModelDir": EmbeddedMLXModelDir(testAgentDir),
 	} {
 		if within, err := IsWithinPath(toolsBin, dir); err != nil {
 			t.Errorf("%s: containment check against the agent PATH failed: %v", name, err)
@@ -374,15 +381,20 @@ func TestEmbeddedLLMDirs(t *testing.T) {
 	}
 
 	// The weights live in a dedicated subdirectory of the models root, never at
-	// its top level.
-	if within, err := IsWithinPath(ModelsDir(testAgentDir), EmbeddedModelDir(testAgentDir)); err != nil {
-		t.Errorf("EmbeddedModelDir containment: %v", err)
-	} else if !within {
-		t.Errorf("EmbeddedModelDir = %q is not inside ModelsDir %q",
-			EmbeddedModelDir(testAgentDir), ModelsDir(testAgentDir))
-	}
-	if EmbeddedModelDir(testAgentDir) == ModelsDir(testAgentDir) {
-		t.Error("EmbeddedModelDir equals ModelsDir; removing the embedded model would delete the embedding model")
+	// its top level — for BOTH engine families, so a scoped removal can never
+	// touch the flat embedding-model files sharing the models root.
+	for name, dir := range map[string]string{
+		"EmbeddedModelDir":    EmbeddedModelDir(testAgentDir),
+		"EmbeddedMLXModelDir": EmbeddedMLXModelDir(testAgentDir),
+	} {
+		if within, err := IsWithinPath(ModelsDir(testAgentDir), dir); err != nil {
+			t.Errorf("%s containment: %v", name, err)
+		} else if !within {
+			t.Errorf("%s = %q is not inside ModelsDir %q", name, dir, ModelsDir(testAgentDir))
+		}
+		if dir == ModelsDir(testAgentDir) {
+			t.Errorf("%s equals ModelsDir; removing the embedded model would delete the embedding model", name)
+		}
 	}
 }
 

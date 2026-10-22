@@ -39,11 +39,13 @@ function archivedBranchKey(branch: string): string {
  * Dropdown session selector — used in CODE mode (a real project is active).
  *
  * In CHAT (No Project) mode the sidebar renders the flat {@link SessionList}
- * instead, so this component only mounts when `isChatMode` is false. Grouped
- * mode delegates to {@link SessionGroupedList}; the Archived section renders
- * in both modes — archived worktree sessions as collapsible branch rows with
- * their own action overlay (Pin/Unpin, Unarchive all, Delete all), archived
- * local sessions flat.
+ * instead, so this component only mounts when `isChatMode` is false. The
+ * `sessionListGrouped` display mode drives BOTH the live list and the Archived
+ * section: grouped mode delegates to {@link SessionGroupedList} and renders
+ * the Archived section as collapsible branch rows with their own action
+ * overlay (Pin/Unpin, Unarchive all, Delete all) plus flat archived local
+ * sessions; flat mode renders every session — active and archived — as a
+ * plain row (no branch groups, per-session actions only).
  */
 export function SessionSelector() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -73,8 +75,9 @@ export function SessionSelector() {
 
   // Grouping model (grouped mode only, but cheap enough to always compute):
   // classification + ordering live entirely in lib/sessionGroups; the search
-  // filter there hides groups left without members. The Archived section
-  // renders from it too — in BOTH display modes.
+  // filter there hides groups left without members. The GROUPED Archived
+  // section renders from it too (and the Archived header count uses it in
+  // both modes); flat mode renders archived rows from `visibleArchived`.
   const groups = useMemo(
     () => buildSessionGroups(sessions ?? [], { search, pinnedBranches }),
     [sessions, search, pinnedBranches],
@@ -129,6 +132,13 @@ export function SessionSelector() {
   const showSearch = (sessions ?? []).length >= 5;
 
   const visibleActive = activeSessionsList.filter((s) => filterFn(s.name));
+
+  // Flat-mode Archived rows: the SAME canonical order + search rule as
+  // `visibleActive` (store order — per-session pins first, then freshness).
+  // Grouped mode instead renders the Archived section from the grouping
+  // model above, so branch groups appear only while the toggle is on.
+  const archivedSessionsList = useMemo(() => (sessions ?? []).filter((s) => s.archived), [sessions]);
+  const visibleArchived = archivedSessionsList.filter((s) => filterFn(s.name));
 
   const activeSession = sessions?.find((s) => s.id === activeSessionId);
 
@@ -227,60 +237,69 @@ export function SessionSelector() {
                 />
                 {isSectionExpanded(ARCHIVED_SECTION_KEY, searchActive) && (
                   <div id={sessionRegionId(ARCHIVED_SECTION_KEY)} role="presentation">
-                    {groups.archivedWorktrees.map((group) => {
-                      const key = archivedBranchKey(group.branch);
-                      const expanded = isSectionExpanded(key, searchActive);
-                      // Full (unfiltered) membership — same rule as the live
-                      // rows: the group acts on the whole branch, and the
-                      // plural confirmation copy counts exactly these ids.
-                      const ids =
-                        allGroups.archivedWorktrees.find((g) => g.branch === group.branch)?.sessions.map(
-                          (s) => s.id,
-                        ) ?? [];
-                      const groupPinned = pinnedBranches.includes(group.branch);
-                      return (
-                        <Fragment key={key}>
-                          <BranchRow
-                            variant="archived"
-                            branch={group.branch}
-                            expanded={expanded}
-                            pinned={groupPinned}
-                            regionId={sessionRegionId(key)}
-                            onToggle={() => toggleSection(key)}
-                            freshest={freshestSession(group.sessions)}
-                            actionItems={
-                              <>
-                                <PinGroupAction
-                                  branch={group.branch}
-                                  pinned={groupPinned}
-                                  onToggle={() => togglePinnedBranch(group.branch)}
-                                />
-                                <DropdownMenuItem
-                                  title={`Restore sessions (${group.branch})`}
-                                  className={branchActionItemClasses}
-                                  onSelect={() => void actions.handleUnarchiveGroup(group.branch, ids)}
-                                >
-                                  <ArchiveRestore className="size-3 text-warning" />
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  title={`Delete sessions (${group.branch})`}
-                                  className={branchActionItemClasses}
-                                  onSelect={() => actions.handleDeleteGroup(group.branch, ids)}
-                                >
-                                  <Trash2 className="size-3 text-destructive" />
-                                </DropdownMenuItem>
-                              </>
-                            }
-                          />
-                          {expanded && (
-                            <div id={sessionRegionId(key)} role="presentation">
-                              {group.sessions.map((s) => renderSessionItem(s, { indented: true }))}
-                            </div>
-                          )}
-                        </Fragment>
-                      );
-                    })}
-                    {groups.archivedLocal.map((s) => renderSessionItem(s))}
+                    {sessionListGrouped ? (
+                      <>
+                        {groups.archivedWorktrees.map((group) => {
+                          const key = archivedBranchKey(group.branch);
+                          const expanded = isSectionExpanded(key, searchActive);
+                          // Full (unfiltered) membership — same rule as the live
+                          // rows: the group acts on the whole branch, and the
+                          // plural confirmation copy counts exactly these ids.
+                          const ids =
+                            allGroups.archivedWorktrees.find((g) => g.branch === group.branch)?.sessions.map(
+                              (s) => s.id,
+                            ) ?? [];
+                          const groupPinned = pinnedBranches.includes(group.branch);
+                          return (
+                            <Fragment key={key}>
+                              <BranchRow
+                                variant="archived"
+                                branch={group.branch}
+                                expanded={expanded}
+                                pinned={groupPinned}
+                                regionId={sessionRegionId(key)}
+                                onToggle={() => toggleSection(key)}
+                                freshest={freshestSession(group.sessions)}
+                                actionItems={
+                                  <>
+                                    <PinGroupAction
+                                      branch={group.branch}
+                                      pinned={groupPinned}
+                                      onToggle={() => togglePinnedBranch(group.branch)}
+                                    />
+                                    <DropdownMenuItem
+                                      title={`Restore sessions (${group.branch})`}
+                                      className={branchActionItemClasses}
+                                      onSelect={() => void actions.handleUnarchiveGroup(group.branch, ids)}
+                                    >
+                                      <ArchiveRestore className="size-3 text-warning" />
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      title={`Delete sessions (${group.branch})`}
+                                      className={branchActionItemClasses}
+                                      onSelect={() => actions.handleDeleteGroup(group.branch, ids)}
+                                    >
+                                      <Trash2 className="size-3 text-destructive" />
+                                    </DropdownMenuItem>
+                                  </>
+                                }
+                              />
+                              {expanded && (
+                                <div id={sessionRegionId(key)} role="presentation">
+                                  {group.sessions.map((s) => renderSessionItem(s, { indented: true }))}
+                                </div>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                        {groups.archivedLocal.map((s) => renderSessionItem(s))}
+                      </>
+                    ) : (
+                      // Flat mode: no branch groups — every archived session is a
+                      // plain row (store order, search-filtered), per-session
+                      // actions only, exactly like the flat live list above.
+                      visibleArchived.map((s) => renderSessionItem(s))
+                    )}
                   </div>
                 )}
               </>

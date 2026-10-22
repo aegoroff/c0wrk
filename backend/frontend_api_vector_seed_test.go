@@ -208,10 +208,7 @@ func TestCreateManagedSession_SeedsWorktreeEmbeddingCache(t *testing.T) {
 	writeCacheEntry(t, src, "ab", "abcd0123456789ef.vec", "vector-1")
 	writeCacheEntry(t, src, "cd", "cdef0123456789ab.vec", "vector-2")
 
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 	if binding == nil || binding.Kind != session.WorkspaceManagedWorktree {
 		t.Fatalf("managed binding: %+v", binding)
@@ -239,10 +236,7 @@ func TestForkManagedSession_SeedsWorktreeEmbeddingCache(t *testing.T) {
 	src := config.ProjectEmbeddingCachePath(h.agentDir, h.project.ID)
 	writeCacheEntry(t, src, "ab", "abcd0123456789ef.vec", "vector-1")
 
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	fork, err := h.api.ForkSession(info.ID)
 	if err != nil {
 		t.Fatalf("ForkSession: %v", err)

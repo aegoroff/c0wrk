@@ -2277,6 +2277,31 @@ func TestLaunchSpecArgsRenderTypedValuesOnly(t *testing.T) {
 			}
 			continue
 		}
+		if name == "Engine" {
+			// The renderer selector, not an argv element: spawn picks between
+			// Args (llama) and mlxArgs (mtplx) by it, so it must never be
+			// rendered — asserting Args does NOT read it is the point, the
+			// same shape as ServerBinary. The other half of the contract is
+			// structural: the second renderer must exist and be engine-gated.
+			if fields[name] != 0 {
+				t.Error("Args reads Engine; the engine selects the renderer in spawn and must never also be an argument")
+			}
+			mlxSource, err := os.ReadFile("server_mlx.go")
+			if err != nil {
+				t.Fatalf("reading server_mlx.go: %v", err)
+			}
+			if !strings.Contains(string(mlxSource), "func (spec LaunchSpec) mlxArgs()") {
+				t.Error("LaunchSpec.Engine exists but LaunchSpec.mlxArgs does not; the selector has nothing to select")
+			}
+			spawnSource, err := os.ReadFile("server.go")
+			if err != nil {
+				t.Fatalf("reading server.go: %v", err)
+			}
+			if !strings.Contains(string(spawnSource), "spec.mlxArgs()") {
+				t.Error("mlxArgs is never called in server.go; the mtplx argv would never render")
+			}
+			continue
+		}
 		t.Errorf("LaunchSpec.%s is neither rendered by Args nor listed as the exec target; decide which, and say why it is safe", name)
 	}
 }

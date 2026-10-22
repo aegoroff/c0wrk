@@ -21,11 +21,18 @@ var errGoalSuggestNoCaller = errors.New("goal suggest: no LLM caller")
 // GoalSuggestion is the goal-mode suitability classifier's verdict for one
 // fresh user message (see Orchestrator.SuggestGoalMode). Suggest=true means
 // goal mode is OBVIOUSLY the better fit for the request — the orchestrator may
-// then offer the user to activate it before the task starts. Reason is a short
-// user-facing explanation (in the user's language); empty when Suggest=false.
+// then offer the user to activate it before the task starts. Suggest=true is
+// honored ONLY together with ExplicitCriteria: the request must EXPLICITLY
+// state at least one verifiable done-criterion in its own text; a goal merely
+// implied by the task's formulation (every "implement X" implies "X works")
+// never qualifies — the suggestion gate fail-closes on a missing or false
+// explicit_criteria (a suggested-but-unexplicit verdict is a no-suggestion).
+// Reason is a short user-facing explanation (in the user's language); empty
+// when Suggest=false.
 type GoalSuggestion struct {
-	Suggest bool   `json:"suggest"`
-	Reason  string `json:"reason"`
+	Suggest          bool   `json:"suggest"`
+	ExplicitCriteria bool   `json:"explicit_criteria"`
+	Reason           string `json:"reason"`
 }
 
 // GoalSuggester is the orchestrator-side seam for the goal-mode suitability
@@ -69,7 +76,10 @@ const (
 // is a valid "no suggestion" (Go JSON decoding of a malformed or absent
 // "suggest" field yields false), so a model that answers garbage fails closed
 // to no-offer; oneshot.ParseJSON still fails on a response with no JSON at
-// all, which the caller treats as fail-open to the normal path.
+// all, which the caller treats as fail-open to the normal path. The same
+// zero-value rule covers the required explicit_criteria field: a suggest=true
+// verdict that omits it decodes as ExplicitCriteria=false and the gate
+// fail-closes to no-offer.
 func parseGoalSuggestion(resp *llm.ChatResponse) (GoalSuggestion, error) {
 	s, err := oneshot.ParseJSON[GoalSuggestion](resp)
 	if err != nil {
@@ -189,8 +199,9 @@ func (o *Orchestrator) goalSuggestRoutingEligible(routing *router.RoutingDecisio
 	return routing.Complexity >= o.config.GoalLoop.Suggest.MinComplexity
 }
 
-// runGoalSuggestionGate runs the classifier and, on an obvious fit, blocks on
-// the user's answer. Fail-open contract: every error path returns
+// runGoalSuggestionGate runs the classifier and, on an obvious fit backed by
+// done-criteria the request explicitly states, blocks on the user's answer.
+// Fail-open contract: every error path returns
 // gateNoSuggestion (the plain Conductor path continues, suppression stays
 // armed); only an explicit user decline returns gateDeclined.
 func (o *Orchestrator) runGoalSuggestionGate(ctx context.Context, sessionID, message string, routing *router.RoutingDecision) goalSuggestGateOutcome {
@@ -201,6 +212,14 @@ func (o *Orchestrator) runGoalSuggestionGate(ctx context.Context, sessionID, mes
 	}
 	if !suggestion.Suggest {
 		o.logDebug("goal suggest: classifier judged the message not goal-suited")
+		return gateNoSuggestion
+	}
+	if !suggestion.ExplicitCriteria {
+		// The offer must rest on done-criteria the request itself states: an
+		// implicit goal (anything "implement X" implies "X works") is not
+		// goal material — fail closed to the plain path, suppression stays
+		// armed (this is not a user decline).
+		o.logDebug("goal suggest: classifier suggested, but the request states no explicit done-criteria")
 		return gateNoSuggestion
 	}
 	accepted, err := o.goalSuggestionProposer.ProposeGoalSuggestion(ctx, sessionID, suggestion)

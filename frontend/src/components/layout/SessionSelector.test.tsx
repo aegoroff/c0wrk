@@ -16,18 +16,21 @@
 // - grouped mode separates the Worktrees and Local sections with the branch
 //   combo's hairline divider (only when both sections render headers);
 // - each managed branch row carries a "New session in this worktree" item
-//   (the + action): it arms the ADR-080 draft pinned to that branch
-//   (createBranch=false — CreateManagedSession adopts the branch's existing
-//   managed tree per ADR-082), clears the active selection and closes the
+//   (the + action): it eagerly creates the session and presets its ADR-091
+//   workspace choice to that branch (createBranch=false — the FIRST SEND
+//   adopts the branch's existing managed tree per ADR-082), clears the
+//   active selection and closes the
 //   menu; it never toggles the branch's collapse state, and nothing but
 //   managed branch rows (flat mode, Local/Archived sections) has the action;
 // - an active search force-expands every group and section and hides empty ones;
-// - the Archived section renders in BOTH modes: archived managed sessions as
-//   collapsible branch rows (chevron + GitBranch + branch + freshest-member
-//   time) carrying their own THREE-action hover overlay — Pin/Unpin group
-//   (stays open), Unarchive all (no confirmation), Delete all (plural
-//   confirmation) — archived local sessions flat; archived branch rows toggle
-//   independently of the live rows of the same branch;
+// - the Archived section renders in BOTH modes and follows the display mode:
+//   grouped mode shows archived managed sessions as collapsible branch rows
+//   (chevron + GitBranch + branch + freshest-member time) carrying their own
+//   THREE-action hover overlay — Pin/Unpin group (stays open), Unarchive all
+//   (no confirmation), Delete all (plural confirmation) — plus archived local
+//   sessions flat; archived branch rows toggle independently of the live rows
+//   of the same branch; flat mode shows every archived session as a plain row
+//   (no branch groups, per-session actions only);
 // - every one of these controls is a REGISTERED Radix menu item — arrow keys
 //   traverse them and Enter/Space activate them (a group collapsed with the
 //   mouse stays reopenable from the keyboard; Radix prevents Tab inside the
@@ -102,14 +105,19 @@ const { chatMocks } = vi.hoisted(() => ({
   },
 }))
 vi.mock('@/stores/chatStore', () => ({
-  useChatStore: (selector: (s: typeof chatMocks) => unknown) => selector(chatMocks),
+  useChatStore: Object.assign(
+    (selector: (s: typeof chatMocks) => unknown) => selector(chatMocks),
+    // The creation gestures seed the new session's confirmed-empty transcript
+    // through the store's action surface (ADR-091).
+    { getState: () => ({ ensureEmptyTranscript: vi.fn() }) },
+  ),
 }))
 
 import { SessionSelector } from './SessionSelector'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useUIStore } from '@/stores/uiStore'
 import { usePinnedGroupsStore } from '@/stores/pinnedGroupsStore'
 import { useProjectStore } from '@/stores/projectStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
 import type { ProjectInfo } from '@/types/models'
 
 const NOW = Date.now()
@@ -950,6 +958,33 @@ describe('SessionSelector — archived section (branch groups + flat local)', ()
     expect(menuText(menu)).not.toContain('Archived feat newer')
   })
 
+  it('the grouping toggle drives the Archived section live — branch groups appear and disappear without closing the menu', async () => {
+    useUIStore.setState({ sessionListGrouped: false })
+    sessionMocks.sessions = archivedFixture()
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+    await click(archivedHeader(menu))
+
+    // Flat start: rows visible, no archived branch row.
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(menu.querySelectorAll('[role="menuitem"][title$="archived branch sessions"]')).toHaveLength(0)
+
+    // Toggle grouped ON: the archived branch row appears (members start
+    // expanded) and the menu stays open.
+    await click(menu.querySelector<HTMLElement>('[role="menuitem"][title="Group sessions by branch"]')!)
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    const branchRow = archivedBranchToggle(menu, 'feat-a')
+    expect(branchRow.getAttribute('aria-expanded')).toBe('true')
+    expect(menuText(menu)).toContain('Archived feat newer')
+
+    // Toggle back OFF: the branch chrome disappears, the rows remain.
+    await click(menu.querySelector<HTMLElement>('[role="menuitem"][title="Show flat list"]')!)
+    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    expect(menu.querySelectorAll('[role="menuitem"][title$="archived branch sessions"]')).toHaveLength(0)
+    expect(menuText(menu)).toContain('Archived feat newer')
+    expect(menuText(menu)).toContain('Archived local one')
+  })
+
   it('archived branch rows carry a THREE-action overlay — Pin/Unpin, Restore, Delete', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = archivedFixture()
@@ -1076,8 +1111,10 @@ describe('SessionSelector — archived section (branch groups + flat local)', ()
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
-  it('flat mode: the Archived section renders the same branch rows + flat local sessions', async () => {
-    // sessionListGrouped stays false — the shipped default.
+  it('flat mode: the Archived section renders plain rows — no branch groups, no group actions', async () => {
+    // The shipped default mode (sessionListGrouped stays false): the grouping
+    // toggle must reach the Archived section too — archived managed sessions
+    // lose their branch rows here and flatten into plain rows.
     sessionMocks.sessions = archivedFixture()
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
@@ -1085,23 +1122,41 @@ describe('SessionSelector — archived section (branch groups + flat local)', ()
     expect(menuText(menu)).toContain('Archived (3)')
     await click(archivedHeader(menu))
 
-    // The archived branch row is the ONLY GitBranch row — the flat active
-    // list has no branch chrome.
-    expect(menu.querySelectorAll('[role="menuitem"] svg.lucide-git-branch')).toHaveLength(1)
-    expect(archivedBranchToggle(menu, 'feat-a').textContent).toContain('2h')
+    // Both archived kinds surface as plain rows, no extra toggle.
+    const text = menuText(menu)
+    expect(text).toContain('Archived feat newer')
+    expect(text).toContain('Archived feat older')
+    expect(text).toContain('Archived local one')
 
-    // Archived groups start expanded — members show right away; archived
-    // local is flat next to them.
-    expect(menuText(menu)).toContain('Archived feat newer')
-    expect(menuText(menu)).toContain('Archived local one')
+    // NO branch chrome anywhere: no GitBranch glyph (the flat active list has
+    // none either), no group-level actions — a flat archived row manages
+    // itself through the per-session Unarchive.
+    expect(menu.querySelectorAll('[role="menuitem"] svg.lucide-git-branch')).toHaveLength(0)
+    const titles = Array.from(menu.querySelectorAll('[title]')).map((el) => el.getAttribute('title'))
+    expect(titles).not.toContain('Pin group (feat-a)')
+    expect(titles).not.toContain('Restore sessions (feat-a)')
+    expect(titles).not.toContain('Delete sessions (feat-a)')
 
-    // The row toggle collapses the archived members (menu stays open).
-    await click(archivedBranchToggle(menu, 'feat-a'))
-    expect(menuText(menu)).not.toContain('Archived feat newer')
-    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
+    // The three archived rows are un-indented (no branch nesting) and each
+    // carries the per-session Unarchive action.
+    const archivedRows = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter((el) =>
+      /^(Archived feat|Archived local)/.test((el.textContent ?? '').trim()),
+    )
+    expect(archivedRows).toHaveLength(3)
+    for (const rowEl of archivedRows) expect(rowEl.className).not.toContain('pl-6')
+    expect(menu.querySelectorAll('button[title="Unarchive"]')).toHaveLength(3)
 
     // No new-session buttons anywhere in flat mode — archived rows included.
     expect(menu.querySelectorAll('[role="menuitem"][title^="New session in this worktree"]')).toHaveLength(0)
+
+    // The search filter reaches the flat archived rows (header count and rows
+    // can never disagree).
+    const input = menu.querySelector<HTMLInputElement>('input[placeholder*="Search"]')!
+    await typeInto(input, 'Archived feat')
+    const narrowed = document.body.querySelector('[role="menu"]') as HTMLElement
+    expect(narrowed).not.toBeNull()
+    expect(menuText(narrowed)).toContain('Archived (2)')
+    expect(menuText(narrowed)).not.toContain('Archived local one')
   })
 
   it('toggling an archived branch collapses/expands its members and keeps the menu open', async () => {
@@ -1222,9 +1277,10 @@ describe('SessionSelector — branch new-session action', () => {
   }
 
   beforeEach(() => {
-    // The real stores behind the branch-button draft flow.
+    // The real stores behind the branch-button gesture (eager creation +
+    // the fresh window's pending workspace choice).
     useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
-    useSessionDraftStore.getState().clearDraft()
+    useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   })
 
   it('offers the button on every managed branch row — and nowhere else', async () => {
@@ -1254,26 +1310,33 @@ describe('SessionSelector — branch new-session action', () => {
     ).toHaveLength(0)
   })
 
-  it('clicking arms the branch draft, clears the active session and closes the menu', async () => {
+  it('clicking eagerly creates the session, presets its branch choice and closes the menu', async () => {
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = newSessionFixture()
     sessionMocks.activeSessionId = 'm1'
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
     await click(newSessionAction(menu, 'feat-a'))
 
-    // The menu closed so the chat area's draft state becomes visible...
+    // The menu closed...
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    // ...the draft is armed for the branch (createBranch=false — the branch
-    // exists, CreateManagedSession adopts its managed tree), ...
-    expect(useSessionDraftStore.getState().draft).toEqual({
-      projectId: 'proj-1',
-      workspace: { kind: 'branch', branch: 'feat-a', createBranch: false, startPoint: '' },
+    // ...the row was born immediately (ADR-091 eager creation — no draft
+    // state, the session exists from the gesture onward), ...
+    expect(apiMocks.createSession).toHaveBeenCalledOnce()
+    expect(sessionMocks.addSession).toHaveBeenCalledWith(expect.objectContaining({ id: 's-new' }))
+    // ...and the fresh window's pending choice pins the branch
+    // (createBranch=false — the branch exists, the first send adopts its
+    // managed tree per ADR-082).
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
+      kind: 'branch',
+      branch: 'feat-a',
+      createBranch: false,
+      startPoint: '',
     })
-    // ...and the active selection was cleared (draft and selection are
-    // mutually exclusive — same contract as the New Session gesture).
-    expect(sessionMocks.selectSession).toHaveBeenCalledWith(null)
+    // The new session became the visible active one.
+    expect(sessionMocks.selectSession).toHaveBeenCalledWith('s-new', 'proj-1')
   })
 
   it('clicking never toggles the collapse state — even a collapsed branch arms its draft', async () => {
@@ -1287,10 +1350,12 @@ describe('SessionSelector — branch new-session action', () => {
     menu = document.body.querySelector('[role="menu"]') as HTMLElement
     expect(menuText(menu)).not.toContain('Feat A one')
 
-    // The + button stays reachable on the collapsed row and arms the draft...
+    // The + button stays reachable on the collapsed row and records the
+    // choice for the eagerly created session...
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     await click(newSessionAction(menu, 'feat-a'))
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
       kind: 'branch',
       branch: 'feat-a',
       createBranch: false,
@@ -1408,12 +1473,12 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     expect(menuText(menu)).toContain('Feat A two')
   })
 
-  it('Enter on a branch "+" arms the branch draft and closes the menu', async () => {
-    // The real stores behind the branch-draft flow.
+  it('Enter on a branch "+" eagerly creates the session with its branch choice', async () => {
+    // The real stores behind the branch-button gesture.
     useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
-    useSessionDraftStore.getState().clearDraft()
     useUIStore.setState({ sessionListGrouped: true })
     sessionMocks.sessions = kbFixture()
+    apiMocks.createSession.mockResolvedValueOnce({ id: 's-new', project_id: 'proj-1' })
     const container = await render(<SessionSelector />)
     const menu = await openMenu(container)
 
@@ -1428,7 +1493,7 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     // The "+" select is NOT prevented — Radix's default close fires (and the
     // onOpenChange path clears the search).
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['s-new']).toEqual({
       kind: 'branch',
       branch: 'feat-a',
       createBranch: false,
@@ -1436,6 +1501,6 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     })
     // The active selection was cleared (draft and selection are mutually
     // exclusive — same contract as the click path).
-    expect(sessionMocks.selectSession).toHaveBeenCalledWith(null)
+    expect(sessionMocks.selectSession).toHaveBeenCalledWith('s-new', 'proj-1')
   })
 })

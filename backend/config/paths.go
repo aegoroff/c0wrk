@@ -394,6 +394,13 @@ func EmbeddedModelDir(agentDir string) string {
 	return filepath.Join(agentDir, core.EmbeddedModelRelativePath)
 }
 
+// EmbeddedMLXModelDir returns the embedded-LLM MLX weight-pack directory
+// (~/.c0wrk/models/bonsai-2-27b-mlx/): the mtplx engine's pinned pack root,
+// kept separate from the llama GGUF root so scoped removals stay scoped.
+func EmbeddedMLXModelDir(agentDir string) string {
+	return filepath.Join(agentDir, core.EmbeddedMLXModelRelativePath)
+}
+
 // ToolsDir returns the managed external tools directory (~/.c0wrk/tools/).
 func ToolsDir(agentDir string) string {
 	return filepath.Join(agentDir, "tools")

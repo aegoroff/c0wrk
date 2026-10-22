@@ -340,8 +340,12 @@ const cacheRAMNoLimit = -1
 // from config. TestLaunchSpecArgsRenderTypedValuesOnly enforces this at the
 // syntax-tree level, so widening it is a deliberate, reviewed act.
 type LaunchSpec struct {
+	// Engine selects which argv/validate/readback family this spec renders.
+	// The ZERO value is the llama family; EngineMTPLX switches every engine-
+	// shaped half to the mtplx variants (server_mlx.go).
+	Engine Engine
 	// ServerBinary is the absolute path of llama-server inside the installed
-	// runtime tree.
+	// runtime tree (or, under EngineMTPLX, the provisioned interpreter).
 	ServerBinary string
 	// ModelFile is the GGUF passed to -m.
 	ModelFile string
@@ -470,6 +474,9 @@ type LaunchSpec struct {
 // `-fitc` and `--image-max-tokens`. Either way the value that reaches this gate is
 // the one that becomes a command line, whichever path it arrived by.
 func (spec LaunchSpec) Validate() error {
+	if spec.Engine == EngineMTPLX {
+		return spec.mlxValidate()
+	}
 	if spec.ServerBinary == "" {
 		return fmt.Errorf("%w: no llama-server binary", ErrLaunchSpecInvalid)
 	}
@@ -1644,6 +1651,9 @@ type resolvedLaunch struct {
 // the install is priced at launch instead of being served a shape computed for a
 // machine that no longer exists.
 func (s *Server) launchSpec(ctx context.Context, manifest Manifest, port int) (resolvedLaunch, error) {
+	if manifest.Engine == EngineMTPLX {
+		return s.launchSpecMLX(manifest, port)
+	}
 	identity, err := s.launchIdentity(manifest, port)
 	if err != nil {
 		return resolvedLaunch{}, err
@@ -2021,7 +2031,13 @@ func mulContext(perSlot, slots int) (int, bool) {
 func (s *Server) recordEffectiveContext(ctx context.Context, launch resolvedLaunch, manifest Manifest) int {
 	recorded := manifest.ContextSize
 	effective := recorded
-	if n, ok := readPropsContext(ctx, s.httpClient(), propsURL(launch.Spec.Port), s.probeTimeout()); ok {
+	readCtx := func() (int, bool) {
+		if launch.Spec.Engine == EngineMTPLX {
+			return readHealthContext(ctx, s.httpClient(), healthURL(launch.Spec.Port), s.probeTimeout())
+		}
+		return readPropsContext(ctx, s.httpClient(), propsURL(launch.Spec.Port), s.probeTimeout())
+	}
+	if n, ok := readCtx(); ok {
 		effective = n
 		// The served window can never legitimately exceed what this launch
 		// itself ordered (`-c`, the RAM tier in the auto path, the operator's
@@ -2116,7 +2132,8 @@ func (s *Server) recordEffectiveContext(ctx context.Context, launch resolvedLaun
 // install time means the tree was replaced, and a different model path means the
 // GGUF is not the one this load measured.
 func sameInstall(recorded, loaded Manifest) bool {
-	return recorded.Packing == loaded.Packing &&
+	return recorded.Engine == loaded.Engine &&
+		recorded.Packing == loaded.Packing &&
 		recorded.Backend == loaded.Backend &&
 		recorded.RuntimeVersion == loaded.RuntimeVersion &&
 		recorded.InstalledAt == loaded.InstalledAt &&
@@ -2188,10 +2205,26 @@ func libraryPathVar(goos string) string {
 // spawn builds the LaunchCommand and hands it to the spawner.
 func (s *Server) spawn(ctx context.Context, spec LaunchSpec) (*processRun, error) {
 	binaryDir := filepath.Dir(spec.ServerBinary)
+	// The engine selects the renderer: Args stays the llama argv's only home,
+	// mlxArgs the mtplx argv's (server_mlx.go). Engine itself never renders —
+	// it is identity, like ServerBinary.
+	args := spec.Args()
+	if spec.Engine == EngineMTPLX {
+		args = spec.mlxArgs()
+	}
+	env := launchEnv(binaryDir, s.hostOS(), os.Environ())
+	if spec.Engine == EngineMTPLX {
+		// The mtplx children run on a scrubbed, self-contained environment:
+		// pinned bin dir first on PATH, no inherited PIP_*/PYTHON*/MTPLX_*
+		// influence, and the engine's config/model state pointed INSIDE the
+		// c0wrk layout (mlxChildEnv, server_mlx.go) — an operator's MTPLX
+		// install can never mix with this one.
+		env = mlxChildEnv(os.Environ(), s.hostOS(), binaryDir)
+	}
 	cmd := LaunchCommand{
 		Binary: spec.ServerBinary,
-		Args:   spec.Args(),
-		Env:    launchEnv(binaryDir, s.hostOS(), os.Environ()),
+		Args:   args,
+		Env:    env,
 		Dir:    binaryDir,
 	}
 	s.logger().Debug("spawning the embedded LLM server",
@@ -2611,6 +2644,9 @@ func (s *Server) crashMessage(run *processRun, exitErr error) string {
 // params to free device memory", the line every captured trace ends with)
 // deliberately does not match.
 func scanFitFailure(tail string) string {
+	if msg := scanMLXFitFailure(tail); msg != "" {
+		return msg
+	}
 	if strings.Contains(tail, fitFailureMarker) {
 		return "the runtime's --fit pass aborted: " + strconv.Quote(fitFailureMarker) +
 			" — the recorded memory plan and this pin's fit contract disagree;" +
@@ -2707,7 +2743,7 @@ func (s *Server) waitReady(ctx context.Context, run *processRun, spec LaunchSpec
 	probe := func() bool {
 		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		defer cancel()
-		ready, err := probeModels(probeCtx, client, modelsURL)
+		ready, err := probeModelsExt(probeCtx, client, modelsURL, spec.Engine == EngineMTPLX)
 		if err != nil {
 			lastErr = err
 			return false
@@ -2746,8 +2782,35 @@ func (s *Server) waitReady(ctx context.Context, run *processRun, spec LaunchSpec
 // at. Only the presence of a served model matters.
 type modelsPayload struct {
 	Data []struct {
-		ID string `json:"id"`
+		ID            string `json:"id"`
+		ContextLength *int   `json:"context_length"`
+		MaxContextLen *int   `json:"max_context_length"`
+		MaxModelLen   *int   `json:"max_model_len"`
 	} `json:"data"`
+}
+
+// modelsReady applies the readiness predicate to one parsed model list. The
+// llama contract is "a served model is listed" — llama never sends window
+// fields, so absence satisfies it. The mtplx contract is STRICTER: its listing
+// names the configured model before the backend has resolved its context, and
+// a request sent before that resolution would queue behind the load, so a
+// window spelling MUST be present — any of the three the server emits
+// satisfies it, their absence means NOT ready and the poll keeps going.
+func modelsReady(payload modelsPayload, requireWindow bool) bool {
+	for _, m := range payload.Data {
+		if m.ID == "" {
+			continue
+		}
+		if !requireWindow {
+			return true
+		}
+		for _, w := range []*int{m.ContextLength, m.MaxContextLen, m.MaxModelLen} {
+			if w != nil && *w > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // probeModels performs one readiness probe.
@@ -2758,6 +2821,11 @@ type modelsPayload struct {
 // weight load (nothing is listening yet), so it is reported as an error the
 // caller keeps as diagnostic detail rather than as a failure.
 func probeModels(ctx context.Context, client *http.Client, url string) (bool, error) {
+	return probeModelsExt(ctx, client, url, false)
+}
+
+// probeModelsExt is probeModels with the engine's window requirement.
+func probeModelsExt(ctx context.Context, client *http.Client, url string, requireWindow bool) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return false, fmt.Errorf("building the readiness probe: %w", err)
@@ -2783,7 +2851,7 @@ func probeModels(ctx context.Context, client *http.Client, url string) (bool, er
 	if len(payload.Data) == 0 {
 		return false, nil
 	}
-	return true, nil
+	return modelsReady(payload, requireWindow), nil
 }
 
 // exitReason renders an exit error for a message. A clean exit is still a

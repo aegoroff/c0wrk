@@ -333,3 +333,61 @@ func TestEmbeddedDevicesDTONeverCarriesANullArray(t *testing.T) {
 		t.Errorf("an empty topology serialized a null array: %s", encoded)
 	}
 }
+
+// TestEmbeddedLLMStatusEngineFieldsAreAlwaysPresent pins the boundary rules the
+// engine additions introduced: `engine` is a required string and
+// `python_version`/`pack_revision` are always-present strings ("" on the llama
+// family) — the same no-omitempty invariant every other field of this DTO
+// follows, so the frontend never has to distinguish "absent" from "zero". The
+// negative cases are the failures this contract forbids: a payload that OMITS
+// one of the keys (what an omitempty retype produces) is a contract break this
+// test catches.
+func TestEmbeddedLLMStatusEngineFieldsAreAlwaysPresent(t *testing.T) {
+	populated := EmbeddedLLMStatus{
+		Engine:        "mtplx",
+		PythonVersion: "3.12.15",
+		PackRevision:  "03bd60bb82755f2446f5083426dca9708eb8e0fe",
+		Devices:       []EmbeddedLLMDevice{},
+		Plan:          embeddedPlanDTO(nil),
+	}
+	encoded, err := json.Marshal(populated)
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+	for key, want := range map[string]string{
+		"engine":         "mtplx",
+		"python_version": "3.12.15",
+		"pack_revision":  "03bd60bb82755f2446f5083426dca9708eb8e0fe",
+	} {
+		value, ok := raw[key]
+		if !ok {
+			t.Errorf("the %q key is missing from the payload — the boundary never omits a field: %s", key, encoded)
+			continue
+		}
+		if got := jsonKind(value); got != "string" {
+			t.Errorf("the %q key is a %s, want a string", key, got)
+			continue
+		}
+		var got string
+		if err := json.Unmarshal(value, &got); err != nil || got != want {
+			t.Errorf("the %q key = %s, want %q", key, value, want)
+		}
+	}
+
+	// The zero value — the llama family's shape — still carries every key, as
+	// "" rather than an omitted key. An omitempty on any of the three would
+	// drop it from this payload and fail these assertions.
+	empty, err := json.Marshal(EmbeddedLLMStatus{Devices: []EmbeddedLLMDevice{}, Plan: embeddedPlanDTO(nil)})
+	if err != nil {
+		t.Fatalf("marshalling the empty status: %v", err)
+	}
+	for _, key := range []string{`"engine":""`, `"python_version":""`, `"pack_revision":""`} {
+		if !strings.Contains(string(empty), key) {
+			t.Errorf("an unpopulated status dropped %s — the key must always be present: %s", key, empty)
+		}
+	}
+}

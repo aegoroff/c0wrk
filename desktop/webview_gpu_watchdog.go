@@ -146,28 +146,8 @@ func newWebviewGpuWatchdog(goos, envRaw, agentDir, logDir string, stderrObserved
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	if !stderrObserved {
-		// Without the capture there is nothing to scan: detection could never
-		// fire. The launch-policy resolution has already pinned fresh auto to
-		// never for the same reason — arming would be dead weight.
-		logger.Debug("webview GPU watchdog disarmed: no usable stderr capture",
-			"stderr", crashlog.StderrLogPath(logDir))
+	if !gpuFailureDetectionApplies(envRaw, agentDir, logDir, stderrObserved, logger) {
 		return nil
-	}
-	state := backend.LoadWebviewGpuState(agentDir, logger)
-	if state.Setting() != backend.WebviewGpuPolicyAuto || state.FallbackActive() {
-		logger.Debug("webview GPU watchdog disarmed: detection covers fresh auto only",
-			"setting", state.Setting(), "fallback", state.FallbackActive())
-		return nil
-	}
-	// An explicit env override is an explicit choice: never second-guessed.
-	// An invalid value falls through to auto and stays armed.
-	if strings.TrimSpace(envRaw) != "" {
-		if _, err := backend.NormalizeWebviewGpuPolicy(envRaw); err == nil {
-			logger.Debug("webview GPU watchdog disarmed: explicit env override",
-				"env", backend.WebviewGpuPolicyEnvVar, "value", strings.TrimSpace(envRaw))
-			return nil
-		}
 	}
 	w := &webviewGpuWatchdog{
 		agentDir:   agentDir,
@@ -183,6 +163,37 @@ func newWebviewGpuWatchdog(goos, envRaw, agentDir, logDir string, stderrObserved
 	logger.Debug("webview GPU watchdog armed",
 		"stderr", w.stderrPath, "start_offset", w.startOffset)
 	return w
+}
+
+// gpuFailureDetectionApplies reports whether GPU-failure detection (the
+// in-run watchdog and the next-start post-mortem alike) may act on this
+// Linux launch: a usable stderr capture, a fresh auto setting (no explicit
+// choice, no active fallback), and no valid env override.
+func gpuFailureDetectionApplies(envRaw, agentDir, logDir string, stderrObserved bool, logger *slog.Logger) bool {
+	if !stderrObserved {
+		// Without the capture there is nothing to scan: detection could never
+		// fire. The launch-policy resolution has already pinned fresh auto to
+		// never for the same reason — arming would be dead weight.
+		logger.Debug("webview GPU watchdog disarmed: no usable stderr capture",
+			"stderr", crashlog.StderrLogPath(logDir))
+		return false
+	}
+	state := backend.LoadWebviewGpuState(agentDir, logger)
+	if state.Setting() != backend.WebviewGpuPolicyAuto || state.FallbackActive() {
+		logger.Debug("webview GPU watchdog disarmed: detection covers fresh auto only",
+			"setting", state.Setting(), "fallback", state.FallbackActive())
+		return false
+	}
+	// An explicit env override is an explicit choice: never second-guessed.
+	// An invalid value falls through to auto and stays armed.
+	if strings.TrimSpace(envRaw) != "" {
+		if _, err := backend.NormalizeWebviewGpuPolicy(envRaw); err == nil {
+			logger.Debug("webview GPU watchdog disarmed: explicit env override",
+				"env", backend.WebviewGpuPolicyEnvVar, "value", strings.TrimSpace(envRaw))
+			return false
+		}
+	}
+	return true
 }
 
 // start runs the bounded startup scan. Idempotent: DomReady fires again on

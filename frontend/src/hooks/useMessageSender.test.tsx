@@ -20,6 +20,7 @@ import { useInputModeStore } from '@/stores/inputModeStore'
 import { useExperimentalStore } from '@/stores/experimentalStore'
 import { useE2SStore } from '@/stores/e2sStore'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import type { SessionInfo, AttachmentInfoUI } from '@/types/models'
 import type { ChatMessageUI } from '@/types/messages'
 
@@ -27,6 +28,7 @@ import type { ChatMessageUI } from '@/types/messages'
 const spies = vi.hoisted(() => ({
   sendMessage: vi.fn<(...args: unknown[]) => Promise<void>>(),
   createSession: vi.fn<() => Promise<SessionInfo>>(),
+  listSessions: vi.fn<() => Promise<SessionInfo[]>>(),
 }))
 
 vi.mock('@/api/chat', () => ({
@@ -36,6 +38,7 @@ vi.mock('@/api/chat', () => ({
 
 vi.mock('@/api/sessions', () => ({
   createSession: spies.createSession,
+  listSessions: spies.listSessions,
 }))
 
 vi.mock('@/lib/logger', () => ({
@@ -101,6 +104,7 @@ let root: Root
 beforeEach(() => {
   spies.sendMessage.mockReset().mockResolvedValue(undefined)
   spies.createSession.mockReset().mockResolvedValue(makeSession('fresh-session'))
+  spies.listSessions.mockReset().mockResolvedValue([])
   act(() => {
     useSessionStore.setState({ sessions: [], activeSessionId: null })
     useChatStore.setState({ messages: {}, messageOrder: {}, paused: {}, taskActive: {}, unfinishedTaskStatus: {} })
@@ -110,6 +114,7 @@ beforeEach(() => {
     useExperimentalStore.setState({ enabled: true })
     useE2SStore.getState().clearAll()
     useAttachmentsStore.setState({ attachmentsBySession: {}, uploadsBySession: {}, namesById: {}, imageErrorBySession: {} })
+    useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   })
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -142,7 +147,7 @@ describe('useMessageSender optimistic metadata', () => {
     })
 
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's-origin', 'review this', [], [], [], '', '', false, '', false,
+      's-origin', 'review this', [], [], [], '', '', false, '', false, false, null,
     )
     expect(userMessages('s-origin')).toHaveLength(1)
     expect(userMessages('s-other')).toHaveLength(0)
@@ -161,7 +166,7 @@ describe('useMessageSender optimistic metadata', () => {
     expect(useInputModeStore.getState().goalEnabled).toBe(false)
     expect(useInputModeStore.getState().goalBudget).toBe('')
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false,
+      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false, false, null,
     )
   })
 
@@ -180,7 +185,7 @@ describe('useMessageSender optimistic metadata', () => {
     // e2s rides after goalBudget (position 10) — and goal must NOT be
     // re-armed by the send.
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'run with explicit state', [], [], [], '', '', false, '', true,
+      's1', 'run with explicit state', [], [], [], '', '', false, '', true, false, null,
     )
     // E2S is per-task opt-in: the toggle resets after the defining message.
     expect(useInputModeStore.getState().e2sEnabled).toBe(false)
@@ -199,7 +204,7 @@ describe('useMessageSender optimistic metadata', () => {
       await capturedSend!('plain message')
     })
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'plain message', [], [], [], '', '', false, '', false,
+      's1', 'plain message', [], [], [], '', '', false, '', false, false, null,
     )
   })
 
@@ -339,5 +344,177 @@ describe('useMessageSender optimistic activation rollback', () => {
 
     expect(useChatStore.getState().taskActive['s1']).toBe(true)
     expect(useChatStore.getState().unfinishedTaskStatus['s1']).toBe('')
+  })
+})
+
+describe('useMessageSender consumption window (ADR-091 workspace bind)', () => {
+  const BRANCH_CHOICE = { kind: 'branch' as const, branch: 'feat/x', createBranch: false, startPoint: '' }
+
+  function armChoice(sessionId = 's1') {
+    useSessionStore.setState({
+      sessions: [makeSession(sessionId)],
+      activeSessionId: sessionId,
+    })
+    useSessionWorkspaceStore.getState().setChoice(sessionId, BRANCH_CHOICE)
+  }
+
+  it('brackets the RPC with the consumption window and clears the choice on success', async () => {
+    armChoice()
+    // The backend FACT the row refresh must mirror (never a local guess).
+    const boundFact = makeSession('s1')
+    ;(boundFact as { workspace_binding?: SessionInfo['workspace_binding'] }).workspace_binding = {
+      kind: 'managed_worktree',
+      workspace_path: '/w/trees/s-1',
+      worktree_name: 's-abc12345',
+      branch: 'feat/x',
+    }
+    spies.listSessions.mockResolvedValue([boundFact])
+    let settleSend: (() => void) | null = null
+    spies.sendMessage.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { settleSend = resolve }),
+    )
+
+    let sendPromise: Promise<void> | null = null
+    act(() => {
+      sendPromise = capturedSend!('provision feat/x')
+    })
+    // The choice rides on the wire, and the window is OPEN while it flies.
+    expect(spies.sendMessage).toHaveBeenCalledWith(
+      's1', 'provision feat/x', [], [], [], '', '', false, '', false, false,
+      { branch: 'feat/x', create_branch: false, start_point: '' },
+    )
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBe('s1')
+    // The pending choice survives the window (it IS the in-flight payload).
+    expect(useSessionWorkspaceStore.getState().choices['s1']).toBeDefined()
+
+    await act(async () => {
+      settleSend!()
+      await sendPromise
+    })
+
+    // The window settled and the consumed choice is gone.
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
+    expect(useSessionWorkspaceStore.getState().choices['s1']).toBeUndefined()
+    // The session row mirrors the backend FACT (the refreshed binding), not
+    // an optimistic managed guess.
+    const row = useSessionStore.getState().sessions?.find((s) => s.id === 's1')
+    expect(row?.workspace_binding).toEqual(boundFact.workspace_binding)
+  })
+
+  it('re-arms the choice and refreshes the row when the send is rejected', async () => {
+    armChoice()
+    spies.sendMessage.mockRejectedValueOnce(new Error('branch busy'))
+    // The row refresh runs on the failure path too: a failure AFTER a
+    // successful bind leaves the binding persisted — the row must say so.
+    const boundFact = makeSession('s1')
+    ;(boundFact as { workspace_binding?: SessionInfo['workspace_binding'] }).workspace_binding = {
+      kind: 'managed_worktree',
+      workspace_path: '/w/trees/s-1',
+      worktree_name: 's-abc12345',
+      branch: 'feat/x',
+    }
+    spies.listSessions.mockResolvedValue([boundFact])
+
+    await act(async () => {
+      await capturedSend!('provision feat/x')
+    })
+
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
+    // The bind was refused before any backend state changed: the choice is
+    // re-armed so a corrected resend carries it again.
+    expect(useSessionWorkspaceStore.getState().choices['s1']).toEqual(BRANCH_CHOICE)
+    // The optimistic user message is rolled back; the failure card remains.
+    expect(userMessages('s1')).toHaveLength(0)
+    // The fact refresh mirrored the persisted binding into the row.
+    const row = useSessionStore.getState().sessions?.find((s) => s.id === 's1')
+    expect(row?.workspace_binding).toEqual(boundFact.workspace_binding)
+  })
+
+  it('does NOT re-arm the choice for a session deleted mid-provisioning', async () => {
+    armChoice()
+    // The user deletes the session while the send (provisioning) is in
+    // flight: the delete path drops the choice slice and removes the row.
+    spies.sendMessage.mockImplementationOnce(async () => {
+      useSessionWorkspaceStore.getState().dropSessions(['s1'])
+      useSessionStore.setState({ sessions: [], activeSessionId: null })
+      throw new Error('bind refused after deletion')
+    })
+
+    await act(async () => {
+      await capturedSend!('provision feat/x')
+    })
+
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
+    // The choice was already dropped by the delete path; the failed send's
+    // teardown must not resurrect it onto the dead id.
+    expect(useSessionWorkspaceStore.getState().choices['s1']).toBeUndefined()
+  })
+
+  it('never opens the window for a null workspace choice', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s1')], activeSessionId: 's1' })
+    await act(async () => {
+      await capturedSend!('plain local send')
+    })
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
+    expect(spies.listSessions).not.toHaveBeenCalled()
+    expect(spies.sendMessage).toHaveBeenCalledWith(
+      's1', 'plain local send', [], [], [], '', '', false, '', false, false, null,
+    )
+  })
+
+  it('refuses a workspace-carrying send while another consumption window is open', async () => {
+    armChoice()
+    act(() => {
+      // Another send's window is already open (the backend is provisioning).
+      useSessionWorkspaceStore.getState().beginConsumption('s1')
+    })
+
+    await act(async () => {
+      // The refusal REJECTS: the caller's catch (useChatInputController)
+      // restores the typed text and surfaces the reason via the sendError
+      // hint — a normal resolve would strand the already-cleared editor.
+      await expect(capturedSend!('second enter mid-provisioning')).rejects.toThrow(
+        /already being prepared/,
+      )
+    })
+
+    // The refusal: no RPC, no optimistic residue.
+    expect(spies.sendMessage).not.toHaveBeenCalled()
+    expect(userMessages('s1')).toHaveLength(0)
+    // The busy window's own state is untouched.
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBe('s1')
+  })
+
+  it('backstop refusal throws before any optimistic state and leaves no transcript card', async () => {
+    armChoice()
+    // A racing send took the window between the early guard and the take:
+    // beginConsumption refuses. No await sits between the guard and the
+    // take today, so the backstop cannot be reached through interleaving —
+    // the mock pins its contract against future refactors (any interposed
+    // await must keep this path text-preserving and card-free).
+    const original = useSessionWorkspaceStore.getState().beginConsumption
+    useSessionWorkspaceStore.setState({ beginConsumption: () => false })
+
+    try {
+      await act(async () => {
+        // The refusal REJECTS: it propagates to the caller (whose catch
+        // restores the typed text) instead of being swallowed by the send's
+        // own catch into a phantom transcript error card.
+        await expect(capturedSend!('second enter mid-provisioning')).rejects.toThrow(
+          /already being prepared/,
+        )
+      })
+    } finally {
+      useSessionWorkspaceStore.setState({ beginConsumption: original })
+    }
+
+    // No optimistic residue: no user card, no transcript error card, no RPC.
+    expect(spies.sendMessage).not.toHaveBeenCalled()
+    expect(userMessages('s1')).toHaveLength(0)
+    const cards = Object.values(useChatStore.getState().messages['s1'] ?? {})
+    expect(cards.filter((m) => m.type === 'error')).toHaveLength(0)
+    // The choice was never consumed and the window did not leak.
+    expect(useSessionWorkspaceStore.getState().choices['s1']).toEqual(BRANCH_CHOICE)
+    expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
   })
 })

@@ -180,6 +180,7 @@ func newInstallFixture(t *testing.T, tc installCase) *installFixture {
 	layout, err := NewLayout(
 		filepath.Join(fx.agentDir, "runtimes"),
 		filepath.Join(fx.agentDir, "models", testModelDirName),
+		filepath.Join(fx.agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
@@ -2897,6 +2898,7 @@ func TestRefineWithStagedDevicesAppliesTheGPUGenerationPacking(t *testing.T) {
 	layout, err := NewLayout(
 		filepath.Join(agentDir, "runtimes"),
 		filepath.Join(agentDir, "models", testModelDirName),
+		filepath.Join(agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
@@ -2980,6 +2982,7 @@ func TestRefineWithStagedDevicesStopsOnAMemoryRefusal(t *testing.T) {
 	layout, err := NewLayout(
 		filepath.Join(agentDir, "runtimes"),
 		filepath.Join(agentDir, "models", testModelDirName),
+		filepath.Join(agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
@@ -3031,6 +3034,7 @@ func TestRefineWithStagedDevicesKeepsThePlanWithoutAnAnswer(t *testing.T) {
 	layout, err := NewLayout(
 		filepath.Join(agentDir, "runtimes"),
 		filepath.Join(agentDir, "models", testModelDirName),
+		filepath.Join(agentDir, "models", testModelDirName+"-mlx"),
 	)
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)

@@ -274,7 +274,10 @@ func TestAttachImageRefusesEscapingSymlinkedImagesDir(t *testing.T) {
 		t.Fatalf("write source png: %v", err)
 	}
 
-	sid := "attach-image-session"
+	// The session's REAL registered id: appendPendingAttachments re-validates
+	// manager membership under this id after the append, so the staging call
+	// must carry the (session, id) pair production passes — matching values.
+	sid := info.ID
 	sessionDir := config.SessionDir(agentDir, testProjectID, sid)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("mkdir session dir: %v", err)

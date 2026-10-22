@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted
+Accepted (amended by [ADR-091](./091-eager-session-creation.md): the
+adoption/degradation/refusal dispatch below moved from the deleted
+`CreateManagedSession` RPC into the send-time workspace bind — `SendMessage`'s
+`workspace` argument through `SessionStore.BindSessionWorkspace` with the
+atomic fresh-window guard — so the adoption's failure path rolls the *binding*
+back on the surviving session row instead of removing the row and the
+in-memory session; the sharing rule, the reference-counted release and the
+critical-section protocol stand unchanged).
 
 ## Context
 
@@ -29,7 +36,10 @@ one project; a repository registered as several projects shares its trees
 across those project rows too, so the release refcount below is keyed by the
 globally unique tree name, never by project).
 
-1. **Creation reuses the branch holder.** `CreateManagedSession` lists the
+1. **Creation reuses the branch holder.** The workspace-choosing flow (at
+   decision time the `CreateManagedSession` RPC; since ADR-091 the send-time
+   workspace bind — `SendMessage`'s `workspace` argument through
+   `bindSessionWorkspace`) lists the
    repository's worktrees before provisioning and looks up the holder of the
    requested branch:
    - a **managed** tree holds it → the new session's binding carries that

@@ -63,7 +63,7 @@ func newEmbeddedFixture(t *testing.T) *embeddedFixture {
 	})
 	t.Cleanup(func() { app.Lifecycle().Cleanup() })
 
-	layout, err := embeddedllm.NewLayout(config.RuntimesDir(agentDir), config.EmbeddedModelDir(agentDir))
+	layout, err := embeddedllm.NewLayout(config.RuntimesDir(agentDir), config.EmbeddedModelDir(agentDir), config.EmbeddedMLXModelDir(agentDir))
 	if err != nil {
 		t.Fatalf("NewLayout: %v", err)
 	}

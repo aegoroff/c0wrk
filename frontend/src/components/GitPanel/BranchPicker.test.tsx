@@ -40,7 +40,7 @@ import { BranchPicker } from './BranchPicker'
 import { focusWorktree } from '@/lib/gitFocus'
 import { MANAGED_FOCUS_BLOCKED_REASON } from '@/hooks/useSessionWorktreePin'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import type { GitWorktree } from '@/types/models'
@@ -560,7 +560,11 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   }
 
   beforeEach(() => {
-    useSessionDraftStore.getState().startDraft('p1')
+    // The pick targets the ACTIVE fresh session (the selector's freshness
+    // gate opens the picker only there); the seeded choice is the local
+    // default, matching the former armed draft.
+    useSessionStore.setState({ activeSessionId: 'sess-draft' })
+    useSessionWorkspaceStore.getState().setChoice('sess-draft', { kind: 'local' })
     // The shared focus mock carries call history from the earlier describes.
     focusMocks.focusWorktree.mockReset()
     focusMocks.focusWorktree.mockResolvedValue(undefined)
@@ -582,14 +586,15 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/a',
       createBranch: false,
       startPoint: '',
     })
     // NO in-place checkout side effect: no git mutation ran at pick time —
-    // provisioning happens at draft commit via CreateManagedSession.
+    // provisioning happens on the FIRST SEND, via SendMessage's workspace
+    // argument.
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(gitMocks.createBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
@@ -599,9 +604,9 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   })
 
   it('marks the already-picked branch and keeps the picker open while it loads', async () => {
-    useSessionDraftStore
+    useSessionWorkspaceStore
       .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/b', createBranch: false, startPoint: '' })
+      .setChoice('sess-draft', { kind: 'branch', branch: 'feat/b', createBranch: false, startPoint: '' })
     await openDraftPicker()
 
     expect(body().textContent).toContain('Choose Branch')
@@ -613,8 +618,8 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   it('draft mode: selects a worktree\'s branch even when it is_current — the existing managed tree is adopted', async () => {
     // The Git panel is focused on the managed tree holding feat/a, so
     // GetBranches (which runs in the focused tree) marks feat/a is_current.
-    // The pick must still record the draft — at draft commit
-    // CreateManagedSession ADOPTS the existing tree (ADR-082) — and close
+    // The pick must still record the choice — the FIRST SEND adopts
+    // the existing tree (ADR-082) — and close
     // the picker; nothing is checked out here.
     gitMocks.getBranches.mockResolvedValue([
       { name: 'main', is_current: false, kind: 'local', upstream: '' },
@@ -647,7 +652,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/a',
       createBranch: false,
@@ -695,7 +700,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     await flush()
 
     // The draft stays local and the picker stays open (no selection made).
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
   })
 
@@ -712,14 +717,15 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/drafted',
       createBranch: true,
       startPoint: '',
     })
-    // The branch is created at draft commit inside the session's managed
-    // worktree — NOT here via an in-place CreateBranch/checkout.
+    // The branch is created by the FIRST SEND's provisioning inside the
+    // session's managed worktree — NOT here via an in-place
+    // CreateBranch/checkout.
     expect(gitMocks.createBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
@@ -745,7 +751,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/from-base',
       createBranch: true,
@@ -770,7 +776,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     await openDraftPicker()
 
     // Remote rows are listed and selectable in draft mode (no git operation
-    // runs at pick time — provisioning happens at draft commit).
+    // runs at pick time — provisioning happens on the first send).
     expect(body().textContent).toContain('Remote')
     expect(branchRow('origin/feat/remote')).toBeDefined()
 
@@ -807,7 +813,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'sess/s-abc12345',
       createBranch: false,
@@ -819,7 +825,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   })
 
   it('draft mode: an external worktree row is not a draft target — its branch is held outside c0wrk', async () => {
-    // c0wrk never adopts trees it does not own (ADR-082): the draft commit
+    // c0wrk never adopts trees it does not own (ADR-082): the first send
     // would refuse a branch held by an external tree (ErrBranchBusy), and
     // provisioning a fresh managed tree on that branch would fail too — git
     // allows a branch in at most one worktree. The row must render disabled
@@ -851,7 +857,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     await flush()
 
     // No doomed draft: the pre-armed local workspace is untouched…
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     // …and never a hidden focus switch either; the picker stays open so the
     // user can pick a real target.
     expect(focusWorktree).not.toHaveBeenCalled()
@@ -885,7 +891,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     expect(focusWorktree).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
   })
@@ -928,7 +934,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
       mainRow.click()
     })
     await flush()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'main',
       createBranch: false,
@@ -939,9 +945,9 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   it('draft mode: clicking the local checkout worktree row records the local workspace in the draft', async () => {
     // Start from an armed branch draft: the "Local checkout" row must reset
     // the drafted workspace to the project working tree.
-    useSessionDraftStore
+    useSessionWorkspaceStore
       .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' })
+      .setChoice('sess-draft', { kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' })
     const worktrees: GitWorktree[] = [
       {
         path: '/repo', name: 'repo', kind: 'main', branch: 'main', head: 'a',
@@ -963,7 +969,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     expect(focusWorktree).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
   })
@@ -982,14 +988,15 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     // worktree on the local short name, created from the remote-tracking
     // start point (git DWIM at commit — an existing local branch of that
     // name is reused, a missing one is created from the remote ref).
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/remote',
       createBranch: true,
       startPoint: 'origin/feat/remote',
     })
     // NO in-place checkout side effect at pick time: no git mutation ran —
-    // provisioning happens at draft commit via CreateManagedSession.
+    // provisioning happens on the FIRST SEND, via SendMessage's workspace
+    // argument.
     expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(gitMocks.createBranch).not.toHaveBeenCalled()
@@ -999,9 +1006,9 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   })
 
   it('marks the already-picked remote branch without marking local rows', async () => {
-    useSessionDraftStore
+    useSessionWorkspaceStore
       .getState()
-      .setDraftWorkspace({ kind: 'branch', branch: 'feat/remote', createBranch: true, startPoint: 'origin/feat/remote' })
+      .setChoice('sess-draft', { kind: 'branch', branch: 'feat/remote', createBranch: true, startPoint: 'origin/feat/remote' })
     await openDraftPicker()
 
     const remoteRow = branchRow('origin/feat/remote')!
@@ -1053,7 +1060,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
 
     // The draft stays local and the picker stays open (no selection made) —
     // and no in-place checkout-remote ran either.
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
   })
@@ -1074,7 +1081,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     // The refusal is visible in the dialog's error banner…
     expect(body().textContent).toContain('A branch named "feat/a" already exists')
     // …the draft stays local (no silent DWIM reuse ignoring the base)…
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
     // …and the picker stays open with the name intact for renaming.
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(true)
     expect(input.value).toBe('feat/a')
@@ -1101,7 +1108,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     // draft is untouched (still the default local workspace) and no
     // branch selection was recorded.
     expect(gitMocks.checkoutRemoteBranch).toHaveBeenCalledWith('origin/feat/remote')
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
   })
 
   it('deleting a worktree from the draft picker runs the confirmed removal without touching the draft', async () => {
@@ -1119,7 +1126,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     gitMocks.listProjectWorktrees.mockResolvedValue(worktrees)
     useGitPanelStore.getState().setWorktrees(worktrees)
     await openDraftPicker()
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
 
     const rows = Array.from(body().querySelectorAll('[data-testid="worktree-row"]'))
     // The checkout has no delete action; the linked tree does.
@@ -1142,7 +1149,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     })
     expect(focusMocks.refreshGitFocus).toHaveBeenCalledTimes(1)
     // The draft is untouched by the deletion.
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({ kind: 'local' })
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({ kind: 'local' })
   })
 
   it('closing the picker resets the mode — the next Git-panel open is a switch intent', async () => {
@@ -1253,7 +1260,11 @@ describe('BranchPicker — managed session pin (manage mode only)', () => {
   it('draft mode: no pin rendering even with a managed session active', async () => {
     armManagedSession()
     armGitLists()
-    useSessionDraftStore.getState().startDraft('p1')
+    // The pick targets the ACTIVE fresh session (the selector's freshness
+    // gate opens the picker only there); the seeded choice is the local
+    // default, matching the former armed draft.
+    useSessionStore.setState({ activeSessionId: 'sess-draft' })
+    useSessionWorkspaceStore.getState().setChoice('sess-draft', { kind: 'local' })
     act(() => {
       useGitPanelStore.getState().openBranchPicker('draft')
     })
@@ -1369,7 +1380,11 @@ describe('BranchPicker — managed-focus gate (manage mode only, ADR-080)', () =
 
   it('draft mode: the gate is absent — rows stay selectable and New-branch records the draft', async () => {
     armManagedFocusLists()
-    useSessionDraftStore.getState().startDraft('p1')
+    // The pick targets the ACTIVE fresh session (the selector's freshness
+    // gate opens the picker only there); the seeded choice is the local
+    // default, matching the former armed draft.
+    useSessionStore.setState({ activeSessionId: 'sess-draft' })
+    useSessionWorkspaceStore.getState().setChoice('sess-draft', { kind: 'local' })
     act(() => {
       useGitPanelStore.getState().openBranchPicker('draft')
     })
@@ -1395,7 +1410,7 @@ describe('BranchPicker — managed-focus gate (manage mode only, ADR-080)', () =
     })
     await flush()
 
-    expect(useSessionDraftStore.getState().draft?.workspace).toEqual({
+    expect(useSessionWorkspaceStore.getState().choices['sess-draft']).toEqual({
       kind: 'branch',
       branch: 'feat/draft',
       createBranch: true,

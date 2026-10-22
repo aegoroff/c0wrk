@@ -10,9 +10,40 @@ import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStor
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
 import { isE2SSendEnabled } from '@/lib/e2sGate'
 import { sendMessage, cancelTask } from '@/api/chat'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
+import { listSessions } from '@/api/sessions'
+import { ensureActiveSession } from '@/lib/ensureActiveSession'
+import { useSessionWorkspaceStore, pendingWorkspaceToWire } from '@/stores/sessionWorkspaceStore'
 import { generateMessageId } from '@/lib/ids'
 import { logger } from '@/lib/logger'
+import type { SessionInfo } from '@/types/models'
+
+/** The consumption-window refusal message (shared by the early guard and the
+ *  beginConsumption backstop — one wording for both entry points). */
+const WORKSPACE_BUSY_MESSAGE =
+  'A workspace is already being prepared for this session — wait for the send in progress to settle'
+
+/**
+ * Reconcile one session row with the backend's authoritative store state.
+ * Every send that carried a workspace choice refreshes its row (success AND
+ * failure): the bind can provision a fresh tree, adopt an existing one, or
+ * deliberately no-op (the checkout took the branch meanwhile) — and a failure
+ * after a successful bind leaves the binding persisted anyway. Mirroring the
+ * local guess would make the toolbar chip assert an outcome the backend did
+ * not produce; the refreshed row is the fact.
+ */
+async function refreshSessionRow(sessionId: string): Promise<void> {
+  try {
+    const sessions = await listSessions()
+    const fresh = sessions.find((s) => s.id === sessionId)
+    if (!fresh) return
+    const updates: Partial<SessionInfo> = fresh.workspace_binding !== undefined
+      ? { last_active_at: fresh.last_active_at, workspace_binding: fresh.workspace_binding }
+      : { last_active_at: fresh.last_active_at }
+    useSessionStore.getState().updateSession(sessionId, updates)
+  } catch (err) {
+    logger.warn('Failed to refresh the session row after a workspace-carrying send:', err)
+  }
+}
 
 export interface SendOptions {
   /** Force a fresh session: create + activate a new session and dispatch the
@@ -58,19 +89,55 @@ export function useMessageSender(): UseMessageSenderResult {
 
     // The pinned origin session wins; only an explicitly null origin (the
     // no-session scratch space) falls through to the auto-create flow —
-    // unless the caller forced a fresh session (research Shift-click). Both
-    // paths honor an armed session draft: the first real action commits it,
-    // creating the session on the project checkout (local) or provisioning
-    // its managed worktree (branch draft) via CreateManagedSession.
+    // unless the caller forced a fresh session (research Shift-click). The
+    // fallback creates a plain LOCAL session exactly like CHAT mode's
+    // auto-create (ADR-091): fast, never provisioning a worktree.
     let sessionId = originSessionId ?? useSessionStore.getState().activeSessionId
     if (options?.newSession || !sessionId) {
       try {
-        const newSession = await createSessionFromDraft()
+        const newSession = await ensureActiveSession()
         sessionId = newSession.id
       } catch (error) {
         setIsProcessing(false)
         throw error // let caller restore text
       }
+    }
+
+    // The fresh window's workspace choice rides on this message: a pending
+    // branch choice (picked in the toolbar's workspace selector, or preset
+    // by the per-branch gesture) makes THIS send provision the managed
+    // worktree and bind the session before the task starts. A local choice
+    // (or none) sends null — the session is already local. A choice only
+    // exists on a fresh session, so continuations and nudges always send
+    // null here.
+    const pendingChoice = useSessionWorkspaceStore.getState().choices[sessionId]
+    const workspace = pendingWorkspaceToWire(pendingChoice)
+
+    // Re-entrancy guard (the consumption window): a send carrying a workspace
+    // choice while ANOTHER send is consuming one would race the same fresh
+    // window — a second concurrent bind of the same session, with the two
+    // RPCs then both persisting their messages and dispatching tasks. The
+    // window spans the whole provisioning (seconds; a full checkout), so the
+    // guard REFUSES with a thrown error — the caller's catch restores the
+    // typed text and surfaces the reason via the dismissible sendError hint
+    // (the same convention as the ambiguous-mention no-op), and a silent
+    // text loss is impossible. The store's beginConsumption re-checks under
+    // the same rule as the backstop.
+    if (workspace !== null && useSessionWorkspaceStore.getState().consumingFor !== null) {
+      setIsProcessing(false)
+      throw new Error(WORKSPACE_BUSY_MESSAGE)
+    }
+
+    // The authoritative backstop takes the window BEFORE any optimistic
+    // write: a refusal (a racing second send took the window between the
+    // guard and this call) throws with no message card, no task overlay and
+    // no consumed choice to undo — and lands OUTSIDE the try below, so it
+    // propagates straight to the caller, whose catch restores the typed
+    // text and surfaces the reason. No transcript error card here: the
+    // first send is still in flight and owns the transcript.
+    if (workspace !== null && !useSessionWorkspaceStore.getState().beginConsumption(sessionId)) {
+      setIsProcessing(false)
+      throw new Error(WORKSPACE_BUSY_MESSAGE)
     }
 
     // A message sent while a task is cooperatively paused is a nudge-resume:
@@ -143,7 +210,27 @@ export function useMessageSender(): UseMessageSenderResult {
       const modelOverride = useInputModeStore.getState().selectedModel ?? ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
       const goalBudget = useInputModeStore.getState().goalBudget
-      await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled)
+      // The consumption window is already held — taken before the
+      // optimistic writes (the backstop above the try) — and the toolbar's
+      // workspace selector shows the "Preparing worktree…" hint while the
+      // choice is on the wire (backend provisioning can take a while — a
+      // full checkout). Always settled, success or failure: by the inner
+      // finally around the RPC itself, and structurally by the outer
+      // finally no matter where this try throws.
+      try {
+        await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled, false, workspace)
+      } finally {
+        if (workspace !== null) {
+          useSessionWorkspaceStore.getState().endConsumption()
+        }
+      }
+      if (workspace !== null) {
+        // The workspace choice was consumed: drop the pending slice and
+        // reconcile the session row with the backend FACT (refreshSessionRow)
+        // — never mirror a local guess of the binding outcome.
+        useSessionWorkspaceStore.getState().clearChoice(sessionId)
+        await refreshSessionRow(sessionId)
+      }
       // A confirmed fresh non-E2S task supersedes any prior E2S run in this
       // session: drop the stale Σ snapshot so the Execution State panel does
       // not shadow the plan view for the new task (E2S is selected per
@@ -203,7 +290,35 @@ export function useMessageSender(): UseMessageSenderResult {
       if (wasPaused || !isRunning) {
         useChatStore.getState().setUnfinishedTaskStatus(sessionId, prevUnfinished)
       }
+      if (workspace !== null) {
+        // The workspace choice itself: a bind refusal rejects the send before
+        // ANY backend state changes (no activity bump, no message row, no
+        // task), so the choice was not consumed — re-arm it next to the
+        // restored task state, or a corrected resend would silently leave it
+        // behind and start the task in the shared checkout. When the failure
+        // happened AFTER a successful bind instead, repeating the same choice
+        // is a no-op on the backend — and the fact refresh below mirrors the
+        // already-persisted binding into the row either way. NEVER for a
+        // session deleted mid-provisioning (its delete path already dropped
+        // the choice slice): re-arming onto a dead id would strand a stale
+        // entry the session can never consume.
+        const sessionExists =
+          useSessionStore.getState().sessions?.some((s) => s.id === sessionId) ?? false
+        if (sessionExists && pendingChoice !== undefined) {
+          useSessionWorkspaceStore.getState().setChoice(sessionId, pendingChoice)
+        }
+        void refreshSessionRow(sessionId)
+      }
     } finally {
+      // The window cannot outlive this TRY: whatever throws inside it — the
+      // RPC, the success reconciliation, the failure teardown — still
+      // settles here, idempotently when the inner finally already closed it.
+      // The optimistic writes between the take and the try are synchronous
+      // store writes with no throw path; keep them that way (a throw there
+      // would escape both finallys and leak the window).
+      if (workspace !== null) {
+        useSessionWorkspaceStore.getState().endConsumption()
+      }
       setIsProcessing(false)
     }
   }, [])

@@ -26,6 +26,10 @@ type stepTodoReplaceCall struct {
 }
 
 func (s *captureStore) SaveSession(_ context.Context, _ SessionInfo) error { return nil }
+
+func (s *captureStore) BindSessionWorkspace(_ context.Context, _, _ string, _ *WorkspaceBinding) error {
+	return nil
+}
 func (s *captureStore) LoadSession(_ context.Context, _ string) (*SessionInfo, error) {
 	return nil, nil
 }

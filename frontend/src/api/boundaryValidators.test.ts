@@ -353,65 +353,71 @@ describe('#34/#121/#125 research status normalizes brief/metrics per project', (
   })
 })
 
-describe('#157 isEmbeddedLLMStatus fit_warning', () => {
-  const base = {
-    state: 'installed',
-    installed: true,
-    installing: false,
-    loading: false,
-    loaded: false,
-    packing: 'PQ2_0',
-    backend: 'cpu',
-    port: 43211,
-    context_size: 131072,
-    auto_unload_enabled: true,
-    auto_unload_minutes: 60,
-    idle_remaining_seconds: 0,
-    base_url: 'http://127.0.0.1:43211/v1',
-    model_id: 'embedded/Bonsai 2 27B',
-    model_name: 'Bonsai 2 27B',
-    runtime_version: 'prism-b10735',
-    installed_at: '2026-01-01T00:00:00Z',
-    model_file: '/x.gguf',
-    pid: 4242,
-    error: '',
-    install_error: '',
-    available: true,
-    guards: [],
-    leftover_runtime: false,
-    leftover_weights: false,
-    leftover_projection: false,
-    devices: [],
-    unified: true,
-    host_ram_gib: 128,
-    device_budget_mib: 24576,
-    host_budget_mib: 8192,
-    topology_probed_at: '',
-    plan: {
-      recorded: false,
-      packing: '',
-      kv_type: '',
-      context_size: 0,
-      fit: false,
-      fit_arg: '',
-      fit_target_mib: 0,
-      fit_min_context: 0,
-      offload_mode: 'auto',
-      layers: -1,
-      kv_offload: false,
-      mmproj_offload: false,
-      parallel: 0,
-      cache_ram_mib: -1,
-      gpu_family: '',
-      device_budget_mib: 0,
-      host_budget_mib: 0,
-      expected_device_mib: 0,
-      expected_host_mib: 0,
-      notes: [],
-    },
-    reload_required: false,
-  }
+/** The complete status payload the raw-wire validator cases start from —
+ *  module-level because both engine-field and fit_warning describe blocks
+ *  derive their payloads from it. */
+const base = {
+  state: 'installed',
+  installed: true,
+  installing: false,
+  loading: false,
+  loaded: false,
+  engine: '',
+  python_version: '',
+  pack_revision: '',
+  packing: 'PQ2_0',
+  backend: 'cpu',
+  port: 43211,
+  context_size: 131072,
+  auto_unload_enabled: true,
+  auto_unload_minutes: 60,
+  idle_remaining_seconds: 0,
+  base_url: 'http://127.0.0.1:43211/v1',
+  model_id: 'embedded/Bonsai 2 27B',
+  model_name: 'Bonsai 2 27B',
+  runtime_version: 'prism-b10735',
+  installed_at: '2026-01-01T00:00:00Z',
+  model_file: '/x.gguf',
+  pid: 4242,
+  error: '',
+  install_error: '',
+  available: true,
+  guards: [],
+  leftover_runtime: false,
+  leftover_weights: false,
+  leftover_projection: false,
+  devices: [],
+  unified: true,
+  host_ram_gib: 128,
+  device_budget_mib: 24576,
+  host_budget_mib: 8192,
+  topology_probed_at: '',
+  plan: {
+    recorded: false,
+    packing: '',
+    kv_type: '',
+    context_size: 0,
+    fit: false,
+    fit_arg: '',
+    fit_target_mib: 0,
+    fit_min_context: 0,
+    offload_mode: 'auto',
+    layers: -1,
+    kv_offload: false,
+    mmproj_offload: false,
+    parallel: 0,
+    cache_ram_mib: -1,
+    gpu_family: '',
+    device_budget_mib: 0,
+    host_budget_mib: 0,
+    expected_device_mib: 0,
+    expected_host_mib: 0,
+    notes: [],
+  },
+  reload_required: false,
+}
 
+describe('#157 isEmbeddedLLMStatus fit_warning', () => {
   beforeEach(() => {
     delete mockApp.GetEmbeddedLLMStatus
   })
@@ -425,6 +431,48 @@ describe('#157 isEmbeddedLLMStatus fit_warning', () => {
     mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base }))
     await expect(getEmbeddedLLMStatus()).resolves.toBeDefined()
     mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base, fit_warning: 'did not fit' }))
+    await expect(getEmbeddedLLMStatus()).resolves.toBeDefined()
+  })
+})
+
+describe('isEmbeddedLLMStatus engine fields (engine + python_version + pack_revision)', () => {
+  beforeEach(() => {
+    delete mockApp.GetEmbeddedLLMStatus
+  })
+
+  it('rejects a non-string engine (rendered as the Settings engine label)', async () => {
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base, engine: 42 }))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+  })
+
+  it('rejects a non-string python_version or pack_revision', async () => {
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base, python_version: 5 }))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base, pack_revision: null }))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+  })
+
+  it('rejects a payload missing an always-present key (no omitempty on the wire)', async () => {
+    const noEngine: Record<string, unknown> = { ...base }
+    delete noEngine.engine
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve(noEngine))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+    const noPython: Record<string, unknown> = { ...base }
+    delete noPython.python_version
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve(noPython))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+    const noPack: Record<string, unknown> = { ...base }
+    delete noPack.pack_revision
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve(noPack))
+    await expect(getEmbeddedLLMStatus()).rejects.toThrow()
+  })
+
+  it('accepts the llama-family shape ("" records) and a populated mtplx one', async () => {
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() => Promise.resolve({ ...base }))
+    await expect(getEmbeddedLLMStatus()).resolves.toBeDefined()
+    mockApp.GetEmbeddedLLMStatus = vi.fn(() =>
+      Promise.resolve({ ...base, engine: 'mtplx', python_version: '3.12.15', pack_revision: '03bd60bb' }),
+    )
     await expect(getEmbeddedLLMStatus()).resolves.toBeDefined()
   })
 })

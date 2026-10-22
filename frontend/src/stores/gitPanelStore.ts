@@ -4,7 +4,7 @@ import type { Branch, BranchInfo, GitPanelFocus, GitWorktree, MergeRebaseState }
 
 // --- Types ---
 
-/** The BranchPicker's open intent: Git-panel switch/create vs chat-side draft. */
+/** The BranchPicker's open intent: Git-panel switch/create vs the chat-side workspace pick ('draft' mode). */
 export type BranchPickerMode = 'switch' | 'draft'
 
 /** Empty BranchInfo used as the initial branch state. */
@@ -195,11 +195,11 @@ interface GitPanelState {
   /**
    * The intent the BranchPicker opens with. 'switch' is the Git panel's
    * classic mode (checkout / manage branches). 'draft' is the chat-side
-   * session-draft mode (ADR-080): rows SELECT the branch a new session's
-   * managed worktree will be provisioned on — no checkout, no in-place
-   * mutation; creation happens at draft commit via CreateManagedSession.
-   * Reset to 'switch' on close so a draft open can never leak into a later
-   * Git-panel open.
+   * session-workspace pick mode (ADR-091): rows SELECT the branch a FRESH
+   * session's first send will provision the managed worktree on — no
+   * checkout, no in-place mutation; provisioning happens at the send, via
+   * SendMessage's workspace argument. Reset to 'switch' on close so a pick
+   * open can never leak into a later Git-panel open.
    */
   branchPickerMode: BranchPickerMode
   expandedDirs: Set<string>

@@ -18,7 +18,7 @@ import { useState, useRef, useCallback } from 'react'
 import type { RefObject } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore, selectIsNoProject } from '@/stores/projectStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
+import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useChatStore } from '@/stores/chatStore'
 import { useTerminalRegistryStore } from '@/stores/terminalRegistryStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
@@ -107,25 +107,24 @@ export function useSessionActions(): SessionActions {
 
   const handleNewSession = useCallback(async () => {
     setCreateError(null)
-    // CODE projects use the draft flow (ADR-080): New Session arms a draft
-    // instead of creating a session row — no orchestrator, terminal, or DB
-    // row exists until the first real action (send / attachment / terminal
-    // open) commits it, honoring the drafted workspace (local checkout or a
-    // managed worktree provisioned on the picked branch). The chat input's
-    // toolbar exposes the workspace choice while the draft is armed.
-    const projectState = useProjectStore.getState()
-    const projectId = projectState.activeProjectId
-    if (projectId !== null && !selectIsNoProject(projectState)) {
-      useSessionDraftStore.getState().startDraft(projectId)
-      // Clear the active session (in-memory only — the project's saved
-      // session is deliberately NOT touched, so a restart restores it and an
-      // un-committed draft simply evaporates).
-      selectSession(null)
-      return
-    }
+    // The draft-free creation flow (ADR-091): EVERY "New Session" eagerly
+    // creates the session row — a CODE session is born LOCAL (the project
+    // checkout), exactly like a CHAT (No Project) session, and is fast
+    // because nothing is provisioned. A worktree session is born at the
+    // session's FIRST send: pick the branch in the chat toolbar's workspace
+    // selector (or via the per-branch gesture below) and the choice rides
+    // on the first message (SendMessage's workspace argument). There is no
+    // draft state: the session always exists from the gesture onward.
     try {
       const session = await createSession()
       addSession(session)
+      // A brand-new session is born with a CONFIRMED-EMPTY transcript: the
+      // workspace selector's freshness contract needs the index to exist from
+      // birth — an absent index reads as "history not loaded" and keeps the
+      // picker locked behind the permanent pin until the history loader
+      // settles. The ChatArea's unconditional empty merge covers this too;
+      // seeding here closes that birth window (ADR-091).
+      useChatStore.getState().ensureEmptyTranscript(session.id)
       // A newly created session becomes the visible active one — an explicit
       // activation, so persist it as the project's saved session right away
       // (otherwise an app restart would restore a different session).
@@ -138,14 +137,13 @@ export function useSessionActions(): SessionActions {
   }, [addSession, selectSession])
 
   /**
-   * Arm a New-Session draft pinned to an existing managed branch (the session
-   * selector's grouped view offers this per branch row). The same CODE draft
-   * flow as {@link handleNewSession}, with the drafted workspace preset to
-   * the branch: the session row is born on the first real action, and
-   * `CreateManagedSession` then ADOPTS the branch's existing managed worktree
-   * (ADR-082 shared trees) — the new session executes in that same tree, no
-   * second checkout is made. Outside a CODE project the gesture has no
-   * meaning (no worktrees) and is a deliberate no-op.
+   * "New session on branch X" (the session selector's grouped view offers
+   * this per branch row). The same eager creation as {@link handleNewSession}
+   * — the row is born immediately (local) — plus the fresh session's PENDING
+   * workspace choice preset to the branch: the first send then provisions
+   * the managed worktree (or ADOPTS the branch's existing managed tree,
+   * ADR-082) and the session executes there. Outside a CODE project the
+   * gesture has no meaning (no worktrees) and is a deliberate no-op.
    */
   const handleNewSessionOnBranch = useCallback(
     (branch: string) => {
@@ -153,16 +151,31 @@ export function useSessionActions(): SessionActions {
       const projectState = useProjectStore.getState()
       const projectId = projectState.activeProjectId
       if (projectId === null || selectIsNoProject(projectState)) return
-      useSessionDraftStore.getState().startDraft(projectId)
-      useSessionDraftStore
-        .getState()
-        .setDraftWorkspace({ kind: 'branch', branch, createBranch: false, startPoint: '' })
-      // Same in-memory-only selection clear as handleNewSession: the draft
-      // and a selected session are mutually exclusive states (selecting a
-      // session retires a draft; a draft clears the visible selection).
-      selectSession(null)
+      void (async () => {
+        try {
+          const session = await createSession()
+          addSession(session)
+          // Seed the confirmed-empty index synchronously so the picker is
+          // ARMED from birth: an absent index reads as "history not loaded",
+          // which renders the permanent pin instead of the picker and hides
+          // the preset choice below until the history loader settles
+          // (ADR-091). The preset itself lives in sessionWorkspaceStore and
+          // is only dropped on proof that the fresh window closed.
+          useChatStore.getState().ensureEmptyTranscript(session.id)
+          selectSession(session.id, session.project_id)
+          // Preset the fresh window's pending choice: the FIRST send to this
+          // session provisions (or adopts) the tree on `branch`.
+          useSessionWorkspaceStore
+            .getState()
+            .setChoice(session.id, { kind: 'branch', branch, createBranch: false, startPoint: '' })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          logger.error('Failed to create session on branch:', error)
+          setCreateError(message)
+        }
+      })()
     },
-    [selectSession],
+    [addSession, selectSession],
   )
 
   const performDelete = useCallback(
@@ -189,6 +202,9 @@ export function useSessionActions(): SessionActions {
         // Drop its saved chat scroll position — the session is gone, and the
         // entry would otherwise keep the per-session map growing.
         useChatStore.getState().clearScrollPosition(id)
+        // Drop its pending workspace choice (a fresh session deleted before
+        // its first send) — the per-session map stays bounded.
+        useSessionWorkspaceStore.getState().dropSessions([id])
         // Drop its step context fill + per-step token totals for the same
         // reason — one action clears both session-keyed maps (a deleted
         // session never re-emits context_fill, so the entries would go stale).

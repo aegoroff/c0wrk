@@ -19,17 +19,17 @@ interface RemoteBranchRowProps {
    * branch name), or null when the twin is a valid draft target. Computed by
    * BranchPicker with the same predicate as the local rows — the main
    * checkout's branch — so both sections block (and word) identically. Only
-   * consulted in session-draft mode (see {@link RemoteBranchRowProps.draftSelect}).
+   * consulted in workspace-pick mode (see {@link RemoteBranchRowProps.draftSelect}).
    */
   draftBlockedReason?: string | null
   /**
-   * Session-draft mode (ADR-080): when set, clicking SELECTS the remote
-   * branch for the new session's managed worktree instead of checking it
-   * out — no git operation runs at pick time. The draft records a
+   * Workspace-pick mode (ADR-091): when set, clicking SELECTS the remote
+   * branch for the fresh session's managed worktree instead of checking it
+   * out — no git operation runs at pick time. The pick records a
    * create-branch intent (local short name from the remote-tracking start
-   * point), so commit-time provisioning follows git DWIM semantics: an
+   * point), so the first send's provisioning follows git DWIM semantics: an
    * existing local branch of that name is reused, a missing one is created
-   * from the remote ref (see CreateManagedSession). The per-row hover
+   * from the remote ref (SendMessage's workspace argument). The per-row hover
    * actions are hidden — the row is a selection target, not a management
    * one. A row whose LOCAL twin (the short name) is the working tree's own
    * branch is disabled, mirroring {@link LocalBranchRow}'s current-branch

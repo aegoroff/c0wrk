@@ -114,13 +114,21 @@ export function ChatArea() {
           sessionId: activeSessionId,
           type: 'error',
           content: 'Failed to load session history. Please try switching sessions.',
-          metadata: {},
+          // Distinguishes this card from the send-path's failure cards in
+          // the workspace selector's freshness predicate: a load failure
+          // can be the only visible entry of a session WITH persisted rows,
+          // so it must never read as a "confirmed empty" transcript (see
+          // SessionWorkspaceSelector.isFresh).
+          metadata: { historyLoadFailed: true },
           timestamp: Date.now(),
         })
         return
       }
       if (cancelled) return
 
+      // The merged chat rows, materialized for the EMPTY history too (see the
+      // unconditional merge below).
+      let chatMessages: ChatMessageUI[] = []
       if (history.length > 0) {
         // Filter out rows that must never surface in the chat:
         //  - "event_unknown" — transient UI events (attachments:changed,
@@ -150,14 +158,31 @@ export function ChatArea() {
         // Drop store-state rows (agent_metrics) and the legacy per-task
         // "Routing request..." activity boilerplate so the chat shows only the
         // routing decision itself.
-        const chatMessages = uiMessages.filter((m) => !isAgentMetricsRow(m) && !isRoutingRequestRow(m))
-        // Merge (not replace) so live events delivered while the RPC was in
-        // flight — e.g. a terminal `error` — are not clobbered.
-        useChatStore.getState().mergeHistoryMessages(activeSessionId, chatMessages, loadStartedAt)
+        chatMessages = uiMessages.filter((m) => !isAgentMetricsRow(m) && !isRoutingRequestRow(m))
         // Rebuild the plan panel and goal badge from the loaded history: the
         // whole row set is present, so the plan declaration and the goal
         // snapshots are always available.
         restorePlanAndGoalFromHistory(activeSessionId, chatMessages)
+      }
+      // Merge (not replace) so live events delivered while the RPC was in
+      // flight — e.g. a terminal `error` — are not clobbered; the merge
+      // protects them through loadStartedAt. An EMPTY history must NOT go
+      // through the merge: its loadStartedAt guard would drop every stored
+      // row older than this load — on a fresh session that is exactly the
+      // frontend-only transcript (a rejected send's error card, an in-flight
+      // optimistic message) — so the empty case only MATERIALIZES the
+      // confirmed-empty index the workspace selector's freshness contract
+      // needs (an absent index reads as "history not loaded yet" and would
+      // keep the workspace picker locked forever; ADR-091's send-time binding
+      // is unreachable without it). With an index already present,
+      // ensureEmptyTranscript keeps every live row untouched — it only reaps
+      // superseded history-load-failure cards, which this successful load
+      // proves stale (a stale card would otherwise keep the fresh predicate
+      // locked on a provably fresh session forever).
+      if (history.length === 0) {
+        useChatStore.getState().ensureEmptyTranscript(activeSessionId)
+      } else {
+        useChatStore.getState().mergeHistoryMessages(activeSessionId, chatMessages, loadStartedAt)
       }
 
       // Reconcile AFTER the merge so the store is populated. Fetch the
