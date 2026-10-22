@@ -1052,7 +1052,7 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 	return info
 }
 
-// The warning-channel refresh (ADR-095): every transport-affecting control
+// The warning-channel refresh (ADR-092): every transport-affecting control
 // RPC recomputes the section's config-load-warning contribution AFTER its
 // webAccessMu critical section — outside the lock on purpose, see
 // RefreshWebAccessLoadWarnings for the lock-order rule. The refresh is
@@ -1071,7 +1071,7 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // flip back so a rejected toggle is indistinguishable from a rejected
 // request (the SetModelProfilesEnabled contract).
 //
-// Enabling onto a configured-but-unusable TLS (ADR-094) is refused before
+// Enabling onto a configured-but-unusable TLS (ADR-092) is refused before
 // anything is mutated or persisted: the pair is loaded exactly like the
 // sidecar would load it (config.ValidateWebAccessTLSPair), so a broken
 // certificate leaves the section OFF with the reason in the toggle's error
@@ -1087,7 +1087,7 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // touches it at runtime), and a concurrent backend config save can only READ
 // the section it persists wholesale — the accepted one-word window of this
 // desktop-owned seam. The warning refresh runs after the unlock, so the
-// never-takes-configMu-under-webAccessMu rule survives (ADR-095).
+// never-takes-configMu-under-webAccessMu rule survives (ADR-092).
 func (a *App) SetWebAccessEnabled(on bool) error {
 	a.webAccessMu.Lock()
 	err := a.setWebAccessEnabledLocked(on)
@@ -1105,7 +1105,7 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 		return nil
 	}
 
-	// ADR-094: a flip onto an unusable TLS is refused up front — the same
+	// ADR-092: a flip onto an unusable TLS is refused up front — the same
 	// usability predicate the load path heals by, fail-closed here because
 	// this is an interactive boundary, not a broken config file.
 	if on && cfg.WebAccess.TLS.Enabled {
@@ -1142,7 +1142,7 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 
 // applyExperimentalWebAccess is the desktop hook the backend invokes after a
 // successful experimental.enabled persist (UpdateExperimentalFeatures → the
-// OnExperimentalChanged FrontendAPIConfig seam, ADR-091): web access is an
+// OnExperimentalChanged FrontendAPIConfig seam, ADR-090): web access is an
 // experimental feature,
 // so its sidecar must follow the master gate LIVE instead of waiting for the
 // next launch. Opening the gate mounts the sidecar when the section's own
@@ -1221,7 +1221,7 @@ func (a *App) applyExperimentalWebAccess(enabled bool) {
 // explaining both, and the app is never left silently without a sidecar it
 // had before the call. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam);
-// the warning refresh runs after the unlock (ADR-095, the lock-order rule).
+// the warning refresh runs after the unlock (ADR-092, the lock-order rule).
 func (a *App) SetWebAccessConnection(bind string, port int) error {
 	a.webAccessMu.Lock()
 	err := a.setWebAccessConnectionLocked(bind, port)
@@ -1367,7 +1367,7 @@ const (
 // bind/port pins it persists regardless and takes effect at the next start
 // whose gates are open. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam);
-// the warning refresh runs after the unlock (ADR-095, the lock-order rule) —
+// the warning refresh runs after the unlock (ADR-092, the lock-order rule) —
 // the HTTPS flip is precisely the transition that must move the
 // config-load-warning banner.
 func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {

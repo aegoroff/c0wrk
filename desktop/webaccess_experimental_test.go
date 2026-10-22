@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_experimental_test.go — the experimental master gate over the
-// browser web-access sidecar (ADR-091): the startup mount requires BOTH the
+// browser web-access sidecar (ADR-090): the startup mount requires BOTH the
 // section's own switch and experimental.enabled; a mid-session gate change
 // live-follows through the backend hook (UpdateExperimentalFeatures → the
 // OnExperimentalChanged FrontendAPIConfig seam → applyExperimentalWebAccess)
@@ -170,7 +170,7 @@ func TestApplyExperimentalWebAccess_SectionOffMountsNothing(t *testing.T) {
 }
 
 // TestUpdateExperimentalFeatures_HookStartsSidecarMidSession is the full
-// cross-seam contract (ADR-091): a REAL FrontendAPI (Init'd, like production)
+// cross-seam contract (ADR-090): a REAL FrontendAPI (Init'd, like production)
 // carries the desktop hook, so UpdateExperimentalFeatures(true) persists the
 // gate AND mounts the skipped sidecar in the same call, and
 // UpdateExperimentalFeatures(false) stops it — no restart anywhere.

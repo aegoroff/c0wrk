@@ -55,7 +55,7 @@ import { WebAccessTLSSettings } from './WebAccessTLSSettings'
  * itself is network-reachable over plain HTTP, which carries its own
  * stronger warning.
  *
- * ADR-095: the transport-affecting writes (the enable toggle, the address
+ * ADR-092: the transport-affecting writes (the enable toggle, the address
  * pin, the TLS switch and its path commits) also refresh the top-of-Settings
  * config warning banner through onConfigChanged — the backend recomputes the
  * section's config-load warnings on each, so the banner must re-read them.
@@ -143,7 +143,7 @@ export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () =>
       setSaving(true)
       try {
         await setWebAccessEnabled(next)
-        // ADR-095: the enable flip is a transport change, so the backend has
+        // ADR-092: the enable flip is a transport change, so the backend has
         // recomputed the section's config-load warnings — tell the banner to
         // re-read them.
         onConfigChanged?.()
@@ -201,7 +201,7 @@ export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () =>
     setAddressError(null)
     try {
       await setWebAccessConnection(parsed.bind, parsed.port)
-      // ADR-095: a re-bind can move the exposure warning in or out of the
+      // ADR-092: a re-bind can move the exposure warning in or out of the
       // loopback class — the banner re-reads the recomputed warnings.
       onConfigChanged?.()
       const fresh = await getWebAccessInfo()

@@ -2144,7 +2144,7 @@ notifications:
 #                               actually serve — either path empty, or the
 #                               pair failing to load (missing file, parse
 #                               error, key/cert mismatch) — is unusable
-#                               (ADR-094): the config load turns the whole
+#                               (ADR-092): the config load turns the whole
 #                               web_access section OFF with a warning
 #                               naming the reason (a requested TLS is never
 #                               downgraded to plain HTTP; fix the pair and

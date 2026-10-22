@@ -26,7 +26,7 @@ interface WebAccessTLSSettingsProps {
   info: WebAccessInfo
   /** The parent's setter: optimistic updates and post-write re-reads land here. */
   onInfo: (info: WebAccessInfo | null) => void
-  /** ADR-095: fired after a successful transport change — the backend has
+  /** ADR-092: fired after a successful transport change — the backend has
    *  recomputed the section's config-load warnings, and the Settings banner
    *  must re-read them. The certificate Generate cannot move those warnings
    *  (paths only) and stays out. */
@@ -69,7 +69,7 @@ export function WebAccessTLSSettings({ info, onInfo, onConfigChanged }: WebAcces
       setTlsBusy(true)
       try {
         await setWebAccessTLS(next, info.tlsCert ?? '', info.tlsKey ?? '')
-        // ADR-095: the HTTPS flip is the transition that must move the
+        // ADR-092: the HTTPS flip is the transition that must move the
         // config-load-warning banner — the backend has recomputed it.
         onConfigChanged?.()
         await reread()
@@ -100,7 +100,7 @@ export function WebAccessTLSSettings({ info, onInfo, onConfigChanged }: WebAcces
       setTlsError(null)
       try {
         await setWebAccessTLS(info.tlsEnabled, cert, key)
-        // ADR-095: the backend recomputes the section's warnings after every
+        // ADR-092: the backend recomputes the section's warnings after every
         // SetWebAccessTLS (the recompute is state-only and idempotent), so
         // the commit mirrors it even though a path change alone cannot move
         // the exposure warning.

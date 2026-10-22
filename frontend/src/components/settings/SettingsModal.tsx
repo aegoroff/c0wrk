@@ -99,7 +99,7 @@ export function SettingsModal() {
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
   // One banner refresher shared by every writer that can move the
   // config-load-warning channel: the LLM saves (handleSettingsSaved) and the
-  // Web Access control RPCs (ADR-095 — the banner follows the live section).
+  // Web Access control RPCs (ADR-092 — the banner follows the live section).
   const refreshBanner = useCallback(() => setBannerRefreshKey((k) => k + 1), [])
   const [closeBlocked, setCloseBlocked] = useState(false)
   const [checkingClose, setCheckingClose] = useState(false)
@@ -300,7 +300,7 @@ export function SettingsModal() {
                   block. */}
               {experimentalEnabled && !isWebTransport() && (
                 <div className="border-t border-border pt-4">
-                  {/* ADR-095: every successful transport-affecting Web Access
+                  {/* ADR-092: every successful transport-affecting Web Access
                       write recomputes the section's config-load warnings, so
                       the banner above must re-read them. */}
                   <WebAccessSettings onConfigChanged={refreshBanner} />

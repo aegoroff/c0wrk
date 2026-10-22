@@ -112,7 +112,7 @@ func tlsRootPool(t *testing.T, certPath string) *x509.CertPool {
 	return pool
 }
 
-// TestSetWebAccessEnabled_BrokenTLSPairRefused: ADR-094's interactive gate
+// TestSetWebAccessEnabled_BrokenTLSPairRefused: ADR-092's interactive gate
 // on the enable flip — turning the section on while its TLS subsection
 // points at an unloadable pair is refused before anything is mutated or
 // persisted, so the toggle never produces a persisted-on switch above a
@@ -789,7 +789,7 @@ func mustSidecarAddr(t *testing.T, a *App) string {
 	return addr
 }
 
-// TestWebAccessControlRPCsRefreshConfigLoadWarnings pins the ADR-095 wire
+// TestWebAccessControlRPCsRefreshConfigLoadWarnings pins the ADR-092 wire
 // end-to-end: the transport-affecting control RPCs keep the UI's
 // config-load-warning channel (GetConfig().config_errors → the Settings
 // "Configuration warning" banner) in step with the live section — an

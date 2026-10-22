@@ -35,7 +35,7 @@ import (
 // writeWebAccessConfig writes a loadable config.yaml (the smallest document
 // the loader accepts) with an optional web_access block, loads it through the
 // real pipeline, and returns the live config plus its path. The experimental
-// master gate (web access is an experimental feature, ADR-091) is OPEN —
+// master gate (web access is an experimental feature, ADR-090) is OPEN —
 // these tests exercise the sidecar's own lifecycle, not the gate.
 func writeWebAccessConfig(t *testing.T, webAccess string) (cfg *config.Config, path string) {
 	t.Helper()

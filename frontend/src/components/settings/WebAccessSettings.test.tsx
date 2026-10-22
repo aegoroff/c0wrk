@@ -702,7 +702,7 @@ describe('WebAccessSettings token regenerate', () => {
   })
 })
 
-describe('WebAccessSettings config warning banner refresh (ADR-095)', () => {
+describe('WebAccessSettings config warning banner refresh (ADR-092)', () => {
   it('fires onConfigChanged after a successful enable toggle', async () => {
     const onConfigChanged = vi.fn()
     mocks.getWebAccessInfo.mockResolvedValueOnce(offInfo).mockResolvedValueOnce(runningInfo)
