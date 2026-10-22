@@ -593,7 +593,8 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
       startPoint: '',
     })
     // NO in-place checkout side effect: no git mutation ran at pick time —
-    // provisioning happens at draft commit via CreateManagedSession.
+    // provisioning happens on the FIRST SEND, via SendMessage's workspace
+    // argument.
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(gitMocks.createBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
@@ -617,8 +618,8 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   it('draft mode: selects a worktree\'s branch even when it is_current — the existing managed tree is adopted', async () => {
     // The Git panel is focused on the managed tree holding feat/a, so
     // GetBranches (which runs in the focused tree) marks feat/a is_current.
-    // The pick must still record the draft — at draft commit
-    // CreateManagedSession ADOPTS the existing tree (ADR-082) — and close
+    // The pick must still record the choice — the FIRST SEND adopts
+    // the existing tree (ADR-082) — and close
     // the picker; nothing is checked out here.
     gitMocks.getBranches.mockResolvedValue([
       { name: 'main', is_current: false, kind: 'local', upstream: '' },
@@ -722,8 +723,9 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
       createBranch: true,
       startPoint: '',
     })
-    // The branch is created at draft commit inside the session's managed
-    // worktree — NOT here via an in-place CreateBranch/checkout.
+    // The branch is created by the FIRST SEND's provisioning inside the
+    // session's managed worktree — NOT here via an in-place
+    // CreateBranch/checkout.
     expect(gitMocks.createBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(useGitPanelStore.getState().isBranchPickerOpen).toBe(false)
@@ -774,7 +776,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
     await openDraftPicker()
 
     // Remote rows are listed and selectable in draft mode (no git operation
-    // runs at pick time — provisioning happens at draft commit).
+    // runs at pick time — provisioning happens on the first send).
     expect(body().textContent).toContain('Remote')
     expect(branchRow('origin/feat/remote')).toBeDefined()
 
@@ -823,7 +825,7 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
   })
 
   it('draft mode: an external worktree row is not a draft target — its branch is held outside c0wrk', async () => {
-    // c0wrk never adopts trees it does not own (ADR-082): the draft commit
+    // c0wrk never adopts trees it does not own (ADR-082): the first send
     // would refuse a branch held by an external tree (ErrBranchBusy), and
     // provisioning a fresh managed tree on that branch would fail too — git
     // allows a branch in at most one worktree. The row must render disabled
@@ -993,7 +995,8 @@ describe('BranchPicker — session-draft mode (select/create for a managed workt
       startPoint: 'origin/feat/remote',
     })
     // NO in-place checkout side effect at pick time: no git mutation ran —
-    // provisioning happens at draft commit via CreateManagedSession.
+    // provisioning happens on the FIRST SEND, via SendMessage's workspace
+    // argument.
     expect(gitMocks.checkoutRemoteBranch).not.toHaveBeenCalled()
     expect(gitMocks.checkoutBranch).not.toHaveBeenCalled()
     expect(gitMocks.createBranch).not.toHaveBeenCalled()

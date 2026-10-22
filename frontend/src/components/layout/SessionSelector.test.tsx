@@ -16,9 +16,10 @@
 // - grouped mode separates the Worktrees and Local sections with the branch
 //   combo's hairline divider (only when both sections render headers);
 // - each managed branch row carries a "New session in this worktree" item
-//   (the + action): it arms the ADR-080 draft pinned to that branch
-//   (createBranch=false — CreateManagedSession adopts the branch's existing
-//   managed tree per ADR-082), clears the active selection and closes the
+//   (the + action): it eagerly creates the session and presets its ADR-091
+//   workspace choice to that branch (createBranch=false — the FIRST SEND
+//   adopts the branch's existing managed tree per ADR-082), clears the
+//   active selection and closes the
 //   menu; it never toggles the branch's collapse state, and nothing but
 //   managed branch rows (flat mode, Local/Archived sections) has the action;
 // - an active search force-expands every group and section and hides empty ones;
@@ -104,7 +105,12 @@ const { chatMocks } = vi.hoisted(() => ({
   },
 }))
 vi.mock('@/stores/chatStore', () => ({
-  useChatStore: (selector: (s: typeof chatMocks) => unknown) => selector(chatMocks),
+  useChatStore: Object.assign(
+    (selector: (s: typeof chatMocks) => unknown) => selector(chatMocks),
+    // The creation gestures seed the new session's confirmed-empty transcript
+    // through the store's action surface (ADR-091).
+    { getState: () => ({ ensureEmptyTranscript: vi.fn() }) },
+  ),
 }))
 
 import { SessionSelector } from './SessionSelector'

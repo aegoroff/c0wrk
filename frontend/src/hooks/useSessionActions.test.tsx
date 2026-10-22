@@ -1,10 +1,11 @@
-// Tests for the New Session gesture's draft flow (useSessionActions).
+// Tests for the session-creation gestures of useSessionActions.
 //
-// In a CODE project, New Session arms a session draft (ADR-080) instead of
-// creating a session row — no RPC runs, no session becomes active; the draft
-// is committed later by the first send / attachment / terminal open (see
-// lib/sessionDraft.test.ts). In CHAT (No Project) mode the gesture keeps
-// the legacy eager creation.
+// Both "New Session" and "new session on branch X" eagerly create the
+// session row (ADR-091): a CODE session is born LOCAL and immediately
+// active, with a CONFIRMED-EMPTY transcript seeded (the workspace picker's
+// freshness contract) and — for the per-branch gesture — the fresh window's
+// pending workspace choice preset. In CHAT (No Project) mode the same eager
+// creation runs.
 //
 // No @testing-library/react in this repo; we follow the established
 // createRoot + jsdom harness pattern (see useMessageSender.test.tsx).
@@ -197,6 +198,14 @@ describe('handleNewSessionOnBranch — grouped-view per-branch gesture', () => {
       createBranch: false,
       startPoint: '',
     })
+    // The transcript is seeded CONFIRMED-EMPTY from birth: the selector's
+    // freshness contract needs the index to EXIST — without it the picker
+    // stays locked behind the permanent pin and the preset choice is
+    // invisible until the history loader settles (the choice itself still
+    // rides the first send, but the user cannot see or change it).
+    const index = useChatStore.getState().messages['s-new']
+    expect(index).toBeDefined()
+    expect(Object.keys(index!)).toHaveLength(0)
   })
 
   it('CODE project: the choice is keyed to the NEW session, not the previous one', async () => {

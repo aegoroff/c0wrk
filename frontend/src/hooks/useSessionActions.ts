@@ -118,6 +118,13 @@ export function useSessionActions(): SessionActions {
     try {
       const session = await createSession()
       addSession(session)
+      // A brand-new session is born with a CONFIRMED-EMPTY transcript: the
+      // workspace selector's freshness contract needs the index to exist from
+      // birth — an absent index reads as "history not loaded" and keeps the
+      // picker locked behind the permanent pin until the history loader
+      // settles. The ChatArea's unconditional empty merge covers this too;
+      // seeding here closes that birth window (ADR-091).
+      useChatStore.getState().ensureEmptyTranscript(session.id)
       // A newly created session becomes the visible active one — an explicit
       // activation, so persist it as the project's saved session right away
       // (otherwise an app restart would restore a different session).
@@ -148,6 +155,13 @@ export function useSessionActions(): SessionActions {
         try {
           const session = await createSession()
           addSession(session)
+          // Seed the confirmed-empty index synchronously so the picker is
+          // ARMED from birth: an absent index reads as "history not loaded",
+          // which renders the permanent pin instead of the picker and hides
+          // the preset choice below until the history loader settles
+          // (ADR-091). The preset itself lives in sessionWorkspaceStore and
+          // is only dropped on proof that the fresh window closed.
+          useChatStore.getState().ensureEmptyTranscript(session.id)
           selectSession(session.id, session.project_id)
           // Preset the fresh window's pending choice: the FIRST send to this
           // session provisions (or adopts) the tree on `branch`.

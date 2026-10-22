@@ -193,13 +193,13 @@ export function useChatInputController(): ChatInputController {
   const showCancel = taskActive || paused || isProcessing || compacting
 
   // Prompt suggestions (ADR-088): the store's single-slot snapshot, keyed to
-  // the active session — or, while a CODE project's New-Session draft is
-  // armed (no session row), to the DRAFT surface under the empty key: the
-  // project's new_session set (see usePromptSuggestionsSync). Selectors
-  // return the stable empty set / -1 while the store still holds another
-  // context's snapshot. A non-empty set in the idle state takes over the
-  // placeholder (the multi-line browse hint); the refs feed the arrow keymap
-  // below.
+  // the active session — or, while NO session is active in a real project
+  // (the eager flow still has session-less states: fresh app start, last
+  // session deleted), to the backend's new-session surface under the empty
+  // key (see usePromptSuggestionsSync). Selectors return the stable empty
+  // set / -1 while the store still holds another context's snapshot. A
+  // non-empty set in the idle state takes over the placeholder (the
+  // multi-line browse hint); the refs feed the arrow keymap below.
   const suggestionKey = activeSessionId ?? ''
   const suggestions = usePromptSuggestions(suggestionKey)
   const selectedIndex = usePromptSelectedIndex(suggestionKey)
@@ -265,8 +265,9 @@ export function useChatInputController(): ChatInputController {
   })
 
   // Suggestion keyboard navigation (ADR-088): armed only while the ACTIVE
-  // context's suggestion set (the active session's, or the armed draft's
-  // project surface) is non-empty AND the input is in the same idle state
+  // context's suggestion set (the active session's, or the session-less
+  // project surface the backend serves under the empty key) is non-empty AND
+  // the input is in the same idle state
   // whose placeholder carries the browse hint — the keys do
   // exactly what the placeholder says, nothing more (a compacting/pausing/
   // working window keeps its own placeholder and must never let → inject

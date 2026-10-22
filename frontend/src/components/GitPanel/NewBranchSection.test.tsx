@@ -233,8 +233,9 @@ describe('NewBranchSection — draft mode (ADR-080)', () => {
 
     await typeAndSubmit('feat/draft2')
 
-    // The drafted branch is created inside the session's managed worktree at
-    // draft commit — no worktree flag is needed at pick time.
+    // The recorded branch intent is created inside the session's managed
+    // worktree by the FIRST SEND's provisioning — no worktree flag is needed
+    // at pick time.
     expect(onDraftCreate).toHaveBeenCalledWith('feat/draft2', '')
   })
 

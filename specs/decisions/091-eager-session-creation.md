@@ -63,9 +63,13 @@ actually starts running, which is exactly when the first message is sent.
    binding, and only then dispatches the task; a provisioning failure
    (typed `ErrBranchBusy`, DWIM refusals) rejects the send before any state
    is touched — no activity bump, no persisted message. The former
-   `CreateManagedSession` RPC and its draft-commit helpers are deleted; the
-   send-time path reuses the same ownership primitives and the
-   adoption↔deletion critical section protocol.
+   `CreateManagedSession` RPC and its frontend draft-commit UX
+   (`sessionDraftStore`/`lib/sessionDraft`) are deleted; the send-time path
+   reuses the same ownership primitives and the adoption↔deletion critical
+   section protocol. `SessionDraft`/`CreateSessionFromDraft` themselves
+   SURVIVE as the manager's internal identity seam — the reserved-identity
+   path `Manager.CreateSession` builds on (and the managed fork mints its
+   identity through) — no longer a user-facing state.
 
 4. **The fresh window is the one sanctioned binding mutation.** ADR-080's
    immutability stands everywhere else. `SessionStore.BindSessionWorkspace`
@@ -74,11 +78,16 @@ actually starts running, which is exactly when the first message is sent.
    one atomic statement and a send racing a first persisted message cannot
    slip past it; a refusal is the typed `ErrSessionNotFresh`. After the
    write the in-memory session is evicted
-   (`Manager.EvictSession`, the promotion flow's primitive: refuses an
-   active task/compaction, waits out in-flight restores) so the send's own
-   session access lazily restores an orchestrator BUILT for the new
-   workspace — the orchestrator captures its workspace at construction, so a
-   binding write alone cannot retarget execution. Freshly provisioned trees
+   (`Manager.EvictSessionCarryingAttachments`, the promotion flow's
+   primitive: refuses an active task/compaction, waits out in-flight
+   restores, and hands back the session's staged pending attachments) so
+   the send's own session access lazily restores an orchestrator BUILT for
+   the new workspace — the orchestrator captures its workspace at
+   construction, so a binding write alone cannot retarget execution. The
+   returned attachment snapshot is re-staged onto the restored session
+   inside the send path; a failed re-stage rejects the send and surfaces
+   the staged-attachments-lost event instead of dropping them silently.
+   Freshly provisioned trees
    are compensated (released) on every post-write failure; adopted trees are
    never touched.
 

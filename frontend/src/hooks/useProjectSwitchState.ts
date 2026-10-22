@@ -3,6 +3,7 @@ import { createSession, listSessions } from '@/api/sessions'
 import { getProjectSwitchState, saveProjectSwitchState, switchProject } from '@/api/projects'
 import { logger } from '@/lib/logger'
 import { resolveRestoreSession } from '@/lib/sessionRestore'
+import { useChatStore } from '@/stores/chatStore'
 import {
   capture as captureProjectSnapshot,
   restore as restoreProjectSnapshot,
@@ -212,6 +213,11 @@ async function performSwitch(nextProjectId: string, seq: number): Promise<void> 
     const created = await createSession()
     if (abortIfSuperseded()) return
     sessionStore.addSession(created)
+    // A brand-new session is born with a CONFIRMED-EMPTY transcript
+    // (ADR-091): mirror the other creation sites so the workspace picker is
+    // armed immediately instead of showing the permanent pin until the
+    // history loader settles.
+    useChatStore.getState().ensureEmptyTranscript(created.id)
     sessionStore.setActiveSessionId(created.id)
   } catch (error) {
     logger.error('Failed to create fallback session after project switch restore', error)

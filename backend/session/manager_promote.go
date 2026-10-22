@@ -8,6 +8,7 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
+	"github.com/v0lka/sp4rk/orchestration"
 )
 
 // EvictSession drops an in-memory session WITHOUT touching any on-disk state:
@@ -27,9 +28,26 @@ import (
 // A concurrently starting lazy restore is waited out first (single-flight
 // reservation), so a restore that began before the eviction can never
 // re-insert the session after it is dropped.
+// EvictSession drops an in-memory session without touching on-disk state.
+// See EvictSessionCarryingAttachments — this wrapper discards the attachment
+// capture for callers that do not carry staged state across the eviction.
 func (m *Manager) EvictSession(id string) error {
+	_, err := m.EvictSessionCarryingAttachments(id)
+	return err
+}
+
+// EvictSessionCarryingAttachments evicts the in-memory session exactly like
+// EvictSession AND returns the staged (pending) attachments the session held,
+// CAPTURED under the same critical section that deletes the session: the
+// manager write lock is held from the restore wait through the capture to the
+// map delete, so a staging append racing the eviction either commits before
+// the capture (and is carried) or re-validates against the manager only after
+// the delete is visible (and re-stages on the restored session — see
+// appendPendingAttachments). No interleaving can lose the file, which the
+// bind flow's separate snapshot-then-evict pair could not guarantee.
+func (m *Manager) EvictSessionCarryingAttachments(id string) (*PendingAttachmentSnapshot, error) {
 	if id == "" {
-		return errors.New("session id is required")
+		return nil, errors.New("session id is required")
 	}
 	// Wait out any in-flight restore of this session, then evict under the
 	// write lock. The loop re-checks because another goroutine may start a new
@@ -47,18 +65,27 @@ func (m *Manager) EvictSession(id string) error {
 
 	sess, ok := m.sessions[id]
 	if !ok {
-		return nil // not in memory — nothing to evict
+		return nil, nil // not in memory — nothing staged, nothing to evict
 	}
 
 	sess.mu.Lock()
 	if sess.active {
 		sess.mu.Unlock()
-		return fmt.Errorf("session %s has an active task; it cannot be evicted", id)
+		return nil, fmt.Errorf("session %s has an active task; it cannot be evicted", id)
 	}
 	if sess.compacting {
 		sess.mu.Unlock()
-		return fmt.Errorf("session %s has a manual compaction in flight; it cannot be evicted", id)
+		return nil, fmt.Errorf("session %s has a manual compaction in flight; it cannot be evicted", id)
 	}
+	// Capture the staged attachments BEFORE any teardown, under the same
+	// m.mu hold that will delete the session (the loss-proof ordering
+	// documented above).
+	snap := &PendingAttachmentSnapshot{
+		Docs:   make([]orchestration.Attachment, len(sess.pendingAttachments)),
+		Images: make([]ImageAttachment, len(sess.pendingImageAttachments)),
+	}
+	copy(snap.Docs, sess.pendingAttachments)
+	copy(snap.Images, sess.pendingImageAttachments)
 	// Idempotent per-step dump cleanup via the orchestrator (same call
 	// DeleteSession makes), then the plain file handles.
 	if sess.orchestrator != nil {
@@ -81,7 +108,7 @@ func (m *Manager) EvictSession(id string) error {
 	// the evicted identity.
 	m.fileTracker.PurgeSession(id)
 	m.lastToolCallIDs.Delete(id)
-	return nil
+	return snap, nil
 }
 
 // ReserveRestores parks new lazy restores of the session until the returned

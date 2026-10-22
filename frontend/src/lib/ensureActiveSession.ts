@@ -1,6 +1,7 @@
 import type { SessionInfo } from '@/types/models'
 import { createSession } from '@/api/sessions'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useChatStore } from '@/stores/chatStore'
 import { logger } from '@/lib/logger'
 
 /**
@@ -21,6 +22,9 @@ export async function ensureActiveSession(): Promise<SessionInfo> {
   try {
     const session = await createSession()
     useSessionStore.getState().addSession(session)
+    // Born confirmed-empty (the workspace picker must arm from birth — same
+    // seeding the "New Session" flow does; ADR-091).
+    useChatStore.getState().ensureEmptyTranscript(session.id)
     useSessionStore.getState().selectSession(session.id, session.project_id)
     return session
   } catch (err) {

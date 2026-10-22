@@ -236,6 +236,20 @@ type SessionWorkspaceChoice struct {
 	StartPoint string `json:"start_point"`
 }
 
+// Bind errors. They wrap the returned error so callers (tests, future RPC
+// surfaces) can classify the outcome with errors.Is.
+var (
+	// ErrBindInProgress reports that another send for this session is
+	// already applying a workspace bind (the consumption window is busy).
+	// The frontend's own re-entrancy guard makes this unreachable from the
+	// UI; it is the backend backstop for a hand-crafted concurrent send.
+	ErrBindInProgress = errors.New("a workspace bind is already in progress for this session")
+	// ErrWorkspaceAlreadyChosen reports that the session's fresh window
+	// already persisted a managed-worktree binding for a DIFFERENT choice:
+	// the workspace is chosen once per fresh session.
+	ErrWorkspaceAlreadyChosen = errors.New("session workspace already chosen")
+)
+
 // bindSessionWorkspace applies a send-time workspace choice to a FRESH
 // session (no transcript, no task rows — enforced atomically by the store's
 // BindSessionWorkspace). The branch-holder dispatch mirrors the former
@@ -250,7 +264,14 @@ type SessionWorkspaceChoice struct {
 // The binding write is followed by an in-memory eviction so the send's own
 // session access lazily restores with an orchestrator built for the NEW
 // workspace — the orchestrator captures its workspace at construction, so
-// a binding write alone would not retarget execution.
+// a binding write alone would not retarget execution. Before the eviction
+// the session's terminal is stopped (the promotion-flow protocol: the
+// frontend hears session:<id>:terminal_exited and lazily resurrects the
+// shell in the new workspace) and the staged attachments are snapshotted
+// and re-staged after the eviction — the pending lists are memory-only.
+// A concurrent bind for the same session is refused (ErrBindInProgress);
+// a choice that repeats an already-persisted managed binding is a no-op
+// success, a different one is refused (ErrWorkspaceAlreadyChosen).
 func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choice *SessionWorkspaceChoice) error {
 	if choice == nil {
 		return nil
@@ -261,6 +282,14 @@ func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choic
 	if f.store == nil {
 		return errors.New("session store not initialized")
 	}
+	// One bind at a time per session: a second send carrying a workspace
+	// choice while the first is still provisioning would race the same
+	// fresh window (double provision, conflicting compensations). The
+	// frontend refuses such sends itself; this is the backend backstop.
+	if _, busy := f.bindInFlight.LoadOrStore(id, struct{}{}); busy {
+		return fmt.Errorf("%w: wait for the in-flight send to settle", ErrBindInProgress)
+	}
+	defer f.bindInFlight.Delete(id)
 	// The same generous provisioning budget the sibling managed flows get:
 	// a wedged git fails the send explicitly instead of hanging it.
 	ctx, cancel := context.WithTimeout(ctx, managedProvisionTimeout)
@@ -280,6 +309,13 @@ func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choic
 	if info.HasUnfinishedTask {
 		return fmt.Errorf("%w: the session already has an unfinished task", session.ErrSessionNotFresh)
 	}
+	// Archived sessions are read-only; dispatch rejects them again (the
+	// authoritative ErrSessionArchived gate), but only AFTER this bind has
+	// provisioned a tree, persisted the binding and evicted the session —
+	// refuse before any of that runs.
+	if info.Archived {
+		return fmt.Errorf("%w: a read-only session cannot have its workspace bound", session.ErrSessionArchived)
+	}
 	// Refuse a session that is running something before any git runs (the
 	// store guard below remains the authoritative race-closer).
 	if status, statusErr := f.app.Manager().GetSessionRuntimeStatus(id); statusErr == nil && status.Active {
@@ -292,6 +328,20 @@ func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choic
 	}
 	if branch == "" {
 		return errors.New("a branch is required — name an existing branch or pass create_branch=true")
+	}
+	// A fresh window that already persists a managed binding (a previous
+	// send's bind succeeded but the send itself failed — no transcript/task
+	// rows, so the window is still open) accepts only the SAME choice: the
+	// session already executes where that choice wants it, so a repeat is a
+	// no-op success. A DIFFERENT choice is refused: dispatching by branch
+	// holder alone would silently re-provision (orphaning the previous
+	// tree) or no-op (leaving execution in the old tree) — neither honors
+	// the fresh selection. Deleting the session resets the window.
+	if prev := info.WorkspaceBinding; prev != nil && prev.Kind == session.WorkspaceManagedWorktree {
+		if prev.Branch == branch {
+			return nil
+		}
+		return fmt.Errorf("%w: the session is already bound to managed worktree %q on branch %q (the earlier send provisioned it before failing); the workspace is chosen once per fresh session — delete the session to choose again", ErrWorkspaceAlreadyChosen, prev.WorktreeName, prev.Branch)
 	}
 	// Canonicalize the provisioning root for the git primitives
 	// (canonicalWorktreeRoot), the same split the sibling flows use.
@@ -358,12 +408,47 @@ func (f *FrontendAPI) bindSessionWorkspace(ctx context.Context, id string, choic
 		f.compensateProvisionedTree(ctx, repoRoot, binding.WorktreeName, "workspace binding failed")
 		return err
 	}
-	if err := f.app.Manager().EvictSession(id); err != nil {
+	// Quiesce the session in memory so the send's own access lazily restores
+	// with an orchestrator built for the NEW workspace. The terminal stops
+	// first (the promotion-flow protocol): its PTY's cwd lives in the OLD
+	// workspace, and a live shell cannot be moved — the frontend hears
+	// session:<id>:terminal_exited and lazily re-spawns the shell in the new
+	// workspace on the session's next activation. The staged attachments are
+	// snapshotted before the eviction and re-staged after: the pending lists
+	// are memory-only, so without the carry-over the first send would
+	// silently lose them across the restore.
+	if f.stopSessionTerminal(id) {
+		f.emitTerminalExited(id)
+	}
+	// The eviction captures the staged attachments under the same critical
+	// section that deletes the session (EvictSessionCarryingAttachments), so
+	// a staging append racing the eviction is either carried by the capture
+	// or re-stages itself on the restored session — no interleaving loses it.
+	pendingSnap, evictErr := f.bindEvict(id)
+	if evictErr != nil {
 		// Roll the persisted binding back so the store agrees with the
-		// in-memory session that refused eviction, then release the tree.
-		f.rollbackSessionBinding(ctx, id, projectID, info.WorkspaceBinding, binding.WorktreeName)
+		// in-memory session that refused eviction, then release the tree —
+		// but only on a CONFIRMED rollback. A refused rollback (the fresh
+		// window closed: a parallel send already started a task) leaves the
+		// persisted binding naming this tree; releasing it would strand the
+		// binding on a missing path and force the next restore to
+		// surprise-reprovision, so the tree stays and the error says so.
+		if rbErr := f.rollbackSessionBinding(ctx, id, projectID, info.WorkspaceBinding, binding.WorktreeName); rbErr != nil {
+			f.log().Error("workspace-binding rollback refused; provisioned tree kept under the live binding",
+				"session_id", id, "worktree", binding.WorktreeName, "cause", rbErr)
+			return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the rollback was refused (the fresh window closed) and the session remains bound to worktree %q: %w", binding.WorktreeName, evictErr)
+		}
 		f.compensateProvisionedTree(ctx, repoRoot, binding.WorktreeName, "session eviction failed")
-		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", err)
+		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", evictErr)
+	}
+	if err := f.app.Manager().RestorePendingAttachments(id, pendingSnap); err != nil {
+		// The binding is persisted but the session restored WITHOUT the
+		// staged attachments. Rejecting the send and notifying the UI (the
+		// event drops the stale chips) keeps the retry honest: a silent
+		// retry here would start the task without the files, because the
+		// backend pending lists — the send's only source — are empty.
+		f.app.Manager().EmitStagedAttachmentsLost(id, pendingSnap)
+		return fmt.Errorf("session workspace bound, but its staged attachments could not be carried across the workspace switch; the files were NOT sent — re-attach them: %w", err)
 	}
 	// Seed the tree's embedding cache from the checkout's — after the success
 	// point and before the send proceeds (the task's vector manager builds
@@ -396,12 +481,29 @@ func (f *FrontendAPI) bindAdoptedTree(ctx context.Context, owner *worktrees.Owne
 	if err := f.store.BindSessionWorkspace(ctx, id, projectID, binding); err != nil {
 		return err
 	}
-	if err := f.app.Manager().EvictSession(id); err != nil {
-		f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name)
-		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", err)
+	// Quiesce + carry-over, mirroring the provisioned path: the terminal
+	// stops before the eviction (PTY cwd lives in the old workspace; the
+	// frontend resurrects the shell in the adopted tree on the next
+	// activation), and the staged attachments hop across the eviction via
+	// their memory-only snapshot.
+	if f.stopSessionTerminal(id) {
+		f.emitTerminalExited(id)
+	}
+	pendingSnap, evictErr := f.bindEvict(id)
+	if evictErr != nil {
+		if rbErr := f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name); rbErr != nil {
+			return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the rollback was refused (the fresh window closed) and the session remains bound to worktree %q: %w", holder.Name, evictErr)
+		}
+		return fmt.Errorf("session workspace binding persisted but the session could not be reloaded; the previous workspace was restored: %w", evictErr)
+	}
+	if err := f.app.Manager().RestorePendingAttachments(id, pendingSnap); err != nil {
+		f.app.Manager().EmitStagedAttachmentsLost(id, pendingSnap)
+		return fmt.Errorf("session workspace bound, but its staged attachments could not be carried across the workspace switch; the files were NOT sent — re-attach them: %w", err)
 	}
 	if _, err := owner.Inspect(ctx, repoRoot, holder.Name); err != nil {
-		f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name)
+		if rbErr := f.rollbackSessionBinding(ctx, id, projectID, prevBinding, holder.Name); rbErr != nil {
+			return fmt.Errorf("managed worktree %q was gone at the post-bind re-validation (removed by a concurrent last-owner deletion); the rollback was refused (the fresh window closed) and the session remains bound to it: %w", holder.Name, err)
+		}
 		return fmt.Errorf("managed worktree %q was gone at the post-bind re-validation (removed by a concurrent last-owner deletion); the previous workspace was restored — retry the send to provision a fresh tree: %w", holder.Name, err)
 	}
 	// Idempotent: the tree's first session seeded the cache already; a fresh
@@ -412,16 +514,29 @@ func (f *FrontendAPI) bindAdoptedTree(ctx context.Context, owner *worktrees.Owne
 
 // rollbackSessionBinding restores a session's previous persisted workspace
 // binding after a post-write step (eviction refusal, adoption re-validation)
-// failed. Best-effort but loud: a failed rollback self-heals only on the
-// next restore of the affected session, so the error is logged at Error.
-func (f *FrontendAPI) rollbackSessionBinding(ctx context.Context, id, projectID string, prev *session.WorkspaceBinding, treeName string) {
+// failed. It REPORTS the outcome: a nil return means the previous binding is
+// durably recorded again and the caller may release a provisioned tree; a
+// non-nil return means the restore did NOT happen (most commonly the store's
+// atomic fresh-window guard refused the write because the window closed — a
+// parallel send already started a task), so the caller must keep the tree:
+// the persisted binding still names it, and releasing it would strand the
+// binding on a missing path. Best-effort but loud: a failed rollback
+// self-heals only on the next restore of the affected session, so the error
+// is logged at Error here as well as surfaced to the caller.
+func (f *FrontendAPI) rollbackSessionBinding(ctx context.Context, id, projectID string, prev *session.WorkspaceBinding, treeName string) error {
 	if prev == nil {
-		return
+		// Unreachable from the bind paths (NormalizeWorkspaceBinding gives
+		// every CODE session a non-nil binding), but with no previous binding
+		// recorded the rollback outcome is unknowable — refuse rather than
+		// let the caller release a tree under the live persisted binding.
+		return errors.New("no previous workspace binding recorded; rollback outcome unknown")
 	}
 	if err := f.store.BindSessionWorkspace(ctx, id, projectID, prev); err != nil {
 		f.log().Error("failed to roll back the persisted workspace binding",
 			"session_id", id, "worktree", treeName, "error", err)
+		return err
 	}
+	return nil
 }
 
 // branchHolder returns the worktree entry currently holding branch, or nil
@@ -434,6 +549,17 @@ func branchHolder(trees []workspace.WorktreeInfo, branch string) *workspace.Work
 	}
 	return nil
 }
+
+// bindEvict performs the bind paths' in-memory eviction and returns the
+// staged-attachment capture: the test seam when installed
+// (FrontendAPI.bindEvictHook), the manager's eviction-with-capture otherwise.
+func (f *FrontendAPI) bindEvict(id string) (*session.PendingAttachmentSnapshot, error) {
+	if f.bindEvictHook != nil {
+		return f.bindEvictHook(id)
+	}
+	return f.app.Manager().EvictSessionCarryingAttachments(id)
+}
+
 func (f *FrontendAPI) compensateProvisionedTree(ctx context.Context, repoRoot, treeName, cause string) {
 	if treeName == "" {
 		return // an adopted tree: it pre-existed and is never touched
@@ -786,10 +912,11 @@ func lockedReasonOf(err error) string {
 
 // stopSessionTerminal stops the session's terminal, if any, and reports
 // whether a live terminal was stopped. Shared by the managed pre-flight
-// (before tree removal) and the legacy deletion path (idempotent: IsActive
-// gates the Stop). The promotion flow uses the report to emit
+// (before tree removal), the bind paths (before the workspace-switching
+// eviction), and the legacy deletion path (idempotent: IsActive gates the
+// Stop). The promotion flow uses the report to emit
 // session:<id>:terminal_exited — the one explicit stop the frontend must
-// hear about, because its terminal instance survives the promotion.
+// hear about, because its terminal instance survives the stop.
 func (f *FrontendAPI) stopSessionTerminal(id string) bool {
 	f.seedAcquire()
 	if f.terminalManager == nil || !f.terminalManager.IsActive(id) {
@@ -799,4 +926,15 @@ func (f *FrontendAPI) stopSessionTerminal(id string) bool {
 		f.log().Warn("failed to stop terminal for session", "session_id", id, "error", err)
 	}
 	return true
+}
+
+// emitTerminalExited announces an explicit terminal stop so the frontend's
+// xterm instance can lazily resurrect the shell — in the session's (new)
+// workspace on its next activation. Nil-guarded: struct-literal-constructed
+// APIs (tests, early lifecycle) may not have the event sink wired.
+func (f *FrontendAPI) emitTerminalExited(id string) {
+	if f.emitEvent == nil {
+		return
+	}
+	f.emitEvent(fmt.Sprintf("session:%s:terminal_exited", id), map[string]string{})
 }

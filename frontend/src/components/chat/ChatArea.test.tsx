@@ -21,6 +21,7 @@ import type { SessionInfo, ChatMessage } from '@/types/models'
 // after the history-load filter. vi.hoisted keeps it in scope for the mock
 // factories below, which are hoisted above the imports.
 const mergeSpy = vi.hoisted(() => vi.fn())
+const ensureEmptySpy = vi.hoisted(() => vi.fn())
 
 // --- sessionStore: a REAL zustand store so setState triggers re-renders ---
 // (lets the live-toggle assertion flip the surface without a fresh mount).
@@ -46,7 +47,7 @@ vi.mock('@/stores/sessionStore', async () => {
 vi.mock('@/stores/chatStore', () => ({
   useChatStore: Object.assign(
     () => undefined,
-    { getState: () => ({ addMessage: vi.fn(), mergeHistoryMessages: mergeSpy, setTaskActive: vi.fn(), workUnitStatus: {}, scrollPositions: {}, saveScrollPosition: vi.fn(), clearScrollPosition: vi.fn() }) },
+    { getState: () => ({ addMessage: vi.fn(), mergeHistoryMessages: mergeSpy, ensureEmptyTranscript: ensureEmptySpy, setTaskActive: vi.fn(), workUnitStatus: {}, scrollPositions: {}, saveScrollPosition: vi.fn(), clearScrollPosition: vi.fn() }) },
   ),
   useSessionMessages: () => [],
   useSessionWorkUnits: () => ({}),
@@ -199,5 +200,24 @@ describe('ChatArea archived-session input swap', () => {
     const merged = calls[calls.length - 1]![1] as Array<{ type: string; content: string }>
     expect(merged.some((m) => m.content === 'Uncommitted changes detected in this repository.')).toBe(false)
     expect(merged.some((m) => m.type === 'user' && m.content === 'do the thing')).toBe(true)
+  })
+
+  it('materializes the confirmed-empty transcript for an EMPTY history without the merge', async () => {
+    // A freshly created session has zero rows. The workspace selector's
+    // freshness contract (ADR-091) needs messages[sid] to EXIST as an empty
+    // index — an absent index reads as "history not loaded yet" and would
+    // keep the picker locked forever, making the send-time bind unreachable.
+    // But the empty case must not run the timestamp-guarded MERGE: its
+    // loadStartedAt guard would drop stored rows older than this load — on a
+    // fresh session that is exactly the frontend-only transcript (a rejected
+    // send's error card, an in-flight optimistic message). ensureEmptyTranscript
+    // materializes the index and is a no-op when it already exists.
+    vi.mocked(getSessionHistory).mockResolvedValueOnce([])
+    useSessionStore.setState({ sessions: [session({ archived: false })], activeSessionId: 's1' })
+    render(<ChatArea />)
+    await flushEffects()
+
+    expect(ensureEmptySpy).toHaveBeenCalledWith('s1')
+    expect(mergeSpy).not.toHaveBeenCalled()
   })
 })

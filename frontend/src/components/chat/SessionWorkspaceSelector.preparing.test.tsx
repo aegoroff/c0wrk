@@ -1,8 +1,10 @@
 // Tests for the send-time "Preparing worktree…" hint (ADR-091): while a
 // send carrying the session's workspace choice is on the wire (the store's
-// consumption window), the fresh-session selector shows a spinner beside
-// the picker; the hint disappears when the send settles — success OR
-// failure — and the picker itself stays interactive throughout.
+// consumption window), the selector shows the spinner beside the CHOSEN
+// branch — not the stale pre-send binding. The hint replaces the picker
+// (fresh session) and the pin chip (in-flight session: the real flow
+// activates the task before the RPC, so the window is non-fresh) for its
+// whole duration, and disappears when the send settles — success OR failure.
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
@@ -54,7 +56,15 @@ function trigger(): HTMLButtonElement | null {
   return body().querySelector<HTMLButtonElement>('[data-testid="session-workspace-selector"]')
 }
 
-function preparing(): HTMLElement | null {
+function readOnly(): HTMLButtonElement | null {
+  return body().querySelector<HTMLButtonElement>('[data-testid="session-workspace-readonly"]')
+}
+
+function preparingChip(): HTMLElement | null {
+  return body().querySelector<HTMLElement>('[data-testid="session-workspace-preparing"]')
+}
+
+function preparingStatus(): HTMLElement | null {
   return body().querySelector<HTMLElement>('[role="status"]')
 }
 
@@ -94,36 +104,64 @@ afterEach(() => {
 })
 
 describe('Worktree preparing hint (send-time consumption window)', () => {
-  it('shows the spinner while the choice is being consumed, then hides it', () => {
+  it('shows the spinner with the chosen branch while the choice is on the wire, then hides it', () => {
     armChoice()
     renderSelector()
-    expect(preparing()).toBeNull()
+    expect(preparingChip()).toBeNull()
 
     // The send captured the choice and put it on the wire.
     act(() => {
       useSessionWorkspaceStore.getState().beginConsumption('s-1')
     })
-    expect(preparing()).not.toBeNull()
-    // The spinner's accessible name announces what is happening.
-    expect(preparing()!.textContent).toContain('Preparing worktree')
+    expect(preparingChip()).not.toBeNull()
+    // The spinner's accessible name announces what is happening, and the
+    // chosen branch is labeled beside it — not the stale local default.
+    expect(preparingStatus()!.textContent).toContain('Preparing worktree')
+    expect(preparingChip()!.textContent).toContain('feat/x')
+    // The hint replaces the picker for the whole window.
+    expect(trigger()).toBeNull()
 
     // The send settles (success or failure — the hint goes either way).
     act(() => {
       useSessionWorkspaceStore.getState().endConsumption()
     })
-    expect(preparing()).toBeNull()
-    // The picker itself stays interactive throughout the window.
+    expect(preparingChip()).toBeNull()
+    // The picker is back once the window closes.
     expect(trigger()).not.toBeNull()
   })
 
-  it('another session\'s consumption window never lights this selector', () => {
+  it('the real in-flight state (task activated before the RPC) shows the hint instead of the stale pin', () => {
+    armChoice()
+    renderSelector()
+    // The send path activates the session BEFORE putting the choice on the
+    // wire: the transcript index stays empty but the task flag pins the
+    // selector non-fresh — the stale "local" pin must NOT show.
+    act(() => {
+      useChatStore.setState((s) => ({ ...s, taskActive: { 's-1': true } }))
+      useSessionWorkspaceStore.getState().beginConsumption('s-1')
+    })
+    expect(preparingChip()).not.toBeNull()
+    expect(preparingChip()!.textContent).toContain('feat/x')
+    expect(readOnly()).toBeNull()
+    expect(trigger()).toBeNull()
+
+    act(() => {
+      useSessionWorkspaceStore.getState().endConsumption()
+    })
+    // After the window the task still runs: the pin shows the session's
+    // (still local) binding — the send has not settled its mirror yet.
+    expect(preparingChip()).toBeNull()
+    expect(readOnly()).not.toBeNull()
+  })
+
+  it("another session's consumption window never lights this selector", () => {
     armChoice('s-1')
     renderSelector()
 
     act(() => {
       useSessionWorkspaceStore.getState().beginConsumption('s-other')
     })
-    expect(preparing()).toBeNull()
+    expect(preparingChip()).toBeNull()
   })
 
   it('the wire conversion maps only branch choices; local/absent send null', () => {

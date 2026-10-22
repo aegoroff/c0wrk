@@ -50,8 +50,15 @@ interface SessionWorkspaceState {
   setChoice: (sessionId: string, workspace: PendingWorkspace) => void
   /** Drop the choice (send consumed it, the user picked local again, …). */
   clearChoice: (sessionId: string) => void
-  /** Mark the named session's choice as being consumed by an in-flight send. */
-  beginConsumption: (sessionId: string) => void
+  /**
+   * Mark the named session's choice as being consumed by an in-flight send.
+   * Refuses (returns false) when a consumption window is already open — one
+   * window at a time, so a second concurrent send can never re-enter the
+   * window while provisioning is running. The send-path early guard usually
+   * filters those sends before the optimistic activation; this is the
+   * authoritative backstop living next to the state it protects.
+   */
+  beginConsumption: (sessionId: string) => boolean
   /** Settle the consumption window (success OR failure — always called). */
   endConsumption: () => void
   /** Drop the slices of deleted sessions so the map stays bounded. */
@@ -75,7 +82,15 @@ export const useSessionWorkspaceStore = create<SessionWorkspaceState>((set) => (
       return { choices: next }
     }),
 
-  beginConsumption: (sessionId) => set({ consumingFor: sessionId }),
+  beginConsumption: (sessionId) => {
+    let accepted = false
+    set((s) => {
+      if (s.consumingFor !== null) return s
+      accepted = true
+      return { consumingFor: sessionId }
+    })
+    return accepted
+  },
 
   endConsumption: () => set({ consumingFor: null }),
 

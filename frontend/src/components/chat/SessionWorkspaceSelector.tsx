@@ -76,14 +76,55 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
   const taskActive = useChatStore((s) =>
     activeSessionId !== null ? (s.taskActive[activeSessionId] ?? false) : false,
   )
-  const isFresh = useMemo(
-    () => activeSessionId !== null && messageIndex !== undefined && Object.keys(messageIndex).length === 0 && !taskActive,
-    [activeSessionId, messageIndex, taskActive],
-  )
+  const isFresh = useMemo(() => {
+    if (activeSessionId === null || messageIndex === undefined || taskActive) return false
+    // CONFIRMED empty — or carrying only frontend send-failure cards. A
+    // rejected first send leaves exactly that transcript: the send-path
+    // catch rolls the optimistic user message back and adds the failure
+    // card, while the backend refused the bind before persisting anything
+    // (the fresh window is still open — no rows, no task). Such a
+    // transcript must keep the picker armed: the pin branch's "fixed when
+    // the session was created" would be factually false, and the user's
+    // re-armed choice would be locked away. Real transcript rows
+    // (user/assistant/…) always make it not-fresh — the window is closed
+    // by then.
+    //
+    // The history-load-failure card is explicitly EXCLUDED from this
+    // equivalence: ChatArea stamps it with `historyLoadFailed` because it
+    // can be the ONLY visible entry of a session whose persisted rows
+    // simply failed to load — treating it as "confirmed empty" would arm
+    // the picker on a session that is not fresh (the backend would refuse
+    // the bind). Unknown error shapes also stay conservative: only the
+    // send-path's bare cards (no metadata) count as fresh-window signals.
+    const entries = Object.values(messageIndex)
+    return entries.every(
+      (m) => m.type === 'error' && m.metadata?.historyLoadFailed !== true,
+    )
+  }, [activeSessionId, messageIndex, taskActive])
+  // The DESTRUCTIVE counterpart of isFresh, used only by the stale-choice
+  // cleanup below: it may fire on PROOF that the fresh window is closed —
+  // a real transcript row (anything but an error card) or a persisted
+  // managed binding in the session row. Error cards never prove closure (a
+  // bare card is the failed-first-send transcript whose window is still
+  // open; a history-load-failure card can be the ONLY visible entry of a
+  // session that never sent anything), so a transient load failure must
+  // never trigger the drop — the conservative direction for a deleting
+  // operation. When in doubt the pending choice stays: the backend's typed
+  // not-fresh refusal and the send's own success/failure teardown close
+  // any residue.
+  const windowClosed = useMemo(() => {
+    if (messageIndex !== undefined && Object.values(messageIndex).some((m) => m.type !== 'error')) {
+      return true
+    }
+    const activeSession = activeSessionId !== null
+      ? sessions?.find((s) => s.id === activeSessionId) ?? null
+      : null
+    return activeSession?.workspace_binding?.kind === 'managed_worktree'
+  }, [activeSessionId, messageIndex, sessions])
   // While the send carrying this session's workspace choice is on the wire
   // (backend provisioning a full checkout can take a while), the spinner
-  // says why nothing seems to happen — the hint the draft-commit flow used
-  // to show. Declared unconditionally with the other hooks (early returns
+  // says why nothing seems to happen. Declared unconditionally with the
+  // other hooks (early returns
   // below must never change the hook count).
   const preparingWorktree = useSessionWorkspaceStore(
     (s) => activeSessionId !== null && s.consumingFor === activeSessionId,
@@ -94,17 +135,43 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
 
   // A pending choice must never outlive its fresh window: the first message
   // locks the workspace (the send consumed or refused the choice), so a
-  // choice that is still pending on a non-fresh session is a stale leftover
-  // (e.g. the send failed elsewhere) — drop it. Runs even when the selector
-  // itself renders nothing (CHAT mode / no project), because the hooks above
-  // are unconditional.
+  // choice that is still pending once the window is PROVABLY closed (see
+  // windowClosed above) is a stale leftover (e.g. the send failed elsewhere)
+  // — drop it. EXCEPT while this session's own send is consuming the choice
+  // (the consumption window): the pending entry is the in-flight send's
+  // payload, not a leftover, and the success teardown clears it explicitly.
+  // Unknown transcript states (history not loaded / load failed) keep the
+  // choice — dropping on an unproven window would let a transient load
+  // failure destroy the user's pick. Runs even when the selector itself
+  // renders nothing (CHAT mode / no project), because the hooks above are
+  // unconditional.
   useEffect(() => {
-    if (activeSessionId !== null && !isFresh && pendingChoice !== undefined) {
-      useSessionWorkspaceStore.getState().clearChoice(activeSessionId)
-    }
-  }, [activeSessionId, isFresh, pendingChoice])
+    if (activeSessionId === null || !windowClosed || pendingChoice === undefined) return
+    if (preparingWorktree) return
+    useSessionWorkspaceStore.getState().clearChoice(activeSessionId)
+  }, [activeSessionId, windowClosed, pendingChoice, preparingWorktree])
 
   if (activeProjectId === null || isNoProject) return null
+
+  // The consumption window (the send carrying the choice is on the wire):
+  // show the spinner and the CHOSEN branch instead of the pin chip with the
+  // stale pre-send binding — provisioning a full checkout takes a while, and
+  // asserting "local" for its whole duration would show the opposite of what
+  // is actually happening. The live pending choice is still set here (the
+  // cleanup effect above leaves it alone for the window; the success teardown
+  // clears it).
+  if (preparingWorktree) {
+    const preparingLabel = pendingChoice?.kind === 'branch' ? pendingChoice.branch : 'local'
+    return (
+      <span
+        data-testid="session-workspace-preparing"
+        className="flex items-center gap-1 max-w-[220px]"
+      >
+        <WorktreePreparingIndicator />
+        <span className="truncate text-xs text-muted-foreground">{preparingLabel}</span>
+      </span>
+    )
+  }
 
   // An existing (non-fresh) session pins its workspace: the binding is
   // immutable past the fresh window (ADR-091), so choosing another
@@ -184,7 +251,6 @@ export function SessionWorkspaceSelector({ disabled = false }: { disabled?: bool
 
   return (
     <div className="flex items-center gap-1">
-      {preparingWorktree && <WorktreePreparingIndicator />}
       <DropdownMenu>
         <DropdownMenuTrigger asChild disabled={locked}>
           <button

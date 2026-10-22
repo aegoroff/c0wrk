@@ -37,7 +37,12 @@ var ErrSessionNotFresh = errors.New("session is no longer fresh — its workspac
 type WorkspaceEnsurer func(ctx context.Context, repoRoot string, binding *WorkspaceBinding) (recreated bool, err error)
 
 // SessionDraft reserves identity without creating an orchestrator, emitting an
-// event or writing a row. The lifecycle owner provisions a tree before commit.
+// event or writing a row. It is the manager's INTERNAL identity seam (not a
+// user-facing state): Manager.CreateSession mints every session's identity
+// through it, and the managed fork uses the reservation to provision a tree
+// before the row exists. The eager session-creation RPC provisions nothing —
+// a managed tree is bound at the session's FIRST send (ADR-091), inside the
+// store's fresh window.
 type SessionDraft struct {
 	ID               string            `json:"id"`
 	ProjectID        string            `json:"project_id"`
