@@ -1,197 +1,176 @@
+// Tests for the send-time "Preparing worktree…" hint (ADR-091): while a
+// send carrying the session's workspace choice is on the wire (the store's
+// consumption window), the selector shows the spinner beside the CHOSEN
+// branch — not the stale pre-send binding. The hint replaces the picker
+// (fresh session) and the pin chip (in-flight session: the real flow
+// activates the task before the RPC, so the window is non-fresh) for its
+// whole duration, and disappears when the send settles — success OR failure.
 // @vitest-environment jsdom
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { TooltipProvider, TOOLTIP_DELAY_MS } from '@/components/ui/tooltip'
-import { createManagedSession, createSession } from '@/api/sessions'
-import { createSessionFromDraft } from '@/lib/sessionDraft'
-import { logger } from '@/lib/logger'
-import { useProjectStore } from '@/stores/projectStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
-import { useSessionStore } from '@/stores/sessionStore'
-import type { SessionInfo } from '@/types/models'
+import { TooltipProvider } from '@/components/ui/tooltip'
+
 import { SessionWorkspaceSelector } from './SessionWorkspaceSelector'
+import { useSessionWorkspaceStore, pendingWorkspaceToWire } from '@/stores/sessionWorkspaceStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useChatStore } from '@/stores/chatStore'
+import { useProjectStore } from '@/stores/projectStore'
+import type { ProjectInfo } from '@/types/models'
 
-vi.mock('@/api/sessions', () => ({ createManagedSession: vi.fn(), createSession: vi.fn() }))
-vi.mock('@/api/projects', () => ({ saveProjectActiveSession: vi.fn(() => Promise.resolve()) }))
+let container: HTMLDivElement | null = null
+let root: Root | null = null
 
-let root: Root
-let container: HTMLDivElement
-const hint = 'Preparing worktree…'
-const indicator = () => container.querySelector<HTMLElement>('[role="status"]')
-const trigger = () => container.querySelector<HTMLButtonElement>('[data-testid="session-workspace-selector"]')
-
-function deferredSession() {
-  let resolve!: (value: SessionInfo) => void
-  let reject!: (reason: unknown) => void
-  const promise = new Promise<SessionInfo>((onResolve, onReject) => {
-    resolve = onResolve
-    reject = onReject
-  })
-  return { promise, resolve, reject }
-}
-
-function armBranch(projectId = 'proj-1') {
-  useSessionDraftStore.getState().startDraft(projectId)
-  useSessionDraftStore.getState().setDraftWorkspace({
-    kind: 'branch', branch: 'feat/x', createBranch: false, startPoint: '',
-  })
-}
-
-function render() {
-  act(() => root.render(
-    <TooltipProvider>
-      <SessionWorkspaceSelector />
-    </TooltipProvider>,
-  ))
-}
-
-function session(): SessionInfo {
+function makeProject(): ProjectInfo {
   return {
-    id: 's-1', project_id: 'proj-1', name: 'Session',
-    created_at: '', last_active_at: '', archived: false, pinned: false,
-    active: false, total_input_tokens: 0, total_output_tokens: 0,
-    model: 'm', family: 'f', has_unfinished_task: false,
-    workspace_binding: {
-      kind: 'managed_worktree', workspace_path: '/w/proj/.worktrees/s-1',
-      worktree_name: 's-1', branch: 'feat/x',
-    },
+    id: 'proj-1',
+    name: 'Proj',
+    workspace_path: '/w/proj',
+    is_external: false,
+    is_no_project: false,
+    created_at: '2026-01-01T00:00:00Z',
+    last_active_at: '2026-01-01T00:00:00Z',
   }
 }
 
-beforeEach(() => {
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  })
-  vi.useFakeTimers()
-  vi.mocked(createManagedSession).mockReset()
-  vi.mocked(createSession).mockReset()
-  useSessionStore.setState({ sessions: null, activeSessionId: null })
-  useSessionDraftStore.setState({ draft: null, committing: false, committingDraft: null })
-  useProjectStore.setState({ activeProjectId: 'proj-1', projects: [] })
+function renderSelector() {
   container = document.createElement('div')
   document.body.appendChild(container)
-  root = createRoot(container)
+  const r = createRoot(container)
+  root = r
+  act(() => {
+    r.render(
+      <TooltipProvider>
+        <SessionWorkspaceSelector />
+      </TooltipProvider>,
+    )
+  })
+}
+
+function body(): HTMLElement {
+  return document.body
+}
+
+
+function trigger(): HTMLButtonElement | null {
+  return body().querySelector<HTMLButtonElement>('[data-testid="session-workspace-selector"]')
+}
+
+function readOnly(): HTMLButtonElement | null {
+  return body().querySelector<HTMLButtonElement>('[data-testid="session-workspace-readonly"]')
+}
+
+function preparingChip(): HTMLElement | null {
+  return body().querySelector<HTMLElement>('[data-testid="session-workspace-preparing"]')
+}
+
+function preparingStatus(): HTMLElement | null {
+  return body().querySelector<HTMLElement>('[role="status"]')
+}
+
+/** Arm the ACTIVE fresh session with a branch choice (the send-to-come
+ *  carries it as the workspace argument). */
+function armChoice(id = 's-1') {
+  useSessionStore.setState({
+    sessions: [{ id, project_id: 'proj-1', name: 'S', created_at: '', last_active_at: '', archived: false, pinned: false, active: false, total_input_tokens: 0, total_output_tokens: 0, model: '', family: '', has_unfinished_task: false }],
+    activeSessionId: id,
+  })
+  useChatStore.setState({ messages: { [id]: {} }, taskActive: {}, paused: {} })
+  useSessionWorkspaceStore.getState().setChoice(id, {
+    kind: 'branch',
+    branch: 'feat/x',
+    createBranch: false,
+    startPoint: '',
+  })
+}
+
+beforeEach(() => {
+  useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
+  useSessionStore.setState({ sessions: null, activeSessionId: null })
+  useChatStore.setState({ messages: {}, taskActive: {}, paused: {} })
+  useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
 })
 
 afterEach(() => {
-  act(() => root.unmount())
-  container.remove()
-  vi.useRealTimers()
-  vi.restoreAllMocks()
-  vi.unstubAllGlobals()
+  if (root) {
+    const r = root
+    root = null
+    act(() => {
+      r.unmount()
+    })
+  }
+  container?.remove()
+  container = null
 })
 
-describe('managed workspace preparation', () => {
-  it.each(['resolve', 'reject'] as const)('tracks the entire managed RPC until %s', async (outcome) => {
-    armBranch()
-    const rpc = deferredSession()
-    vi.mocked(createManagedSession).mockReturnValue(rpc.promise)
-    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
-    render()
-    expect(indicator()).toBeNull()
-    let pending!: Promise<SessionInfo | unknown>
-    act(() => { pending = createSessionFromDraft().catch((error: unknown) => error) })
+describe('Worktree preparing hint (send-time consumption window)', () => {
+  it('shows the spinner with the chosen branch while the choice is on the wire, then hides it', () => {
+    armChoice()
+    renderSelector()
+    expect(preparingChip()).toBeNull()
 
-    expect(createManagedSession).toHaveBeenCalledWith('feat/x', false, '')
-    // The live region carries the announcement as its own text content, not
-    // only as an aria-label (a role="status" with empty content announces
-    // unreliably). Assert the real content screen readers announce.
-    expect(indicator()?.textContent).toBe(hint)
-    expect(indicator()?.querySelector('.sr-only')?.textContent).toBe(hint)
-    expect(indicator()?.querySelector('svg')?.classList.contains('animate-spin')).toBe(true)
-    expect(trigger()?.disabled).toBe(true)
-    expect(trigger()?.contains(indicator())).toBe(false)
-    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
-    expect(indicator()).not.toBeNull()
-
-    const error = new Error('provisioning failed')
-    await act(async () => {
-      if (outcome === 'resolve') rpc.resolve(session())
-      else rpc.reject(error)
-      await pending
+    // The send captured the choice and put it on the wire.
+    act(() => {
+      useSessionWorkspaceStore.getState().beginConsumption('s-1')
     })
-    expect(indicator()).toBeNull()
-    expect(useSessionDraftStore.getState().committing).toBe(false)
-    expect(useSessionDraftStore.getState().committingDraft).toBeNull()
-    if (outcome === 'reject') {
-      expect(errorSpy).toHaveBeenCalledExactlyOnceWith('Failed to create session from draft:', error)
-      expect(useSessionDraftStore.getState().draft?.workspace.kind).toBe('branch')
-      expect(trigger()?.disabled).toBe(false)
-    } else {
-      expect(errorSpy).not.toHaveBeenCalled()
-      expect(container.querySelector('[data-testid="session-workspace-readonly"]')?.getAttribute('aria-disabled')).toBe('true')
-    }
+    expect(preparingChip()).not.toBeNull()
+    // The spinner's accessible name announces what is happening, and the
+    // chosen branch is labeled beside it — not the stale local default.
+    expect(preparingStatus()!.textContent).toContain('Preparing worktree')
+    expect(preparingChip()!.textContent).toContain('feat/x')
+    // The hint replaces the picker for the whole window.
+    expect(trigger()).toBeNull()
+
+    // The send settles (success or failure — the hint goes either way).
+    act(() => {
+      useSessionWorkspaceStore.getState().endConsumption()
+    })
+    expect(preparingChip()).toBeNull()
+    // The picker is back once the window closes.
+    expect(trigger()).not.toBeNull()
   })
 
-  it('keeps hover and keyboard hints reachable outside the disabled selector', async () => {
-    armBranch()
-    useSessionDraftStore.getState().setCommitting(true)
-    render()
-    const status = indicator()!
-    expect(status.tabIndex).toBe(0)
-    act(() => status.focus())
-    expect(document.activeElement).toBe(status)
-    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(hint)
-    act(() => status.blur())
-    const move = new MouseEvent('pointermove', { bubbles: true })
-    Object.defineProperty(move, 'pointerType', { value: 'mouse' })
-    act(() => status.dispatchEvent(move))
-    await act(async () => { await vi.advanceTimersByTimeAsync(TOOLTIP_DELAY_MS) })
-    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(hint)
-    expect(trigger()?.disabled).toBe(true)
+  it('the real in-flight state (task activated before the RPC) shows the hint instead of the stale pin', () => {
+    armChoice()
+    renderSelector()
+    // The send path activates the session BEFORE putting the choice on the
+    // wire: the transcript index stays empty but the task flag pins the
+    // selector non-fresh — the stale "local" pin must NOT show.
+    act(() => {
+      useChatStore.setState((s) => ({ ...s, taskActive: { 's-1': true } }))
+      useSessionWorkspaceStore.getState().beginConsumption('s-1')
+    })
+    expect(preparingChip()).not.toBeNull()
+    expect(preparingChip()!.textContent).toContain('feat/x')
+    expect(readOnly()).toBeNull()
+    expect(trigger()).toBeNull()
+
+    act(() => {
+      useSessionWorkspaceStore.getState().endConsumption()
+    })
+    // After the window the task still runs: the pin shows the session's
+    // (still local) binding — the send has not settled its mirror yet.
+    expect(preparingChip()).toBeNull()
+    expect(readOnly()).not.toBeNull()
   })
 
-  it('does not show a WT spinner for a pending local creation', async () => {
-    useSessionDraftStore.getState().startDraft('proj-1')
-    const rpc = deferredSession()
-    vi.mocked(createSession).mockReturnValue(rpc.promise)
-    render()
-    let pending!: Promise<SessionInfo>
-    act(() => { pending = createSessionFromDraft() })
-    expect(useSessionDraftStore.getState().committing).toBe(true)
-    expect(trigger()?.disabled).toBe(true)
-    expect(indicator()).toBeNull()
-    act(() => armBranch())
-    expect(indicator()).toBeNull()
-    await act(async () => { rpc.resolve(session()); await pending })
+  it("another session's consumption window never lights this selector", () => {
+    armChoice('s-1')
+    renderSelector()
+
+    act(() => {
+      useSessionWorkspaceStore.getState().beginConsumption('s-other')
+    })
+    expect(preparingChip()).toBeNull()
   })
 
-  it('hides the spinner on a project switch while the managed RPC is pending', async () => {
-    armBranch()
-    const rpc = deferredSession()
-    vi.mocked(createManagedSession).mockReturnValue(rpc.promise)
-    render()
-    let pending!: Promise<SessionInfo>
-    act(() => { pending = createSessionFromDraft() })
-    expect(indicator()).not.toBeNull()
-    act(() => useProjectStore.setState({ activeProjectId: 'proj-other' }))
-    expect(indicator()).toBeNull()
-    expect(trigger()?.textContent).toContain('local')
-    act(() => armBranch('proj-other'))
-    expect(trigger()?.textContent).toContain('feat/x')
-    expect(indicator()).toBeNull()
-    expect(useSessionDraftStore.getState().committingDraft?.projectId).toBe('proj-1')
-    await act(async () => { rpc.resolve(session()); await pending })
+  it('the wire conversion maps only branch choices; local/absent send null', () => {
+    expect(pendingWorkspaceToWire({ kind: 'branch', branch: 'feat/x', createBranch: true, startPoint: 'origin/feat/x' })).toEqual({
+      branch: 'feat/x',
+      create_branch: true,
+      start_point: 'origin/feat/x',
+    })
+    expect(pendingWorkspaceToWire({ kind: 'local' })).toBeNull()
+    expect(pendingWorkspaceToWire(undefined)).toBeNull()
   })
-
-  it.each(['No Project', 'no active project', 'foreign draft'])(
-    'does not show a WT spinner for %s', (gate) => {
-      armBranch(gate === 'foreign draft' ? 'proj-other' : 'proj-1')
-      useSessionDraftStore.getState().setCommitting(true)
-      if (gate === 'no active project') useProjectStore.setState({ activeProjectId: null })
-      if (gate === 'No Project') useProjectStore.setState({
-        activeProjectId: '__no_project__',
-        projects: [{
-          id: '__no_project__', name: 'No Project', workspace_path: '',
-          is_external: false, is_no_project: true, created_at: '', last_active_at: '',
-        }],
-      })
-      render()
-      expect(indicator()).toBeNull()
-      if (gate !== 'foreign draft') expect(trigger()).toBeNull()
-    },
-  )
 })

@@ -15,29 +15,23 @@ import (
 
 func TestManagedWorktreeRootConfigChangePreservesIdentity(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	first, err := h.api.CreateManagedSession("root-first", true, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := h.api.mustManagedSession(t, "root-first", true, "")
 	want := filepath.Join(canonicalWorktreeRoot(h.agentDir), "projects", h.project.ID, "worktrees", first.WorkspaceBinding.WorktreeName)
 	if err := h.api.DeleteProject(h.project.ID); err == nil {
 		t.Fatal("DeleteProject(with managed trees) = nil error, want refusal")
 	}
-	if !h.manager.HasSession(first.ID) {
+	if _, ok := h.manager.GetSession(first.ID); !ok {
 		t.Error("blocked DeleteProject removed the resident session")
 	}
 	if got := first.WorkspaceBinding.WorkspacePath; got != want {
-		t.Fatalf("CreateManagedSession(default).path = %q, want %q", got, want)
+		t.Fatalf("managed session (default).path = %q, want %q", got, want)
 	}
 	custom := gittest.TempDir(t)
 	h.api.config = &config.Config{Git: config.GitConfig{WorktreesRoot: custom}}
-	second, err := h.api.CreateManagedSession("root-second", true, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	second := h.api.mustManagedSession(t, "root-second", true, "")
 	wantSecond := filepath.Join(custom, h.project.ID, "worktrees", second.WorkspaceBinding.WorktreeName)
 	if got := second.WorkspaceBinding.WorkspacePath; got != wantSecond {
-		t.Fatalf("CreateManagedSession(custom).path = %q, want %q", got, wantSecond)
+		t.Fatalf("managed session (custom).path = %q, want %q", got, wantSecond)
 	}
 	api, mgr, _ := h.restart(t)
 	api.config = &config.Config{Git: config.GitConfig{WorktreesRoot: gittest.TempDir(t)}}
@@ -52,10 +46,7 @@ func TestManagedWorktreeRootConfigChangePreservesIdentity(t *testing.T) {
 		if got := loaded.WorkspaceBinding.WorkspacePath; got != info.path {
 			t.Fatalf("LoadSession(%q).path = %q, want %q", info.id, got, info.path)
 		}
-		adopted, err := api.CreateManagedSession(info.branch, false, "")
-		if err != nil {
-			t.Fatal(err)
-		}
+		adopted := api.mustManagedSession(t, info.branch, false, "")
 		if got := adopted.WorkspaceBinding.WorkspacePath; got != info.path {
 			t.Fatalf("adopt(%q).path = %q, want %q", info.branch, got, info.path)
 		}
@@ -100,10 +91,7 @@ func TestManagedWorktreeLegacyRootSurvivesConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.api.config = &config.Config{Git: config.GitConfig{WorktreesRoot: gittest.TempDir(t)}}
-	info, err := h.api.CreateManagedSession("legacy-branch", false, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	info := h.api.mustManagedSession(t, "legacy-branch", false, "")
 	if info.WorkspaceBinding.WorkspacePath != legacy.Path {
 		t.Fatalf("adopt(legacy).path = %q, want %q", info.WorkspaceBinding.WorkspacePath, legacy.Path)
 	}

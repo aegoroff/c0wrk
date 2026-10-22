@@ -24,7 +24,6 @@ import (
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/review"
 	"github.com/v0lka/c0wrk/backend/session"
-	"github.com/v0lka/c0wrk/backend/worktrees"
 	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/c0wrk/internal/gittest"
@@ -83,14 +82,6 @@ func wtFactory() session.OrchestratorFactory {
 			ContextFactory: cf,
 			Emitter:        emitter,
 		}), nil
-	}
-}
-
-// wtFailingFactory mirrors wtFactory but always fails, driving the creation
-// compensation path.
-func wtFailingFactory() session.OrchestratorFactory {
-	return func(core.Emitter, *slog.Logger, string, core.BlackboardFactory, io.Writer, *orchestration.StepDumpTracker) (*core.Orchestrator, error) {
-		return nil, errors.New("orchestrator construction failed")
 	}
 }
 
@@ -318,67 +309,6 @@ func managedBindingOf(t *testing.T, store *session.SQLiteSessionStore, id string
 	}
 	return info.WorkspaceBinding
 }
-
-// ---------------------------------------------------------------------------
-// Creation: tree before orchestrator, persisted binding, compensation
-// ---------------------------------------------------------------------------
-
-func TestCreateManagedSession_ProvisionsTreePersistsBinding(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
-
-	binding := info.WorkspaceBinding
-	if binding == nil || binding.Kind != session.WorkspaceManagedWorktree {
-		t.Fatalf("expected managed binding, got %+v", binding)
-	}
-	if binding.WorktreeName != managedTreeName(info.ID) {
-		t.Fatalf("tree name %q != derived %q", binding.WorktreeName, managedTreeName(info.ID))
-	}
-	if binding.Branch != "session-"+shortIdentity(info.ID) {
-		t.Fatalf("branch %q not the derived default", binding.Branch)
-	}
-
-	// Tree exists on the pinned branch.
-	entry := treeEntry(t, h.project.WorkspacePath, binding.WorkspacePath)
-	if entry == nil || entry.Kind != workspace.WorktreeManaged || entry.Branch != binding.Branch {
-		t.Fatalf("managed tree missing or wrong identity: %+v", entry)
-	}
-	// The runtime session executes in the tree.
-	wp, ok := h.manager.GetSessionWorkspacePath(info.ID)
-	if !ok || wp != binding.WorkspacePath {
-		t.Fatalf("runtime workspace %q (ok=%v) != tree path %q", wp, ok, binding.WorkspacePath)
-	}
-	// The binding is persisted (restart-visible), not just in memory.
-	persisted := managedBindingOf(t, h.store, info.ID)
-	if persisted == nil || persisted.Kind != session.WorkspaceManagedWorktree || persisted.Branch != binding.Branch {
-		t.Fatalf("persisted binding mismatch: %+v", persisted)
-	}
-}
-
-func TestCreateManagedSession_ExistingBranchCheckout(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	wtGit(t, h.repoRoot, "branch", "feature/topic")
-	info, err := h.api.CreateManagedSession("feature/topic", false, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
-	if info.WorkspaceBinding.Branch != "feature/topic" {
-		t.Fatalf("branch = %q", info.WorkspaceBinding.Branch)
-	}
-	entry := treeEntry(t, h.project.WorkspacePath, info.WorkspaceBinding.WorkspacePath)
-	if entry == nil || entry.Branch != "feature/topic" {
-		t.Fatalf("tree not on feature/topic: %+v", entry)
-	}
-}
-
-// commitRemoteTip adds one commit on a throwaway branch, publishes ONLY its
-// commit as the remote-tracking ref refs/remotes/origin/<branch>, and
-// returns to the checkout's original branch. The returned SHA is then
-// observable as "created from": it differs from the checkout's HEAD, so a
-// provisioned tree sitting on it can only come from the remote start point.
 func commitRemoteTip(t *testing.T, repoRoot, branch string) string {
 	t.Helper()
 	startBranch := strings.TrimSpace(wtGit(t, repoRoot, "rev-parse", "--abbrev-ref", "HEAD"))
@@ -394,430 +324,9 @@ func commitRemoteTip(t *testing.T, repoRoot, branch string) string {
 	wtGit(t, repoRoot, "branch", "-D", "tmp-remote-src")
 	return sha
 }
-
-func TestCreateManagedSession_RemoteStartPointCreatesLocalBranch(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	// No local feature/topic exists — only the remote-tracking ref. The
-	// remote pick must provision the tree on a NEW local branch created
-	// FROM that ref (its tip, not the checkout's HEAD).
-	remoteSha := commitRemoteTip(t, h.repoRoot, "feature/topic")
-
-	info, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
-	if err != nil {
-		t.Fatalf("CreateManagedSession(remote start point): %v", err)
-	}
-	if b := info.WorkspaceBinding; b == nil || b.Kind != session.WorkspaceManagedWorktree || b.Branch != "feature/topic" {
-		t.Fatalf("expected a managed binding on feature/topic, got %+v", b)
-	}
-	if !branchExists(t, h.repoRoot, "feature/topic") {
-		t.Fatal("the local branch was not created from the remote-tracking start point")
-	}
-	entry := treeEntry(t, h.project.WorkspacePath, info.WorkspaceBinding.WorkspacePath)
-	if entry == nil || entry.Kind != workspace.WorktreeManaged || entry.Branch != "feature/topic" {
-		t.Fatalf("managed tree missing or wrong identity: %+v", entry)
-	}
-	// The tree's tip IS the remote-tracking ref's commit — proof the branch
-	// was created from origin/feature/topic, not from HEAD.
-	if got := wtGit(t, entry.Path, "rev-parse", "HEAD"); got != remoteSha {
-		t.Fatalf("tree HEAD %q != remote-tracking tip %q", got, remoteSha)
-	}
-	persisted := managedBindingOf(t, h.store, info.ID)
-	if persisted == nil || persisted.Branch != "feature/topic" {
-		t.Fatalf("persisted binding mismatch: %+v", persisted)
-	}
-}
-
-func TestCreateManagedSession_CreateBranchDWIMReusesExistingFreeBranch(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	// A local feature/topic ALREADY exists (at the initial commit), free of
-	// any worktree; the remote-tracking ref points at a NEWER commit. Git
-	// DWIM semantics: the create request must check the EXISTING branch out
-	// — never re-create (or reset) it at the remote start point.
-	wtGit(t, h.repoRoot, "branch", "feature/topic")
-	localSha := wtGit(t, h.repoRoot, "rev-parse", "refs/heads/feature/topic")
-	_ = commitRemoteTip(t, h.repoRoot, "feature/topic")
-
-	info, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
-	if err != nil {
-		t.Fatalf("CreateManagedSession over an existing free branch: %v", err)
-	}
-	entry := treeEntry(t, h.project.WorkspacePath, info.WorkspaceBinding.WorkspacePath)
-	if entry == nil || entry.Branch != "feature/topic" {
-		t.Fatalf("tree not on the existing feature/topic: %+v", entry)
-	}
-	// The tree sits on the LOCAL branch's tip — reuse, not a re-create from
-	// the remote ref (that would move the tip to the newer remote commit).
-	if got := wtGit(t, entry.Path, "rev-parse", "HEAD"); got != localSha {
-		t.Fatalf("tree HEAD %q != pre-existing local tip %q (branch was re-created, not reused)", got, localSha)
-	}
-}
-
-func TestCreateManagedSession_CreateBranchDWIMRefusesBusyExternalHolder(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	wtGit(t, h.repoRoot, "branch", "feature/ext")
-	external := filepath.Join(t.TempDir(), "external-tree")
-	wtGit(t, h.repoRoot, "worktree", "add", external, "feature/ext")
-	_ = commitRemoteTip(t, h.repoRoot, "feature/ext")
-
-	// The create-variant over an EXISTING branch occupied by an external
-	// tree refuses with the same typed branch-busy error as the
-	// existing-branch pick — it must never force or share the holder.
-	_, err := h.api.CreateManagedSession("feature/ext", true, "origin/feature/ext")
-	if err == nil {
-		t.Fatal("expected refusal for an external worktree holding the branch")
-	}
-	if !errors.Is(err, workspace.ErrBranchBusy) || !strings.Contains(err.Error(), "external worktree") {
-		t.Fatalf("refusal must be a typed branch-busy error naming the external tree: %v", err)
-	}
-	if got := len(h.manager.ListSessions()); got != 0 {
-		t.Fatalf("no session may exist after refusal, got %d", got)
-	}
-	// No managed tree may have been provisioned by the refused request.
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			t.Fatalf("refused creation provisioned a managed tree %q", tr.Path)
-		}
-	}
-}
-
-func TestCreateManagedSession_CreateBranchDWIMSharesManagedHolder(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	wtGit(t, h.repoRoot, "branch", "feature/topic")
-	_ = commitRemoteTip(t, h.repoRoot, "feature/topic")
-
-	// The branch is already held by a managed tree: the create-variant over
-	// the existing branch must SHARE that tree (the shared-tree revision of
-	// ADR-080), exactly like picking the existing branch directly.
-	first, err := h.api.CreateManagedSession("feature/topic", false, "")
-	if err != nil {
-		t.Fatalf("first CreateManagedSession: %v", err)
-	}
-	second, err := h.api.CreateManagedSession("feature/topic", true, "origin/feature/topic")
-	if err != nil {
-		t.Fatalf("second CreateManagedSession (create variant over the held branch): %v", err)
-	}
-	if first.WorkspaceBinding.WorkspacePath != second.WorkspaceBinding.WorkspacePath ||
-		first.WorkspaceBinding.WorktreeName != second.WorkspaceBinding.WorktreeName {
-		t.Fatalf("create variant must share the holding tree: %+v vs %+v", first.WorkspaceBinding, second.WorkspaceBinding)
-	}
-}
-
-func TestCreateManagedSession_CheckoutHeldBranchFallsBackToLocal(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	// main is checked out by the main worktree: a managed tree can never
-	// hold that branch, so the request silently degrades to a plain local
-	// session running in the checkout (shared-tree revision of ADR-080).
-	info, err := h.api.CreateManagedSession("main", false, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession on checkout-held branch: %v", err)
-	}
-	if b := info.WorkspaceBinding; b == nil || b.Kind != session.WorkspaceLocal || b.WorkspacePath != h.project.WorkspacePath {
-		t.Fatalf("expected a local binding on the checkout, got %+v", b)
-	}
-	wp, ok := h.manager.GetSessionWorkspacePath(info.ID)
-	if !ok || wp != h.project.WorkspacePath {
-		t.Fatalf("runtime workspace %q (ok=%v) != checkout %q", wp, ok, h.project.WorkspacePath)
-	}
-	// No managed tree may appear.
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			t.Fatalf("local fallback provisioned a managed tree %q", tr.Path)
-		}
-	}
-	persisted := managedBindingOf(t, h.store, info.ID)
-	if persisted == nil || persisted.Kind != session.WorkspaceLocal {
-		t.Fatalf("persisted binding of the fallback session: %+v", persisted)
-	}
-}
-
-func TestCreateManagedSession_SharesExistingTreeForSameBranch(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	wtGit(t, h.repoRoot, "branch", "feature/topic")
-	first, err := h.api.CreateManagedSession("feature/topic", false, "")
-	if err != nil {
-		t.Fatalf("first CreateManagedSession: %v", err)
-	}
-	second, err := h.api.CreateManagedSession("feature/topic", false, "")
-	if err != nil {
-		t.Fatalf("second CreateManagedSession on the same branch: %v", err)
-	}
-	if first.ID == second.ID {
-		t.Fatal("two creations must yield distinct sessions")
-	}
-	fb, sb := first.WorkspaceBinding, second.WorkspaceBinding
-	if fb.WorktreeName != sb.WorktreeName || fb.WorkspacePath != sb.WorkspacePath || fb.Branch != sb.Branch {
-		t.Fatalf("sessions must share the tree: %+v vs %+v", fb, sb)
-	}
-	if sb.WorktreeName != managedTreeName(first.ID) {
-		t.Fatalf("shared tree name %q must be the first session's tree", sb.WorktreeName)
-	}
-	// Exactly ONE managed tree exists and BOTH runtime sessions execute in it.
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	managed := 0
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			managed++
-			if tr.Path != sb.WorkspacePath || tr.Branch != "feature/topic" {
-				t.Fatalf("shared tree mismatch: %+v", tr)
-			}
-		}
-	}
-	if managed != 1 {
-		t.Fatalf("managed trees = %d, want 1", managed)
-	}
-	for _, id := range []string{first.ID, second.ID} {
-		if wp, ok := h.manager.GetSessionWorkspacePath(id); !ok || wp != sb.WorkspacePath {
-			t.Fatalf("session %s workspace %q (ok=%v) != shared tree %q", id, wp, ok, sb.WorkspacePath)
-		}
-	}
-	// Both bindings are persisted, so both restore into the shared tree.
-	for _, id := range []string{first.ID, second.ID} {
-		persisted := managedBindingOf(t, h.store, id)
-		if persisted == nil || persisted.WorktreeName != sb.WorktreeName || persisted.Branch != "feature/topic" {
-			t.Fatalf("persisted binding of %s: %+v", id, persisted)
-		}
-	}
-	// A third session on the same branch shares it too (n-ary sharing).
-	third, err := h.api.CreateManagedSession("feature/topic", false, "")
-	if err != nil {
-		t.Fatalf("third CreateManagedSession: %v", err)
-	}
-	if third.WorkspaceBinding.WorkspacePath != sb.WorkspacePath {
-		t.Fatalf("third session path %q != shared %q", third.WorkspaceBinding.WorkspacePath, sb.WorkspacePath)
-	}
-}
-
-func TestCreateManagedSession_RefusesExternalTreeHolder(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	wtGit(t, h.repoRoot, "branch", "feature/ext")
-	external := filepath.Join(t.TempDir(), "external-tree")
-	wtGit(t, h.repoRoot, "worktree", "add", external, "feature/ext")
-	_, err := h.api.CreateManagedSession("feature/ext", false, "")
-	if err == nil {
-		t.Fatal("expected refusal for an external worktree holding the branch")
-	}
-	if !errors.Is(err, workspace.ErrBranchBusy) || !strings.Contains(err.Error(), "external worktree") {
-		t.Fatalf("refusal must be a typed branch-busy error naming the external tree: %v", err)
-	}
-	if got := len(h.manager.ListSessions()); got != 0 {
-		t.Fatalf("no session may exist after refusal, got %d", got)
-	}
-}
-
-// orphanTree provisions a managed tree OUTSIDE any session lifecycle, as an
-// app crash or a lost session row would leave it.
-func orphanTree(t *testing.T, repoRoot, name, branch string) workspace.WorktreeInfo {
-	t.Helper()
-	owner := worktrees.NewOwner(nil)
-	info, err := owner.ProvisionNewBranch(context.Background(), repoRoot, name, branch, "")
-	if err != nil {
-		t.Fatalf("provision orphan tree: %v", err)
-	}
-	return info
-}
-
-func TestCreateManagedSession_AdoptsOrphanedTree(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	orphan := orphanTree(t, h.project.WorkspacePath, "s-orphan000", "feature/orphan")
-	info, err := h.api.CreateManagedSession("feature/orphan", false, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession on orphan-held branch: %v", err)
-	}
-	if info.WorkspaceBinding.WorktreeName != "s-orphan000" {
-		t.Fatalf("session must adopt the orphan's tree name, got %q", info.WorkspaceBinding.WorktreeName)
-	}
-	if info.WorkspaceBinding.WorkspacePath != orphan.Path {
-		t.Fatalf("adopted path %q != orphan path %q", info.WorkspaceBinding.WorkspacePath, orphan.Path)
-	}
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	managed := 0
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			managed++
-		}
-	}
-	if managed != 1 {
-		t.Fatalf("managed trees = %d, want 1 (the adopted orphan)", managed)
-	}
-}
-
-func TestCreateManagedSession_AdoptsPrunableOrphan(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	orphan := orphanTree(t, h.project.WorkspacePath, "s-prunable0", "feature/prunable")
-	if err := os.RemoveAll(orphan.Path); err != nil {
-		t.Fatal(err)
-	}
-	info, err := h.api.CreateManagedSession("feature/prunable", false, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession on prunable orphan branch: %v", err)
-	}
-	if info.WorkspaceBinding.WorktreeName != "s-prunable0" {
-		t.Fatalf("session must adopt the orphan's tree name, got %q", info.WorkspaceBinding.WorktreeName)
-	}
-	entry := treeEntry(t, h.project.WorkspacePath, orphan.Path)
-	if entry == nil || entry.Prunable {
-		t.Fatalf("stale metadata must be pruned and the tree recreated, got %+v", entry)
-	}
-}
-
-func TestCreateManagedSession_AdoptionFailureKeepsSharedTree(t *testing.T) {
-	h := newWTHarness(t, wtFailingFactory())
-	orphan := orphanTree(t, h.project.WorkspacePath, "s-keep0000", "feature/keep")
-	_, err := h.api.CreateManagedSession("feature/keep", false, "")
-	if err == nil {
-		t.Fatal("expected orchestrator failure to surface")
-	}
-	// The adopted tree is NOT compensated away: it pre-existed and stays.
-	entry := treeEntry(t, h.project.WorkspacePath, orphan.Path)
-	if entry == nil || entry.Kind != workspace.WorktreeManaged {
-		t.Fatalf("adopted tree must survive a failed adoption, got %+v", entry)
-	}
-	if got := len(h.manager.ListSessions()); got != 0 {
-		t.Fatalf("no session may remain in memory, got %d", got)
-	}
-}
-
-// TestCreateManagedSession_AdoptionLosingRaceRollsBack pins the
-// adoption↔deletion critical section (managedTreeMu): when the last owner's
-// deletion releases the shared tree between the adoption's Recreate and its
-// binding commit, the commit's post-persist re-validation must notice the
-// missing tree and roll the just-committed session back — no in-memory
-// session and no persisted row may survive bound to a removed tree, and a
-// retry provisions a fresh tree for the surviving branch.
-func TestCreateManagedSession_AdoptionLosingRaceRollsBack(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	ctx := context.Background()
-
-	holder, err := h.api.CreateManagedSession("feature/race", true, "")
-	if err != nil {
-		t.Fatalf("seed session: %v", err)
-	}
-	treeName := holder.WorkspaceBinding.WorktreeName
-	repoRoot := h.project.WorkspacePath
-
-	// Replay the interleaving the mutex excludes, with the deletion's half
-	// winning: hold managedTreeMu (as prepareManagedTreeDeletion does around
-	// [count → release]), remove the tree, then run the adoption's
-	// [commit → re-validate] half against the now-missing tree.
-	h.api.managedTreeMu.Lock()
-	owner := h.api.worktreeOwner()
-	if err := owner.Release(ctx, repoRoot, treeName, workspace.RemoveWorktreeOptions{}); err != nil {
-		h.api.managedTreeMu.Unlock()
-		t.Fatalf("release shared tree: %v", err)
-	}
-	draft := session.NewSessionDraft(h.project.ID, &session.WorkspaceBinding{
-		Kind:         session.WorkspaceManagedWorktree,
-		WorktreeName: treeName,
-		Branch:       "feature/race",
-	})
-	_, adoptErr := h.api.bindAdoptedSessionLocked(ctx, owner, repoRoot, draft, treeName)
-	h.api.managedTreeMu.Unlock()
-	if adoptErr == nil {
-		t.Fatal("adoption must fail when its tree was removed concurrently")
-	}
-	if !strings.Contains(adoptErr.Error(), "was gone at the post-commit re-validation") {
-		t.Fatalf("adoption error must name the concurrent removal, got: %v", adoptErr)
-	}
-
-	// The rollback removed both halves of the just-committed session: no
-	// persisted row and no in-memory session may remain.
-	if row, err := h.store.LoadSession(ctx, draft.ID); err != nil {
-		t.Fatalf("load rolled-back session: %v", err)
-	} else if row != nil {
-		t.Fatalf("persisted row must be rolled back, got binding %+v", row.WorkspaceBinding)
-	}
-	if h.manager.HasSession(draft.ID) {
-		t.Fatal("in-memory session must be rolled back")
-	}
-	// The branch itself is never deleted, so the retry provisions a FRESH
-	// tree for it.
-	if !branchExists(t, repoRoot, "feature/race") {
-		t.Fatal("branch must survive the rollback (branches are never deleted)")
-	}
-	retry, err := h.api.CreateManagedSession("feature/race", false, "")
-	if err != nil {
-		t.Fatalf("retry after rollback: %v", err)
-	}
-	if retry.WorkspaceBinding.WorktreeName == treeName {
-		t.Fatal("retry must provision a fresh tree, not re-bind the removed one")
-	}
-	if treeEntry(t, repoRoot, retry.WorkspaceBinding.WorkspacePath) == nil {
-		t.Fatalf("retry's tree %q must exist", retry.WorkspaceBinding.WorkspacePath)
-	}
-}
-
-func TestCreateManagedSession_RollbackWhenOrchestratorFails(t *testing.T) {
-	h := newWTHarness(t, wtFailingFactory())
-	_, err := h.api.CreateManagedSession("", true, "")
-	if err == nil {
-		t.Fatal("expected orchestrator failure to surface")
-	}
-	if got := len(h.manager.ListSessions()); got != 0 {
-		t.Fatalf("no session may remain in memory, got %d", got)
-	}
-	// Compensation: the provisioned tree is gone; the fresh branch is KEPT
-	// (no operation in this path deletes a branch).
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			t.Fatalf("managed tree %q survived rollback", tr.Path)
-		}
-	}
-}
-
-func TestCreateManagedSession_RollbackWhenBindingPersistFails(t *testing.T) {
-	h := newWTHarness(t, wtFactory())
-	// Break the DB precondition for persisting the binding: the projects row
-	// disappears, so SaveSession's binding validation fails while the runtime
-	// session (built from the resolver func) succeeded.
-	if err := h.api.projectManager.DeleteProject(h.project.ID); err != nil {
-		t.Fatalf("delete project row: %v", err)
-	}
-	_, err := h.api.CreateManagedSession("", true, "")
-	if err == nil {
-		t.Fatal("expected persistence failure to surface")
-	}
-	if got := len(h.manager.ListSessions()); got != 0 {
-		t.Fatalf("unpersisted session must be removed, got %d", got)
-	}
-	trees, err := workspace.ListWorktrees(context.Background(), h.project.WorkspacePath)
-	if err != nil {
-		t.Fatalf("list worktrees: %v", err)
-	}
-	for _, tr := range trees {
-		if tr.Kind == workspace.WorktreeManaged {
-			t.Fatalf("managed tree %q survived rollback", tr.Path)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Restart / restore: no-op, recreate-from-branch, missing branch
-// ---------------------------------------------------------------------------
-
 func TestManagedSessionRestart_TreePresentRestoreIsNoOp(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 
 	api2, mgr2, capture := h.restart(t)
 	wp, ok := mgr2.GetSessionWorkspacePath(info.ID)
@@ -835,10 +344,7 @@ func TestManagedSessionRestart_TreePresentRestoreIsNoOp(t *testing.T) {
 
 func TestManagedSessionRestart_MissingTreeRecreatedFromPinnedBranch(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 
 	// Uncommitted work lives only in the tree; then the tree directory is
@@ -874,10 +380,7 @@ func TestManagedSessionRestart_MissingTreeRecreatedFromPinnedBranch(t *testing.T
 
 func TestManagedSessionRestart_MissingBranchFailsExplicitlyNeverFallsBackToLocal(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 
 	// Remove tree AND branch: restore must refuse to invent either.
@@ -905,17 +408,14 @@ func TestManagedSessionRestart_MissingBranchFailsExplicitlyNeverFallsBackToLocal
 
 func TestDeleteManagedSession_DirtyTreeRequiresExplicitConfirmation(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 	if err := os.WriteFile(filepath.Join(binding.WorkspacePath, "dirty.txt"), []byte("uncommitted"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Unconfirmed deletion is refused; the session stays fully retryable.
-	err = h.api.DeleteSession(info.ID)
+	err := h.api.DeleteSession(info.ID)
 	var blocked *SessionDeleteBlockedError
 	if !errors.As(err, &blocked) {
 		t.Fatalf("expected SessionDeleteBlockedError, got %v", err)
@@ -950,10 +450,7 @@ func TestDeleteManagedSession_DirtyTreeRequiresExplicitConfirmation(t *testing.T
 
 func TestDeleteManagedSession_StopsTerminalBeforeTreeRemoval(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 
 	if err := h.terminal.Start(info.ID, binding.WorkspacePath); err != nil {
@@ -980,10 +477,7 @@ func TestDeleteManagedSession_StopsTerminalBeforeTreeRemoval(t *testing.T) {
 
 func TestDeleteManagedSession_StoreOnlySessionReleasesTree(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 
 	// Fresh app instance: the session was never restored this run.
@@ -1005,14 +499,8 @@ func TestDeleteManagedSession_StoreOnlySessionReleasesTree(t *testing.T) {
 func TestDeleteManagedSession_SharedTreeSurvivesUntilLastOwner(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	wtGit(t, h.repoRoot, "branch", "feature/shared")
-	first, err := h.api.CreateManagedSession("feature/shared", false, "")
-	if err != nil {
-		t.Fatalf("first CreateManagedSession: %v", err)
-	}
-	second, err := h.api.CreateManagedSession("feature/shared", false, "")
-	if err != nil {
-		t.Fatalf("second CreateManagedSession: %v", err)
-	}
+	first := h.api.mustManagedSession(t, "feature/shared", false, "")
+	second := h.api.mustManagedSession(t, "feature/shared", false, "")
 	sharedPath := second.WorkspaceBinding.WorkspacePath
 	if first.WorkspaceBinding.WorkspacePath != sharedPath {
 		t.Fatalf("fixture broken: sessions do not share the tree")
@@ -1042,7 +530,7 @@ func TestDeleteManagedSession_SharedTreeSurvivesUntilLastOwner(t *testing.T) {
 
 	// The LAST owner deletion removes the tree — with the dirty confirmation,
 	// because the uncommitted work is now truly at stake.
-	err = h.api.DeleteSession(second.ID)
+	err := h.api.DeleteSession(second.ID)
 	var blocked *SessionDeleteBlockedError
 	if !errors.As(err, &blocked) || blocked.Option != "confirm_uncommitted_loss" {
 		t.Fatalf("last-owner dirty deletion must be blocked, got %v", err)
@@ -1061,14 +549,8 @@ func TestDeleteManagedSession_SharedTreeSurvivesUntilLastOwner(t *testing.T) {
 func TestDeleteManagedSession_ArchivedCoOwnerKeepsTree(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
 	wtGit(t, h.repoRoot, "branch", "feature/archived")
-	first, err := h.api.CreateManagedSession("feature/archived", false, "")
-	if err != nil {
-		t.Fatalf("first CreateManagedSession: %v", err)
-	}
-	second, err := h.api.CreateManagedSession("feature/archived", false, "")
-	if err != nil {
-		t.Fatalf("second CreateManagedSession: %v", err)
-	}
+	first := h.api.mustManagedSession(t, "feature/archived", false, "")
+	second := h.api.mustManagedSession(t, "feature/archived", false, "")
 	sharedPath := second.WorkspaceBinding.WorkspacePath
 	// Archive one co-owner: an archived session can be unarchived and runs in
 	// its tree again, so its reference keeps the tree alive.
@@ -1100,14 +582,8 @@ func TestDeleteManagedSession_ConcurrentLastCoOwnersStillReleaseTree(t *testing.
 	h := newWTHarness(t, wtFactory())
 	ctx := context.Background()
 	wtGit(t, h.repoRoot, "branch", "feature/co-race")
-	first, err := h.api.CreateManagedSession("feature/co-race", false, "")
-	if err != nil {
-		t.Fatalf("first CreateManagedSession: %v", err)
-	}
-	second, err := h.api.CreateManagedSession("feature/co-race", false, "")
-	if err != nil {
-		t.Fatalf("second CreateManagedSession: %v", err)
-	}
+	first := h.api.mustManagedSession(t, "feature/co-race", false, "")
+	second := h.api.mustManagedSession(t, "feature/co-race", false, "")
 	sharedPath := second.WorkspaceBinding.WorkspacePath
 	if first.WorkspaceBinding.WorkspacePath != sharedPath {
 		t.Fatalf("fixture broken: sessions do not share the tree")
@@ -1166,9 +642,7 @@ func TestDeleteManagedSession_ConcurrentLastCoOwnersStillReleaseTree(t *testing.
 	}
 	// The tree is adoptable again, not bricked: a fresh session on the same
 	// branch provisions (no holder) and works.
-	if _, err := h.api.CreateManagedSession("feature/co-race", false, ""); err != nil {
-		t.Fatalf("fresh session on the released branch: %v", err)
-	}
+	_ = h.api.mustManagedSession(t, "feature/co-race", false, "")
 }
 
 func TestDeleteLocalSession_NeverTouchesCheckout(t *testing.T) {
@@ -1193,10 +667,7 @@ func TestDeleteLocalSession_NeverTouchesCheckout(t *testing.T) {
 
 func TestForkManagedSession_NewTreeAtCommittedHead(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	src := info.WorkspaceBinding
 
 	// Committed work after creation: a second commit on the session branch.
@@ -1257,10 +728,7 @@ func TestForkManagedSession_NewTreeAtCommittedHead(t *testing.T) {
 
 func TestForkManagedSession_UnfinishedTaskStillBlocked(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	if err := h.store.SaveTask(context.Background(), session.TaskRecord{
 		ID: "task-run", SessionID: info.ID, OriginalRequest: "running",
 		RoutingDecision: json.RawMessage(`{}`), Plan: json.RawMessage(`{}`),
@@ -1289,10 +757,7 @@ func TestForkManagedSession_UnfinishedTaskStillBlocked(t *testing.T) {
 
 func TestForkManagedSession_RollbackWhenStoreForkFails(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	h.api.managedForkCommit = func(context.Context, string, string, *session.WorkspaceBinding, session.ForkReviewCloner) (*session.SessionInfo, error) {
 		return nil, errors.New("store fork failed")
 	}
@@ -1321,10 +786,7 @@ func TestForkManagedSession_RollbackWhenStoreForkFails(t *testing.T) {
 
 func TestArchiveManagedSession_RetainsTreeAndBranch(t *testing.T) {
 	h := newWTHarness(t, wtFactory())
-	info, err := h.api.CreateManagedSession("", true, "")
-	if err != nil {
-		t.Fatalf("CreateManagedSession: %v", err)
-	}
+	info := h.api.mustManagedSession(t, "", true, "")
 	binding := info.WorkspaceBinding
 
 	if err := h.api.ArchiveSession(info.ID); err != nil {

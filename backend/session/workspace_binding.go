@@ -15,6 +15,13 @@ import (
 	"github.com/v0lka/c0wrk/backend/project"
 )
 
+// ErrSessionNotFresh reports that a session's workspace can no longer be
+// chosen: the fresh window (no transcript, no task rows) has closed. The
+// send-time workspace binding (the draft-free creation flow) fails with this
+// error so the caller can surface an actionable message instead of a raw
+// store failure.
+var ErrSessionNotFresh = errors.New("session is no longer fresh — its workspace can only be chosen before the first message")
+
 // WorkspaceEnsurer guarantees the execution workspace named by a managed
 // binding physically exists on its pinned branch before a restored session's
 // orchestrator is built on top of it. It is the seam through which the
@@ -30,7 +37,12 @@ import (
 type WorkspaceEnsurer func(ctx context.Context, repoRoot string, binding *WorkspaceBinding) (recreated bool, err error)
 
 // SessionDraft reserves identity without creating an orchestrator, emitting an
-// event or writing a row. The lifecycle owner provisions a tree before commit.
+// event or writing a row. It is the manager's INTERNAL identity seam (not a
+// user-facing state): Manager.CreateSession mints every session's identity
+// through it, and the managed fork uses the reservation to provision a tree
+// before the row exists. The eager session-creation RPC provisions nothing —
+// a managed tree is bound at the session's FIRST send (ADR-091), inside the
+// store's fresh window.
 type SessionDraft struct {
 	ID               string            `json:"id"`
 	ProjectID        string            `json:"project_id"`

@@ -13,7 +13,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { useGitPanelStore } from '@/stores/gitPanelStore'
-import { useSessionDraftStore } from '@/stores/sessionDraftStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionWorkspaceStore, type PendingWorkspace } from '@/stores/sessionWorkspaceStore'
 import { getBranches, listProjectWorktrees } from '@/api/git'
 import { useBranchActions } from '@/hooks/useBranchActions'
 import type { BranchActionKind } from '@/hooks/useBranchActions'
@@ -29,22 +30,24 @@ import { NewBranchSection } from './NewBranchSection'
 import { WorktreesSection } from './WorktreesSection'
 
 /**
- * Draft-mode selection gate for the Worktrees rows (ADR-080/ADR-082). The
- * only rows that can back the drafted session are the local checkout (a
- * local session) and a MANAGED tree with a branch (its draft commit adopts
- * the existing tree). Everything else is a guaranteed dead end, so it is
- * gated off with the reason:
+ * Workspace-choice gate for the Worktrees rows in the picker's 'draft'
+ * (workspace pick) mode (ADR-091/ADR-082). The only rows that can back the
+ * fresh session's choice are the local checkout (a local session) and a
+ * MANAGED tree with a branch (the choice's first send adopts the existing
+ * tree). Everything else is a guaranteed dead end, so it is gated off with
+ * the reason:
  *
  * - an EXTERNAL tree never adopts — c0wrk does not bind sessions to trees
- *   it does not own (CreateManagedSession refuses a branch held by an
- *   external tree with ErrBranchBusy), and provisioning a fresh managed
+ *   it does not own (the send-time workspace bind refuses a branch held by
+ *   an external tree with ErrBranchBusy), and provisioning a fresh managed
  *   tree on that branch would fail too: git allows a branch in at most one
  *   worktree, and the external tree holds it;
  * - a branch-less (detached HEAD) tree has no branch to run the session on.
  *
  * The returned reason is both the row tooltip and the gate: BranchPicker
  * passes the function to WorktreesSection (rendering gated rows inert) and
- * consults it in the draft onSelect, so the two can never drift apart.
+ * consults it in the choice-recording onSelect, so the two can never drift
+ * apart.
  */
 function draftWorktreeBlockedReason(w: GitWorktree): string | null {
   if (w.kind === 'main') return null
@@ -96,17 +99,18 @@ function remoteTwinName(remoteRef: string): string {
  *   worktree of the project (local checkout, managed session trees with
  *   their owning session, external trees) — a focus switch via
  *   SetGitPanelFocus, never a checkout, so it never touches the operation
- *   console. In the session-draft mode the same rows instead SELECT the
- *   drafted workspace: the "Local checkout" row drafts a local session, a
- *   managed tree with a branch drafts a session on its branch (adopted at
- *   draft commit, ADR-082) — the focus never moves. External and detached
- *   trees are gated off by {@link draftWorktreeBlockedReason}: they can
- *   never back the drafted session, so they render inert with the reason.
- *   The linked trees (managed + external) also expose a hover delete that
- *   runs through the mandatory {@link WorktreeDeleteConfirmDialog}; the
- *   section is shown in draft mode too, so an existing worktree can be
- *   deleted without leaving the chat-side draft picker (the deletion never
- *   touches the draft, and stays available on gated rows).
+ *   console. In the workspace-pick ('draft') mode the same rows instead
+ *   SELECT the pending workspace choice: the "Local checkout" row records a
+ *   local workspace, a managed tree with a branch records a choice of its
+ *   branch (the first send adopts the tree, ADR-082) — the focus never
+ *   moves. External and detached trees are gated off by
+ *   {@link draftWorktreeBlockedReason}: they can never back the fresh
+ *   session's choice, so they render inert with the reason. The linked
+ *   trees (managed + external) also expose a hover delete that runs through
+ *   the mandatory {@link WorktreeDeleteConfirmDialog}; the section is shown
+ *   in pick mode too, so an existing worktree can be deleted without
+ *   leaving the chat-side workspace picker (the deletion never touches the
+ *   recorded choice, and stays available on gated rows).
  */
 export function BranchPicker() {
   const isOpen = useGitPanelStore((s) => s.isBranchPickerOpen)
@@ -228,23 +232,30 @@ export function BranchPicker() {
     [checkoutRemote, closeBranchPicker],
   )
 
-  // ── Session-draft mode (ADR-080) ──────────────────────────────────────
+  // ── Session-workspace pick mode (ADR-091) ─────────────────────────────
   // The picker was opened from the chat toolbar's `branch…` entry: rows
-  // SELECT the branch the drafted session's managed worktree will be
-  // provisioned on. Nothing is checked out here — the working tree is
+  // SELECT the branch the fresh session's managed worktree will be bound to
+  // at its first send. Nothing is checked out here — the working tree is
   // untouched; provisioning (worktree add + optional branch creation)
-  // happens at draft commit via CreateManagedSession. Remote-tracking
-  // rows participate too: picking `origin/x` records a create-branch
-  // draft (local `x` created from `origin/x` at commit). The Manage
-  // Branches mode keeps its own semantics — a remote-row click there is
-  // an in-place checkout-remote.
+  // happens at the session's FIRST send (SendMessage's workspace argument).
+  // Remote-tracking rows participate too: picking `origin/x` records a
+  // create-branch choice (local `x` created from `origin/x` at
+  // provisioning, git DWIM semantics — an existing local `x` is reused).
+  // The Manage Branches mode keeps its own semantics — a remote-row click
+  // there is an in-place checkout-remote.
   const isDraftMode = pickerMode === 'draft'
-  const draft = useSessionDraftStore((s) => s.draft)
+  // The pick targets the ACTIVE session: the toolbar that opened the picker
+  // belongs to it, and the selector only offers the entry on a fresh
+  // session (a non-fresh session's choice could never be consumed).
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const pending = useSessionWorkspaceStore((s) =>
+    activeSessionId !== null ? s.choices[activeSessionId] : undefined,
+  )
 
-  // In draft mode a branch can back the new session's managed worktree
+  // In pick mode a branch can back the fresh session's managed worktree
   // unless the MAIN checkout holds it — git allows a branch in at most one
   // worktree. Branches held by existing managed worktrees stay selectable:
-  // the draft commit ADOPTS the existing tree instead of provisioning a new
+  // the first send ADOPTS the existing tree instead of provisioning a new
   // one (ADR-082). `is_current` is deliberately not consulted — it follows
   // the Git panel's focus (GetBranches runs in the focused tree), so the
   // main checkout's branch stays blocked (and managed branches selectable)
@@ -261,66 +272,63 @@ export function BranchPicker() {
     [mainCheckoutBranch],
   )
 
-  const handleDraftSelect = useCallback(
-    (name: string) => {
-      useSessionDraftStore
-        .getState()
-        .setDraftWorkspace({ kind: 'branch', branch: name, createBranch: false, startPoint: '' })
+  const recordChoice = useCallback(
+    (workspace: PendingWorkspace) => {
+      if (activeSessionId === null) return
+      useSessionWorkspaceStore.getState().setChoice(activeSessionId, workspace)
       closeBranchPicker()
     },
-    [closeBranchPicker],
+    [activeSessionId, closeBranchPicker],
+  )
+
+  const handleDraftSelect = useCallback(
+    (name: string) => {
+      recordChoice({ kind: 'branch', branch: name, createBranch: false, startPoint: '' })
+    },
+    [recordChoice],
   )
 
   const handleDraftCreate = useCallback(
     (name: string, startPoint: string) => {
-      useSessionDraftStore
-        .getState()
-        .setDraftWorkspace({ kind: 'branch', branch: name, createBranch: true, startPoint })
-      closeBranchPicker()
+      recordChoice({ kind: 'branch', branch: name, createBranch: true, startPoint })
     },
-    [closeBranchPicker],
+    [recordChoice],
   )
 
-  // A remote-tracking pick records a create-branch draft: the session's
+  // A remote-tracking pick records a create-branch choice: the session's
   // managed worktree is provisioned on the LOCAL branch named by the
-  // remote ref's short name, created from that ref at draft commit.
-  // CreateManagedSession follows git DWIM semantics at commit — an
-  // existing local branch of that name is reused (never re-created or
-  // reset), a missing one is created from the remote-tracking start point.
-  // Nothing is checked out at pick time. The row itself refuses the pick
-  // when that local twin is the main checkout's branch (the same
-  // draftBlockedReason predicate as the local rows) — the DWIM reuse would
-  // silently serve the session from the shared checkout instead of a
-  // managed worktree.
+  // remote ref's short name, created from that ref at provisioning.
+  // Send-time provisioning follows git DWIM semantics — an existing local
+  // branch of that name is reused (never re-created or reset), a missing
+  // one is created from the remote-tracking start point. Nothing is
+  // checked out at pick time. The row itself refuses the pick when that
+  // local twin is the main checkout's branch (the same draftBlockedReason
+  // predicate as the local rows) — the DWIM reuse would silently serve the
+  // session from the shared checkout instead of a managed worktree.
   const handleDraftRemoteSelect = useCallback(
     (remoteRef: string) => {
       const local = remoteTwinName(remoteRef)
-      useSessionDraftStore
-        .getState()
-        .setDraftWorkspace({ kind: 'branch', branch: local, createBranch: true, startPoint: remoteRef })
-      closeBranchPicker()
+      recordChoice({ kind: 'branch', branch: local, createBranch: true, startPoint: remoteRef })
     },
-    [closeBranchPicker],
+    [recordChoice],
   )
 
   // The row-level "already picked" marker: an existing-branch selection.
   const draftSelectedBranch =
-    draft !== null && draft.workspace.kind === 'branch' && !draft.workspace.createBranch
-      ? draft.workspace.branch
-      : null
+    pending?.kind === 'branch' && !pending.createBranch ? pending.branch : null
 
   // The row-level "already picked" marker for a remote-based selection: a
-  // create-branch draft whose start point is a remote-tracking ref naming
-  // exactly the drafted local branch (the remote-pick shape — not a
-  // manually named new branch that merely uses a remote base).
+  // create-branch choice whose start point is a remote-tracking ref naming
+  // exactly the picked local branch (the remote-pick shape — not a manually
+  // named new branch that merely uses a remote base).
   const draftSelectedRemote = (() => {
-    if (draft === null || draft.workspace.kind !== 'branch' || !draft.workspace.createBranch) {
+    if (pending?.kind !== 'branch' || !pending.createBranch) {
       return null
     }
-    const startPoint = draft.workspace.startPoint
+    const startPoint = pending.startPoint
     const slash = startPoint.indexOf('/')
     if (slash === -1) return null
-    return draft.workspace.branch === startPoint.slice(slash + 1) ? startPoint : null
+    return pending.branch === startPoint.slice(slash + 1) ? startPoint : null
   })()
 
   const handleClearError = useCallback(() => setError(null), [])
@@ -462,17 +470,18 @@ export function BranchPicker() {
             the project (local checkout, managed session trees, external
             trees) and expose deletion of the linked trees. Selecting one
             closes the picker: the focus switch is not a checkout, so there
-            is no operation console outcome to read. In DRAFT mode the same
-            rows SELECT the drafted workspace instead: the local checkout
-            drafts a local session, a managed tree drafts a session on ITS
-            branch — CreateManagedSession then adopts the existing tree
-            (ADR-082) — and the focus never moves. External and detached
-            trees can never back the drafted session (a branch held outside
-            c0wrk is refused, a detached tree has no branch to bind), so
+            is no operation console outcome to read. In workspace-pick
+            ('draft') mode the same rows SELECT the pending workspace choice
+            instead: the local checkout records a local workspace, a managed
+            tree records a choice of ITS branch — the choice's first send
+            adopts the existing tree (ADR-082) — and the focus never moves.
+            External and detached trees can never back the fresh session's
+            choice (a branch held outside c0wrk is refused at the send, a
+            detached tree has no branch to bind), so
             {@link draftWorktreeBlockedReason} gates them off and the section
             renders them inert with the reason. Linked trees also expose
             deletion (e.g. a stale managed tree); the deletion never touches
-            the draft. */}
+            the recorded choice. */}
         {worktrees.length > 0 && (
           <div className="shrink-0 border-t border-border px-2 pb-2 pt-1">
             <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -488,20 +497,19 @@ export function BranchPicker() {
                   // Switch mode: the row switches the Git panel's focus.
                   void focusWorktree(w.path)
                 } else if (draftWorktreeBlockedReason(w) !== null) {
-                  // External or detached tree: not a draft target (the row
+                  // External or detached tree: not a pick target (the row
                   // renders disabled) — and never a hidden focus switch; the
                   // picker stays open so the user can pick a real target.
                   return
                 } else if (w.kind === 'main') {
-                  // "Local checkout" row: the drafted session runs in the
-                  // project working tree.
-                  useSessionDraftStore.getState().setDraftWorkspace({ kind: 'local' })
+                  // "Local checkout" row: the fresh session keeps running in
+                  // the project working tree (the implicit default, recorded
+                  // explicitly so a prior branch pick is replaced).
+                  recordChoice({ kind: 'local' })
                 } else if (w.branch) {
-                  // A managed tree drafts a session on ITS branch; the draft
-                  // commit adopts the existing tree (ADR-082).
-                  useSessionDraftStore
-                    .getState()
-                    .setDraftWorkspace({ kind: 'branch', branch: w.branch, createBranch: false, startPoint: '' })
+                  // A managed tree picks a session on ITS branch; the first
+                  // send adopts the existing tree (ADR-082).
+                  recordChoice({ kind: 'branch', branch: w.branch, createBranch: false, startPoint: '' })
                 }
                 closeBranchPicker()
               }}
@@ -512,11 +520,12 @@ export function BranchPicker() {
         )}
 
         {/* New branch — key on isOpen so the field resets when reopened. In
-            draft mode the submit records the drafted branch (created at
-            draft commit in the session's managed worktree) instead of
-            running CreateBranch + in-place checkout; an existing local name
-            is refused up front — commit-time DWIM would silently reuse that
-            branch and ignore the chosen base. */}
+            workspace-pick mode the submit records the branch intent
+            (created by the FIRST SEND's provisioning in the session's
+            managed worktree) instead of running CreateBranch + in-place
+            checkout; an existing local name is refused up front — send-time
+            DWIM would silently reuse that branch and ignore the chosen
+            base. */}
         <NewBranchSection
           key={isOpen ? 'open' : 'closed'}
           disabled={actions.isBusy}

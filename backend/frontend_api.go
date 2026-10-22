@@ -194,6 +194,14 @@ type FrontendAPI struct {
 	// context), so a wedged git delays — but never deadlocks — concurrent
 	// deletions and adoption commits.
 	managedTreeMu sync.Mutex
+	// bindInFlight holds the session ids with a workspace bind currently in
+	// flight (the send-time consumption window): one bind at a time per
+	// session, so a second concurrent send carrying a workspace choice is
+	// refused (ErrBindInProgress) instead of racing the same fresh window.
+	// The frontend refuses such sends itself; this is the backend backstop.
+	// Zero-value-ready (sync.Map) — struct-literal-constructed test
+	// instances need no initialization.
+	bindInFlight sync.Map
 
 	// switchMu serializes the whole SwitchProject body (teardown → vector →
 	// watcher → activate → event). Wails runs each binding call in its own
@@ -361,6 +369,17 @@ type FrontendAPI struct {
 	// persistence step after the fork tree was provisioned, mirroring
 	// gitStatusFn and friends.
 	managedForkCommit func(ctx context.Context, srcID, dstID string, binding *session.WorkspaceBinding, cloner session.ForkReviewCloner) (*session.SessionInfo, error)
+
+	// bindEvictHook, when non-nil, replaces the in-memory eviction both bind
+	// paths perform after persisting the workspace binding. Test-only seam
+	// (nil in production, where Manager.EvictSessionCarryingAttachments runs
+	// and its capture is re-staged onto the restored session) letting the
+	// rollback tests replay the interleavings the guards exclude: an
+	// eviction refusal after the persist (rollback + compensation e2e,
+	// shared-tree survival) and the adoption↔deletion losing race (the tree
+	// removed at the excluded point, caught by the post-bind re-validation).
+	// Same pattern as managedForkCommit and gitStatusFn.
+	bindEvictHook func(id string) (*session.PendingAttachmentSnapshot, error)
 
 	// Injected Wails callbacks (set by desktop during construction).
 	emitEvent func(string, ...any)

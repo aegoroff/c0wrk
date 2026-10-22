@@ -103,6 +103,51 @@ func (s *SQLiteSessionStore) CountManagedWorktreeSessions(ctx context.Context, w
 	return n, nil
 }
 
+// BindSessionWorkspace writes the execution-workspace binding of a FRESH
+// session: the one sanctioned mutation of the binding identity (SaveSession
+// refuses every other change — ADR-080 immutability). The fresh window is
+// "no transcript rows and no task rows", enforced inside the UPDATE's WHERE
+// so the check and the write are a single atomic statement; a send racing a
+// first persisted message therefore cannot slip a binding past the guard.
+// The binding is validated and its managed path derived exactly like
+// SaveSession's (sessionBindingJSON against the owning project), so a
+// tampered proposal fails closed before any row is touched.
+func (s *SQLiteSessionStore) BindSessionWorkspace(ctx context.Context, sessionID, projectID string, binding *WorkspaceBinding) error {
+	if sessionID == "" {
+		return errors.New("session identity is required")
+	}
+	bindingJSON, err := s.sessionBindingJSON(ctx, SessionInfo{ProjectID: projectID, WorkspaceBinding: binding})
+	if err != nil {
+		return fmt.Errorf("validate session binding: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET workspace_binding = ?
+		WHERE id = ?
+		  AND NOT EXISTS (SELECT 1 FROM session_messages WHERE session_messages.session_id = sessions.id)
+		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.session_id = sessions.id)`,
+		bindingJSON, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bind session workspace: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check bound session: %w", err)
+	}
+	if changed == 0 {
+		var exists int
+		if scanErr := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&exists); scanErr != nil {
+			return fmt.Errorf("failed to bind session workspace: %w", scanErr)
+		}
+		if exists == 0 {
+			return fmt.Errorf("session %s not found", sessionID)
+		}
+		return ErrSessionNotFresh
+	}
+	return nil
+}
+
 func (s *SQLiteSessionStore) sessionBindingJSON(ctx context.Context, info SessionInfo) (string, error) {
 	var root string
 	if err := s.db.QueryRowContext(ctx, `SELECT workspace_path FROM projects WHERE id = ?`, info.ProjectID).Scan(&root); err != nil {

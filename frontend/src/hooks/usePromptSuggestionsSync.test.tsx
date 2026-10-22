@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 // Tests for usePromptSuggestionsSync — every refetch trigger of the
 // promptSuggestionsStore. Session switch / project switch / session creation
-// (an activating create is an activeSessionId change) and the armed
-// New-Session draft's project surface (the empty session key) go through the
-// load effect; the session-scoped `prompt_suggestions` event goes through
+// (an activating create is an activeSessionId change) and the session-less
+// project surface (the empty session key — fresh start / last session
+// deleted) go through the load effect; the session-scoped
+// `prompt_suggestions` event goes through
 // refetch(). Malformed payloads are dropped at the boundary; the hook never
 // applies the event's raw both-kinds set.
 //
@@ -174,10 +175,11 @@ describe('usePromptSuggestionsSync triggers', () => {
     expect(getPromptSuggestionsMock).toHaveBeenCalledTimes(1) // no project window → no load
   })
 
-  it('loads the project draft surface under the empty session key (armed New-Session draft)', async () => {
-    // A CODE project's armed New-Session draft has no session row: the hook
-    // must address the backend's new_session branch with the EMPTY session
-    // id instead of resetting (the per-project next_task surface).
+  it('loads the project surface under the empty session key (the session-less window)', async () => {
+    // A CODE project with no active session (fresh start / last session
+    // deleted): the hook must address the backend's new_session branch with
+    // the EMPTY session id instead of resetting (the per-project next_task
+    // surface).
     getPromptSuggestionsMock.mockReset()
     getPromptSuggestionsMock.mockResolvedValue(makeResponse({
       session_id: '',
@@ -202,7 +204,7 @@ describe('usePromptSuggestionsSync triggers', () => {
     expect(s.suggestions[0]?.kind).toBe('next_task')
   })
 
-  it('resets instead of loading when the armed draft sits in the No-Project window', async () => {
+  it('resets instead of loading when the session-less window sits in No-Project', async () => {
     useProjectStore.setState({
       projects: [makeProject({ id: 'no-project', name: 'No Project', is_no_project: true })],
       activeProjectId: 'no-project',

@@ -130,6 +130,19 @@ interface ChatActions {
   updateMessage: (sessionId: string, messageId: string, updates: Partial<ChatMessageUI>) => void
   removeMessage: (sessionId: string, messageId: string) => void
   upsertChecklistMessage: (sessionId: string, message: ChatMessageUI) => void
+  /** Materialize a CONFIRMED-EMPTY transcript for a brand-new session
+   *  (ADR-091): the workspace selector's freshness contract needs
+   *  messages[sid] to EXIST as an empty index — an absent index reads as
+   *  "history not loaded yet", keeping the picker locked behind the
+   *  permanent pin until the history loader settles. With an index already
+   *  present this leaves every live row untouched, EXCEPT superseded
+   *  history-load-failure cards: a successful empty history load (the only
+   *  caller that can hit an existing index with nothing else in it) proves
+   *  every earlier failed attempt's card stale — a failed load can be the
+   *  only entry a session ever gets, so only a later successful load can
+   *  clear it (otherwise the stale card would keep the fresh predicate
+   *  locked on a provably fresh session forever). */
+  ensureEmptyTranscript: (sessionId: string) => void
   setMessages: (sessionId: string, messages: ChatMessageUI[]) => void
   /** Replace the session's messages with the persisted history, preserving
    *  live-event rows that arrived while the RPC was in flight. */
@@ -343,6 +356,40 @@ export const useChatStore = create<ChatState & ChatActions>((set) => ({
     return {
       messages: { ...s.messages, [sessionId]: nextIndex },
       messageOrder: { ...s.messageOrder, [sessionId]: order },
+    }
+  }),
+
+  ensureEmptyTranscript: (sessionId) => set((s) => {
+    const index = s.messages[sessionId]
+    if (index === undefined) {
+      return {
+        messages: { ...s.messages, [sessionId]: {} },
+        messageOrder: { ...s.messageOrder, [sessionId]: [] },
+      }
+    }
+    // The index already exists — live state stays untouched EXCEPT
+    // superseded history-load-failure cards (see the interface contract):
+    // a successful empty load proves them stale, and without the reap the
+    // stale card keeps the workspace selector's fresh predicate locked
+    // forever. Per-session loader runs are serialized (an uncancelled run
+    // settles before the effect re-runs for the same session), so every
+    // such card present here predates this load. An in-flight optimistic
+    // message, a rejected send's error card and live terminal events all
+    // survive.
+    const order = s.messageOrder[sessionId] ?? []
+    const kept = order.filter((id) => {
+      const m = index[id]
+      return m === undefined || !(m.type === 'error' && m.metadata?.historyLoadFailed === true)
+    })
+    if (kept.length === order.length) return s
+    const nextIndex: Record<string, ChatMessageUI> = {}
+    for (const id of kept) {
+      const m = index[id]
+      if (m !== undefined) nextIndex[id] = m
+    }
+    return {
+      messages: { ...s.messages, [sessionId]: nextIndex },
+      messageOrder: { ...s.messageOrder, [sessionId]: kept },
     }
   }),
 
