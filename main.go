@@ -16,6 +16,7 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/crashlog"
+	"github.com/v0lka/c0wrk/core/cli"
 	"github.com/v0lka/c0wrk/core/updater"
 	"github.com/v0lka/c0wrk/desktop"
 )
@@ -54,15 +55,31 @@ func gpuRelaunchHandoverBudget(agentDir string) time.Duration {
 }
 
 func mainImpl() int {
-	// Self-update re-exec path: when launched with --self-update, this process
-	// is the staging updater. It must NOT start the Wails lifecycle. Instead it
-	// waits for the parent PID to exit, swaps the install tree, relaunches the
-	// new app, and exits.
-	if opts, isSelfUpdate, err := updater.ParseSelfUpdateFlags(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "c0wrk self-update: %v\n", err)
+	// The command line is parsed exactly once, here, before anything else in
+	// the process runs. The ordering is load-bearing: (a) a parse error, -h or
+	// -v must reach the REAL stdout/stderr — crashlog.Install below redirects
+	// fd 1/2 into <logDir>/stderr.log, and usage output buried in a log file
+	// is invisible to the user; (b) a diagnostic exit must not touch app state
+	// at all — in particular it happens before AcquireSingleInstanceLock
+	// (ADR-075), since a mistyped flag is not a competing app instance; and
+	// (c) the self-update re-exec path must NOT start the Wails lifecycle:
+	// this process is the staging updater — it waits for the parent PID to
+	// exit, swaps the install tree, relaunches the new app, and exits.
+	req, parseErr := cli.Parse(os.Args[1:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "c0wrk: %v\n", parseErr)
+		cli.PrintHelp(os.Stderr)
 		return 2
-	} else if isSelfUpdate {
-		if applyErr := updater.ApplySelfUpdate(opts, slog.Default()); applyErr != nil {
+	}
+	switch req.Action {
+	case cli.ActionHelp:
+		cli.PrintHelp(os.Stdout)
+		return 0
+	case cli.ActionVersion:
+		cli.PrintVersion(os.Stdout)
+		return 0
+	case cli.ActionSelfUpdate:
+		if applyErr := updater.ApplySelfUpdate(*req.SelfUpdate, slog.Default()); applyErr != nil {
 			fmt.Fprintf(os.Stderr, "c0wrk self-update failed: %v\n", applyErr)
 			return 1
 		}

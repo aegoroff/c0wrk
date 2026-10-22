@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/v0lka/c0wrk/core/cli"
 )
 
 // sumsURLForTest mirrors backend.sumsURLFor: both the asset and SHA256SUMS
@@ -209,8 +211,8 @@ func TestPipeline_CheckDownloadVerifyStage_E2E(t *testing.T) {
 	}
 	t.Cleanup(func() { relaunchFn = origRelaunch })
 
-	opts := SelfUpdateOptions{PID: dead, StageDir: staging, TargetDir: target}
-	if err := ApplySelfUpdate(opts, slog.Default()); err != nil {
+	req := cli.SelfUpdateRequest{PID: dead, Stage: staging, Target: target}
+	if err := ApplySelfUpdate(req, slog.Default()); err != nil {
 		t.Fatalf("ApplySelfUpdate: %v", err)
 	}
 
