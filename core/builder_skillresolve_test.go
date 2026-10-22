@@ -21,6 +21,23 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// canonicalTempRoot returns the symlink-resolved form of a t.TempDir()
+// directory. The SkillManager scan canonicalizes every discovery root through
+// filepath.EvalSymlinks (sp4rk/skills/manager.go), so SkillPath — and the
+// resolved resource path built on top of it — always carries the canonical
+// prefix. On macOS that differs from t.TempDir()'s raw form (/var/folders/…
+// vs /private/var/folders/…, /var is a symlink to /private/var). Canonicalizing
+// the expected roots keeps the string comparisons platform-independent (an
+// identity on Linux, matching sp4rk/skills/extra_test.go's precedent).
+func canonicalTempRoot(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks %s: %v", dir, err)
+	}
+	return resolved
+}
+
 // writeSkillWithResource creates a skill directory containing a minimal valid
 // SKILL.md plus references/api.md with the given content, and returns the
 // resource's absolute path.
@@ -78,8 +95,8 @@ func execReadSkillResourceTool(t *testing.T, sm *skills.SkillManager, skillName,
 //  4. Traversal outside the skill directory is refused (SafeResolvePath),
 //     unknown skills are refused, and an empty discovery set is refused.
 func TestOrchestratorBuilder_ResolveSkillResourcePath(t *testing.T) {
-	projectSkills := t.TempDir()
-	globalSkills := t.TempDir()
+	projectSkills := canonicalTempRoot(t, t.TempDir())
+	globalSkills := canonicalTempRoot(t, t.TempDir())
 
 	const (
 		projectResource = "project-local api reference"
