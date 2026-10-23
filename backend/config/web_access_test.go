@@ -836,10 +836,13 @@ func TestWebAccessTLS_SaveGateIgnoresFiles(t *testing.T) {
 	}
 }
 
-func TestWebAccessTLS_SectionResetDoesNotStackTLSWarning(t *testing.T) {
-	// A bind/port reset already zeroes the subsection (it resets the whole
-	// section), so a doubly-broken section must produce exactly ONE warning,
-	// never a stacked tls warning on top of the section one.
+func TestWebAccessTLS_SectionResetPreservesSubsection(t *testing.T) {
+	// The bind/port fail-soft reset preserves the authored tls subsection
+	// (only Enabled/Bind/Port/Token return to the default state) — the same
+	// preserve-the-subsection contract as the ADR-092 branch below it. A
+	// doubly-broken section therefore stacks the tls warning on top of the
+	// section one: both repair flows are named, and the section ends up
+	// disabled either way.
 	cfg := &Config{WebAccess: WebAccessConfig{
 		Enabled: true,
 		Bind:    "garbage",
@@ -847,14 +850,64 @@ func TestWebAccessTLS_SectionResetDoesNotStackTLSWarning(t *testing.T) {
 		TLS:     WebAccessTLSConfig{Enabled: true},
 	}}
 	warnings := normalizeWebAccess(cfg)
+	if len(warnings) != 2 {
+		t.Fatalf("expected the section-reset and tls warnings stacked, got %v", warnings)
+	}
+	if !strings.Contains(warnings[0], "ignored") || strings.Contains(warnings[0], "tls") {
+		t.Errorf("the first warning must be the section reset, got %q", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "tls") {
+		t.Errorf("the second warning must name tls, got %q", warnings[1])
+	}
+	// The connection/credential fields reset; the authored subsection
+	// survives untouched.
+	if cfg.WebAccess.Enabled || cfg.WebAccess.Bind != DefaultWebAccessBind ||
+		cfg.WebAccess.Port != 0 || cfg.WebAccess.Token != "" {
+		t.Errorf("connection/credential fields must reset to the default state, got %+v", cfg.WebAccess)
+	}
+	if cfg.WebAccess.TLS != (WebAccessTLSConfig{Enabled: true}) {
+		t.Errorf("the authored subsection must survive the reset, got %+v", cfg.WebAccess.TLS)
+	}
+}
+
+func TestWebAccessTLS_BindResetPreservesUsablePair(t *testing.T) {
+	// The realistic loss scenario: an operator hand-authors a usable PEM
+	// pair (config.example.yaml documents hand-editing the paths as THE way
+	// to bring an operator-owned certificate) alongside a malformed bind. The
+	// fail-soft reset must heal only the connection/credential fields — the
+	// cert/key paths survive verbatim, so the next unrelated settings save
+	// cannot persist the pair away, and the fix-and-re-enable flow
+	// (ADR-092) finds its subsection intact.
+	dir := t.TempDir()
+	certPath, keyPath := writeWebAccessTLSPair(t, dir)
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  bind: "127.0.0.1:8080"
+  port: 8765
+  token: my-static-token-0123456789
+  tls:
+    enabled: true
+    cert: `+strconv.Quote(certPath)+`
+    key: `+strconv.Quote(keyPath)+`
+`))
 	if len(warnings) != 1 {
 		t.Fatalf("expected exactly the section-reset warning, got %v", warnings)
 	}
-	if strings.Contains(warnings[0], "tls") {
-		t.Errorf("the section reset must not name tls, got %q", warnings[0])
+	if !strings.Contains(warnings[0], "ignored") {
+		t.Errorf("warning must name the section reset, got %q", warnings[0])
 	}
-	if cfg.WebAccess != defaultWebAccessState() {
-		t.Errorf("section must reset to the default state, got %+v", cfg.WebAccess)
+	if cfg.WebAccess.Enabled {
+		t.Error("the section must be disabled after the bind reset")
+	}
+	if cfg.WebAccess.Bind != DefaultWebAccessBind || cfg.WebAccess.Port != 0 {
+		t.Errorf("bind/port must reset to the defaults, got %q/%d", cfg.WebAccess.Bind, cfg.WebAccess.Port)
+	}
+	if cfg.WebAccess.Token != "" {
+		t.Errorf("the credential must reset to empty, got %q", cfg.WebAccess.Token)
+	}
+	if !cfg.WebAccess.TLS.Enabled || cfg.WebAccess.TLS.Cert != certPath || cfg.WebAccess.TLS.Key != keyPath {
+		t.Errorf("the authored pair must survive the reset verbatim, got %+v", cfg.WebAccess.TLS)
 	}
 }
 

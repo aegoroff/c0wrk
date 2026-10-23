@@ -18,8 +18,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -123,6 +125,46 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.hasSessionCookie(r) {
 			writeJSONError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// sameOriginGate rejects a state-changing request whose Origin header is
+// present and does not exactly match scheme://r.Host — the exact-equality
+// check the /ws upgrade already enforces, extended to the POST routes
+// (/api/rpc, /api/login). SameSite=Strict separates SITES, not origins: a
+// page served from any other port of the same host shares the cookie jar,
+// and a preflight-free no-cors POST would ride the session cookie straight
+// into a handler that parses the body regardless of its content type.
+// A MISSING Origin stays allowed — browsers attach Origin to every POST
+// (fetch spec), so only non-browser clients (curl, scripting) omit it, and
+// such a client carries the session cookie only by having logged in
+// deliberately; refusing them would break every non-browser consumer for no
+// security gain.
+func sameOriginGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Origin") != "" && !sameOrigin(r) {
+			writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// jsonContentTypeGate requires the JSON media type on a route whose body is
+// always JSON (/api/rpc). A cross-origin no-cors request cannot carry
+// Content-Type: application/json — the fetch CORS safelist restricts no-cors
+// bodies to form/text encodings — so the header doubles as a CSRF
+// discriminator on top of sameOriginGate. The official shim sends it on
+// every call, including zero-argument ones. Charset and other media-type
+// parameters are accepted (parsed via mime.ParseMediaType).
+func jsonContentTypeGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || !strings.EqualFold(mediaType, "application/json") {
+			writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 			return
 		}
 		next(w, r)

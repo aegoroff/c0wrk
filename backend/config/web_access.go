@@ -362,8 +362,12 @@ func defaultWebAccessState() WebAccessConfig {
 
 // normalizeWebAccess validates the web_access section in place and returns
 // load warnings. VALIDITY problems are FAIL-SOFT: an enabled section with an
-// unparseable bind or an out-of-range port is warned about and reset to the
-// default state (the sidecar stays off), never fatal — a broken section must
+// unparseable bind or an out-of-range port is warned about and has its
+// connection/credential fields reset to the default state (the sidecar stays
+// off) while the authored tls subsection survives — the same
+// preserve-the-subsection contract as the TLS branch below, so a bind/port
+// typo can never silently wipe a hand-authored certificate pair or static
+// token — never fatal, because a broken section must
 // not keep the app from starting, and must not leave a half-applied unsafe
 // listener either. A VALID non-loopback bind is not a validity problem: the
 // section stays enabled and draws the network-exposure warning while the
@@ -396,7 +400,17 @@ func normalizeWebAccess(cfg *Config) []string {
 	if len(reasons) > 0 {
 		warning := "web_access ignored (the sidecar stays disabled; fix bind/port and re-enable): " +
 			strings.Join(reasons, "; ")
+		// The reset mirrors the sibling ADR-092 branch below: only the
+		// connection/credential fields return to the default state and the
+		// authored tls subsection survives (only Enabled/Bind/Port/Token are
+		// reset). A disabled section is inert — the persisted shape stays
+		// valid either way — and silently wiping a hand-authored PEM pair or
+		// static token because of a bind/port typo would destroy real
+		// operator config on the next unrelated save (the warning names
+		// bind/port alone, so nothing would hint at the loss).
+		authored := cfg.WebAccess
 		cfg.WebAccess = defaultWebAccessState()
+		cfg.WebAccess.TLS = authored.TLS
 		warnings = append(warnings, warning)
 	}
 	// ADR-092: a tls subsection the sidecar cannot serve — structurally
@@ -404,9 +418,10 @@ func normalizeWebAccess(cfg *Config) []string {
 	// section off: a requested TLS is never downgraded to plain HTTP, so no
 	// listener is the only safe state. The subsection is preserved as
 	// authored (the operator's paths survive; a disabled section is inert),
-	// and the warning names the reason. The whole-section reset above
-	// zeroes the subsection, so a bad bind never stacks a second tls
-	// warning on top.
+	// and the warning names the reason. The bind/port reset above preserves
+	// the subsection the same way, so a bad bind WITH an unusable subsection
+	// stacks this warning on top — both repair flows are named, and the
+	// section ends up disabled either way.
 	if err := webAccessTLSPairError(cfg.WebAccess.TLS); err != nil {
 		warning := "web_access.tls unusable (the sidecar stays disabled — a configured TLS is never downgraded to plain HTTP; fix the certificate pair or turn tls off, then enable web_access again): " +
 			err.Error()

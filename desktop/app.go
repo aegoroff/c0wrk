@@ -1071,6 +1071,12 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // flip back so a rejected toggle is indistinguishable from a rejected
 // request (the SetModelProfilesEnabled contract).
 //
+// Enabling with the master experimental gate closed (ADR-090 decision 13)
+// persists the switch — operator intent — but mounts nothing: availability
+// is the conjunction, enforced at every mount decision through
+// webAccessMountAllowed; opening the gate live-follows the mount through
+// applyExperimentalWebAccess.
+//
 // Enabling onto a configured-but-unusable TLS (ADR-092) is refused before
 // anything is mutated or persisted: the pair is loaded exactly like the
 // sidecar would load it (config.ValidateWebAccessTLSPair), so a broken
@@ -1122,6 +1128,17 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 	}
 
 	if on {
+		if !webAccessMountAllowed(cfg, cfg.Experimental.Enabled) {
+			// ADR-090 decision 13: availability is the conjunction of the
+			// master experimental gate and the section switch, enforced at
+			// EVERY mount decision. With the master gate closed this toggle
+			// still persists (operator intent — the same paper state a
+			// restart would produce) but no sidecar mounts; opening the
+			// gate live-follows the mount through applyExperimentalWebAccess.
+			a.log().Debug("web access enabled while the experimental gate is closed; the sidecar stays unmounted",
+				"experimental_enabled", cfg.Experimental.Enabled)
+			return nil
+		}
 		srv, err := a.startWebAccessLocked(a.log())
 		if err != nil {
 			// The persisted switch stays on (operator intent; the next
@@ -1179,7 +1196,7 @@ func (a *App) applyExperimentalWebAccess(enabled bool) {
 	}
 
 	switch {
-	case enabled && cfg.WebAccess.Enabled:
+	case webAccessMountAllowed(cfg, enabled):
 		srv, err := a.startWebAccessLocked(a.log())
 		if err != nil {
 			a.log().Error("web access sidecar failed to start after the experimental gate opened; continuing without it", "error", err)
@@ -1574,6 +1591,17 @@ func (a *App) restartWebAccessOrRollbackLocked(prev config.WebAccessConfig, cfg 
 	return fmt.Errorf(
 		"web access %s not applied: the sidecar failed to start with the new settings (%w); the previous settings were restored and the sidecar is running again",
 		what, err)
+}
+
+// webAccessMountAllowed is the ADR-090 decision-13 availability conjunction —
+// the master experimental gate AND the feature's own web_access switch —
+// evaluated as ONE predicate by every mount decision: the startup mount
+// (initWebAccess), the live-follow hook (applyExperimentalWebAccess) and the
+// section toggle (setWebAccessEnabledLocked). experimentalEnabled is passed
+// explicitly because the live-follow hook carries the post-toggle gate value
+// that the in-memory config has only just converged to.
+func webAccessMountAllowed(cfg *config.Config, experimentalEnabled bool) bool {
+	return cfg != nil && experimentalEnabled && cfg.WebAccess.Enabled
 }
 
 // startWebAccessLocked constructs and starts the sidecar and publishes the

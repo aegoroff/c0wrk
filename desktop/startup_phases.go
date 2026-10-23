@@ -1598,7 +1598,7 @@ func (a *App) initWebAccess(cfg *config.Config, log *slog.Logger) {
 	if a.frontendAPI() == nil || cfg == nil {
 		return
 	}
-	if !cfg.Experimental.Enabled || !cfg.WebAccess.Enabled {
+	if !webAccessMountAllowed(cfg, cfg.Experimental.Enabled) {
 		log.Debug("web access sidecar not mounted: gate closed",
 			"experimental_enabled", cfg.Experimental.Enabled,
 			"web_access_enabled", cfg.WebAccess.Enabled)

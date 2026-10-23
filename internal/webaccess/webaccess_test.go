@@ -2,7 +2,8 @@
 //
 // webaccess_test.go — the httptest security/behavior matrix for the sidecar
 // core: auth gating of every route, login flows (static + per-launch token),
-// cookie flags, transport discovery, static+CSP serving, body limits,
+// cookie flags, the same-origin/content-type CSRF gates on the POST routes,
+// transport discovery, static+CSP serving, body limits,
 // handler-panic isolation, and the login rate limiter.
 //
 // Deliberately exercised failure paths (4xx/panics/rate limits) capture the
@@ -169,6 +170,9 @@ func jsonQuote(s string) string {
 }
 
 // doJSON performs a request against the test server and returns the recorder.
+// Content-Type: application/json is always set — mirroring the official shim
+// (runtime.ts), which sends it on every RPC/login call including zero-argument
+// ones, as the jsonContentTypeGate requires.
 func doJSON(t *testing.T, client *http.Client, method, url, body string) *http.Response {
 	t.Helper()
 	var rdr io.Reader
@@ -179,9 +183,7 @@ func doJSON(t *testing.T, client *http.Client, method, url, body string) *http.R
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("do %s %s: %v", method, url, err)
@@ -347,6 +349,110 @@ func TestLoginBodyHandling(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSameOriginAndContentTypeGates pins the CSRF hardening on the POST
+// routes: a present-but-mismatched Origin is refused on /api/login and
+// /api/rpc (the same exact-equality check the /ws upgrade enforces), and
+// /api/rpc additionally requires the JSON content type — a preflight-free
+// no-cors request cannot send either. Missing Origin stays allowed for
+// non-browser clients.
+func TestSameOriginAndContentTypeGates(t *testing.T) {
+	srv, ts := newTestServer(t, nil)
+	base := ts.URL
+	// A same-site but cross-origin page: identical host string, different
+	// port — exactly the requester SameSite=Strict does NOT separate.
+	attackerOrigin := "http://127.0.0.1:3000"
+
+	// post fires a raw POST with explicit Origin/Content-Type control (both
+	// omitted when empty).
+	post := func(t *testing.T, client *http.Client, url, origin, contentType, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("do %s: %v", url, err)
+		}
+		return resp
+	}
+
+	t.Run("cross-origin login is refused", func(t *testing.T) {
+		resp := post(t, &http.Client{}, base+"/api/login", attackerOrigin, "application/json",
+			`{"token":"static-test-token-0123456789"}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("cross-origin rpc is refused even with a valid session", func(t *testing.T) {
+		authed := loginClient(t, base, srv.AuthToken())
+		resp := post(t, authed, base+"/api/rpc/Echo", attackerOrigin, "application/json", `["x"]`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("same-origin login and rpc pass", func(t *testing.T) {
+		resp := post(t, &http.Client{}, base+"/api/login", base, "application/json",
+			`{"token":"static-test-token-0123456789"}`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("login status = %d, want 200", resp.StatusCode)
+		}
+		authed := loginClient(t, base, srv.AuthToken())
+		echo := post(t, authed, base+"/api/rpc/Echo", base, "application/json", `["x"]`)
+		defer func() { _ = echo.Body.Close() }()
+		if echo.StatusCode != http.StatusOK {
+			t.Fatalf("rpc status = %d, want 200", echo.StatusCode)
+		}
+	})
+
+	t.Run("rpc requires the json content type", func(t *testing.T) {
+		authed := loginClient(t, base, srv.AuthToken())
+		for _, tc := range []struct {
+			name        string
+			contentType string
+		}{
+			{"no-cors text/plain", "text/plain"},
+			{"form encoding", "application/x-www-form-urlencoded"},
+			{"missing header", ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resp := post(t, authed, base+"/api/rpc/Echo", "", tc.contentType, `["x"]`)
+				defer func() { _ = resp.Body.Close() }()
+				if resp.StatusCode != http.StatusUnsupportedMediaType {
+					t.Fatalf("status = %d, want 415", resp.StatusCode)
+				}
+			})
+		}
+		t.Run("charset parameter is accepted", func(t *testing.T) {
+			resp := post(t, authed, base+"/api/rpc/Echo", "", "application/json; charset=utf-8", `["x"]`)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+		})
+	})
+
+	t.Run("non-browser client without Origin keeps working", func(t *testing.T) {
+		authed := loginClient(t, base, srv.AuthToken())
+		resp := post(t, authed, base+"/api/rpc/Echo", "", "application/json", `["x"]`)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+	})
 }
 
 func TestTransportDiscovery(t *testing.T) {

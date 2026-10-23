@@ -48,6 +48,11 @@
 //     SameSite=Strict cookie).
 //   - The cookie carries a per-launch session secret, NOT the configured
 //     token — stealing a cookie never reveals a durable secret.
+//   - The state-changing POST routes carry the /ws admission hardening:
+//     /api/rpc and /api/login reject a present-but-mismatched Origin (the
+//     exact-equality same-origin check — SameSite=Strict separates sites,
+//     not origins), and /api/rpc additionally requires Content-Type:
+//     application/json, which a preflight-free no-cors request cannot send.
 //   - Every handler and goroutine is recovered: a panic in the web layer (or
 //     in a dispatched method) becomes a 500 envelope, never an app crash.
 //   - RPC surface = exported methods of Dispatch minus the named denylist
@@ -310,8 +315,8 @@ func New(opts Options) (*Server, error) {
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/transport", s.recoverWrap(noStore(s.handleTransport)))
-	mux.Handle("POST /api/login", s.recoverWrap(noStore(s.handleLogin)))
-	mux.Handle("POST /api/rpc/{method}", s.recoverWrap(noStore(s.requireAuth(s.handleRPC))))
+	mux.Handle("POST /api/login", s.recoverWrap(noStore(sameOriginGate(s.handleLogin))))
+	mux.Handle("POST /api/rpc/{method}", s.recoverWrap(noStore(sameOriginGate(s.requireAuth(jsonContentTypeGate(s.handleRPC))))))
 	mux.Handle("GET /ws", s.recoverWrap(noStore(s.requireAuth(s.handleWS))))
 	if s.static != nil {
 		static := http.FileServerFS(s.static)

@@ -288,6 +288,34 @@ describe('WebAccessTLSSettings', () => {
     expect(mocks.setWebAccessTLS).toHaveBeenCalledTimes(2)
   })
 
+  it('replaces both halves of a pair: the first commit carries both drafts (no persisted-sibling deadlock)', async () => {
+    render(httpsInfo)
+    await flush()
+    typeInto(certInput(), '/tmp/new-pair.crt')
+    typeInto(keyInput(), '/tmp/new-pair.key')
+    // The post-commit re-read returns the NEWLY persisted pair — the shape
+    // the real backend answers with after a successful write.
+    mocks.getWebAccessInfo.mockResolvedValueOnce({
+      ...httpsInfo,
+      tlsCert: '/tmp/new-pair.crt',
+      tlsKey: '/tmp/new-pair.key',
+    })
+    blurField(certInput())
+    await flush()
+    // The commit threads the sibling DRAFT: pairing the new cert with the
+    // still-persisted key would offer a mismatched pair, be refused, and
+    // deadlock both fields with no way to land (certB, keyB).
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledTimes(1)
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledWith(true, '/tmp/new-pair.crt', '/tmp/new-pair.key')
+    expect(mocks.getWebAccessInfo).toHaveBeenCalledTimes(1)
+    expect(certInput().value).toBe('/tmp/new-pair.crt')
+    expect(keyInput().value).toBe('/tmp/new-pair.key')
+    // The second field's blur is now an unchanged no-op.
+    blurField(keyInput())
+    await flush()
+    expect(mocks.setWebAccessTLS).toHaveBeenCalledTimes(1)
+  })
+
   it('surfaces a rejected path commit and keeps the draft', async () => {
     mocks.setWebAccessTLS.mockRejectedValue(
       new Error('web access TLS change not applied: the previous settings were restored'),

@@ -171,19 +171,29 @@ export function useStageAttachments(): {
   const stageAttachmentFiles = useCallback(
     async (activeSessionId: string | null, files: readonly File[]): Promise<void> => {
       if (files.length === 0) return
-      const byName = new Map(files.map((f) => [f.name, f]))
+      // Zip by identity, not by name: a web drop may carry two files with the
+      // same basename (multi-select across folders), and a name-keyed map
+      // would stage one file's BYTES under the other's name. The entry
+      // objects flow through stageEntries by reference, so the closure
+      // resolves each entry back to its own File; the name is display-only
+      // metadata.
+      const staged = files.map((file) => ({
+        entry: { path: '', fileName: file.name, isImage: isImagePath(file.name) },
+        file,
+      }))
       await stageEntries(
         activeSessionId,
-        files.map((f) => ({ path: '', fileName: f.name, isImage: isImagePath(f.name) })),
+        staged.map((s) => s.entry),
         async (sessionId, entries) => {
           // Web content has no path: each file is uploaded through
           // AttachFileContent. Every call returns the FULL current pending
           // list, so the last successful result is the authoritative store
           // value; a mid-loop failure drains the placeholders exactly like a
           // failed attachFiles call (already-staged files stay staged).
+          const fileByEntry = new Map<StageEntry, File>(staged.map((s) => [s.entry, s.file] as const))
           let list: AttachmentInfoUI[] = []
           for (const e of entries) {
-            const file = byName.get(e.fileName)
+            const file = fileByEntry.get(e)
             if (!file) continue
             list = await attachFileContent(sessionId, {
               name: file.name,

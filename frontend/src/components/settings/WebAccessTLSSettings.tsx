@@ -17,8 +17,10 @@ import { Toggle } from './ModelProfilesControls'
  * discipline: optimistic with a rollback on rejection, authoritative state
  * re-read after every applied write. The cert and key paths are independent
  * self-committing fields (Enter or focus loss; unchanged saves nothing) —
- * each threads the other persisted path through (the backend loads the pair
- * as a unit and refuses a half-set one). Generate mints and persists the pair.
+ * each threads the OTHER FIELD'S DRAFT through (trimmed, empty falling back
+ * to the persisted path; the backend loads the pair as a unit and refuses a
+ * half-set one), so replacing both halves of a pair commits the complete new
+ * pair on the first blur. Generate mints and persists the pair.
  */
 
 interface WebAccessTLSSettingsProps {
@@ -84,38 +86,42 @@ export function WebAccessTLSSettings({ info, onInfo, onConfigChanged }: WebAcces
     [info, onInfo, reread, onConfigChanged],
   )
 
-  /** Commit one path draft (Enter or focus loss): an unchanged value saves
-   *  nothing; the other persisted path rides along — the backend loads the
-   *  pair as a unit and refuses a half-set one. */
-  const commitPath = useCallback(
-    async (field: 'cert' | 'key') => {
-      if (writeBusy) return
-      const cert = field === 'cert' ? certDraft.trim() : info.tlsCert ?? ''
-      const key = field === 'key' ? keyDraft.trim() : info.tlsKey ?? ''
-      if (cert === (info.tlsCert ?? '') && key === (info.tlsKey ?? '')) {
-        setTlsError(null)
-        return
-      }
-      setCommitBusy(true)
+  /** Commit the path drafts (Enter or focus loss on either field): an
+   *  unchanged pair saves nothing, and BOTH drafts ride along — each
+   *  trimmed, an empty draft falling back to its persisted path — because
+   *  the backend loads the pair as a unit and refuses a half-set one.
+   *  Threading the drafts (not the persisted sibling) is what makes
+   *  replacing BOTH halves of a pair committable: a self-committing blur
+   *  that paired a new draft with the persisted sibling would offer a
+   *  mismatched pair, be refused, and deadlock the fields. */
+  const commitPaths = useCallback(async () => {
+    if (writeBusy) return
+    const certDrafted = certDraft.trim()
+    const keyDrafted = keyDraft.trim()
+    const cert = certDrafted || (info.tlsCert ?? '')
+    const key = keyDrafted || (info.tlsKey ?? '')
+    if (cert === (info.tlsCert ?? '') && key === (info.tlsKey ?? '')) {
       setTlsError(null)
-      try {
-        await setWebAccessTLS(info.tlsEnabled, cert, key)
-        // ADR-092: the backend recomputes the section's warnings after every
-        // SetWebAccessTLS (the recompute is state-only and idempotent), so
-        // the commit mirrors it even though a path change alone cannot move
-        // the exposure warning.
-        onConfigChanged?.()
-        await reread()
-      } catch (err) {
-        setTlsError(err instanceof Error ? err.message : 'Failed to apply the TLS paths.')
-      } finally {
-        setCommitBusy(false)
-      }
-    },
-    [writeBusy, certDraft, keyDraft, info, reread, onConfigChanged],
-  )
-  const commitCert = useCallback(() => commitPath('cert'), [commitPath])
-  const commitKey = useCallback(() => commitPath('key'), [commitPath])
+      return
+    }
+    setCommitBusy(true)
+    setTlsError(null)
+    try {
+      await setWebAccessTLS(info.tlsEnabled, cert, key)
+      // ADR-092: the backend recomputes the section's warnings after every
+      // SetWebAccessTLS (the recompute is state-only and idempotent), so
+      // the commit mirrors it even though a path change alone cannot move
+      // the exposure warning.
+      onConfigChanged?.()
+      await reread()
+    } catch (err) {
+      setTlsError(err instanceof Error ? err.message : 'Failed to apply the TLS paths.')
+    } finally {
+      setCommitBusy(false)
+    }
+  }, [writeBusy, certDraft, keyDraft, info, reread, onConfigChanged])
+  const commitCert = useCallback(() => void commitPaths(), [commitPaths])
+  const commitKey = useCallback(() => void commitPaths(), [commitPaths])
 
   /** Mint the app-owned pair: writes the files, persists their paths, never
    *  flips the switch, restarts a running sidecar onto the fresh material. */
