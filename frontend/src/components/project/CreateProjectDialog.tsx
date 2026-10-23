@@ -24,6 +24,13 @@ interface CreateProjectDialogProps {
 }
 
 export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogProps) {
+  // Project creation is a desktop-only capability: a browser session has no
+  // directory access to point a project at, and the backend's createProject
+  // expects a path the web transport has no honest way to obtain. The dialog
+  // stays reachable (naming a future project is harmless), but the Create
+  // action is disabled with the reason on it instead of pretending the form
+  // can be completed.
+  const web = isWebTransport()
   const [name, setName] = useState('')
   const [externalPath, setExternalPath] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -94,10 +101,10 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
                 {externalPath}
               </p>
             )}
-            {isWebTransport() && (
+            {web && (
               <p className="text-xs text-muted-foreground">
-                Type the workspace directory path — the native folder browser
-                is only available in the desktop app.
+                Creating projects requires the desktop app — a browser session
+                has no directory access to point a project at.
               </p>
             )}
           </div>
@@ -120,7 +127,10 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!name.trim() || !externalPath || submitting}
+            disabled={!name.trim() || !externalPath || submitting || web}
+            title={
+              web ? 'Creating projects is only available in the desktop app.' : undefined
+            }
           >
             {submitting ? 'Creating...' : 'Create'}
           </Button>

@@ -254,6 +254,20 @@ describe('WebAccessSettings', () => {
     expect(byTestId('web-access-warning')).not.toBeNull()
   })
 
+  it('keeps the applied switch when the post-toggle re-read fails (no "Off" lie)', async () => {
+    mocks.getWebAccessInfo.mockResolvedValueOnce(offInfo).mockResolvedValueOnce(null)
+    render()
+    await flush()
+    clickToggle()
+    await flush()
+    expect(mocks.setWebAccessEnabled).toHaveBeenCalledWith(true)
+    // The write succeeded; a failed re-read must not flip the display back
+    // to the pre-toggle snapshot — the sidecar is actually serving.
+    expect(toggleInput().checked).toBe(true)
+    expect(byTestId('web-access-status')?.textContent).not.toContain('Off')
+    expect(addressInput().value).toBe('http://127.0.0.1')
+  })
+
   it('rolls the toggle back when the RPC rejects', async () => {
     mocks.getWebAccessInfo.mockResolvedValue(offInfo)
     mocks.setWebAccessEnabled.mockRejectedValue(new Error('persist failed'))

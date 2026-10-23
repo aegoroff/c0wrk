@@ -128,14 +128,33 @@ describe('CreateProjectDialog', () => {
     expect(dialogEl()?.textContent).not.toContain('Type the workspace directory path')
   })
 
-  it('hides the native directory browser in the web transport (manual entry only)', async () => {
+  it('web transport cannot create projects: Create is disabled with the reason', async () => {
     isWebTransportMock.mockReturnValue(true)
     await renderOpen()
 
     expect(findButton('Choose directory')).toBeUndefined()
-    // The manual path entry stays usable — the hint explains the missing
-    // native browser instead.
-    expect(dialogEl()?.textContent).toContain('Type the workspace directory path')
+    // Creation is a desktop-only capability. The hint states it, and the
+    // disabled Create button carries the reason as its tooltip — the old
+    // "type the workspace directory path" hint pointed at a path input the
+    // dialog does not have, making Create permanently (and silently) dead.
+    expect(dialogEl()?.textContent).toContain('requires the desktop app')
+    const create = findButton('Create')
+    expect(create).toBeInstanceOf(HTMLButtonElement)
+    expect((create as HTMLButtonElement).disabled).toBe(true)
+    expect((create as HTMLButtonElement).getAttribute('title')).toContain('desktop app')
     expect(pickDirectoryMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps Create enabled (path-gated) in the wails transport', async () => {
+    isWebTransportMock.mockReturnValue(false)
+    await renderOpen()
+
+    const create = findButton('Create')
+    expect(create).toBeInstanceOf(HTMLButtonElement)
+    // Still disabled until a directory is picked — but not transport-gated,
+    // and without a web-only tooltip.
+    expect((create as HTMLButtonElement).disabled).toBe(true)
+    expect((create as HTMLButtonElement).getAttribute('title')).toBeNull()
+    expect(dialogEl()?.textContent).not.toContain('requires the desktop app')
   })
 })

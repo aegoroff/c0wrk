@@ -149,10 +149,13 @@ export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () =>
         onConfigChanged?.()
         // The toggle both persisted and applied: re-read the authoritative
         // state instead of deriving running/url/token locally. A failed
-        // re-read rolls the display back — the backend still holds the
-        // previous value everywhere the UI can verify.
+        // re-read keeps the APPLIED switch value — the write succeeded, so
+        // falling back to `previous` would render a network-facing sidecar
+        // as Off (the same re-read-null semantics the TLS block follows;
+        // its test pins them). Only the running/url/token detail may go
+        // stale until the next successful read.
         const fresh = await getWebAccessInfo()
-        setInfo(fresh ?? previous)
+        setInfo(fresh ?? { ...previous, enabled: next })
       } catch (err) {
         logger.error('Failed to toggle web access:', err)
         setInfo(previous) // the backend still holds the previous value

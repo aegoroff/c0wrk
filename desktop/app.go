@@ -104,6 +104,15 @@ type App struct {
 	// wait for them before tearing down the backend application.
 	judgeWG sync.WaitGroup
 
+	// judgeInFlight holds the confirm_ids whose runJudgeEvaluation goroutine
+	// is still running (claimed by beginJudgeEvaluation, released by the
+	// goroutine itself). It bounds judge spawning to one evaluation per
+	// confirmation: a repeat frame for an in-flight evaluation is dropped
+	// instead of starting a second full-budget LLM call that could only lose
+	// the first-responder race. Entries live exactly as long as their
+	// goroutine; judgeWG above remains the shutdown barrier.
+	judgeInFlight sync.Map
+
 	// wailsEmit, when non-nil, is used in place of wailsRuntime.EventsEmit. It
 	// lets tests inject a fake event sink so phase helpers can be exercised
 	// without a live Wails runtime (W-19/W-23). Production wiring keeps it nil.
@@ -1021,19 +1030,33 @@ func webAccessBrowserURL(addr string, tlsEnabled bool) string {
 // GetWebAccessInfo reports the sidecar state for Settings → Web Access.
 // Desktop-only by construction: it is an App method, so the web reflection
 // surface (the FrontendAPI methods) cannot serve it back to a browser tab.
+//
+// The section read is a whole-struct snapshot taken under webAccessMu — the
+// same lock every control-RPC writer above mutates it under. This method is
+// itself renderer-callable, so it races those writers on real,
+// user-triggerable paths (Settings refreshing its info around a toggle), and
+// Token is a multi-word string header: a torn read is UB-class, so the
+// fields are copied once, never walked field-by-field off the live config.
+// The classification and URL rendering stay OUTSIDE the lock on purpose —
+// the same after-the-critical-section rule as refreshWebAccessLoadWarnings
+// (ADR-092): no file I/O rides the transition lock.
 func (a *App) GetWebAccessInfo() WebAccessInfo {
 	info := WebAccessInfo{}
+	var sec config.WebAccessConfig
 	if cfg, _ := a.configRef(); cfg != nil {
-		info.Enabled = cfg.WebAccess.Enabled
-		info.ConfiguredBind = cfg.WebAccess.Bind
-		info.BindIsLoopback = config.IsLoopbackBind(cfg.WebAccess.Bind)
-		info.ConfiguredPort = cfg.WebAccess.Port
-		info.TokenPinned = cfg.WebAccess.Token != ""
-		info.TLSEnabled = cfg.WebAccess.TLS.Enabled
-		info.TLSCert = cfg.WebAccess.TLS.Cert
-		info.TLSKey = cfg.WebAccess.TLS.Key
+		a.webAccessMu.Lock()
+		sec = cfg.WebAccess
+		a.webAccessMu.Unlock()
+		info.Enabled = sec.Enabled
+		info.ConfiguredBind = sec.Bind
+		info.BindIsLoopback = config.IsLoopbackBind(sec.Bind)
+		info.ConfiguredPort = sec.Port
+		info.TokenPinned = sec.Token != ""
+		info.TLSEnabled = sec.TLS.Enabled
+		info.TLSCert = sec.TLS.Cert
+		info.TLSKey = sec.TLS.Key
 		info.CertStatus, info.CertDetail = classifyWebAccessCert(
-			cfg.WebAccess.TLS.Cert, cfg.WebAccess.TLS.Key, cfg.WebAccess.Bind)
+			sec.TLS.Cert, sec.TLS.Key, sec.Bind)
 	}
 	if srv := a.webAccess.Load(); srv != nil {
 		info.Running = true
@@ -1044,10 +1067,12 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 			}
 		}
 		info.Token = srv.AuthToken()
-	} else if cfg, _ := a.configRef(); cfg != nil {
+	} else {
 		// Not running: the configured token is what the next start would
 		// use (an empty value means that start mints and persists one).
-		info.Token = cfg.WebAccess.Token
+		// From the same snapshot as above — a second configRef read here
+		// (the old shape) could interleave a writer between the two reads.
+		info.Token = sec.Token
 	}
 	return info
 }

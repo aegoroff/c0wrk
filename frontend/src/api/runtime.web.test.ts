@@ -61,6 +61,13 @@ class FakeWebSocket {
 
   // Test-side helpers — the server's view of the connection.
 
+  /** Client-side close — the transport's own close() call (the idle
+   *  watchdog's forced recycle). */
+  close(): void {
+    this.readyState = FakeWebSocket.CLOSED
+    this.onclose?.()
+  }
+
   serverOpen(): void {
     this.readyState = FakeWebSocket.OPEN
     this.onopen?.()
@@ -181,6 +188,10 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  // Cancel the idle watchdog BEFORE the globals go away: suites that run on
+  // real timers leave a pending recycle timer behind, and a module instance
+  // discarded here must not fire into a stale socket later.
+  runtime?.cancelWSIdleWatchdog()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.useRealTimers()
@@ -526,6 +537,61 @@ describe('websocket reconnect (virtual time)', () => {
     // After 6 attempts the schedule has hit the 30s cap; the 7th retry still
     // arrives within one capped window.
     expect(FakeWebSocket.instances).toHaveLength(8)
+  })
+})
+
+describe('websocket idle watchdog (virtual time)', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    runtime = await bootedRuntime()
+  })
+
+  it('force-closes a socket idle past the threshold and reconnects with a resync', () => {
+    const resyncs: number[] = []
+    runtime.onWSReconnected(() => resyncs.push(1))
+
+    const first = webSocket()
+    first.serverOpen()
+    vi.advanceTimersByTime(299_999)
+    // One millisecond short of the idle window: the socket stays untouched.
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    // The watchdog assumed the half-open socket dead: a local close, the
+    // warn-once record, and the existing backoff path takes over.
+    expect(loggerWarn).toHaveBeenCalledWith(expect.stringContaining('idle past 5m'))
+    vi.advanceTimersByTime(500)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    // The recycle rode the reconnect path: the retry's open is a RE-connect
+    // (the attempt counter is > 0), so the resync fired — events emitted
+    // during the dead window are re-read by consumers.
+    FakeWebSocket.instances[1]!.serverOpen()
+    expect(resyncs).toEqual([1])
+  })
+
+  it('re-arms on every inbound frame: steady traffic never churns the socket', () => {
+    const first = webSocket()
+    first.serverOpen()
+    // Ten minutes of regular traffic, one frame a minute: every frame
+    // restarts the idle clock long before it expires.
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(60_000)
+      first.serverFrame({ name: 'backend:ready', args: [i] })
+    }
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    // The watchdog is still armed, not disarmed by the traffic: five idle
+    // minutes after the last frame it recycles the socket as before.
+    vi.advanceTimersByTime(300_000)
+    vi.advanceTimersByTime(500)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+  })
+
+  it('leaves a reconnecting transport alone — the backoff owns the down phase', () => {
+    webSocket().serverClose()
+    vi.advanceTimersByTime(10 * 60_000)
+    // The retry fired (a fresh socket exists), but no idle recycle ran while
+    // the transport was down: the warn record is absent.
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(loggerWarn).not.toHaveBeenCalledWith(expect.stringContaining('idle past'))
   })
 })
 

@@ -61,8 +61,11 @@ interface ActiveSessionsState {
    *  deletes the key (a "no pending" answer never overrides a live-derived
    *  HITL signal — the merge in lib/activeSessions is OR-only). */
   setPendingOverride: (sessionId: string, pending: boolean) => void
-  /** Convenience: apply a raw GetPendingActions response (or null on RPC
-   *  failure) as the pending override for one session. */
+  /** Convenience: apply a raw GetPendingActions response as the pending
+   *  override for one session. Null (an RPC failure) is NOT an authoritative
+   *  answer — production callers filter it out before calling (the sweep and
+   *  the hitl_resolved re-query both keep the bit on null); if one still
+   *  arrives it maps to no-pending as before. */
   applyPendingActions: (sessionId: string, response: PendingActionsResponse | null) => void
   /** Drop one session's DB-derived unfinished-task status from the snapshot in
    *  place, so the live-sessions radar stops surfacing it without waiting for
@@ -202,8 +205,12 @@ export function cancelPendingRefresh(): void {
  * path: chatStore starts empty, the DB still says in_progress, and only the
  * backend knows the task is actually blocked on a prompt — the answer
  * upgrades the row (and the badge dot) from green to yellow. Best effort: a
- * failed call yields null, which fails the override open (a true bit is
- * cleared — hasPendingActions(null) is false).
+ * failed call resolves null — null is not an answer, and the sweep applies
+ * only definitive ones. Feeding a null through hasPendingActions would clear
+ * a genuinely-blocked session's override bit (the radar dot flips green while
+ * the prompt is still pending) and the signal may not heal until the next
+ * sweep or dropdown open, so a failed poll leaves the bit exactly as it was;
+ * the next sweep retries.
  *
  * Reads the CURRENT snapshot (and chatStore state) directly — it does not
  * fetch; the caller is responsible for loading/freshness (the mount path
@@ -237,7 +244,10 @@ export async function sweepPendingActions(): Promise<void> {
   })
   await Promise.all(
     targets.map(async (row) => {
-      store.applyPendingActions(row.session.id, await getPendingActions(row.session.id))
+      // Apply only DEFINITIVE answers: a failed poll resolves null, and null
+      // is not authoritative — the override bit is left exactly as it was.
+      const resp = await getPendingActions(row.session.id)
+      if (resp !== null) store.applyPendingActions(row.session.id, resp)
     }),
   )
 }

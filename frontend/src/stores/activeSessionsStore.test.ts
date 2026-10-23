@@ -392,16 +392,42 @@ describe('activeSessionsStore', () => {
       expect(useActiveSessionsStore.getState().pendingOverride).toEqual({ both: true })
     })
 
-    it('heals a stale override bit when the backend answers no pending', async () => {
+    it('heals a stale override bit when the backend answers a definitive no-pending', async () => {
+      useActiveSessionsStore.setState({
+        sessions: [makeSession({ id: 's1', unfinished_task_status: 'in_progress' })],
+        pendingOverride: { s1: true },
+      })
+      // A REAL empty response — the genuine all-empty heal case, not an RPC
+      // failure wearing its shape.
+      mockedGetPendingActions.mockResolvedValue({
+        tool_confirms: [],
+        step_limits: [],
+        plan_approvals: [],
+        ask_user: [],
+        goal_proposals: [],
+        goal_suggestions: [],
+      })
+
+      await sweepPendingActions()
+
+      expect(useActiveSessionsStore.getState().pendingOverride).toEqual({})
+    })
+
+    it('a failed poll (null) preserves the override bit — it is not an answer', async () => {
       useActiveSessionsStore.setState({
         sessions: [makeSession({ id: 's1', unfinished_task_status: 'in_progress' })],
         pendingOverride: { s1: true },
       })
       mockedGetPendingActions.mockResolvedValue(null)
+      const overrideBefore = useActiveSessionsStore.getState().pendingOverride
 
       await sweepPendingActions()
 
-      expect(useActiveSessionsStore.getState().pendingOverride).toEqual({})
+      // The RPC failed; the sweep applied nothing. Clearing the bit here
+      // would flip a genuinely-blocked session's radar dot off, and the
+      // signal may not heal until the next sweep or dropdown open.
+      expect(useActiveSessionsStore.getState().pendingOverride).toEqual({ s1: true })
+      expect(useActiveSessionsStore.getState().pendingOverride).toBe(overrideBefore)
     })
 
     it('re-confirms a really-pending override-only row without reference flapping', async () => {

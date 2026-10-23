@@ -395,6 +395,52 @@ let ws: WebSocket | null = null
 let wsAttempts = 0
 let wsEmitDropWarned = false
 
+/**
+ * Client-side staleness watchdog: neither side currently keeps the events
+ * socket alive (the server defers its ping stage), so a half-open socket —
+ * laptop sleep, NAT rebinding — never fires `onclose`: no reconnect, no
+ * resync, every emit dropped warn-once until a manual reload. Track the last
+ * inbound frame; an idle gap past this threshold means the socket is assumed
+ * dead and is force-closed locally, and the existing onclose → backoff →
+ * reconnect path re-establishes the stream and fires the reconnect resync.
+ * Every inbound frame re-arms the watchdog, so steady traffic never churns
+ * the socket; a healthy-but-silent one is recycled at most once per window,
+ * and the resync loaders are idempotent by contract.
+ */
+const WS_IDLE_RECONNECT_MS = 5 * 60_000
+
+let wsIdleTimer: ReturnType<typeof setTimeout> | null = null
+
+function armWSIdleWatchdog(): void {
+  if (wsIdleTimer !== null) clearTimeout(wsIdleTimer)
+  const sock = ws
+  if (sock === null) return
+  wsIdleTimer = setTimeout(() => {
+    wsIdleTimer = null
+    if (ws !== sock) return
+    logger.warn(
+      `[events] websocket idle past ${Math.round(WS_IDLE_RECONNECT_MS / 60_000)}m with no inbound frames — forcing close to reconnect`,
+    )
+    sock.close()
+  }, WS_IDLE_RECONNECT_MS)
+}
+
+function clearWSIdleWatchdog(): void {
+  if (wsIdleTimer !== null) {
+    clearTimeout(wsIdleTimer)
+    wsIdleTimer = null
+  }
+}
+
+/** Cancel the idle watchdog's pending timer. The web transport never tears
+ *  down in production (the socket lives for the page), so this exists for
+ *  teardown paths — public for tests, like the sessions store's
+ *  cancelPendingRefresh: a module instance discarded between tests must not
+ *  fire into a stale socket. */
+export function cancelWSIdleWatchdog(): void {
+  clearWSIdleWatchdog()
+}
+
 /** Re-connect subscribers (see onWSReconnected). */
 const wsReconnectListeners = new Set<() => void>()
 
@@ -445,11 +491,16 @@ function connectWS(): void {
     const reconnected = wsAttempts > 0
     wsAttempts = 0
     wsEmitDropWarned = false
+    // The open itself is inbound liveness: start the staleness clock.
+    armWSIdleWatchdog()
     if (reconnected) notifyWSReconnected()
   }
   sock.onmessage = (ev: MessageEvent) => handleWSFrame(ev.data)
   sock.onclose = () => {
     if (ws !== sock) return
+    // No socket to watch — the reconnect timer below owns the next attempt,
+    // and its success re-arms the watchdog via onopen.
+    clearWSIdleWatchdog()
     ws = null
     scheduleWSReconnect()
   }
@@ -467,6 +518,9 @@ function scheduleWSReconnect(): void {
 
 /** Normalize one WS frame into the dispatchBatchedEvent fan-out. */
 function handleWSFrame(raw: unknown): void {
+  // Any inbound frame — even a malformed one — is proof of liveness: re-arm
+  // the staleness watchdog before anything else.
+  armWSIdleWatchdog()
   let msg: unknown
   try {
     msg = JSON.parse(typeof raw === 'string' ? raw : String(raw))

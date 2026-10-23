@@ -224,7 +224,11 @@ func (a *App) handleToolConfirmResponse(payload map[string]any, log *slog.Logger
 
 // handleToolJudgeRequest is the body of the EventToolJudgeRequest listener.
 // It looks up the pending confirmation metadata and spawns runJudgeEvaluation
-// asynchronously so the event listener returns promptly.
+// asynchronously so the event listener returns promptly. An in-flight marker
+// keyed by confirm_id drops repeat frames while an evaluation is still
+// running: first-responder-wins protects the response DELIVERY, but without
+// the marker a second frame (a double-click, a scripted client) would fan out
+// a second full-budget LLM evaluation that could only lose the response race.
 func (a *App) handleToolJudgeRequest(payload map[string]any, uiEmit func(session.Event), log *slog.Logger) {
 	confirmID, ok := stringField(payload, "confirm_id", "tool judge request", log)
 	if !ok {
@@ -242,11 +246,32 @@ func (a *App) handleToolJudgeRequest(payload map[string]any, uiEmit func(session
 		return
 	}
 
+	if !a.beginJudgeEvaluation(confirmID) {
+		log.Debug("judge evaluation already in flight; dropping repeat request",
+			"confirm_id", confirmID, "tool", pendingData.toolName)
+		return
+	}
 	a.judgeWG.Add(1)
 	go func() {
 		defer a.judgeWG.Done()
+		defer a.finishJudgeEvaluation(confirmID)
 		a.runJudgeEvaluation(confirmID, pendingData, uiEmit, log)
 	}()
+}
+
+// beginJudgeEvaluation claims the confirm_id's in-flight slot: true means the
+// caller owns the evaluation and must release it through
+// finishJudgeEvaluation; false means an evaluation for this confirm_id is
+// already running and a repeat request is dropped. The marker closes the gap
+// first-responder-wins leaves open — it protects the spawn, not the delivery.
+func (a *App) beginJudgeEvaluation(confirmID string) bool {
+	_, loaded := a.judgeInFlight.LoadOrStore(confirmID, struct{}{})
+	return !loaded
+}
+
+// finishJudgeEvaluation releases the claim taken by beginJudgeEvaluation.
+func (a *App) finishJudgeEvaluation(confirmID string) {
+	a.judgeInFlight.Delete(confirmID)
 }
 
 // runJudgeEvaluation performs the on-demand judge call and emits the response
