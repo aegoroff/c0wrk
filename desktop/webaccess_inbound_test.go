@@ -294,20 +294,34 @@ func TestWebInboundDispatch_Drops(t *testing.T) {
 			}
 		}
 	})
-	t.Run("whitelisted event with empty args warns and drops", func(t *testing.T) {
+	t.Run("whitelisted event with empty args drops at Debug", func(t *testing.T) {
 		a := &App{}
 		log, buf := captureLogger()
 		a.dispatchWebInboundFrame(webInboundFrame(t, "tool_confirm_response"), silentUIEmit(), log)
 		if !strings.Contains(buf.String(), "missing payload") {
-			t.Errorf("expected the missing-payload warning, got %q", buf.String())
+			t.Errorf("expected the missing-payload drop record, got %q", buf.String())
+		}
+		// The file's security invariant: network input must not write unbounded
+		// Warn lines — the payload-shape drop stays Debug-level.
+		if strings.Contains(buf.String(), "level=WARN") {
+			t.Errorf("payload drop must never log at Warn, got %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "level=DEBUG") {
+			t.Errorf("expected a Debug drop record, got %q", buf.String())
 		}
 	})
-	t.Run("whitelisted event with non-map payload warns and drops", func(t *testing.T) {
+	t.Run("whitelisted event with non-map payload drops at Debug", func(t *testing.T) {
 		a := &App{}
 		log, buf := captureLogger()
 		a.dispatchWebInboundFrame(webInboundFrame(t, "tool_confirm_response", "not a map"), silentUIEmit(), log)
 		if !strings.Contains(buf.String(), "unexpected payload type") {
-			t.Errorf("expected the unexpected-payload-type warning, got %q", buf.String())
+			t.Errorf("expected the unexpected-payload-type drop record, got %q", buf.String())
+		}
+		if strings.Contains(buf.String(), "level=WARN") {
+			t.Errorf("payload drop must never log at Warn, got %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "level=DEBUG") {
+			t.Errorf("expected a Debug drop record, got %q", buf.String())
 		}
 	})
 	t.Run("nil frame never panics", func(t *testing.T) {

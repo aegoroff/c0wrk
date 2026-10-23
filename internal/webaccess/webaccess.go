@@ -386,11 +386,24 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.ln = ln
+	// Pin HTTP/1.1-only: /ws is a Hijacker-based Upgrade handshake and cannot
+	// survive HTTP/2, and an automatic h2 setup would let browsers attempt
+	// WebSocket-over-HTTP/2 (RFC 8441 extended CONNECT — no Upgrade, no
+	// Hijacker) for wss:// under TLS. Go's h2 server currently rejects
+	// extended CONNECT by default, but that default is explicitly temporary
+	// (GODEBUG http2xconnect, go issue #71128) — the non-nil Protocols below
+	// disables the automatic h2 configuration outright on both the TLS and
+	// the plain listener (h2c was never enabled) instead of riding that
+	// default. The ALPN assertion in TestServer_TLSEndToEnd fails when this
+	// pin is removed.
+	protos := new(http.Protocols)
+	protos.SetHTTP1(true)     // the zero (empty) set denies every protocol
 	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-092), floor 1.2 pinned in New; timeouts set below
 		Handler:           s.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		TLSConfig:         s.tls,
+		Protocols:         protos,
 		// Route the stdlib server's internal diagnostics (refused TLS
 		// handshakes, protocol misuse) through the injected slog logger at
 		// Warn level — they are client-triggered and carry no secrets, and

@@ -4,6 +4,11 @@
 // pure-text pastes and delegates everything else — images and copied files —
 // to the async handler built here. This hook owns the "non-fast-path" body:
 //
+//   0. Transport branch — on the web transport the backend paste RPC is
+//      denylisted (host clipboard never crosses to the browser), so the
+//      DataTransfer's file/image items are staged client-side through
+//      stageAttachmentFiles and the handler returns before any RPC; a
+//      text flavor riding alongside is inserted at the cursor.
 //   1. Vision resolution — the active model's image-input capability is
 //      resolved exactly as useStageAttachments does (selectedModel override,
 //      else global defaultModel; findModelInfo + .vision). supportsVision is
@@ -24,8 +29,9 @@
 // hook stays focused on CM lifecycle.
 
 import { useCallback } from 'react'
-import { emit } from '@/api/runtime'
+import { emit, isWebTransport } from '@/api/runtime'
 import { pasteFromClipboard } from '@/api/attachments'
+import { useStageAttachments } from '@/hooks/useStageAttachments'
 import {
   beginAttachmentUploadsFresh,
   collectPasteUploadDescriptors,
@@ -78,9 +84,55 @@ export function usePasteHandler(editor: ChatEditorAPI): {
 } {
   const selectedModel = useInputModeStore((s) => s.selectedModel)
   const { allModels, defaultModel } = useConfigData()
+  const { stageAttachmentFiles } = useStageAttachments()
 
   const onPaste = useCallback(
     async (_data: DataTransfer): Promise<void> => {
+      // Web transport: the PasteFromClipboard RPC is server-denylisted (host
+      // clipboard content is never exposed to the browser — the webaccess
+      // dispatch denylist), so the desktop probe can only ever fail here.
+      // The DataTransfer already carries the payloads — stage file/image
+      // items client-side through the same pipeline the picker and drag-drop
+      // use (vision gating, session-on-demand, upload chips) and return
+      // before the RPC. Only non-fast-path pastes reach this handler (the
+      // editor inserts text natively), so a plain-text flavor here rides
+      // alongside files; insert it at the cursor, keyed to the origin
+      // session like every other write in this handler.
+      if (isWebTransport()) {
+        const originSessionId = useSessionStore.getState().activeSessionId
+        try {
+          const files = Array.from(_data.files ?? [])
+          if (files.length > 0) {
+            await stageAttachmentFiles(originSessionId, files)
+          }
+          const text = _data.getData('text/plain')
+          if (text.length > 0) {
+            // Session-on-demand mirrors the desktop path (a paste must land
+            // somewhere); staging above may already have created one.
+            const sessionId =
+              originSessionId ??
+              useSessionStore.getState().activeSessionId ??
+              (await ensureActiveSession()).id
+            if (useSessionStore.getState().activeSessionId === sessionId) {
+              editor.insertAtCursor(text)
+            } else {
+              // The user switched away mid-paste: the live editor belongs to
+              // another session — append to the origin draft instead.
+              const input = useChatInputStore.getState()
+              const draft = getInputState(input.inputs, sessionId).draft
+              input.setDraft(sessionId, draft + text)
+            }
+          }
+        } catch (err) {
+          logger.error('Failed to handle paste:', err)
+          emit('runtime_error', {
+            id: generateUUID(),
+            message: 'Failed to paste from clipboard',
+          })
+        }
+        return
+      }
+
       // MUST be read synchronously (see collectPasteUploadDescriptors).
       let pasteUploads: AttachmentUploadUI[] = []
       try {
@@ -185,7 +237,7 @@ export function usePasteHandler(editor: ChatEditorAPI): {
         })
       }
     },
-    [editor, selectedModel, allModels, defaultModel],
+    [editor, selectedModel, allModels, defaultModel, stageAttachmentFiles],
   )
 
   return { onPaste }

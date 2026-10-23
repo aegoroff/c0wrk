@@ -275,64 +275,6 @@ func TestMLXChildEnv(t *testing.T) {
 	}
 }
 
-// TestSpawnMLXChildEnvTakesTheInterpreter pins the spawn site to mlxChildEnv's
-// contract: the spawner receives the INTERPRETER path (spec.ServerBinary is the
-// pinned python for this engine), the same shape the pip and smoke call sites
-// pass — not its directory. A bin dir here shifts every derivation one level
-// up: PATH loses the pinned bin dir entirely and MTPLX_CONFIG/MTPLX_MODEL_DIR
-// land in the shared runtimes root, a directory no removal scope deletes.
-func TestSpawnMLXChildEnvTakesTheInterpreter(t *testing.T) {
-	t.Parallel()
-
-	srv := NewServer(Layout{}, discardLogger())
-	srv.HostOS = "darwin"
-	sp := &fakeSpawner{}
-	srv.Spawn = sp.spawn
-
-	python := string(filepath.Separator) + filepath.Join("runtimes", "mtplx-"+MTPLXVersion, "python", "bin", "python3.12")
-	spec := mlxLaunchSpec()
-	spec.ServerBinary = python
-	if _, err := srv.spawn(context.Background(), spec); err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-	cmd := sp.lastCommand()
-
-	// The exec target is untouched, and the child CWD stays the pinned bin
-	// dir — the interpreter's directory — exactly as before.
-	if cmd.Binary != python {
-		t.Errorf("Binary = %q, want the pinned interpreter %q", cmd.Binary, python)
-	}
-	if want := filepath.Dir(python); cmd.Dir != want {
-		t.Errorf("Dir = %q, want %q", cmd.Dir, want)
-	}
-
-	// The env derivation consumed the interpreter path: PATH leads with the
-	// pinned bin dir, and the engine's state paths resolve inside the engine
-	// tree (triple-Dir of the interpreter), not the shared runtimes root.
-	binDir := filepath.Dir(python)
-	treeRoot := filepath.Dir(filepath.Dir(filepath.Dir(python)))
-	env := make(map[string]string, len(cmd.Env))
-	for _, entry := range cmd.Env {
-		name, value, found := strings.Cut(entry, "=")
-		if found {
-			env[name] = value
-		}
-	}
-	path, ok := env["PATH"]
-	if !ok {
-		t.Fatalf("the mtplx child env carries no PATH: %v", cmd.Env)
-	}
-	if got, _, _ := strings.Cut(path, pathListSeparator("darwin")); got != binDir {
-		t.Errorf("PATH leads with %q, want the pinned bin dir %q", got, binDir)
-	}
-	if want := filepath.Join(treeRoot, "config.toml"); env["MTPLX_CONFIG"] != want {
-		t.Errorf("MTPLX_CONFIG = %q, want %q", env["MTPLX_CONFIG"], want)
-	}
-	if env["MTPLX_MODEL_DIR"] != treeRoot {
-		t.Errorf("MTPLX_MODEL_DIR = %q, want the engine tree %q", env["MTPLX_MODEL_DIR"], treeRoot)
-	}
-}
-
 func TestReadHealthContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {

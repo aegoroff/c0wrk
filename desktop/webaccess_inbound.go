@@ -39,7 +39,12 @@ func (a *App) webWSInboundDispatcher(log *slog.Logger) func(*webaccess.WSConn, [
 // the shared HITL handlers. Anything malformed, unnamed, or outside the
 // whitelist is dropped with a Debug record and never touches the handlers;
 // the connection stays alive (the server only closes it on a handler panic,
-// which the handlers do not produce).
+// which the handlers do not produce). The payload-shape gate is inline and
+// Debug-only — the shared extractPayload helper logs the same two failure
+// shapes at Warn, which would hand a network peer an unbounded Warn stream
+// (see the security model above); the Wails path keeps those Warns.
+// Whitelist first: an unrecognized name is dropped before its payload is
+// judged.
 func (a *App) dispatchWebInboundFrame(data []byte, uiEmit func(session.Event), log *slog.Logger) {
 	var env struct {
 		Name string `json:"name"`
@@ -51,52 +56,42 @@ func (a *App) dispatchWebInboundFrame(data []byte, uiEmit func(session.Event), l
 	}
 
 	// The whitelist mirrors wireWailsEventListeners one-to-one: the same
-	// event constants, the same payload extraction, the same handlers. JSON
-	// numbers arrive as float64, which parseConfirmDecision already accepts.
+	// event constants, the same handlers. An unrecognized name is dropped
+	// before anything is said about its payload. JSON numbers arrive as
+	// float64, which parseConfirmDecision already accepts.
+	var dispatch func(map[string]any)
 	switch env.Name {
 	case backend.EventToolConfirmResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleToolConfirmResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handleToolConfirmResponse(payload, log) }
 	case backend.EventToolJudgeRequest:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleToolJudgeRequest(payload, uiEmit, log)
+		dispatch = func(payload map[string]any) { a.handleToolJudgeRequest(payload, uiEmit, log) }
 	case backend.EventAskUserResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleAskUserResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handleAskUserResponse(payload, log) }
 	case backend.EventStepLimitResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleStepLimitResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handleStepLimitResponse(payload, log) }
 	case backend.EventPlanApprovalResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handlePlanApprovalResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handlePlanApprovalResponse(payload, log) }
 	case backend.EventGoalProposalResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleGoalProposalResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handleGoalProposalResponse(payload, log) }
 	case backend.EventGoalSuggestionResponse:
-		payload, ok := extractPayload(env.Name, env.Args, log)
-		if !ok {
-			return
-		}
-		a.handleGoalSuggestionResponse(payload, log)
+		dispatch = func(payload map[string]any) { a.handleGoalSuggestionResponse(payload, log) }
 	default:
 		log.Debug("web inbound: event not allowed from the web dropped", "event", env.Name)
+		return
 	}
+
+	// The shape contract of the shared handlers, checked here instead of
+	// through extractPayload so the drop stays Debug: exactly one argument,
+	// a JSON object (the payload map). The Wails path tolerates extra args
+	// and logs Warn; this path is network input — strict and silent.
+	if len(env.Args) != 1 {
+		log.Debug("web inbound: payload dropped", "event", env.Name, "reason", "missing payload")
+		return
+	}
+	payload, ok := env.Args[0].(map[string]any)
+	if !ok {
+		log.Debug("web inbound: payload dropped", "event", env.Name, "reason", "unexpected payload type")
+		return
+	}
+	dispatch(payload)
 }

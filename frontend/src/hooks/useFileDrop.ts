@@ -15,8 +15,12 @@
 // actual staging comes from the Wails `files:dropped` event, which is the only
 // source that yields absolute paths.
 //
-// The hook is a no-op in terminal mode: dropping files into the terminal would
-// be surprising, and the terminal panel is the active surface there.
+// The staging (and the drop-zone highlight it feeds) is active in chat mode
+// only: dropping files into the terminal would be surprising. The dragover/
+// drop preventDefault (navigation suppression) is NOT mode-gated — in a
+// browser tab it is the only thing keeping an accidental drop anywhere over
+// the window from navigating the tab to the file's content, discarding the
+// whole SPA state.
 
 import { useEffect, useRef, useState } from 'react'
 import { isWebTransport, onGlobalEvent } from '@/api/runtime'
@@ -52,17 +56,21 @@ export function useFileDrop(activeSessionId: string | null): {
   const dragEnterCount = useRef(0)
 
   useEffect(() => {
-    if (mode !== 'chat') {
-      // Reset state so a leftover highlight doesn't persist across a mode switch.
-      dragEnterCount.current = 0
-      setDragActive(false)
-      return
-    }
+    // Navigation suppression is NOT mode-gated: preventDefault on dragover/
+    // drop is the only thing stopping a browser tab from navigating away to
+    // the dropped file's content (the Wails webview has the OS-level
+    // OnFileDrop intercept; a browser tab has nothing else). Only the
+    // STAGING (and the highlight overlay it feeds) is chat-only — dropping
+    // files into the terminal would be surprising.
+    const stagingActive = mode === 'chat'
 
     const resetDrag = () => {
       dragEnterCount.current = 0
       setDragActive(false)
     }
+    // A mode switch re-runs this effect: clear any overlay a drag that was
+    // in flight at the switch left behind.
+    resetDrag()
 
     // --- Drive the highlight overlay via document-level HTML5 drag events. ---
     // preventDefault on dragover is REQUIRED for the browser to fire `drop` and
@@ -74,6 +82,7 @@ export function useFileDrop(activeSessionId: string | null): {
       // Only react to drags carrying files.
       if (!hasFiles(e)) return
       e.preventDefault()
+      if (!stagingActive) return
       dragEnterCount.current++
       setDragActive(true)
     }
@@ -81,6 +90,7 @@ export function useFileDrop(activeSessionId: string | null): {
     const onDragOver = (e: DragEvent) => {
       if (!hasFiles(e)) return
       e.preventDefault()
+      if (!stagingActive) return
       // Keep the highlight steady while moving over the window. setState with
       // the same value is a no-op, so this is cheap and avoids a stale-closure
       // read of dragActive.
@@ -88,6 +98,7 @@ export function useFileDrop(activeSessionId: string | null): {
     }
 
     const onDragLeave = () => {
+      if (!stagingActive) return
       // dataTransfer may be null/empty on dragleave (notably when leaving the
       // window), so decrement unconditionally to avoid a stuck overlay. The
       // counter is only ever incremented for file drags (onDragEnter), so a
@@ -96,8 +107,9 @@ export function useFileDrop(activeSessionId: string | null): {
       if (dragEnterCount.current === 0) setDragActive(false)
     }
 
-    // Suppress the default "open file" navigation on every transport; where
-    // the files come from differs per transport (below).
+    // Suppress the default "open file" navigation on every transport and in
+    // every input mode; where the files come from differs per transport
+    // (below).
     const suppressNavigation = (e: DragEvent) => {
       e.preventDefault()
       resetDrag()
@@ -110,6 +122,7 @@ export function useFileDrop(activeSessionId: string | null): {
       // through AttachFileContent directly.
       const onDrop = (e: DragEvent) => {
         suppressNavigation(e)
+        if (!stagingActive) return
         const files = Array.from(e.dataTransfer?.files ?? [])
         if (files.length === 0) return
         void stageAttachmentFiles(activeSessionId, files)
@@ -138,6 +151,7 @@ export function useFileDrop(activeSessionId: string | null): {
     // the authoritative signal that the drop completed — reset the highlight
     // here so it can't stick after the files are staged.
     const unsub = onGlobalEvent('files:dropped', (data) => {
+      if (!stagingActive) return
       if (!isFilesDroppedData(data)) return
       resetDrag()
       if (data.paths.length === 0) return

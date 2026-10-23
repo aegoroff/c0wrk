@@ -360,7 +360,9 @@ func doGet(t *testing.T, client *http.Client, url string) *http.Response {
 // hostname verification against the generated IP SANs succeeds, TLS 1.2
 // exactly is accepted, TLS 1.1 is refused by the pinned floor with a
 // server-side diagnostic, the login cookie carries Secure only under TLS,
-// and a plaintext request against the TLS port never reaches the API.
+// a plaintext request against the TLS port never reaches the API, and the
+// listener is pinned to HTTP/1.1 (never h2 — the /ws Upgrade handshake is a
+// Hijacker flow an HTTP/2 stream cannot carry).
 func TestServer_TLSEndToEnd(t *testing.T) {
 	certPath, keyPath := tempPairPaths(t)
 	if err := GenerateWebAccessCertificate("127.0.0.1", certPath, keyPath); err != nil {
@@ -496,6 +498,54 @@ func TestServer_TLSEndToEnd(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusOK {
 			t.Error("plaintext request unexpectedly succeeded against the TLS listener")
+		}
+	})
+
+	t.Run("server is pinned to HTTP/1.1 only", func(t *testing.T) {
+		p := srv.httpSrv.Protocols
+		if p == nil {
+			t.Fatal("Server.Protocols is nil: ServeTLS auto-configures HTTP/2, and the /ws " +
+				"Upgrade handshake cannot survive an h2 stream")
+		}
+		if !p.HTTP1() {
+			t.Error("Protocols.HTTP1 = false, want true")
+		}
+		if p.HTTP2() {
+			t.Error("Protocols.HTTP2 = true, want false: h2 would let browsers attempt " +
+				"WebSocket-over-HTTP/2 against the Hijacker-based /ws handshake")
+		}
+		if p.UnencryptedHTTP2() {
+			t.Error("Protocols.UnencryptedHTTP2 = true, want false")
+		}
+	})
+
+	t.Run("TLS listener never offers h2 over ALPN", func(t *testing.T) {
+		// The wire-level regression for the Protocols pin: a browser-shaped
+		// ClientHello offering both h2 and http/1.1 must negotiate http/1.1.
+		// A future Go (or a removed pin) that re-enables h2 flips this to h2
+		// and fails here instead of silently killing /ws under TLS.
+		d := tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: 2 * time.Second},
+			Config: &tls.Config{
+				RootCAs:    pool,
+				ServerName: "localhost",
+				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"h2", "http/1.1"},
+			},
+		}
+		raw, err := d.DialContext(context.Background(), "tcp", addr)
+		if err != nil {
+			t.Fatalf("TLS dial: %v", err)
+		}
+		conn, ok := raw.(*tls.Conn)
+		if !ok {
+			_ = raw.Close()
+			t.Fatalf("dial returned %T, want *tls.Conn", raw)
+		}
+		defer func() { _ = conn.Close() }()
+		if got := conn.ConnectionState().NegotiatedProtocol; got != "http/1.1" {
+			t.Fatalf("ALPN negotiated %q, want %q — h2 must never be offered (the /ws "+
+				"handshake is a Hijacker-based Upgrade that HTTP/2 cannot carry)", got, "http/1.1")
 		}
 	})
 }

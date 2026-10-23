@@ -48,6 +48,15 @@ export function useSessionLoader(): void {
     // this is set, so it can never restore against a leftover list of another
     // project.
     let listApplied = false
+    // Armed when the initial load resolves stale (a sessions:changed re-read
+    // was issued mid-flight and owns the store) BEFORE any list was applied:
+    // the re-read's apply deliberately never restores, so without this flag
+    // the activation's restore contract would dangle unconsumed —
+    // savedSessionId resolved but no session ever auto-selected. The next
+    // application by this activation (the winning re-read, or a
+    // sessions:loaded push) consumes the flag exactly once, still through
+    // restoreIfIdle's idle-only guard.
+    let pendingRestore = false
     // Pending sessions:changed debounce timer (cleared on teardown).
     let changedTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -89,6 +98,9 @@ export function useSessionLoader(): void {
           store().setSessions(owned)
           listApplied = true
           restoreIfIdle(owned)
+          // This application carried the activation's restore (the call
+          // above) — an armed pending restore is fulfilled here.
+          pendingRestore = false
         })
       }),
     )
@@ -130,6 +142,14 @@ export function useSessionLoader(): void {
               if (useProjectStore.getState().activeProjectId !== projectId) return
               store().setSessions(sessions)
               listApplied = true
+              // Consume an armed activation restore: when the initial load
+              // went stale pre-application, THIS re-read is the application
+              // the restore has been waiting for. One-shot and idle-only —
+              // a re-read on its own never auto-selects anything.
+              if (pendingRestore) {
+                pendingRestore = false
+                restoreIfIdle(sessions)
+              }
             })
             .catch(() => {
               // Already logged by the api wrapper; the current list is kept —
@@ -160,8 +180,15 @@ export function useSessionLoader(): void {
         // store, so this stale result is dropped. The switch's restore
         // contract still holds, though — restore against the freshest list
         // this activation has applied (listApplied guarantees it belongs to
-        // this project; restoreIfIdle itself is a no-op unless idle).
-        if (listApplied) restoreIfIdle(store().sessions ?? [])
+        // this project; restoreIfIdle itself is a no-op unless idle). When
+        // nothing was applied yet, arm the pending restore instead: the
+        // winning application (the re-read's apply, or a sessions:loaded
+        // push) must carry the restore this activation is still owed.
+        if (listApplied) {
+          restoreIfIdle(store().sessions ?? [])
+        } else {
+          pendingRestore = true
+        }
         return
       }
       store().setSessions(sessions)

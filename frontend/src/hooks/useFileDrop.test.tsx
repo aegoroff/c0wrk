@@ -19,9 +19,10 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 // Registry capturing onGlobalEvent subscriptions so tests can emit events.
-const { registry, stageSpy } = vi.hoisted(() => ({
+const { registry, stageSpy, webTransport } = vi.hoisted(() => ({
   registry: new Map<string, Array<(data: unknown) => void>>(),
   stageSpy: vi.fn<(sessionId: string | null, paths: string[]) => Promise<void>>(),
+  webTransport: { enabled: false },
 }))
 
 vi.mock('@/api/runtime', () => ({
@@ -34,7 +35,7 @@ vi.mock('@/api/runtime', () => ({
       registry.set(event, arr.filter((c) => c !== cb))
     }
   },
-  isWebTransport: () => false,
+  isWebTransport: () => webTransport.enabled,
 }))
 
 vi.mock('@/hooks/useStageAttachments', () => ({
@@ -50,14 +51,17 @@ function emitGlobal(event: string, data: unknown): void {
 }
 
 /** Synthesize a document drag event carrying files (jsdom has no real
- *  DataTransfer, so we attach a minimal stand-in the hook's hasFiles accepts). */
-function dispatchDragEvent(type: 'dragenter' | 'dragover' | 'dragleave' | 'drop'): void {
-  const ev = new Event(type, { bubbles: true })
+ *  DataTransfer, so we attach a minimal stand-in the hook's hasFiles accepts).
+ *  The event is cancelable so tests can assert the hook's preventDefault (the
+ *  navigation-suppression contract). Returns the dispatched event. */
+function dispatchDragEvent(type: 'dragenter' | 'dragover' | 'dragleave' | 'drop'): Event {
+  const ev = new Event(type, { bubbles: true, cancelable: true })
   Object.defineProperty(ev, 'dataTransfer', {
     value: { files: [{}], types: ['Files'] },
     configurable: true,
   })
   document.dispatchEvent(ev)
+  return ev
 }
 
 /** A drag event carrying NO files (e.g. a text drag) — must be ignored. */
@@ -90,6 +94,7 @@ beforeEach(() => {
   act(() => { useInputModeStore.setState({ mode: 'chat' }) })
   registry.clear()
   stageSpy.mockReset()
+  webTransport.enabled = false
   capturedDragActive = false
 
   container = document.createElement('div')
@@ -239,5 +244,53 @@ describe('useFileDrop', () => {
       emitGlobal('files:dropped', { paths: ['/x/a.md'], x: 0, y: 0 })
     })
     expect(stageSpy).not.toHaveBeenCalled()
+  })
+
+  describe('web transport', () => {
+    it('suppresses navigation for a file drop in terminal mode and stages nothing', () => {
+      // The finding's scenario: with the terminal panel open (any non-chat
+      // mode) there is no OS-level drop intercept in a browser tab — without
+      // the listeners the tab navigates to the dropped file's content,
+      // discarding the whole SPA state. The listeners must be registered in
+      // every mode; only the staging call is chat-gated.
+      webTransport.enabled = true
+      act(() => { useInputModeStore.setState({ mode: 'terminal' }) })
+      mount('sess-1')
+
+      let ev: Event
+      act(() => { ev = dispatchDragEvent('dragenter') })
+      expect(ev!.defaultPrevented).toBe(true)
+      // No staging overlay outside chat mode.
+      expect(capturedDragActive).toBe(false)
+
+      act(() => { ev = dispatchDragEvent('drop') })
+      expect(ev!.defaultPrevented).toBe(true)
+      expect(stageSpy).not.toHaveBeenCalled()
+      expect(capturedDragActive).toBe(false)
+    })
+
+    it('suppresses navigation on dragover in terminal mode (the drop enabler)', () => {
+      webTransport.enabled = true
+      act(() => { useInputModeStore.setState({ mode: 'terminal' }) })
+      mount('sess-1')
+
+      const ev = dispatchDragEvent('dragover')
+      expect(ev.defaultPrevented).toBe(true)
+      expect(stageSpy).not.toHaveBeenCalled()
+    })
+
+    it('stages dropped File objects in chat mode (the HTML5 drop is the source)', async () => {
+      webTransport.enabled = true
+      stageSpy.mockResolvedValue(undefined)
+      mount('sess-1')
+
+      act(() => { dispatchDragEvent('dragenter') })
+      expect(capturedDragActive).toBe(true)
+
+      act(() => { dispatchDragEvent('drop') })
+      expect(capturedDragActive).toBe(false)
+      expect(stageSpy).toHaveBeenCalledOnce()
+      expect(stageSpy).toHaveBeenCalledWith('sess-1', expect.any(Array))
+    })
   })
 })

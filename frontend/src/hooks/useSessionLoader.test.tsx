@@ -469,6 +469,55 @@ describe('useSessionLoader', () => {
       expect(useSessionStore.getState().activeSessionId).toBeNull()
     })
 
+    it('restores through the winning re-read when the initial fetch goes stale pre-application', async () => {
+      // The review race: the re-read is issued while the initial load is in
+      // flight AND the initial read resolves first — stale, with nothing
+      // applied yet. The re-read's apply deliberately never restores, so the
+      // activation's saved-session pointer would dangle unconsumed (no
+      // session auto-selected). The stale branch must arm a pending restore
+      // that the winning application carries once.
+      vi.useFakeTimers()
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      let releaseInitial!: (v: SessionInfo[]) => void
+      let releaseRefresh!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseInitial = resolve }),
+      )
+      renderLoader()
+
+      // The foreign mutation schedules the re-read fetch (gated too).
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseRefresh = resolve }),
+      )
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      // The INITIAL read resolves first — already stale (fetchSeq moved),
+      // and nothing has been applied yet: no restore may fire from the
+      // stale branch itself, the flag is armed instead.
+      releaseInitial([makeSession({ id: 'saved-session', project_id: 'project-1' })])
+      await flush()
+      expect(useSessionStore.getState().sessions).toBeNull()
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+
+      // The re-read applies the post-mutation list — and carries the
+      // activation's restore against it.
+      releaseRefresh!([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'forked', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      await flush()
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual([
+        'forked',
+        'saved-session',
+      ])
+      expect(useSessionStore.getState().activeSessionId).toBe('saved-session')
+    })
+
     it('supersedes an older in-flight re-read with a newer one', async () => {
       vi.useFakeTimers()
       renderLoader()
