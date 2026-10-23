@@ -71,15 +71,22 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
     if (isWebTransport()) {
       // Web transport: there is no native save dialog — hand the browser a
       // plain anchor download instead (the trivially-replaceable native
-      // dialog from the roadmap). A revoked object URL after the click is
-      // safe: the download has already been handed to the browser.
+      // dialog from the roadmap).
       const blob = new Blob([text], { type: 'text/markdown' })
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
       anchor.download = 'message.md'
       anchor.click()
-      URL.revokeObjectURL(url)
+      // Defer the revocation — a same-tick revokeObjectURL is NOT safe here:
+      // WebKit/Safari have historically raced it against the in-flight
+      // download handoff, so the click cancels, no file arrives, and the
+      // button still claims "Download started" (Chromium/Firefox tolerate
+      // the same-tick revoke; the web transport targets every browser).
+      // The 10 s revoke is the FileSaver.js approach. The timer is
+      // deliberately detached: its callback touches no state, so firing
+      // after unmount is exactly how the URL still gets reclaimed.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
       // The anchor click cannot report failure (a popup blocker can eat it
       // silently) — claim only that the download was handed to the browser.
       flashFeedback('download-started')

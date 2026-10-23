@@ -273,11 +273,29 @@ describe('CopyButton in web transport (no native save dialog)', () => {
     const blob = createObjectURL.mock.calls[0]?.[0]
     expect(await blob?.text()).toBe('markdown body')
     expect(anchorClick).toHaveBeenCalledTimes(1)
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
     // The anchor download cannot report failure — the feedback claims only
     // that it started, never "Saved".
     expect(container.textContent).toContain('Download started')
     expect(container.textContent).not.toContain('Saved')
+    // The object-URL revocation is DEFERRED, not same-tick: WebKit/Safari
+    // race a synchronous revokeObjectURL against the in-flight download
+    // handoff and can cancel it entirely (no file arrives while the button
+    // already claimed "Download started"). Nothing is revoked at click time…
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+    // …and the detached 10 s revoke reclaims the URL once the handoff has
+    // certainly settled — including after unmount. Release Shift BEFORE
+    // that unmount: this is the only test here that unmounts early, and a
+    // keyup after unmount never reaches the store's detached listeners (a
+    // held Shift would leak into the next test — see the afterEach note).
+    releaseShift()
+    act(() => {
+      root.unmount()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+    })
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
   })
 
   it('the plain click still copies through the shared transport clipboard', async () => {

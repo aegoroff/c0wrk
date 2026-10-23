@@ -218,6 +218,53 @@ describe('SystemNotificationSettings', () => {
     await flush()
     expect(testButton()).toBeNull()
   })
+
+  it('toggle-on on the desktop keeps a real denied authorization (no-op ensure must not wipe the hint)', async () => {
+    // The mount probe read the REAL OS authorization (macOS System Settings:
+    // denied). The desktop ensureNotificationPermission is a no-op resolving
+    // 'granted' — folding that constant into the section state used to hide
+    // the hint and reveal the Test button while the OS still refuses.
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    expect(hintText()).not.toBeNull()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    // The hint survives the off→on toggle; the button stays hidden and the
+    // preview stays suppressed (the send lands nowhere on a denied channel).
+    expect(hintText()).toBe(
+      'Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts',
+    )
+    expect(testButton()).toBeNull()
+    expect(mocks.send).not.toHaveBeenCalled()
+  })
+
+  it('toggle-on on the web still derives the section state from the prompt outcome', async () => {
+    // The web outcome IS a permission verdict, so the derivation must keep
+    // running there: a denied prompt keeps the browser-specific hint.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.ensureNotificationPermission.mockResolvedValue('denied')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    expect(hintText()).not.toBeNull()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    expect(hintText()).toBe(
+      'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts',
+    )
+    expect(testButton()).toBeNull()
+  })
 })
 
 // --- Banner lifetime -------------------------------------------------------

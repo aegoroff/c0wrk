@@ -143,7 +143,17 @@ export function SystemNotificationSettings() {
         // closed WITHOUT an answer — is NOT a denial (ADR-090, decision 11):
         // it lands in the neutral state, so no hint shows and the Test
         // button stays available as the documented retry gesture.
-        setPermission(outcome === 'denied' ? 'denied' : 'neutral')
+        //
+        // Only the WEB outcome is a permission verdict: the desktop
+        // ensureNotificationPermission is a no-op that resolves 'granted',
+        // and folding that constant into the state here would wipe a real
+        // 'denied' the mount probe read from the OS (macOS System Settings)
+        // — the hint would vanish while the authorization stays denied.
+        // The preview guard below already keeps the banner suppressed in
+        // that state.
+        if (isWebTransport()) {
+          setPermission(outcome === 'denied' ? 'denied' : 'neutral')
+        }
         if (outcome === 'granted' && permission !== 'denied') {
           void sendSystemNotification({
             kind: 'success',

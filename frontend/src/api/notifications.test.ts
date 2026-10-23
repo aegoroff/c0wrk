@@ -384,6 +384,87 @@ describe('web transport notifications', () => {
     // the desktop path owns authorization through InitNotifications instead.
     await expect(ensureNotificationPermission()).resolves.toBe('granted')
   })
+
+  // --- Firefox insecure origins: the permission GETTER itself throws -------
+  // Every raw `Notification.permission` read in the module is a regression:
+  // the boot init runs under `void` in App (an unhandled rejection per page
+  // load) and the send path would reject per event instead of the designed
+  // silent drop. Both paths must go through readNotificationPermission.
+
+  /** The API exists with a granted permission, but the getter throws. */
+  class ThrowingPermissionNotification {
+    static get permission(): 'default' | 'granted' | 'denied' {
+      throw new DOMException('The operation is insecure', 'SecurityError')
+    }
+    static requestPermission = vi.fn<() => Promise<'default' | 'granted' | 'denied'>>()
+    declare title: string
+    constructor(title: string) {
+      this.title = title
+    }
+    close(): void {}
+  }
+
+  it('init survives a throwing permission getter (no unhandled boot rejection)', async () => {
+    installWeb()
+    vi.stubGlobal('Notification', ThrowingPermissionNotification)
+    await expect(initSystemNotifications()).resolves.toBeUndefined()
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled()
+  })
+
+  it('send folds a throwing permission getter into the silent drop', async () => {
+    installWeb()
+    vi.stubGlobal('Notification', ThrowingPermissionNotification)
+    // A null (unreadable) permission is not 'granted': the banner drops
+    // through the SAME once-per-run warn path — never a rejection.
+    await expect(sendSystemNotification('T', 'B', { sessionId: 's1' })).resolves.toBeUndefined()
+    expect(consoleWarn).toHaveBeenCalledTimes(1)
+    expect(consoleWarn).toHaveBeenCalledWith(
+      expect.stringContaining("permission is 'unreadable'"),
+    )
+  })
+
+  // --- Android: the constructor throws even granted ------------------------
+  // Chrome/Firefox for Android throw TypeError from the Notification
+  // CONSTRUCTOR with the API present and permission granted (banners there
+  // need a service worker). The failure must surface as the SAME clean
+  // failure shape as the missing-API case, not a raw TypeError.
+
+  class IllegalConstructorNotification {
+    static permission: 'default' | 'granted' | 'denied' = 'granted'
+    static requestPermission = vi.fn<() => Promise<'default' | 'granted' | 'denied'>>()
+    constructor(_title: string, _options?: NotificationOptions) {
+      throw new TypeError('Illegal constructor')
+    }
+  }
+
+  it('send maps a throwing Notification constructor (Android) to the clean failure shape', async () => {
+    installWeb()
+    vi.stubGlobal('Notification', IllegalConstructorNotification)
+    const err = await sendSystemNotification('T', 'B', { sessionId: 's1' }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(TypeError)
+    expect((err as Error).message).toContain('cannot display notification banners')
+    // The construct refusal is named at warn, carrying the original cause.
+    expect(consoleWarn).toHaveBeenCalledWith(
+      expect.stringContaining('refused to construct a Notification'),
+      expect.any(TypeError),
+    )
+  })
+
+  it('the test banner surfaces the Android constructor failure as the actionable message', async () => {
+    installWeb()
+    vi.stubGlobal('Notification', IllegalConstructorNotification)
+    // Permission IS granted, so the gesture settles granted and the failure
+    // comes from the constructor: the Settings Test button's catch receives
+    // the clean actionable Error — not a raw TypeError, not a permission
+    // outcome (a granted gesture must not flip the section to the hint).
+    await expect(showTestNotification()).rejects.toThrow(
+      'This browser cannot display notification banners directly',
+    )
+  })
 })
 
 // --- Web denial causes: WHY is the browser permission 'denied'? ------------

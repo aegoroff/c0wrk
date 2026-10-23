@@ -72,7 +72,10 @@ function App() {
   // before any banner-worthy event can arrive. initSoundUnlock is idempotent
   // (guarded internally) and initSystemNotifications is memoized, so a
   // StrictMode double-mount still installs exactly one set of listeners / runs
-  // the init at most once. Both are best-effort and never throw.
+  // the init at most once. Both are best-effort and never throw: the web
+  // init reads the permission through the module's throw-safe reader, so a
+  // Firefox insecure-origin SecurityError cannot surface here as an
+  // unhandled rejection.
   useEffect(() => {
     initSoundUnlock()
     void initSystemNotifications()

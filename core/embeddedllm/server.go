@@ -2218,8 +2218,10 @@ func (s *Server) spawn(ctx context.Context, spec LaunchSpec) (*processRun, error
 		// pinned bin dir first on PATH, no inherited PIP_*/PYTHON*/MTPLX_*
 		// influence, and the engine's config/model state pointed INSIDE the
 		// c0wrk layout (mlxChildEnv, server_mlx.go) — an operator's MTPLX
-		// install can never mix with this one.
-		env = mlxChildEnv(os.Environ(), s.hostOS(), binaryDir)
+		// install can never mix with this one. mlxChildEnv takes the
+		// interpreter path (spec.ServerBinary is the pinned python for this
+		// engine), not its directory: same shape as the pip/smoke call sites.
+		env = mlxChildEnv(os.Environ(), s.hostOS(), spec.ServerBinary)
 	}
 	cmd := LaunchCommand{
 		Binary: spec.ServerBinary,

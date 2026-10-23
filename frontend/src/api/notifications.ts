@@ -55,7 +55,14 @@ export async function initSystemNotifications(): Promise<void> {
       logger.debug('[system-notifications] browser Notification API unavailable; skipping init')
       return
     }
-    logger.debug(`[system-notifications] browser notification permission: ${Notification.permission}`)
+    // The throw-safe reader, not the raw getter: on an insecure origin
+    // Firefox throws SecurityError from the getter itself, and this boot
+    // call runs under `void` in App — a raw read there is an unhandled
+    // rejection on every page load.
+    const permission = readNotificationPermission()
+    logger.debug(
+      `[system-notifications] browser notification permission: ${permission ?? 'unreadable (insecure origin)'}`,
+    )
     return
   }
   const app = getApp()
@@ -129,14 +136,32 @@ async function sendWebNotification(title: string, body: string, data: Record<str
   if (!webNotificationsAvailable()) {
     throw new Error('This browser does not expose the Notification API.')
   }
-  if (Notification.permission !== 'granted') {
-    logUngrantedPermission()
+  // The throw-safe reader: same Firefox insecure-origin SecurityError — a
+  // raw getter here would reject every background send instead of the
+  // designed silent drop. A null (unreadable) permission is not 'granted'.
+  const permission = readNotificationPermission()
+  if (permission !== 'granted') {
+    logUngrantedPermission(permission)
     return
   }
   const options: NotificationOptions & { data?: Record<string, string> } = { body }
   if (data.sessionId !== undefined) options.tag = `c0wrk:${data.sessionId}`
   if (Object.keys(data).length > 0) options.data = data
-  const notification = new Notification(title, options)
+  let notification: Notification
+  try {
+    notification = new Notification(title, options)
+  } catch (err) {
+    // Android browsers (Chrome and Firefox) throw a raw TypeError from the
+    // Notification CONSTRUCTOR even when the API exists and the permission
+    // is granted — banners there need a service worker's showNotification.
+    // Map it to the same clean failure shape as the missing-API case above:
+    // the send path degrades to its per-event warn, and the Settings Test
+    // button carries this actionable message instead of a raw TypeError.
+    logger.warn('[system-notifications] the browser refused to construct a Notification', err)
+    throw new Error(
+      'This browser cannot display notification banners directly (Android delivers them through a service worker, which this app does not register).',
+    )
+  }
   notification.onclick = () => {
     // Best-effort: brings the tab's window forward where the browser allows
     // it (a notification click carries user activation).
@@ -164,17 +189,20 @@ let permissionWarned = false
 /** Drop a banner because the browser permission is not granted: the FIRST
  *  occurrence per app run warns (naming the current permission and the grant
  *  surfaces), later ones only debug. Never throws — the send path is
- *  best-effort and must not spam the event pipeline's log. */
-function logUngrantedPermission(): void {
+ *  best-effort and must not spam the event pipeline's log. Takes the
+ *  permission the caller already read through the throw-safe reader instead
+ *  of touching the raw getter again. */
+function logUngrantedPermission(permission: 'default' | 'granted' | 'denied' | null): void {
+  const shown = permission ?? 'unreadable'
   if (permissionWarned) {
     logger.debug(
-      `[system-notifications] banner skipped: notification permission is '${Notification.permission}'`,
+      `[system-notifications] banner skipped: notification permission is '${shown}'`,
     )
     return
   }
   permissionWarned = true
   logger.warn(
-    `[system-notifications] notification permission is '${Notification.permission}' — banners stay silent until it is granted via the Settings toggle or the Test button`,
+    `[system-notifications] notification permission is '${shown}' — banners stay silent until it is granted via the Settings toggle or the Test button`,
   )
 }
 
