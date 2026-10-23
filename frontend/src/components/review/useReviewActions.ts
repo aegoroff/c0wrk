@@ -6,7 +6,8 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStore'
 import { useE2SStore } from '@/stores/e2sStore'
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
-import { generateMessageId } from '@/lib/ids'
+import { generateMessageId, generateUUID } from '@/lib/ids'
+import { emit } from '@/api/runtime'
 import * as reviewApi from '@/api/review'
 import * as gitApi from '@/api/git'
 import * as chatApi from '@/api/chat'
@@ -38,6 +39,14 @@ export function useReviewActions(sessionId: string) {
       exitReviewLoop(sessionId)
     } catch (err) {
       logger.error('Approve flow failed:', err)
+      // The Approve is the terminal action of the review loop: a transient
+      // failure (SQLite busy, backend restart) must not be silent while
+      // every sibling review surface toasts — say the approve failed so the
+      // user knows to retry it.
+      emit('runtime_error', {
+        id: generateUUID(),
+        message: 'Failed to approve review',
+      })
     } finally {
       setIsStaging(false)
     }
@@ -209,6 +218,14 @@ export function useReviewActions(sessionId: string) {
       // (rollback via exitReviewLoop).
     } catch (err) {
       logger.error('Submit flow failed:', err)
+      // The send failed after the optimistic rollback: the review buffer
+      // survives for retry, but nothing else says the submit did not land —
+      // surface it like every sibling review surface does (the comment-save
+      // paths toast; this hook was log-only).
+      emit('runtime_error', {
+        id: generateUUID(),
+        message: 'Failed to submit review — your comments are kept',
+      })
     } finally {
       setIsSubmitting(false)
     }

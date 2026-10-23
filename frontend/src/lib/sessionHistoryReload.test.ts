@@ -19,8 +19,9 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }))
 
-import { reloadSessionHistory } from './sessionHistoryReload'
+import { reloadSessionHistory, reportHistoryLoadFailure } from './sessionHistoryReload'
 import { getSessionHistory, getSessionRuntimeStatus, getPendingActions } from '@/api/chat'
+import { logger } from '@/lib/logger'
 import { useChatStore } from '@/stores/chatStore'
 import type { ChatMessage } from '@/types/models'
 import type { ChatMessageUI, MessageType } from '@/types/messages'
@@ -149,6 +150,43 @@ describe('reloadSessionHistory', () => {
     expect(cards).toHaveLength(1)
     expect(cards[0]!.type).toBe('error')
     expect(cards[0]!.metadata).toEqual({ historyLoadFailed: true })
+  })
+
+  it('repeated load failures upsert ONE card under the deterministic per-session id', async () => {
+    // The resync re-runs the loader on every focus/visibility/WS-reconnect
+    // trigger while the history RPC stays down: each attempt must refresh the
+    // one card instead of stacking a fresh one per trigger.
+    vi.mocked(getSessionHistory).mockRejectedValue(new Error('rpc down'))
+    await reloadSessionHistory(SESSION)
+    await reloadSessionHistory(SESSION)
+    await reloadSessionHistory(SESSION)
+
+    const order = useChatStore.getState().messageOrder[SESSION] ?? []
+    expect(order).toEqual([`history-load-failed:${SESSION}`])
+  })
+
+  it('a populated transcript never gets the failure card — the failure logs instead', async () => {
+    // A resync failure beneath an already rendered transcript is transient:
+    // appending the card would plant a false "history failed" card under a
+    // fully rendered session.
+    vi.mocked(getSessionHistory).mockRejectedValue(new Error('rpc down'))
+    useChatStore.getState().addMessage(SESSION, liveMsg('history-1', 'user', 'hi'))
+
+    await reloadSessionHistory(SESSION)
+
+    const order = useChatStore.getState().messageOrder[SESSION] ?? []
+    expect(order).toEqual(['history-1'])
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('transcript already populated'),
+    )
+  })
+
+  it('reportHistoryLoadFailure upserts the card for the reconcile phase too', () => {
+    reportHistoryLoadFailure(SESSION, 'reconcile phase')
+    reportHistoryLoadFailure(SESSION, 'reconcile phase')
+
+    const order = useChatStore.getState().messageOrder[SESSION] ?? []
+    expect(order).toEqual([`history-load-failed:${SESSION}`])
   })
 
   // --- historyLoaded marker (the ChatArea loading spinner) ---

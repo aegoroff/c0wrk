@@ -109,10 +109,10 @@ const EventWorkDirsChanged = "workdirs:changed"
 const EventSessionsLoaded = "sessions:loaded"
 
 // EventSessionsChanged is emitted after every successful session mutation
-// that changes a session list: create (the RPC, the SwitchProject fallback
-// creation, and both managed-worktree creation paths), fork (plain and
-// managed), delete, archive, pin, CHAT→project promotion,
-// and project deletion (which cascades its sessions). Task lifecycle
+// that changes a session list: create (the RPC and the SwitchProject fallback
+// creation — the fork paths' own tree creation is covered by the fork clause
+// below), fork (plain and managed), delete, archive, pin, CHAT→project
+// promotion, and project deletion (which cascades its sessions). Task lifecycle
 // transitions count as list-visible state too: the desktop emitter re-issues
 // this event for every task_started / task_complete / task_cancelled /
 // error / task_failed_resumable / session_paused / session_resumed it

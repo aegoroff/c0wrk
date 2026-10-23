@@ -756,8 +756,14 @@ func TestWebAccessTLS_BrokenPairFilesDisableAtLoad(t *testing.T) {
 		cert, key  string
 		wantReason string
 	}{
-		{"missing cert", filepath.Join(dir, "absent.crt"), keyPath, "no such file"},
-		{"missing key", certPath, filepath.Join(dir, "absent.key"), "no such file"},
+		// The missing-file cases assert the platform-neutral classified
+		// phrase ("file not found", minted by webAccessTLSPairError's
+		// errors.Is(err, fs.ErrNotExist) branch) — NOT the raw strerror,
+		// which is OS-localized ("no such file or directory" vs Windows'
+		// "The system cannot find the file specified.") and would fail the
+		// windows-latest CI leg deterministically.
+		{"missing cert", filepath.Join(dir, "absent.crt"), keyPath, "file not found"},
+		{"missing key", certPath, filepath.Join(dir, "absent.key"), "file not found"},
 		{"garbage cert", garbage, keyPath, "failed to load"},
 		{"mismatched pair", certPath, otherKeyPath, "failed to load"},
 		{"mismatched pair (other side)", otherCertPath, keyPath, "failed to load"},

@@ -2124,9 +2124,15 @@ notifications:
 #                            unspecified "0.0.0.0"/"::", or a specific
 #                            LAN/public IPv4/IPv6 address — plus the
 #                            "localhost" name. A non-loopback bind is a
-#                            LAN-exposed listener: it loads with a warning
-#                            ("not loopback — network-accessible, traffic
-#                            unencrypted") and is saved as-is. Invalid
+#                            LAN-exposed listener: over plain HTTP it loads
+#                            with a warning ("web_access: bind … is not
+#                            loopback — the listener is network-accessible,
+#                            traffic is plain HTTP without TLS"); with the
+#                            tls subsection enabled it loads warning-free —
+#                            the exposure is surfaced by the Settings → Web
+#                            Access banner and the sidecar start log
+#                            instead. Either way the value is saved as-is.
+#                            Invalid
 #                            values (unparseable; empty while enabled) are
 #                            fail-soft at load: a warning is surfaced and
 #                            the section is reset to the safe default
@@ -2159,9 +2165,12 @@ notifications:
 #
 #     tls.enabled (default false) — the protocol is its own switch, never
 #                               parsed out of the address field (the URL
-#                               field keeps its host:port grammar; an
-#                               https:// scheme typed there is refused with
-#                               a pointer at this toggle). A TLS 1.2 floor
+#                               field keeps its host:port grammar: an
+#                               explicit http:// or https:// scheme typed
+#                               there is display-only — accepted and
+#                               stripped, any other scheme is refused —
+#                               which transport actually serves the sidecar
+#                               is this toggle alone). A TLS 1.2 floor
 #                               is pinned; with TLS off the behavior is
 #                               byte-identical to pre-TLS builds.
 #

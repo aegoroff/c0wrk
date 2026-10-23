@@ -30,6 +30,8 @@ const spies = vi.hoisted(() => ({
   getReviewDiff: vi.fn<() => Promise<unknown[]>>(),
   clearReviewComments: vi.fn<() => Promise<void>>(),
   setReviewStatus: vi.fn<() => Promise<void>>(),
+  stageAll: vi.fn<() => Promise<void>>(),
+  emit: vi.fn<(event: string, data?: unknown) => void>(),
 }))
 
 vi.mock('@/api/chat', () => ({
@@ -51,18 +53,26 @@ vi.mock('@/api/review', () => ({
 }))
 
 vi.mock('@/api/git', () => ({
-  stageAll: vi.fn(),
+  stageAll: spies.stageAll,
+}))
+
+// The failure paths emit runtime_error toasts through the transport-agnostic
+// emitter — mock it so the assertions never touch the Wails runtime.
+vi.mock('@/api/runtime', () => ({
+  emit: spies.emit,
 }))
 
 vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }))
 
-// Harness: capture the submit callback from the hook.
+// Harness: capture the submit/approve callbacks from the hook.
 let capturedSubmit: (() => Promise<void>) | null = null
+let capturedApprove: (() => Promise<void>) | null = null
 function Harness({ sessionId }: { sessionId: string }) {
-  const { handleSubmit } = useReviewActions(sessionId)
+  const { handleSubmit, handleApprove } = useReviewActions(sessionId)
   capturedSubmit = handleSubmit
+  capturedApprove = handleApprove
   return null
 }
 
@@ -100,6 +110,8 @@ beforeEach(() => {
   spies.getReviewDiff.mockReset().mockResolvedValue([])
   spies.clearReviewComments.mockReset().mockResolvedValue(undefined)
   spies.setReviewStatus.mockReset().mockResolvedValue(undefined)
+  spies.stageAll.mockReset().mockResolvedValue(undefined)
+  spies.emit.mockReset()
 
   act(() => {
     useChatStore.setState({
@@ -283,5 +295,34 @@ describe('useReviewActions.handleSubmit optimistic presentation', () => {
       await capturedSubmit!()
     })
     expect(spies.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits a runtime_error toast when the submit send fails (the buffer survives for retry)', async () => {
+    seedReviewComment('s1', 'fix the null deref')
+    spies.sendMessage.mockRejectedValue(new Error('router offline'))
+
+    await act(async () => {
+      await capturedSubmit!()
+    })
+
+    expect(spies.emit).toHaveBeenCalledWith('runtime_error', expect.objectContaining({
+      message: 'Failed to submit review — your comments are kept',
+    }))
+    // The toast carries a fresh semantic id like every sibling review surface.
+    const [ , payload ] = spies.emit.mock.calls[0]!
+    expect((payload as { id: string }).id).toEqual(expect.any(String))
+  })
+
+  it('emits a runtime_error toast when the approve flow fails', async () => {
+    seedReviewComment('s1', 'looks good')
+    spies.stageAll.mockRejectedValue(new Error('sqlite busy'))
+
+    await act(async () => {
+      await capturedApprove!()
+    })
+
+    expect(spies.emit).toHaveBeenCalledWith('runtime_error', expect.objectContaining({
+      message: 'Failed to approve review',
+    }))
   })
 })

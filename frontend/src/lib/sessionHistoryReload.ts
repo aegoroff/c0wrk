@@ -9,9 +9,11 @@
 // anything — including an in-flight stream, whose tail lives in
 // chatStore.streamingText and is never touched here.
 //
-// Failure contract: the history RPC rejection propagates to the caller
-// (ChatArea renders its error card; the resync logs and waits for the next
-// trigger). Everything after the merge is best-effort: runtime-status and
+// Failure contract: the history RPC rejection is rendered by the shared
+// reportHistoryLoadFailure card (deterministic per-session id — repeated
+// failures upsert, a populated transcript logs instead); reconcile-phase
+// errors still propagate to the caller, whose catch routes through the same
+// helper. Everything after the merge is best-effort: runtime-status and
 // pending-action wrappers already resolve to null on failure, and the stale
 // resolution persist is fire-and-forget. On BOTH outcomes the wrapper's
 // finally settles the chatStore historyLoaded marker, so the ChatArea
@@ -19,7 +21,6 @@
 // (session switched mid-flight), whose snapshot never reached the store.
 
 import { getSessionHistory, getSessionRuntimeStatus, getPendingActions, resolveStalePrompt } from '@/api/chat'
-import { generateMessageId } from '@/lib/ids'
 import { chatMessageToUI, isPersistableHistoryMessage, isLegacyReviewPromptRow, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from '@/lib/chatUtils'
 import { restorePlanAndGoalFromHistory } from '@/lib/sessionStoreRestore'
 import { reconcileRuntimeStatus, reconcilePendingActions, reconcileWorkUnits, stalePromptMatchField } from '@/lib/sessionRuntime'
@@ -64,6 +65,44 @@ export async function reloadSessionHistory(
 }
 
 /**
+ * The shared "Failed to load session history" card emission behind BOTH
+ * failure sites (the load-phase catch inside the loader and ChatArea's
+ * reconcile-phase catch). One contract for the card:
+ *
+ *  - Deterministic per-session id (`history-load-failed:<sessionId>`, the
+ *    HITL-card pattern): {@link useChatStore.addMessage} upserts by id, so a
+ *    repeated failure — each focus/visibility/WS-reconnect resync trigger
+ *    re-runs the loader — refreshes the one card in place instead of stacking
+ *    a fresh "Failed to load session history" card per trigger.
+ *  - A populated transcript never gets the card: a failure beneath a fully
+ *    rendered transcript is a transient resync miss, logged and left to the
+ *    next trigger. Only an empty (or never-loaded) transcript renders the
+ *    card — a load failure can be the only visible entry of a session.
+ *  - The `historyLoadFailed` metadata flag keeps the card out of the
+ *    workspace selector's "confirmed empty" freshness predicate in both
+ *    branches (see SessionWorkspaceSelector.isFresh) and lets the
+ *    success-path reapers (ensureEmptyTranscript) clear it as stale.
+ */
+export function reportHistoryLoadFailure(sessionId: string, phase: string): void {
+  const store = useChatStore.getState()
+  const transcript = store.messages[sessionId]
+  if (transcript !== undefined && Object.keys(transcript).length > 0) {
+    logger.warn(
+      `Failed to load session history (${phase}): transcript already populated — not appending the failure card`,
+    )
+    return
+  }
+  store.addMessage(sessionId, {
+    id: `history-load-failed:${sessionId}`,
+    sessionId,
+    type: 'error',
+    content: 'Failed to load session history. Please try switching sessions.',
+    metadata: { historyLoadFailed: true },
+    timestamp: Date.now(),
+  })
+}
+
+/**
  * The load-and-reconcile body of {@link reloadSessionHistory}, kept as a
  * separate function so the exported wrapper owns the single try/finally that
  * settles the historyLoaded spinner marker on both resolve and reject.
@@ -85,19 +124,7 @@ async function loadAndReconcile(
   } catch (err) {
     if (isCancelled()) return
     logger.error('Failed to load session history:', err)
-    useChatStore.getState().addMessage(sessionId, {
-      id: generateMessageId(),
-      sessionId,
-      type: 'error',
-      content: 'Failed to load session history. Please try switching sessions.',
-      // Distinguishes this card from the send-path's failure cards in
-      // the workspace selector's freshness predicate: a load failure
-      // can be the only visible entry of a session WITH persisted rows,
-      // so it must never read as a "confirmed empty" transcript (see
-      // SessionWorkspaceSelector.isFresh).
-      metadata: { historyLoadFailed: true },
-      timestamp: Date.now(),
-    })
+    reportHistoryLoadFailure(sessionId, 'load phase')
     return
   }
   if (isCancelled()) return

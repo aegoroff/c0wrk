@@ -2,12 +2,11 @@ import { useEffect, useRef, useMemo } from 'react'
 import { useChatStore, useSessionMessages, useSessionWorkUnits, useSessionHistoryLoaded } from '@/stores/chatStore'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
 import { groupMessages, stabilizeDisplayItems } from '@/lib/chatUtils'
-import { reloadSessionHistory } from '@/lib/sessionHistoryReload'
+import { reloadSessionHistory, reportHistoryLoadFailure } from '@/lib/sessionHistoryReload'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { usePlanStore } from '@/stores/planStore'
 import { useTaskFlagRestore } from '@/hooks/useTaskFlagRestore'
-import { generateMessageId } from '@/lib/ids'
 import type { DisplayItem } from '@/types/messages'
 import { AssistantMessage } from './AssistantMessage'
 import { ActivityIndicator } from './ActivityIndicator'
@@ -109,18 +108,10 @@ export function ChatArea() {
     reloadSessionHistory(activeSessionId, { isCancelled: () => cancelled }).catch((err) => {
       if (cancelled) return
       logger.error('Failed to load session history:', err)
-      useChatStore.getState().addMessage(activeSessionId, {
-        id: generateMessageId(),
-        sessionId: activeSessionId,
-        type: 'error',
-        content: 'Failed to load session history. Please try switching sessions.',
-        // Same freshness-predicate contract as the load-phase card inside
-        // reloadSessionHistory: a reload failure (this catch covers the
-        // reconcile phase) must never read as a "confirmed empty"
-        // transcript (see SessionWorkspaceSelector.isFresh).
-        metadata: { historyLoadFailed: true },
-        timestamp: Date.now(),
-      })
+      // Shared card emission (same helper as the load-phase catch): the
+      // deterministic id upserts, and a reconcile failure beneath an already
+      // rendered transcript logs instead of appending a false failure card.
+      reportHistoryLoadFailure(activeSessionId, 'reconcile phase')
     })
 
     return () => { cancelled = true }

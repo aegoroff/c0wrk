@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -4029,6 +4030,14 @@ func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
 	if !strings.Contains(err.Error(), "persisting experimental features toggle") {
 		t.Errorf("error = %v, want it to name the failed persist", err)
 	}
+	// The missing-parent cause is classified structurally (fs.ErrNotExist
+	// through the wrap chain), never by matching the logged strerror: OS-
+	// localized messages ("no such file or directory" vs Windows' "The
+	// system cannot find the file specified.") would fail the windows-latest
+	// CI leg deterministically.
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error = %v, want it to wrap fs.ErrNotExist", err)
+	}
 	if hookRan {
 		t.Error("the desktop hook fired despite the failed persist — it must follow persisted intent only")
 	}
@@ -4041,9 +4050,8 @@ func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
 	if n := strings.Count(logs, "level=WARN"); n != 1 {
 		t.Fatalf("got %d WARN records, want exactly 1:\n%s", n, logs)
 	}
-	if !strings.Contains(logs, "failed to persist experimental features toggle") ||
-		!strings.Contains(logs, "no such file") {
-		t.Errorf("the WARN record must name the failed persist and its cause, got:\n%s", logs)
+	if !strings.Contains(logs, "failed to persist experimental features toggle") {
+		t.Errorf("the WARN record must name the failed persist, got:\n%s", logs)
 	}
 }
 

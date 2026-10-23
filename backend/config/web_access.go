@@ -61,6 +61,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"strings"
 )
@@ -258,6 +259,14 @@ func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
 		return nil
 	}
 	if _, err := tls.LoadX509KeyPair(tlsCfg.Cert, tlsCfg.Key); err != nil {
+		// Classify the missing-file family into platform-neutral wording:
+		// the raw strerror is OS-localized ("no such file or directory"
+		// on Linux/macOS, "The system cannot find the file specified." on
+		// Windows), and the operator-facing warning text — and the tests
+		// pinning it — must not depend on the host OS.
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("certificate pair failed to load: certificate or key file not found: %w", err)
+		}
 		return fmt.Errorf("certificate pair failed to load: %w", err)
 	}
 	return nil

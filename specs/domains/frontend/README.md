@@ -2,7 +2,7 @@
 
 ## Purpose
 
-React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with Go backend exclusively via Wails IPC.
+React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with the Go backend through the `src/api/runtime.ts` transport seam: Wails IPC in the desktop webview; in a browser tab served by the web-access sidecar, `POST /api/rpc` + a WebSocket carrying the same event stream ([ADR-090](../../decisions/090-browser-web-access.md)) — identical behavior in both transports (see [loading-states.md](loading-states.md)).
 
 ## Key Files
 
@@ -201,17 +201,20 @@ Dark color-scheme. Focus outlines globally suppressed. Custom scrollbar (8px, se
 ## Communication Pattern
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Frontend                               │
-│                                                          │
-│  src/api/*.ts  ──RPC──→  window.go.desktop.App.*        │
-│       ↑                        │                        │
-│  src/stores/*  ←──Events──  window.runtime.EventsOn()   │
-│       ↑                        │                        │
-│  src/hooks/*   ←──handlers──   │                        │
-│       ↑                                                 │
-│  src/components/* ←── React renders ←── store selectors │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      Frontend                                │
+│                                                              │
+│  src/api/*.ts ──RPC──→ src/api/runtime.ts  (transport seam)  │
+│       ↑                        │                             │
+│  src/stores/* ←──Events──      ├─ desktop webview (Wails):   │
+│       ↑                        │    window.go.desktop.App.*  │
+│  src/hooks/* ←──handlers──     │    window.runtime.EventsOn()│
+│       ↑                        └─ browser tab (ADR-090):     │
+│  src/components/* ←── React renders ←── store selectors      │
+│       (the seam picks the transport per environment:         │
+│        POST /api/rpc/<Method> + /ws via the web-access       │
+│        sidecar, or the Wails bridge in the webview)          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Project switching is orchestrated by `useProjectSwitchState`: it saves source-project UI state through project RPC wrappers (`saveProjectSwitchState`), calls `switchProject`, restores destination tabs/files from `getProjectSwitchState`, and then applies session fallback (saved session → latest session → create session). The saved-session pointer is PROJECT-scoped (one value per project; the No Project pseudo-project is one bucket for all CHAT sessions) — when the switch is driven by the workspace tab engine, the engine re-selects the activating tab's own remembered session on top of whatever the pointer landed on (see [tabs.md](tabs.md) § Activation sequence).

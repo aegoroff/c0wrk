@@ -1429,9 +1429,13 @@ func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 	key = strings.TrimSpace(key)
 	if cert != "" && key != "" {
 		// Refuse an unloadable pair before the no-op check or any persist,
-		// classified the way cert_status classifies it: a key that does not
-		// match its certificate is a mismatch, every other load failure is
-		// an unreadable pair.
+		// with the commit check's own two-bucket error split (NOT the
+		// cert_status vocabulary — see classifyWebAccessCert): a key that
+		// does not match its certificate is refused as a mismatch ("does
+		// not match"), every other load failure as an unreadable pair.
+		// cert_status itself reserves mismatch for SAN non-coverage of the
+		// pinned bind and reports this same key-mismatch pair as unreadable
+		// (its load precedes the coverage check).
 		if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
 			if strings.Contains(err.Error(), "does not match") {
 				return fmt.Errorf("web access: TLS private key %q does not match the certificate %q: %w", key, cert, err)
