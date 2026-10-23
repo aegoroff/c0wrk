@@ -1559,7 +1559,8 @@ func classifyWebAccessCert(certPath, keyPath, bind string) (status, detail strin
 
 // webAccessCertCoversHost reports whether the leaf's SANs cover host: an IP
 // host must appear among the IP SANs, a name host among the DNS SANs
-// (RFC 6125 — the two lists are not interchangeable).
+// (RFC 6125 — the two lists are not interchangeable; a DNS SAN may carry the
+// RFC 6125 §6.4.3 wildcard form).
 func webAccessCertCoversHost(leaf *x509.Certificate, host string) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		for _, san := range leaf.IPAddresses {
@@ -1570,11 +1571,29 @@ func webAccessCertCoversHost(leaf *x509.Certificate, host string) bool {
 		return false
 	}
 	for _, san := range leaf.DNSNames {
-		if strings.EqualFold(san, host) {
+		if dnsSANCovers(san, host) {
 			return true
 		}
 	}
 	return false
+}
+
+// dnsSANCovers reports whether one DNS SAN pattern covers host: exact match,
+// or the RFC 6125 §6.4.3 wildcard — a single "*" as the complete left-most
+// label matching exactly one label ("*.example.com" covers "app.example.com"
+// but not "example.com" nor "a.b.example.com").
+func dnsSANCovers(pattern, host string) bool {
+	pattern = strings.ToLower(pattern)
+	host = strings.ToLower(host)
+	if pattern == host {
+		return true
+	}
+	wildLabel, wildRest, wildOK := strings.Cut(pattern, ".")
+	if !wildOK || wildLabel != "*" {
+		return false
+	}
+	hostLabel, hostRest, hostOK := strings.Cut(host, ".")
+	return hostOK && hostLabel != "" && hostRest == wildRest
 }
 
 // restartWebAccessOrRollbackLocked hot-restarts a running sidecar onto the

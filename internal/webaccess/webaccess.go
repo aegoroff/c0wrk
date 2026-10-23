@@ -83,9 +83,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/v0lka/c0wrk/backend/config"
@@ -113,6 +116,13 @@ const (
 	// slowloris-style stalling on the listener.
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
+	// requestReadDeadline bounds one request's body read, armed per request
+	// after the headers are in (armReadDeadline): ReadHeaderTimeout covers
+	// only the header phase, so without this a client could trickle a body
+	// forever (slow-POST) and pin a goroutine per connection. The budget is
+	// deliberately generous — it must carry a full 48 MiB upload over a slow
+	// link — it bounds the pathological trickle, not normal traffic.
+	requestReadDeadline = 15 * time.Minute
 	// wsPath is advertised by /api/transport so the SPA shell can find the
 	// event channel without hardcoding it.
 	wsPath = "/ws"
@@ -167,7 +177,9 @@ type Options struct {
 }
 
 // Server is the running sidecar core. Construct with New; serve with Start;
-// stop with Stop. A Server is safe for concurrent use.
+// stop with Stop. A Server is safe for concurrent use; Start is single-use —
+// a second Start (or Start after Stop) returns an error instead of leaking
+// a listener.
 type Server struct {
 	cfg           config.WebAccessConfig
 	dispatch      any
@@ -188,6 +200,10 @@ type Server struct {
 	httpSrv  *http.Server
 	stopOnce sync.Once
 	stopped  chan struct{}
+	// started makes Start single-use: a second call — or a call after Stop —
+	// would bind a second listener this type never tracks. Misuse fails
+	// loudly instead of leaking.
+	started atomic.Bool
 
 	wsMu    sync.Mutex
 	wsConns map[*WSConn]struct{}
@@ -315,11 +331,11 @@ func New(opts Options) (*Server, error) {
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/transport", s.recoverWrap(noStore(s.handleTransport)))
-	mux.Handle("POST /api/login", s.recoverWrap(noStore(sameOriginGate(s.handleLogin))))
-	mux.Handle("POST /api/rpc/{method}", s.recoverWrap(noStore(sameOriginGate(s.requireAuth(jsonContentTypeGate(s.handleRPC))))))
+	mux.Handle("POST /api/login", s.recoverWrap(noStore(s.sameOriginGate(armReadDeadline(s.handleLogin)))))
+	mux.Handle("POST /api/rpc/{method}", s.recoverWrap(noStore(s.sameOriginGate(armReadDeadline(s.requireAuth(jsonContentTypeGate(s.handleRPC)))))))
 	mux.Handle("GET /ws", s.recoverWrap(noStore(s.requireAuth(s.handleWS))))
 	if s.static != nil {
-		static := http.FileServerFS(s.static)
+		static := noDirListing(http.FileServerFS(s.static), s.static)
 		if s.csp != nil {
 			static = s.csp(static)
 		}
@@ -332,6 +348,41 @@ func (s *Server) buildHandler() http.Handler {
 	// The outer recover is the last line of defense for every route,
 	// including injected middleware and the static handler.
 	return s.recoverWrap(mux)
+}
+
+// armReadDeadline arms the per-request body-read deadline (see
+// requestReadDeadline) on the body-carrying POST routes. It runs after the
+// headers are parsed, so the header phase stays under ReadHeaderTimeout and
+// the deadline covers exactly the body. The /ws route is never armed: its
+// hijacked connection must not inherit a read deadline.
+func armReadDeadline(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Best-effort: a writer that cannot take a deadline leaves the
+		// request under the listener's timeouts alone.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(requestReadDeadline)) //nolint:errcheck // best-effort bound
+		next(w, r)
+	}
+}
+
+// noDirListing wraps the static file server so a directory URL without an
+// index.html answers 404 instead of rendering the generated directory index
+// — the SPA file manifest is not something the sidecar needs to hand out.
+// Directories WITH an index.html (the SPA root) keep serving it through the
+// stdlib handler, byte-identical to before.
+func noDirListing(next http.Handler, fsys fs.FS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if name == "" {
+			name = "."
+		}
+		if d, err := fs.Stat(fsys, name); err == nil && d.IsDir() {
+			if _, err := fs.Stat(fsys, path.Join(name, "index.html")); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Handler returns the fully wired HTTP handler (tests and embedding).
@@ -375,8 +426,12 @@ func (s *Server) Addr() (string, bool) {
 // (ADR-092) the same listener terminates TLS with the pair loaded in New
 // (MinVersion 1.2); otherwise it serves plain HTTP exactly as before. It
 // returns after the listener is bound; serve errors after that are logged,
-// not returned.
+// not returned. Start is single-use: a second Start (or Start after Stop)
+// returns an error instead of leaking a second listener.
 func (s *Server) Start(ctx context.Context) error {
+	if !s.started.CompareAndSwap(false, true) {
+		return errors.New("webaccess: server already started (Start is single-use)")
+	}
 	addr := net.JoinHostPort(s.cfg.Bind, strconv.Itoa(s.cfg.Port))
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
@@ -406,9 +461,12 @@ func (s *Server) Start(ctx context.Context) error {
 		Protocols:         protos,
 		// Route the stdlib server's internal diagnostics (refused TLS
 		// handshakes, protocol misuse) through the injected slog logger at
-		// Warn level — they are client-triggered and carry no secrets, and
-		// tests can intercept them at the source like every other diagnostic.
-		ErrorLog: slog.NewLogLogger(s.log.Handler(), slog.LevelWarn),
+		// Debug level: they are client-triggered, unauthenticated input can
+		// produce them at line rate, and they carry no operator value at the
+		// default verbosity. Serve-loop termination keeps its explicit
+		// server-side log below. Tests intercept these records at the source
+		// through the capture handler.
+		ErrorLog: slog.NewLogLogger(s.log.Handler(), slog.LevelDebug),
 	}
 	srv := s.httpSrv
 	s.mu.Unlock()

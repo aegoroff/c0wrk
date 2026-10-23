@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/v0lka/c0wrk/backend/session"
@@ -30,13 +31,31 @@ var imageMimeExtensions = map[string]string{
 	"image/webp": ".webp",
 }
 
+// windowsReservedBaseNames are the MS-DOS device names Windows resolves even
+// with an extension ("nul.png" targets the NUL device — bytes never reach a
+// regular file), so a browser-supplied attachment name carrying one would
+// stage from a device instead of a file.
+var windowsReservedBaseNames = func() map[string]struct{} {
+	m := make(map[string]struct{}, 16)
+	for _, n := range []string{"con", "prn", "aux", "nul"} {
+		m[n] = struct{}{}
+	}
+	for i := 1; i <= 9; i++ {
+		m["com"+strconv.Itoa(i)] = struct{}{}
+		m["lpt"+strconv.Itoa(i)] = struct{}{}
+	}
+	return m
+}()
+
 // sanitizeAttachmentName reduces an untrusted web-supplied file name to a
 // bare base name safe to create as the single file inside the method's own
 // throwaway temp directory: directory components (both separators — the name
 // travels through JSON from a foreign filesystem) are stripped, and an
 // extensionless name gains one derived from a known image MIME type so an
 // extensionless image drop still routes through the image pipeline instead
-// of failing as an unsupported document. Returns "" when nothing usable
+// of failing as an unsupported document. A Windows reserved device base name
+// is underscore-escaped ("nul.png" → "nul_.png") so the staged name is
+// always a regular file on every platform. Returns "" when nothing usable
 // remains.
 func sanitizeAttachmentName(fileName, mimeType string) string {
 	base := fileName
@@ -51,6 +70,11 @@ func sanitizeAttachmentName(fileName, mimeType string) string {
 		if ext, ok := imageMimeExtensions[strings.ToLower(strings.TrimSpace(mimeType))]; ok {
 			base += ext
 		}
+	}
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	if _, reserved := windowsReservedBaseNames[strings.ToLower(name)]; reserved {
+		base = name + "_" + ext
 	}
 	return base
 }

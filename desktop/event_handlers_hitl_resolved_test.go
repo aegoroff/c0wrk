@@ -273,6 +273,35 @@ func TestHitlResolved_GoalSuggestionViaSharedResolver(t *testing.T) {
 	assertSingleResolved(t, a, rec, session.HitlResolvedGoalSuggestion, "gs-1", "accept")
 }
 
+// --- dropped response (full channel) ---
+
+func TestHitlResolved_DroppedResponseEmitsNothing(t *testing.T) {
+	// A response dropped on a full channel never became the effective
+	// decision: the pending entry is cleaned up either way, but no
+	// hitl_resolved event may broadcast a decision the agent never saw.
+	a := &App{}
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+
+	ch := make(chan sdktools.ConfirmationResponse, 1)
+	ch <- sdktools.ConfirmDeny // no receiver: the buffer is already full
+	a.pendingConfirmations.Store("conf-4", &pendingConfirmData{
+		ch:        ch,
+		sessionID: "sess-1",
+		toolName:  "bash_exec",
+	})
+	t.Cleanup(func() { a.pendingConfirmations.Delete("conf-4") })
+
+	a.handleToolConfirmResponse(map[string]any{"confirm_id": "conf-4", "decision": "allow_once"}, silentLogger())
+
+	if events := hitlResolvedEvents(t, a, rec); len(events) != 0 {
+		t.Fatalf("got %d hitl_resolved events for a dropped response, want 0: %+v", len(events), events)
+	}
+	if _, ok := a.pendingConfirmations.Load("conf-4"); ok {
+		t.Error("pending entry must still be cleaned up on the drop path")
+	}
+}
+
 // --- immediate flush ---
 
 func TestHitlResolved_IsImmediateFlushEvent(t *testing.T) {

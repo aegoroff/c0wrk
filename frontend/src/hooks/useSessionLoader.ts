@@ -15,6 +15,24 @@ import type { SessionInfo } from '@/types/models'
  *  into one ListSessions RPC after the last event. */
 const SESSIONS_CHANGED_DEBOUNCE_MS = 250
 
+// Monotonic fetch-generation token shared by every session-list fetch issuer
+// (this loader AND the shallow resync): a fetch captures the counter at
+// issuance through issueSessionListFetch(), and its result applies only while
+// isSessionListFetchCurrent(id) holds — an older response can never clobber a
+// fresher list, regardless of RPC resolution order (CS #11: the resync's own
+// listSessions previously bypassed the loader's fetchSeq).
+let sessionListFetchSeq = 0
+
+/** Capture a fresh session-list fetch generation at issuance time. */
+export function issueSessionListFetch(): number {
+  return ++sessionListFetchSeq
+}
+
+/** True while the captured generation is still the newest one issued. */
+export function isSessionListFetchCurrent(id: number): boolean {
+  return id === sessionListFetchSeq
+}
+
 export function useSessionLoader(): void {
   const activeProjectId = useProjectStore(s => s.activeProjectId)
 
@@ -38,10 +56,10 @@ export function useSessionLoader(): void {
     })
 
     // Monotonic token shared by the initial load and the sessions:changed
-    // re-reads. A fetch captures the counter at issuance; a result whose token
-    // is stale (a newer fetch was issued since) is dropped instead of
+    // re-reads — and with the shallow resync (see module comment). A fetch
+    // captures the counter at issuance; a result whose token is stale (a
+    // newer fetch was issued since, by any issuer) is dropped instead of
     // clobbering the fresher list — regardless of RPC resolution order.
-    let fetchSeq = 0
     // True once THIS activation has applied a session list to the store
     // (initial load, sessions:loaded push, or a sessions:changed re-read).
     // The initial load's deferred restore (below) only trusts the store when
@@ -135,10 +153,10 @@ export function useSessionLoader(): void {
           if (cancelled) return
           const projectId = useProjectStore.getState().activeProjectId
           if (!projectId) return
-          const fetchId = ++fetchSeq
+          const fetchId = issueSessionListFetch()
           listSessions()
             .then((sessions) => {
-              if (cancelled || fetchId !== fetchSeq) return
+              if (cancelled || !isSessionListFetchCurrent(fetchId)) return
               if (useProjectStore.getState().activeProjectId !== projectId) return
               store().setSessions(sessions)
               listApplied = true
@@ -163,7 +181,7 @@ export function useSessionLoader(): void {
     // pointer (read once per activation). Both are best-effort: a failed
     // saved-state read just degrades the restore to the latest-by-activity
     // fallback, a failed session list leaves the store untouched.
-    const initialFetchId = ++fetchSeq
+    const initialFetchId = issueSessionListFetch()
     void Promise.all([
       getProjectSwitchState(activeProjectId).catch(() => null),
       listSessions().catch(() => null),
@@ -174,9 +192,9 @@ export function useSessionLoader(): void {
       savedSessionId = saved?.saved_session_id ?? ''
       resolveSavedSessionIdReady()
       if (cancelled || sessions === null) return
-      if (initialFetchId !== fetchSeq) {
-        // A sessions:changed re-read was issued while this initial read was
-        // in flight: it carries the fresher, post-mutation list and owns the
+      if (!isSessionListFetchCurrent(initialFetchId)) {
+        // A newer fetch — a sessions:changed re-read or a shallow-resync
+        // refresh — was issued while this initial read was in flight: it carries the fresher, post-mutation list and owns the
         // store, so this stale result is dropped. The switch's restore
         // contract still holds, though — restore against the freshest list
         // this activation has applied (listApplied guarantees it belongs to

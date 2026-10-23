@@ -38,6 +38,7 @@ import { logger } from '@/lib/logger'
 import { useActiveSessionsStore, sweepPendingActions } from '@/stores/activeSessionsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { isSessionListFetchCurrent, issueSessionListFetch } from '@/hooks/useSessionLoader'
 
 /** Triggers arriving within this window of each other coalesce into one run
  *  (the last-scheduled one fires). */
@@ -68,11 +69,15 @@ function runShallowResync(): void {
 
   // Active project's session list. The project re-check keeps a switch race
   // from writing the OLD project's list over the new one (useSessionLoader
-  // guards its push handler the same way).
+  // guards its push handler the same way); the shared fetch-generation token
+  // (issueSessionListFetch) keeps a slower older refresh from clobbering a
+  // fresher post-mutation list the loader already applied (CS #11).
   if (projectId) {
+    const fetchId = issueSessionListFetch()
     void listSessions()
       .then((sessions) => {
         if (useProjectStore.getState().activeProjectId !== projectId) return
+        if (!isSessionListFetchCurrent(fetchId)) return
         useSessionStore.getState().setSessions(sessions)
       })
       .catch((err) => {

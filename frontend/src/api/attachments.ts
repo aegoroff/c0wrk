@@ -102,6 +102,13 @@ export interface AttachmentFileInput {
  *
  * Rejects oversize payloads client-side (MAX_ATTACHMENT_UPLOAD_BYTES) and
  * maps the snake_case response exactly like attachFiles.
+ *
+ * Known divergence from the generated binding (CS #8): the Go parameter is
+ * `[]byte`, so `App.d.ts` declares `data: Array<number>`, but this wrapper
+ * sends a base64 STRING. It is deliberate and works on both bridges —
+ * `encoding/json` accepts a base64 string for `[]byte` — but a caller going
+ * through the typed signature directly would break; keep the divergence in
+ * mind when touching the wire shape.
  */
 export async function attachFileContent(sessionId: string, file: AttachmentFileInput): Promise<AttachmentInfoUI[]> {
   if (file.bytes.byteLength > MAX_ATTACHMENT_UPLOAD_BYTES) {

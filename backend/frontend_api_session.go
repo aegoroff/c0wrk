@@ -23,6 +23,13 @@ import (
 // retryable error instead of an indefinitely parked RPC.
 const sessionStoreOpTimeout = 15 * time.Second
 
+// sessionForkTimeout bounds the transactional fork (session + tasks +
+// blackboard + review deep copy). The fork is one transaction over an
+// unbounded row set, so it carries its own budget — wider than
+// sessionStoreOpTimeout, still finite, still derived from f.ctx() so app
+// shutdown cancels it.
+const sessionForkTimeout = 60 * time.Second
+
 // storeOpCtx returns the request context (f.ctx(), cancelled at app shutdown)
 // bounded by sessionStoreOpTimeout, for one store round-trip. Every direct
 // f.store/f.projStore/f.reviewStore call on an RPC path must go through it —
@@ -103,11 +110,16 @@ func (f *FrontendAPI) ForkSession(sessionID string) (*session.SessionInfo, error
 		return nil, errors.New("session store not initialized")
 	}
 
-	ctx := context.Background()
+	// Guard reads go through the file's storeOpCtx bound (pool wait + shutdown
+	// cancellation); the transactional fork below gets its own explicit,
+	// wider budget (sessionForkTimeout) because it copies an unbounded row
+	// set inside one transaction.
+	guardCtx, cancelGuard := f.storeOpCtx()
 
 	// Guard: a session with an unfinished task cannot be forked — forking would
 	// duplicate a half-completed execution state.
-	unfinished, err := f.store.GetUnfinishedTask(ctx, sessionID)
+	unfinished, err := f.store.GetUnfinishedTask(guardCtx, sessionID)
+	cancelGuard()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check session tasks: %w", err)
 	}
@@ -126,18 +138,23 @@ func (f *FrontendAPI) ForkSession(sessionID string) (*session.SessionInfo, error
 	// Managed sources fork into their OWN tree on a derived branch created at
 	// the source's committed HEAD (see forkManagedSession); local and CHAT
 	// sources keep the plain deep-copy path with the binding they have.
-	src, err := f.store.LoadSession(ctx, sessionID)
+	srcCtx, cancelSrc := f.storeOpCtx()
+	src, err := f.store.LoadSession(srcCtx, sessionID)
+	cancelSrc()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load source session: %w", err)
 	}
 	if src == nil {
 		return nil, fmt.Errorf("source session %q not found", sessionID)
 	}
+
+	forkCtx, cancelFork := context.WithTimeout(f.ctx(), sessionForkTimeout)
+	defer cancelFork()
 	if src.WorkspaceBinding != nil && src.WorkspaceBinding.Kind == session.WorkspaceManagedWorktree {
-		return f.forkManagedSession(ctx, src, reviewCloner)
+		return f.forkManagedSession(forkCtx, src, reviewCloner)
 	}
 
-	info, err := f.store.ForkSession(ctx, sessionID, reviewCloner)
+	info, err := f.store.ForkSession(forkCtx, sessionID, reviewCloner)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fork session: %w", err)
 	}

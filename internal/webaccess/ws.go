@@ -39,6 +39,9 @@ const (
 	wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 	// wsMaxMessageSize caps a single (possibly fragmented) inbound message.
 	wsMaxMessageSize = maxBodyBytes
+	// wsMaxControlPayload is the RFC6455 §5.5 ceiling for one control
+	// frame's payload; a larger control frame is a protocol violation.
+	wsMaxControlPayload = 125
 	// wsWriteTimeout bounds a single frame write so one stuck client cannot
 	// stall broadcasts to every other client.
 	wsWriteTimeout = 10 * time.Second
@@ -93,7 +96,7 @@ type WSConn struct {
 // hands the connection to the fan-out registry. The HTTP handler returns
 // after the pump goroutine takes over (the hijacked conn outlives it).
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
+	if !s.sameOrigin(r) {
 		writeJSONError(w, http.StatusForbidden, "cross-origin websocket connections are rejected")
 		return
 	}
@@ -195,9 +198,17 @@ func tokenListContains(h http.Header, name, want string) bool {
 // browser websocket handshakes) matches the request host exactly — scheme
 // and host:port. Missing Origin is a non-browser client; the handshake is
 // rejected because cookie credentials make every origin potentially hostile.
-func sameOrigin(r *http.Request) bool {
+// The Host header itself is additionally checked against the configured
+// bind (or the loopback set): an Origin==Host pair whose host is a rebound
+// DNS name would otherwise pass the equality check. This is
+// defense-in-depth on top of the host-scoped SameSite=Strict cookie — a
+// rebinding attacker without the cookie is already rejected by requireAuth.
+func (s *Server) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
+		return false
+	}
+	if !hostMatchesBind(r.Host, s.cfg.Bind) {
 		return false
 	}
 	scheme := "http"
@@ -206,6 +217,26 @@ func sameOrigin(r *http.Request) bool {
 	}
 	allowed := scheme + "://" + r.Host
 	return origin == allowed
+}
+
+// hostMatchesBind reports whether a Host header value (host or host:port)
+// names the configured bind or the loopback set. A wildcard bind (the
+// unspecified address) names no single serving host, so every Host is
+// accepted there — the cookie scope remains the gate for that class, as for
+// every class this check alone cannot cover.
+func hostMatchesBind(hostHeader, bind string) bool {
+	if bind == "0.0.0.0" || bind == "::" {
+		return true
+	}
+	host := hostHeader
+	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, bind) || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // registry ---------------------------------------------------------------------
@@ -461,6 +492,11 @@ func (c *WSConn) readFrame() (fin bool, opcode byte, payload []byte, err error) 
 			return false, 0, nil, err
 		}
 		length = binary.BigEndian.Uint64(ext[:])
+	}
+	if opcode&0x8 != 0 && length > wsMaxControlPayload {
+		// RFC6455 §5.5: control frames (opcode high bit set) MUST have a
+		// payload of 125 bytes or less.
+		return false, 0, nil, errWSProtocol
 	}
 	if length > wsMaxMessageSize {
 		return false, 0, nil, errWSTooBig

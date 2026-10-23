@@ -202,6 +202,11 @@ export function useSessionActions(): SessionActions {
         // Drop its saved chat scroll position — the session is gone, and the
         // entry would otherwise keep the per-session map growing.
         useChatStore.getState().clearScrollPosition(id)
+        // Drop the chatStore per-session slice wholesale (historyLoaded
+        // marker, token totals, …): the common single delete previously
+        // leaked the historyLoaded marker for the app lifetime, contradicting
+        // the store's own dropSessions contract (CS #14).
+        useChatStore.getState().dropSessions([id])
         // Drop its pending workspace choice (a fresh session deleted before
         // its first send) — the per-session map stays bounded.
         useSessionWorkspaceStore.getState().dropSessions([id])

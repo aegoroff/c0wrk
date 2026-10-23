@@ -23,7 +23,8 @@ import { reloadSessionHistory, reportHistoryLoadFailure } from './sessionHistory
 import { getSessionHistory, getSessionRuntimeStatus, getPendingActions } from '@/api/chat'
 import { logger } from '@/lib/logger'
 import { useChatStore } from '@/stores/chatStore'
-import type { ChatMessage } from '@/types/models'
+import { useSessionStore } from '@/stores/sessionStore'
+import type { ChatMessage, SessionInfo } from '@/types/models'
 import type { ChatMessageUI, MessageType } from '@/types/messages'
 
 const SESSION = 'resync-sess'
@@ -59,9 +60,26 @@ beforeEach(() => {
     activityStatus: {},
     historyLoaded: new Set<string>(),
   })
+  // The catalog carries the loaded session: the finally's deleted-mid-flight
+  // guard (CS #13) marks only sessions the catalog still knows.
+  useSessionStore.setState({
+    sessions: [{ id: SESSION } as SessionInfo],
+    activeSessionId: SESSION,
+  })
 })
 
 describe('reloadSessionHistory', () => {
+  it('does not mark a session deleted mid-flight (the catalog no longer knows it)', async () => {
+    vi.mocked(getSessionHistory).mockResolvedValue([row(1, 'user', 'hi')])
+    // The session's deletion landed while the history RPC was in flight —
+    // dropSessions already cleared the marker; the finally must not
+    // resurrect it (a recreated session with a reused id would otherwise
+    // skip its history load).
+    useSessionStore.setState({ sessions: [] })
+    await reloadSessionHistory(SESSION)
+    expect(useChatStore.getState().historyLoaded.has(SESSION)).toBe(false)
+  })
+
   it('reloading during an active stream neither duplicates nor loses messages', async () => {
     // The session loaded normally at t0; the task has been streaming since.
     // The backend persists before emitting, so the answer being streamed has

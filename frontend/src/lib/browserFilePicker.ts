@@ -19,9 +19,13 @@ interface BrowserFilePickerOptions {
  *
  * The cancel event is part of the HTML spec but is not delivered by every
  * engine; the promise therefore also settles via change-or-cancel — whichever
- * fires first wins, and a browser that fires neither (an abandoned picker)
- * simply leaves the promise pending, exactly like an abandoned native dialog
- * blocks the native flow.
+ * fires first wins. A one-shot window `focus` listener backs both up: the
+ * focus that follows the dialog closing (a dismissed picker on an engine
+ * without cancel support, or a pick whose change event was lost) settles the
+ * promise and removes the dead hidden input from `<body>` instead of
+ * leaking one per dismissal. Only a dialog that never closes leaves the
+ * promise pending, exactly like an abandoned native dialog blocks the
+ * native flow.
  */
 export function openBrowserFilePicker(options: BrowserFilePickerOptions = {}): Promise<File[]> {
   return new Promise((resolve) => {
@@ -35,14 +39,20 @@ export function openBrowserFilePicker(options: BrowserFilePickerOptions = {}): P
     const finish = (files: File[]) => {
       if (settled) return
       settled = true
+      window.removeEventListener('focus', onWindowFocus)
       input.remove()
       resolve(files)
     }
+    // The focus fallback runs AFTER change/cancel on conforming engines
+    // (settled already true → no-op); on cancel-less engines it is the only
+    // finish path for a dismissed picker.
+    const onWindowFocus = () => finish(Array.from(input.files ?? []))
 
     input.addEventListener('change', () => finish(Array.from(input.files ?? [])))
     input.addEventListener('cancel', () => finish([]))
 
     document.body.appendChild(input)
     input.click()
+    window.addEventListener('focus', onWindowFocus, { once: true })
   })
 }

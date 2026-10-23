@@ -73,7 +73,13 @@ let detectionPromise: Promise<TransportMode> | null = null
 async function detectWebTransport(): Promise<TransportMode> {
   if (typeof fetch !== 'function') return 'none'
   try {
-    const res = await fetch('/api/transport', { headers: { Accept: 'application/json' } })
+    const res = await fetch('/api/transport', {
+      headers: { Accept: 'application/json' },
+      // Boot-gating probe: a wedged sidecar must release the splash instead
+      // of holding it forever; a timeout reads as "no sidecar here", the
+      // same answer the catch below gives.
+      signal: webFetchTimeoutSignal(),
+    })
     if (!res.ok) return 'none'
     const info = (await res.json()) as TransportInfo
     if (info.transport !== 'web' || typeof info.ws !== 'string' || info.ws === '') return 'none'
@@ -253,6 +259,26 @@ export function getApp(): any {
 /** One stable function per method name — `getApp().Foo === getApp().Foo`. */
 const webAppMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
 
+/**
+ * Shared bound for the web-sidecar fetches (transport probe, RPC, login): a
+ * sidecar that accepts TCP but stalls must not hold a call — or the boot
+ * barrier — pending until the browser stack's own long timeout. Generous
+ * enough for a full 32 MiB attachment upload on a normal link; the desktop
+ * Wails transport stays unbounded (behavior parity).
+ */
+export const WEB_FETCH_TIMEOUT_MS = 15_000
+
+/** Abort signal bounding a web-sidecar fetch, or undefined on engines without
+ *  `AbortSignal.timeout` (the hardening is best-effort there, like the
+ *  desktop transport's absence of any bound). */
+export function webFetchTimeoutSignal(): AbortSignal | undefined {
+  try {
+    return AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS)
+  } catch {
+    return undefined
+  }
+}
+
 function getWebApp(): unknown {
   const target: Record<string, never> = {}
   return new Proxy(target, {
@@ -276,6 +302,7 @@ async function webRpc(method: string, args: unknown[]): Promise<unknown> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(args),
+      signal: webFetchTimeoutSignal(),
     })
   } catch (err) {
     logger.warn(`[rpc] ${method} transport error`, err)

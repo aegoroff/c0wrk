@@ -168,6 +168,21 @@ func (a *App) emitHitlResolved(sessionID string, kind session.HitlResolvedKind, 
 	})
 }
 
+// deliverResponse performs the best-effort buffered send shared by every
+// HITL response handler and reports whether the decision was DELIVERED. A
+// full channel means a receiver is gone or a faster responder already won —
+// the response is dropped, and the caller must not broadcast it as the
+// effective settlement (hitl_resolved carries the decision that actually
+// drove the agent).
+func deliverResponse[T any](ch chan T, resp T) bool {
+	select {
+	case ch <- resp:
+		return true
+	default:
+		return false
+	}
+}
+
 // handleToolConfirmResponse is the body of the EventToolConfirmResponse listener.
 // Extracted from wireWailsEventListeners (W-23) so it can be unit-tested without
 // a live Wails runtime.
@@ -194,9 +209,8 @@ func (a *App) handleToolConfirmResponse(payload map[string]any, log *slog.Logger
 		return
 	}
 
-	select {
-	case confirmData.ch <- resp:
-	default:
+	sent := deliverResponse(confirmData.ch, resp)
+	if !sent {
 		log.Warn("confirmation response dropped: channel full",
 			"confirm_id", requestID,
 			"tool", confirmData.toolName,
@@ -218,8 +232,13 @@ func (a *App) handleToolConfirmResponse(payload map[string]any, log *slog.Logger
 	// convergence — see emitHitlResolved). Emitted AFTER the channel send and
 	// the pending-map delete so a surface reacting to the event can never
 	// re-answer a live entry: a late tool_confirm_response finds no pending
-	// confirmation and logs its first-responder-wins warning.
-	a.emitHitlResolved(confirmData.sessionID, session.HitlResolvedToolConfirm, requestID, confirmDecisionString(resp))
+	// confirmation and logs its first-responder-wins warning. Only a
+	// DELIVERED decision is broadcast — the event's contract says the payload
+	// carries the effective first-responder decision, and a response dropped
+	// on a full channel never became one.
+	if sent {
+		a.emitHitlResolved(confirmData.sessionID, session.HitlResolvedToolConfirm, requestID, confirmDecisionString(resp))
+	}
 }
 
 // handleToolJudgeRequest is the body of the EventToolJudgeRequest listener.
@@ -371,9 +390,8 @@ func (a *App) handleAskUserResponse(payload map[string]any, log *slog.Logger) {
 		return
 	}
 
-	select {
-	case entry.ch <- resp:
-	default:
+	sent := deliverResponse(entry.ch, resp)
+	if !sent {
 		log.Warn("ask_user response dropped: channel full or receiver gone",
 			"request_id", requestID)
 	}
@@ -389,8 +407,11 @@ func (a *App) handleAskUserResponse(payload map[string]any, log *slog.Logger) {
 
 	// Multi-surface convergence (see emitHitlResolved): the answers themselves
 	// are agent-owned payload, not UI state, so the event carries no decision —
-	// every other surface only needs to retire its open ask-user form.
-	a.emitHitlResolved(entry.sessionID, session.HitlResolvedAskUser, requestID, "")
+	// every other surface only needs to retire its open ask-user form. Only a
+	// delivered response settles the card on other surfaces.
+	if sent {
+		a.emitHitlResolved(entry.sessionID, session.HitlResolvedAskUser, requestID, "")
+	}
 }
 
 // handlePlanApprovalResponse is the body of the EventPlanApprovalResponse listener.
@@ -421,9 +442,8 @@ func (a *App) handlePlanApprovalResponse(payload map[string]any, log *slog.Logge
 		return
 	}
 
-	select {
-	case entry.ch <- planApprovalResponse{Decision: decision, Feedback: feedback}:
-	default:
+	sent := deliverResponse(entry.ch, planApprovalResponse{Decision: decision, Feedback: feedback})
+	if !sent {
 		log.Warn("plan approval response dropped: channel full or receiver gone",
 			"request_id", requestID)
 	}
@@ -438,8 +458,11 @@ func (a *App) handlePlanApprovalResponse(payload map[string]any, log *slog.Logge
 		log.Warn("failed to resolve persisted plan_review message", "request_id", requestID, "error", err)
 	}
 
-	// Multi-surface convergence (see emitHitlResolved).
-	a.emitHitlResolved(entry.sessionID, session.HitlResolvedPlanReview, requestID, decision)
+	// Multi-surface convergence (see emitHitlResolved). Only a delivered
+	// decision is broadcast — the payload carries the effective decision.
+	if sent {
+		a.emitHitlResolved(entry.sessionID, session.HitlResolvedPlanReview, requestID, decision)
+	}
 }
 
 // resolveGoalProposal delivers a user decision to a blocked goal-proposal
@@ -467,11 +490,10 @@ func (a *App) resolveGoalProposal(requestID, decision, condition, verify, verifi
 		Verify:           verify,
 		VerificationMode: verificationMode,
 	}
-	select {
-	case entry.ch <- resp:
-	default:
-		// Channel already resolved or receiver gone — clean up the stale entry.
-	}
+	// A full channel means the receiver is gone or a faster responder won:
+	// the decision is dropped and must not be broadcast as the settlement
+	// below; only the stale entry is cleaned up.
+	sent := deliverResponse(entry.ch, resp)
 	a.pendingGoalProposals.Delete(requestID)
 
 	// Mark the persisted goal_proposal message as resolved so it doesn't
@@ -489,8 +511,11 @@ func (a *App) resolveGoalProposal(requestID, decision, condition, verify, verifi
 	// Multi-surface convergence (see emitHitlResolved). Emitted HERE — in the
 	// shared resolver — so both the event-based path (handleGoalProposalResponse)
 	// and the RPC-based path (FrontendAPI.ConfirmGoal/CancelGoal via the
-	// manager resolver) broadcast the settlement.
-	a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalProposal, requestID, decision)
+	// manager resolver) broadcast the settlement. Only a delivered decision is
+	// broadcast — the payload carries the effective decision.
+	if sent {
+		a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalProposal, requestID, decision)
+	}
 	return true
 }
 
@@ -536,11 +561,10 @@ func (a *App) resolveGoalSuggestion(requestID, decision string) bool {
 		return false
 	}
 
-	select {
-	case entry.ch <- goalSuggestionResponse{Decision: decision}:
-	default:
-		// Channel already resolved or receiver gone — clean up the stale entry.
-	}
+	// A full channel means the receiver is gone or a faster responder won:
+	// the decision is dropped and must not be broadcast as the settlement
+	// below; only the stale entry is cleaned up.
+	sent := deliverResponse(entry.ch, goalSuggestionResponse{Decision: decision})
 	a.pendingGoalSuggestions.Delete(requestID)
 
 	// Mark the persisted goal_suggestion message as resolved so it doesn't
@@ -556,8 +580,11 @@ func (a *App) resolveGoalSuggestion(requestID, decision string) bool {
 	// shared resolver — so both the event-based path
 	// (handleGoalSuggestionResponse) and the RPC-based path
 	// (FrontendAPI.AcceptGoalSuggestion/DeclineGoalSuggestion via the manager
-	// resolver) broadcast the settlement.
-	a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalSuggestion, requestID, decision)
+	// resolver) broadcast the settlement. Only a delivered decision is
+	// broadcast — the payload carries the effective decision.
+	if sent {
+		a.emitHitlResolved(entry.sessionID, session.HitlResolvedGoalSuggestion, requestID, decision)
+	}
 	return true
 }
 
@@ -658,9 +685,8 @@ func (a *App) handleStepLimitResponse(payload map[string]any, log *slog.Logger) 
 		return
 	}
 
-	select {
-	case entry.ch <- resp:
-	default:
+	sent := deliverResponse(entry.ch, resp)
+	if !sent {
 		log.Warn("step_limit response dropped: channel full or receiver gone",
 			"request_id", requestID)
 	}
@@ -675,6 +701,9 @@ func (a *App) handleStepLimitResponse(payload map[string]any, log *slog.Logger) 
 		log.Warn("failed to resolve persisted step_limit message", "request_id", requestID, "error", err)
 	}
 
-	// Multi-surface convergence (see emitHitlResolved).
-	a.emitHitlResolved(entry.sessionID, session.HitlResolvedStepLimit, requestID, respStr)
+	// Multi-surface convergence (see emitHitlResolved). Only a delivered
+	// decision is broadcast — the payload carries the effective decision.
+	if sent {
+		a.emitHitlResolved(entry.sessionID, session.HitlResolvedStepLimit, requestID, respStr)
+	}
 }

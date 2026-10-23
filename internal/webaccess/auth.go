@@ -143,9 +143,9 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // such a client carries the session cookie only by having logged in
 // deliberately; refusing them would break every non-browser consumer for no
 // security gain.
-func sameOriginGate(next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) sameOriginGate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Origin") != "" && !sameOrigin(r) {
+		if r.Header.Get("Origin") != "" && !s.sameOrigin(r) {
 			writeJSONError(w, http.StatusForbidden, "cross-origin request rejected")
 			return
 		}
@@ -196,12 +196,10 @@ type loginRequest struct {
 
 // handleLogin exchanges the auth token for the session cookie.
 // 400 malformed body · 401 wrong token · 429 rate limited · 200 + cookie.
+// The limiter counts only requests that arrive with a parseable body: a
+// script flooding malformed requests must not drain the shared per-IP
+// window and lock the operator's own browser out of login.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow(clientKey(r), time.Now()) {
-		w.Header().Set("Retry-After", "60")
-		writeJSONError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
-		return
-	}
 	body, ok := s.readJSONBody(w, r, maxBodyBytes)
 	if !ok {
 		return
@@ -209,6 +207,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "malformed login body")
+		return
+	}
+	if !s.limiter.allow(clientKey(r), time.Now()) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
 		return
 	}
 	if !constantTimeEqual(req.Token, s.authToken) {

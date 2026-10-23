@@ -8,6 +8,7 @@ package webaccess
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
@@ -473,5 +474,25 @@ func TestStopWithExpiredDeadlineForceCloses(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, rerr := io.ReadAll(conn); errors.Is(rerr, os.ErrDeadlineExceeded) {
 		t.Fatal("connection still open after the expired-deadline Stop (read deadline hit)")
+	}
+}
+
+// TestControlFrameOver125BytesIsProtocolViolation pins the RFC6455 §5.5
+// ceiling: a control frame carrying more than 125 payload bytes fails the
+// frame read with the protocol error instead of being answered (the lenient
+// path used to echo such payloads as pongs).
+func TestControlFrameOver125BytesIsProtocolViolation(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x41}, wsMaxControlPayload+1)
+	mask := [4]byte{1, 2, 3, 4}
+	frame := make([]byte, 0, 4+len(mask)+len(payload))
+	frame = append(frame, 0x80|opPing, 0x80|126, byte(len(payload)>>8), byte(len(payload)))
+	frame = append(frame, mask[:]...)
+	for i, b := range payload {
+		frame = append(frame, b^mask[i%4])
+	}
+	c := &WSConn{br: bufio.NewReader(bytes.NewReader(frame))}
+	_, _, _, err := c.readFrame()
+	if !errors.Is(err, errWSProtocol) {
+		t.Fatalf("err = %v, want errWSProtocol", err)
 	}
 }

@@ -236,9 +236,12 @@ export interface AssistantChunkData { content: string; accumulated_content?: str
  *  than the Conductor's own turn — the frontend must nest it in that block,
  *  never in the root Conductor chat. */
 export interface AssistantDoneData { content: string; input_tokens: number; output_tokens: number; plan_step_id?: string }
-/** Payload of the terminal `task_cancelled` event (backend TaskCancelledData,
- *  backend/session/events.go): `session_id` is always present — no omitempty. */
-export interface TaskCancelledData { session_id: string }
+/** Payload of the terminal `task_cancelled` event (backend TaskCancelledData).
+ *  The backend serializes `session_id` without omitempty, but no boundary
+ *  guard validates the payload (the transport even permits payload-less
+ *  delivery), so the type stays optional to match the unchecked reality —
+ *  do not read it without a presence check (CS #21). */
+export interface TaskCancelledData { session_id?: string }
 export interface TaskCompleteData {
   session_id?: string; output?: string; routing_decision?: Record<string, unknown>
   /** Typed success contract: false for partial/failed/aborted executions delivered as task_complete. */

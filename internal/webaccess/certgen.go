@@ -97,6 +97,14 @@ func GenerateWebAccessCertificate(bind, certPath, keyPath string) error {
 	if err := writeFileAtomic(certPath, certPEM, 0o644); err != nil {
 		return err
 	}
+	// Both renames are in: fsync the directory entry too, so a power loss
+	// cannot revert the renames or land the mixed state. Best-effort — the
+	// pair is already published and readable, a sync failure here only
+	// narrows the crash-durability window the staged-file syncs closed.
+	if d, derr := os.Open(filepath.Dir(certPath)); derr == nil {
+		_ = d.Sync() //nolint:errcheck // best-effort durability
+		_ = d.Close()
+	}
 	return nil
 }
 

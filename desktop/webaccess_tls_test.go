@@ -747,10 +747,11 @@ func TestGetWebAccessInfo_CertStatusMatrix(t *testing.T) {
 
 // TestWebAccessCertCoversHost pins the SAN coverage rule (RFC 6125): an IP
 // host matches only IP SANs, a name host only DNS SANs, compared
-// case-insensitively.
+// case-insensitively, with the §6.4.3 wildcard form (a "*" left-most label
+// covers exactly one label).
 func TestWebAccessCertCoversHost(t *testing.T) {
 	leaf := &x509.Certificate{
-		DNSNames:    []string{"localhost", "MyHost.Example"},
+		DNSNames:    []string{"localhost", "MyHost.Example", "*.example.com"},
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.ParseIP("::1")},
 	}
 	cases := []struct {
@@ -767,6 +768,13 @@ func TestWebAccessCertCoversHost(t *testing.T) {
 		// net.IP.Equal — and browser verification with it — treats the
 		// IPv4-mapped form as the same address as its 4-byte form: covered.
 		{"::ffff:127.0.0.1", true},
+		// RFC 6125 §6.4.3 wildcard: a single "*" left-most label covers
+		// exactly one label.
+		{"app.example.com", true},
+		{"APP.EXAMPLE.COM", true},
+		{"example.com", false},
+		{"a.b.example.com", false},
+		{"example.com.", false},
 	}
 	for _, tc := range cases {
 		if got := webAccessCertCoversHost(leaf, tc.host); got != tc.want {

@@ -9,6 +9,9 @@ const mockApp: Record<string, (...args: unknown[]) => Promise<unknown>> = {}
 
 vi.mock('@/api/runtime', () => ({
   getApp: () => mockApp,
+  // The web-sidecar fetch hardening: the stub env has no real timeouts — the
+  // login tests drive the transport through the fetch stub alone.
+  webFetchTimeoutSignal: () => undefined,
 }))
 vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
@@ -530,6 +533,14 @@ describe('webAccessLogin', () => {
       throw new TypeError('Failed to fetch')
     })
     await expect(webAccessLogin('tok')).rejects.toThrow(/Cannot reach the app/)
+    expect(logger.warn).toHaveBeenCalled()
+  })
+
+  it('maps a stalled sidecar (TimeoutError) to its own actionable message', async () => {
+    stubFetch(async () => {
+      throw new DOMException('The operation timed out', 'TimeoutError')
+    })
+    await expect(webAccessLogin('tok')).rejects.toThrow(/did not answer in time/)
     expect(logger.warn).toHaveBeenCalled()
   })
 

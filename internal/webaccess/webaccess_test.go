@@ -515,6 +515,33 @@ func TestStaticWithoutCSPStillServes(t *testing.T) {
 	}
 }
 
+// TestStaticDirectoryRequestsAnswer404 pins the no-listing contract: a
+// directory URL without an index.html must not render the generated
+// directory index (the SPA file manifest), while the SPA root and real
+// assets keep serving exactly as before.
+func TestStaticDirectoryRequestsAnswer404(t *testing.T) {
+	_, ts := newTestServer(t, func(o *Options) { o.Static = staticFS() })
+	client := &http.Client{}
+	cases := []struct {
+		path string
+		want int
+	}{
+		{"/", http.StatusOK},
+		{"/index.html", http.StatusOK},
+		{"/assets/app.js", http.StatusOK},
+		{"/assets/", http.StatusNotFound},
+		{"/assets", http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		resp := doJSON(t, client, "GET", ts.URL+tc.path, "")
+		bodyString(t, resp)
+		_ = resp.Body.Close() // bodyString already closed it; explicit for the close checker
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s: status = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+	}
+}
+
 func TestPanickingCSPMiddlewareIsIsolated(t *testing.T) {
 	capture := &captureHandler{}
 	_, ts := newTestServer(t, func(o *Options) {
@@ -590,6 +617,73 @@ func TestLoginLimiterWindowReset(t *testing.T) {
 	}
 	if !l.allow("other", now) {
 		t.Fatal("a fresh key must have its own bucket")
+	}
+}
+
+// TestLoginLimiterIgnoresMalformedBodies pins the parse-then-count order:
+// a flood of malformed bodies must not consume the shared per-IP window —
+// only parseable login attempts count, so a script cannot lock the
+// operator's browser out with garbage requests.
+func TestLoginLimiterIgnoresMalformedBodies(t *testing.T) {
+	_, ts := newTestServer(t, nil)
+	base := ts.URL
+	client := &http.Client{}
+	for i := 0; i < loginMaxAttempts+5; i++ {
+		resp := doJSON(t, client, "POST", base+"/api/login", `{not json`)
+		bodyString(t, resp)
+		_ = resp.Body.Close() // bodyString already closed it; explicit for the close checker
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("malformed attempt %d: status = %d, want 400", i+1, resp.StatusCode)
+		}
+	}
+	resp := doJSON(t, client, "POST", base+"/api/login", `{"token":"wrong"}`)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (malformed bodies must not burn attempts)", resp.StatusCode)
+	}
+}
+
+// TestHostMatchesBind pins the DNS-rebinding backstop behind sameOrigin:
+// the request Host must name the configured bind or the loopback set; a
+// rebound DNS name must not. A wildcard bind names no serving host, so
+// every Host passes there (cookie scoping stays the gate).
+func TestHostMatchesBind(t *testing.T) {
+	cases := []struct {
+		host, bind string
+		want       bool
+	}{
+		{"127.0.0.1:8321", "127.0.0.1", true},
+		{"localhost:8321", "127.0.0.1", true},
+		{"127.0.0.1:8321", "localhost", true},
+		{"[::1]:8321", "::1", true},
+		{"192.168.1.10:8321", "192.168.1.10", true},
+		{"attacker.example:8321", "127.0.0.1", false},
+		{"192.168.1.10:8321", "127.0.0.1", false},
+		{"attacker.example:8321", "0.0.0.0", true},
+	}
+	for _, tc := range cases {
+		if got := hostMatchesBind(tc.host, tc.bind); got != tc.want {
+			t.Errorf("hostMatchesBind(%q, %q) = %v, want %v", tc.host, tc.bind, got, tc.want)
+		}
+	}
+}
+
+// TestStartIsSingleUse pins the started guard: a second Start — or a Start
+// after Stop — returns an error instead of leaking a second listener.
+func TestStartIsSingleUse(t *testing.T) {
+	srv := mustNew(t, newTestOptions(stubDispatch{}, func(o *Options) { o.Config.Port = 0 }))
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if err := srv.Start(ctx); err == nil {
+		t.Error("second Start on a running server must fail")
+	}
+	if err := srv.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := srv.Start(ctx); err == nil {
+		t.Error("Start after Stop must fail")
 	}
 }
 

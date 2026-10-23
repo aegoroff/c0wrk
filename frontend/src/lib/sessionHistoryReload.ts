@@ -27,6 +27,7 @@ import { reconcileRuntimeStatus, reconcilePendingActions, reconcileWorkUnits, st
 import { logger } from '@/lib/logger'
 import { useChatStore } from '@/stores/chatStore'
 import { usePlanStore } from '@/stores/planStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import type { ChatMessageUI } from '@/types/messages'
 
 export interface ReloadSessionHistoryOptions {
@@ -59,9 +60,18 @@ export async function reloadSessionHistory(
     // takes over) and reject (the caller's error card renders instead). A
     // cancelled attempt — the user switched sessions mid-flight — deliberately
     // leaves the marker unset: its snapshot never reached the store, so the
-    // next visit to the session spins until its own load settles.
-    if (!isCancelled()) useChatStore.getState().markHistoryLoaded(sessionId)
+    // next visit to the session spins until its own load settles. The same
+    // guard covers a mid-flight DELETION: marking a session the catalog no
+    // longer knows would resurrect the marker dropSessions just cleared (and
+    // a recreated session with a reused id would then skip its history load).
+    if (!isCancelled() && sessionInCatalog(sessionId)) useChatStore.getState().markHistoryLoaded(sessionId)
   }
+}
+
+/** True while the session id still exists in the session catalog. */
+function sessionInCatalog(sessionId: string): boolean {
+  const sessions = useSessionStore.getState().sessions
+  return sessions?.some((s) => s.id === sessionId) ?? false
 }
 
 /**

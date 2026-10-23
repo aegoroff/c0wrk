@@ -63,8 +63,11 @@ func TestSendMessage_TaskStartedEmittedOncePerTask(t *testing.T) {
 	// Bounded join on the epilogue tail (agent_metrics and friends still land
 	// after task_complete): no further lifecycle emission may arrive behind
 	// the terminal event. A duplicate here would double the global
-	// sessions:changed push for a single transition.
+	// sessions:changed push for a single transition. The join itself is
+	// deadline-bounded: a stream firing more often than the 200 ms quiet
+	// window would otherwise spin forever instead of failing the test.
 	quiesced := false
+	quiesceDeadline := time.After(2 * time.Second)
 	for !quiesced {
 		select {
 		case e := <-eventChan:
@@ -77,6 +80,8 @@ func TestSendMessage_TaskStartedEmittedOncePerTask(t *testing.T) {
 		case <-time.After(200 * time.Millisecond):
 			// Join window elapsed with no further event: the epilogue is done.
 			quiesced = true
+		case <-quiesceDeadline:
+			t.Fatal("epilogue tail did not quiesce within 2s (events arriving faster than the quiet window)")
 		}
 	}
 

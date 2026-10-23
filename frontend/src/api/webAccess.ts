@@ -10,7 +10,7 @@
 // getApp proxy simply has no such method; the read degrades to null, the
 // toggle throws).
 
-import { getApp } from './runtime'
+import { getApp, webFetchTimeoutSignal } from './runtime'
 import { logger } from '@/lib/logger'
 
 /** GetWebAccessInfo payload: the Settings → Web Access section's view. */
@@ -99,6 +99,18 @@ export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
 }
 
 /**
+ * Redacted shape summary for boundary-failure logs: the top-level keys with
+ * their value TYPES only — never the values (a payload like GetWebAccessInfo's
+ * carries the access token, which must not reach the console).
+ */
+function shapeSummary(raw: unknown): string {
+  if (raw === null || typeof raw !== 'object') return typeof raw
+  return Object.entries(raw as Record<string, unknown>)
+    .map(([k, v]) => `${k}:${typeof v}`)
+    .join(',')
+}
+
+/**
  * Fetch the sidecar state for Settings → Web Access. Returns the parsed
  * response, or `null` on a transport failure or an unexpected shape — the
  * section renders "unavailable"; a null never rejects into a render path.
@@ -113,7 +125,9 @@ export async function getWebAccessInfo(): Promise<WebAccessInfo | null> {
     if (raw === null || raw === undefined) return null
     const parsed = parseWebAccessInfo(raw)
     if (!parsed) {
-      logger.error('getWebAccessInfo: unexpected response shape', raw)
+      // Redacted shape summary only: the payload carries the access token,
+      // so its VALUES never reach the log — just keys and value types.
+      logger.error('getWebAccessInfo: unexpected response shape', shapeSummary(raw))
     }
     return parsed
   } catch (err) {
@@ -354,9 +368,15 @@ export async function webAccessLogin(token: string): Promise<void> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
+      // A sidecar that accepts TCP but stalls must not hold the login gate
+      // pending until the browser stack's own long timeout.
+      signal: webFetchTimeoutSignal(),
     })
   } catch (err) {
     logger.warn('[web-access] login transport failure', err)
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error('The app did not answer in time — check the desktop instance and try again.')
+    }
     throw new Error('Cannot reach the app — is the desktop instance still running?')
   }
   if (res.ok) return

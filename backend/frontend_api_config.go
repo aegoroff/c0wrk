@@ -758,6 +758,22 @@ func (f *FrontendAPI) runExperimentalChangedHook(enabled bool) {
 // rejected disk write is returned as an error with the in-memory gate rolled
 // back, so the applied gate (what GetConfig serves) and the persisted state
 // never diverge.
+//
+// Recorded trade-off: the configMu critical section spans the synchronous
+// desktop sidecar transition (runExperimentalChangedHook →
+// applyExperimentalWebAccess). The hook must stay inside the critical
+// section that flipped the in-memory gate so no configMu reader can observe
+// the gate already flipped while the sidecar still serves the old state;
+// the transition itself is bounded — the sidecar stop budget on the
+// gate-OFF direction, a fast mount on gate-ON — so the worst-case convoy
+// for other configMu contenders (settings setters, embeddedConfig() readers
+// on the LLM request path) is one stop budget, and only when the gate is
+// switched off while the sidecar's graceful stop is slow. The one-way lock
+// order configMu → webAccessMu (desktop code never takes configMu) keeps
+// the nesting deadlock-free. Splitting the flip from the transition (async
+// mount/stop with completion via a state event) would close even that
+// convoy window but is a contract change needing an ADR amendment —
+// deliberately not taken.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.seedAcquire()
 	f.configMu.Lock()
