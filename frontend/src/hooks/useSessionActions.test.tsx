@@ -21,6 +21,7 @@ const spies = vi.hoisted(() => ({
   createSession: vi.fn<() => Promise<SessionInfo>>(),
   archiveSession: vi.fn<() => Promise<void>>(),
   deleteSession: vi.fn<() => Promise<void>>(),
+  deleteSessionWithOptions: vi.fn<() => Promise<void>>(),
   pinSession: vi.fn<() => Promise<void>>(),
   logError: vi.fn(),
 }))
@@ -30,6 +31,7 @@ vi.mock('@/api/sessions', () => ({
   renameSession: vi.fn(),
   archiveSession: spies.archiveSession,
   deleteSession: spies.deleteSession,
+  deleteSessionWithOptions: spies.deleteSessionWithOptions,
   forkSession: vi.fn(),
   pinSession: spies.pinSession,
 }))
@@ -48,6 +50,8 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'
 import { useChatStore } from '@/stores/chatStore'
+import { useTerminalRegistryStore } from '@/stores/terminalRegistryStore'
+import { useChatInputStore } from '@/stores/chatInputStore'
 
 let captured: ReturnType<typeof useSessionActions> | null = null
 let container: HTMLDivElement | null = null
@@ -94,6 +98,7 @@ beforeEach(() => {
   spies.createSession.mockReset()
   spies.archiveSession.mockReset().mockResolvedValue(undefined)
   spies.deleteSession.mockReset().mockResolvedValue(undefined)
+  spies.deleteSessionWithOptions.mockReset().mockResolvedValue(undefined)
   spies.pinSession.mockReset().mockResolvedValue(undefined)
   spies.logError.mockReset()
   useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
@@ -101,6 +106,10 @@ beforeEach(() => {
   // Group actions consult the live busy overlay — start every test from an
   // idle chat state so busy-ness comes only from the fixture under test.
   useChatStore.setState({ taskActive: {}, paused: {}, unfinishedTaskStatus: {} })
+  // Blocked-delete tests touch the per-session slices the finalization drops
+  // (terminal registry, chat-input drafts) — start them empty every time.
+  useTerminalRegistryStore.setState({ instances: [], readySessions: new Set<string>() })
+  useChatInputStore.setState({ inputs: {} })
   useProjectStore.setState({ activeProjectId: 'proj-1', projects: [makeProject()] })
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -446,5 +455,281 @@ describe('SessionActionConfirmDialog — group copy', () => {
       '"Solo" has a task in progress or unfinished. Archiving will cancel it and make the session read-only.',
     )
     expect(archiveText).not.toContain('groups')
+  })
+})
+
+describe('blocked delete — managed-worktree refusal parks, retries, finalizes', () => {
+  /** The exact backend refusal text (`SessionDeleteBlockedError.Error()`). */
+  function blockedError(reason: string, option: string): Error {
+    return new Error(`session deletion blocked: ${reason} (confirm via ${option})`)
+  }
+
+  it('a blocked refusal parks the state and deletes NOTHING', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-m', 'proj-1', { name: 'Managed' })] })
+    useTerminalRegistryStore.getState().ensureInstance('s-m')
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-m" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+
+    await act(async () => {
+      await captured!.handleDelete('s-m')
+    })
+
+    // The refusal is parked with everything the dialog needs — ids, name,
+    // reason, and the exact option field to set true on confirm.
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-m'],
+      sessionName: 'Managed',
+      reason: 'worktree "s-m" has uncommitted changes',
+      option: 'confirm_uncommitted_loss',
+    })
+    // removeSession never ran: the session stays fully listed and its
+    // terminal instance stays registered.
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).toContain('s-m')
+    expect(useTerminalRegistryStore.getState().instances).toContain('s-m')
+    // A recognized refusal is not a failure — nothing logged, no retry.
+    expect(spies.logError).not.toHaveBeenCalled()
+    expect(spies.deleteSessionWithOptions).not.toHaveBeenCalled()
+    expect(captured!.blockedDeleteError).toBeNull()
+  })
+
+  it('a NON-blocked delete failure never opens the blocked dialog', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-1')] })
+    spies.deleteSession.mockRejectedValueOnce(new Error('rpc down'))
+
+    await act(async () => {
+      await captured!.handleDelete('s-1')
+    })
+
+    expect(captured!.blockedDelete).toBeNull()
+    expect(spies.logError).toHaveBeenCalledWith('Failed to delete session:', expect.any(Error))
+  })
+
+  it('confirmBlockedDelete success finalizes exactly like performDelete', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-m', 'proj-1', { name: 'Managed' })] })
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-m" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+    await act(async () => {
+      await captured!.handleDelete('s-m')
+    })
+    useTerminalRegistryStore.getState().ensureInstance('s-m')
+    useChatInputStore.getState().setDraft('s-m', 'half-written')
+    useSessionWorkspaceStore
+      .getState()
+      .setChoice('s-m', { kind: 'branch', branch: 'feat/a', createBranch: false, startPoint: '' })
+
+    await act(async () => {
+      await captured!.confirmBlockedDelete({ confirmUncommittedLoss: true })
+    })
+
+    expect(spies.deleteSessionWithOptions).toHaveBeenCalledTimes(1)
+    expect(spies.deleteSessionWithOptions).toHaveBeenCalledWith('s-m', { confirmUncommittedLoss: true })
+    // Full cleanup — the same finalization as a plain delete: the row is
+    // removed, and every per-session slice is dropped.
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).not.toContain('s-m')
+    expect(useTerminalRegistryStore.getState().instances).not.toContain('s-m')
+    expect(useChatInputStore.getState().inputs['s-m']).toBeUndefined()
+    expect(useSessionWorkspaceStore.getState().choices['s-m']).toBeUndefined()
+    expect(captured!.blockedDelete).toBeNull()
+    expect(captured!.blockedDeleteError).toBeNull()
+  })
+
+  it('group [local-ok, managed-blocked]: earlier members finalize, the block parks the remainder', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-1'), makeSession('s-2', 'proj-1', { name: 'Managed Two' })],
+    })
+    spies.deleteSession
+      .mockResolvedValueOnce(undefined) // s-1: local, deletes fine
+      .mockRejectedValueOnce(blockedError('worktree "s-2" has uncommitted changes', 'confirm_uncommitted_loss'))
+    await act(async () => {
+      await captured!.handleDeleteGroup('feat/a', ['s-1', 's-2'])
+    })
+
+    await act(async () => {
+      await captured!.confirmPendingAction()
+    })
+
+    expect(spies.deleteSession).toHaveBeenCalledTimes(2)
+    const ids = useSessionStore.getState().sessions!.map((s) => s.id)
+    expect(ids).not.toContain('s-1')
+    expect(ids).toContain('s-2')
+    // The remainder (the refused member — here the last) is parked under the
+    // GROUP's branch label, not a session name.
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-2'],
+      sessionName: 'feat/a',
+      reason: 'worktree "s-2" has uncommitted changes',
+      option: 'confirm_uncommitted_loss',
+    })
+  })
+
+  it('group [managed-blocked, local]: the first refusal parks the WHOLE remainder and stops the loop', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-1', 'proj-1', { name: 'Managed One' }), makeSession('s-2')],
+    })
+    spies.deleteSession.mockRejectedValueOnce(blockedError('worktree "s-1" is locked', 'unlock_locked_tree'))
+    await act(async () => {
+      await captured!.handleDeleteGroup('feat/a', ['s-1', 's-2'])
+    })
+
+    await act(async () => {
+      await captured!.confirmPendingAction()
+    })
+
+    // The refusal on the FIRST member stops the loop before s-2.
+    expect(spies.deleteSession).toHaveBeenCalledTimes(1)
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).toEqual(['s-1', 's-2'])
+    // Everything still-to-delete is parked — the refused member first.
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-1', 's-2'],
+      sessionName: 'feat/a',
+      reason: 'worktree "s-1" is locked',
+      option: 'unlock_locked_tree',
+    })
+  })
+
+  it('confirmBlockedDelete retries the whole parked remainder with the decision and releases the state', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-1', 'proj-1', { name: 'Managed One' }), makeSession('s-2')],
+    })
+    spies.deleteSession.mockRejectedValueOnce(blockedError('worktree "s-1" is locked', 'unlock_locked_tree'))
+    await act(async () => {
+      await captured!.handleDeleteGroup('feat/a', ['s-1', 's-2'])
+    })
+    await act(async () => {
+      await captured!.confirmPendingAction()
+    })
+
+    await act(async () => {
+      await captured!.confirmBlockedDelete({ unlockLockedTree: true })
+    })
+
+    expect(spies.deleteSessionWithOptions).toHaveBeenCalledTimes(2)
+    expect(spies.deleteSessionWithOptions).toHaveBeenNthCalledWith(1, 's-1', { unlockLockedTree: true })
+    expect(spies.deleteSessionWithOptions).toHaveBeenNthCalledWith(2, 's-2', { unlockLockedTree: true })
+    const ids = useSessionStore.getState().sessions!.map((s) => s.id)
+    expect(ids).not.toContain('s-1')
+    expect(ids).not.toContain('s-2')
+    expect(captured!.blockedDelete).toBeNull()
+  })
+
+  it('a renewed refusal on retry refreshes reason/option and keeps the remainder parked', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-1', 'proj-1', { name: 'Managed One' }), makeSession('s-2')],
+    })
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-1" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+    await act(async () => {
+      await captured!.handleDeleteGroup('feat/a', ['s-1', 's-2'])
+    })
+    await act(async () => {
+      await captured!.confirmPendingAction()
+    })
+    spies.deleteSessionWithOptions.mockRejectedValueOnce(
+      blockedError('worktree "s-1" is locked by another process', 'unlock_locked_tree'),
+    )
+
+    await act(async () => {
+      await captured!.confirmBlockedDelete({ confirmUncommittedLoss: true })
+    })
+
+    // The retry stopped at s-1 again; the park is refreshed IN PLACE.
+    expect(spies.deleteSessionWithOptions).toHaveBeenCalledTimes(1)
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-1', 's-2'],
+      sessionName: 'feat/a',
+      reason: 'worktree "s-1" is locked by another process',
+      option: 'unlock_locked_tree',
+    })
+    // A recognized refusal is still not a failure, and nothing was deleted.
+    expect(spies.logError).not.toHaveBeenCalled()
+    expect(captured!.blockedDeleteError).toBeNull()
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).toEqual(['s-1', 's-2'])
+  })
+
+  it('a NON-blocked retry failure parks the inline error; the state stays retryable', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-m', 'proj-1', { name: 'Managed' })] })
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-m" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+    await act(async () => {
+      await captured!.handleDelete('s-m')
+    })
+    spies.deleteSessionWithOptions.mockRejectedValueOnce(new Error('rpc down'))
+
+    await act(async () => {
+      await captured!.confirmBlockedDelete({ confirmUncommittedLoss: true })
+    })
+
+    expect(captured!.blockedDeleteError).toBe('rpc down')
+    expect(spies.logError).toHaveBeenCalledWith('Failed to delete session:', expect.any(Error))
+    // Still parked, unchanged — the user can retry or cancel.
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-m'],
+      sessionName: 'Managed',
+      reason: 'worktree "s-m" has uncommitted changes',
+      option: 'confirm_uncommitted_loss',
+    })
+  })
+
+  it('cancelBlockedDelete clears the parked state and any inline error', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-m', 'proj-1', { name: 'Managed' })] })
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-m" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+    await act(async () => {
+      await captured!.handleDelete('s-m')
+    })
+    spies.deleteSessionWithOptions.mockRejectedValueOnce(new Error('rpc down'))
+    await act(async () => {
+      await captured!.confirmBlockedDelete({ confirmUncommittedLoss: true })
+    })
+    expect(captured!.blockedDeleteError).toBe('rpc down')
+
+    await act(async () => {
+      captured!.cancelBlockedDelete()
+    })
+
+    expect(captured!.blockedDelete).toBeNull()
+    expect(captured!.blockedDeleteError).toBeNull()
+    // The session was never deleted.
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).toContain('s-m')
+  })
+
+  it('busy-confirm is intact: a busy session arms the dialog and ITS confirm parks a block too', async () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s-busy', 'proj-1', { name: 'Busy', unfinished_task_status: 'in_progress' })],
+    })
+
+    await act(async () => {
+      await captured!.handleDelete('s-busy')
+    })
+
+    // The busy guard fires first: the plain confirm dialog, not the park.
+    expect(captured!.pendingAction).toEqual({
+      kind: 'delete',
+      sessionId: 's-busy',
+      sessionName: 'Busy',
+      isArchived: false,
+    })
+    expect(captured!.blockedDelete).toBeNull()
+    expect(spies.deleteSession).not.toHaveBeenCalled()
+
+    spies.deleteSession.mockRejectedValueOnce(
+      blockedError('worktree "s-busy" has uncommitted changes', 'confirm_uncommitted_loss'),
+    )
+    await act(async () => {
+      await captured!.confirmPendingAction()
+    })
+
+    expect(captured!.pendingAction).toBeNull()
+    expect(captured!.blockedDelete).toEqual({
+      sessionIds: ['s-busy'],
+      sessionName: 'Busy',
+      reason: 'worktree "s-busy" has uncommitted changes',
+      option: 'confirm_uncommitted_loss',
+    })
   })
 })

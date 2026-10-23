@@ -38,6 +38,8 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `frontend/src/stores/sessionWorkspaceStore.ts` — the chat-side pending-choice state (ADR-091): per-fresh-session recorded workspace choices plus the single-slot `consumingFor` consumption window; transient by design
 - `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the choice's selection surfaces: the chat toolbar selector (`local` / `branch…` while the active session is FRESH, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — presets a `createBranch=false` choice, so the first send ADOPTS the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated pick mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch request — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in pick mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management; in manage mode both surfaces render the ACTIVE managed session's pin (`frontend/src/hooks/useSessionWorktreePin.ts`) — a lock instead of the check on the pinned branch and the session's own tree row, no delete affordance on either, and a disabled Rename on the pinned branch (see the focus model's pin-rendering bullet)
 - `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the send-time bind's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside the chosen branch label while the consumption window is open
+- `frontend/src/components/layout/SessionDeleteBlockedDialog.tsx` — the session-deletion refusal dialog (the `*SessionDeleteBlockedError` consumer): count-aware copy naming the parked session(s) or branch-named group, the verbatim refusal reason, both worktree consents as explicit checkboxes pre-ticked to the option the refusal named; confirm retries the parked set through `DeleteSessionWithOptions`, cancel deletes nothing (see [Release](#release-deletion))
+- `frontend/src/components/layout/SessionDeleteBlockedDialog.test.tsx` — the dialog's render/consent/reset/retry contract (null renders nothing, verbatim reason, pre-tick permutations, confirm payloads, inline error, park renewal)
 
 ## Core Types
 
@@ -276,6 +278,21 @@ the count always sees every committed binding: a concurrent adoption either
 commits (and is counted — release skipped) or commits after the removal and
 rolls itself back (see Creation), and of two simultaneous co-owner
 deletions the second always observes the first's row gone and releases.
+
+The blocked refusal is a user-facing decision point, not a dead end: the
+frontend parks it (`useSessionActions.blockedDelete` — the refused session
+first, then every group member still pending; a group keeps its branch-name
+label) and `SessionDeleteBlockedDialog` — mounted on both session-list
+surfaces (`SessionList`, `SessionSelector`) — names the parked session(s),
+explains that confirming deletes the session(s) and their worktree
+director{y/ies} while the git branch is kept, shows the verbatim refusal
+reason, and offers both consents as explicit checkboxes
+(`confirmUncommittedLoss` / `unlockLockedTree`), pre-ticking the one the
+refusal named. Confirm retries the whole parked set through
+`DeleteSessionWithOptions` carrying exactly the ticked flags — a renewed
+refusal refreshes the park in place (new reason/option, remaining ids), any
+other failure surfaces inline while the set stays parked and retryable, and
+cancel/dismiss releases the park deleting nothing.
 
 A tree that is no longer linked is already gone (nothing to do); a tree
 classified non-managed (main/external/foreign) is NEVER removed. Deletion
@@ -562,7 +579,7 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 
 ## Extension Points
 
-- Frontend UI for the managed lifecycle: the send-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…` while the active session is FRESH, and the BranchPicker's pick mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch request from the remote ref) into `sessionWorkspaceStore`; provisioning runs at the session's FIRST send via `SendMessage`'s `workspace` argument with no in-place checkout (ADR-091). Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
+- Frontend UI for the managed lifecycle: the send-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…` while the active session is FRESH, and the BranchPicker's pick mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch request from the remote ref) into `sessionWorkspaceStore`; provisioning runs at the session's FIRST send via `SendMessage`'s `workspace` argument with no in-place checkout (ADR-091), and the blocked-deletion refusal has its confirmation surface — `SessionDeleteBlockedDialog` on both session-list surfaces retrying through `DeleteSessionWithOptions` (see [Release](#release-deletion)). Remaining consumer work: rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
   (BranchPicker + BranchDropdown) and the

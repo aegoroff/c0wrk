@@ -31,9 +31,12 @@ import {
   renameSession,
   archiveSession,
   deleteSession,
+  deleteSessionWithOptions,
   forkSession,
   pinSession,
 } from '@/api/sessions'
+import { parseSessionDeleteBlock, type SessionDeleteBlock } from '@/lib/sessionDeleteBlock'
+import type { SessionDeleteOptionsUI } from '@/types/api'
 import { logger } from '@/lib/logger'
 
 /** A destructive action held for user confirmation before execution. */
@@ -49,6 +52,26 @@ export interface PendingSessionAction {
    * name — and `sessionId` is just the first member (kept for compatibility).
    */
   sessionIds?: string[]
+}
+
+/**
+ * A delete the backend refused until an explicit decision about the session's
+ * managed worktree is made. The refused session (plus, for a group
+ * confirmation, every member still pending when the refusal hit) is parked
+ * here — NOTHING has been deleted; the whole set stays intact and retryable
+ * with the named decision. Cleared by {@link SessionActions.confirmBlockedDelete}
+ * on success or {@link SessionActions.cancelBlockedDelete} on dismiss.
+ */
+export interface BlockedSessionDelete {
+  /** Sessions still to be deleted — the refused one first. */
+  sessionIds: string[]
+  /** Display label: the session name, or the branch name for a group action. */
+  sessionName: string
+  /** The backend's human-readable refusal explanation. */
+  reason: string
+  /** Names the decision that unblocks (`confirm_uncommitted_loss` or
+   *  `unlock_locked_tree`) — the `SessionDeleteOptionsUI` field to set true. */
+  option: string
 }
 
 export interface SessionActions {
@@ -91,6 +114,27 @@ export interface SessionActions {
   confirmPendingAction: () => Promise<void>
   /** Dismiss the pending action (user cancelled). */
   cancelPendingAction: () => void
+  /**
+   * A delete the backend refused pending an explicit worktree decision
+   * (`session deletion blocked: …`), parked with everything still to be
+   * deleted — null when nothing is parked. The parking never touches the
+   * session list: a blocked refusal deletes nothing.
+   */
+  blockedDelete: BlockedSessionDelete | null
+  /**
+   * Message of the last NON-blocked failure during
+   * {@link confirmBlockedDelete} — surfaced inline; the parked state stays so
+   * the user can retry or cancel. Reset on the next confirm/cancel/park.
+   */
+  blockedDeleteError: string | null
+  /** Re-issue the parked deletions carrying the user's explicit decisions.
+   *  Each success runs the same finalization as a plain delete; a renewed
+   *  refusal refreshes the parked reason/option; any other failure parks an
+   *  inline {@link blockedDeleteError}. */
+  confirmBlockedDelete: (options: SessionDeleteOptionsUI) => Promise<void>
+  /** Dismiss the parked blocked deletion — deletes nothing, clears the
+   *  parked state and any inline error. */
+  cancelBlockedDelete: () => void
 }
 
 export function useSessionActions(): SessionActions {
@@ -103,6 +147,8 @@ export function useSessionActions(): SessionActions {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [pendingAction, setPendingAction] = useState<PendingSessionAction | null>(null)
+  const [blockedDelete, setBlockedDelete] = useState<BlockedSessionDelete | null>(null)
+  const [blockedDeleteError, setBlockedDeleteError] = useState<string | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
 
   const handleNewSession = useCallback(async () => {
@@ -178,42 +224,89 @@ export function useSessionActions(): SessionActions {
     [addSession, selectSession],
   )
 
-  const performDelete = useCallback(
-    async (id: string) => {
-      try {
-        await deleteSession(id)
-        removeSession(id)
-        // The backend stopped this session's terminal PTY in DeleteSession;
-        // drop its (now-dead) instance from the app-lifetime registry.
-        useTerminalRegistryStore.getState().removeInstances([id])
-        // Drop the deleted session's chat-input slice (draft, optimize flag,
-        // optimize error) so the per-session map stays bounded.
-        useChatInputStore.getState().dropSessions([id])
-        // Drop its pending-attachment slice + transient image-error banner
-        // for the same reason (namesById stays — committed names remain
-        // resolvable for tool cards).
-        useAttachmentsStore.getState().dropSessions([id])
-        // Drop the deleted session's bookmarks so the per-session map stays
-        // bounded (the backend already cascade-deleted them from the DB).
-        useBookmarkStore.getState().clearSession(id)
-        // Drop its E2S execution-state snapshot (live-only stream — a deleted
-        // session never re-emits e2s_state, so the entry would go stale).
-        useE2SStore.getState().clearSession(id)
-        // Drop its saved chat scroll position — the session is gone, and the
-        // entry would otherwise keep the per-session map growing.
-        useChatStore.getState().clearScrollPosition(id)
-        // Drop its pending workspace choice (a fresh session deleted before
-        // its first send) — the per-session map stays bounded.
-        useSessionWorkspaceStore.getState().dropSessions([id])
-        // Drop its step context fill + per-step token totals for the same
-        // reason — one action clears both session-keyed maps (a deleted
-        // session never re-emits context_fill, so the entries would go stale).
-        useChatStore.getState().clearStepContextFill(id)
-      } catch (error) {
-        logger.error('Failed to delete session:', error)
-      }
+  /**
+   * Shared post-delete cleanup — runs ONLY after the backend confirmed the
+   * deletion. A blocked refusal must never reach this: it parks
+   * {@link BlockedSessionDelete} state instead, leaving the session fully
+   * listed and retryable.
+   */
+  const finalizeDeletedSession = useCallback(
+    (id: string) => {
+      removeSession(id)
+      // The backend stopped this session's terminal PTY in DeleteSession;
+      // drop its (now-dead) instance from the app-lifetime registry.
+      useTerminalRegistryStore.getState().removeInstances([id])
+      // Drop the deleted session's chat-input slice (draft, optimize flag,
+      // optimize error) so the per-session map stays bounded.
+      useChatInputStore.getState().dropSessions([id])
+      // Drop its pending-attachment slice + transient image-error banner
+      // for the same reason (namesById stays — committed names remain
+      // resolvable for tool cards).
+      useAttachmentsStore.getState().dropSessions([id])
+      // Drop the deleted session's bookmarks so the per-session map stays
+      // bounded (the backend already cascade-deleted them from the DB).
+      useBookmarkStore.getState().clearSession(id)
+      // Drop its E2S execution-state snapshot (live-only stream — a deleted
+      // session never re-emits e2s_state, so the entry would go stale).
+      useE2SStore.getState().clearSession(id)
+      // Drop its saved chat scroll position — the session is gone, and the
+      // entry would otherwise keep the per-session map growing.
+      useChatStore.getState().clearScrollPosition(id)
+      // Drop its pending workspace choice (a fresh session deleted before
+      // its first send) — the per-session map stays bounded.
+      useSessionWorkspaceStore.getState().dropSessions([id])
+      // Drop its step context fill + per-step token totals for the same
+      // reason — one action clears both session-keyed maps (a deleted
+      // session never re-emits context_fill, so the entries would go stale).
+      useChatStore.getState().clearStepContextFill(id)
     },
     [removeSession],
+  )
+
+  /**
+   * Delete ONE session and, on success, run the shared finalization.
+   * A structured refusal (`session deletion blocked: <reason> (confirm via
+   * <option>)`) is recognized and returned to the caller — nothing was
+   * deleted, and the caller parks it as blocked-delete state. Any other
+   * failure is logged and reported as 'failed'; the session stays listed.
+   */
+  const attemptDelete = useCallback(
+    async (
+      id: string,
+    ): Promise<{ status: 'deleted' } | { status: 'blocked'; block: SessionDeleteBlock } | { status: 'failed' }> => {
+      try {
+        await deleteSession(id)
+        finalizeDeletedSession(id)
+        return { status: 'deleted' }
+      } catch (error) {
+        const block = parseSessionDeleteBlock(error)
+        if (block !== null) return { status: 'blocked', block }
+        logger.error('Failed to delete session:', error)
+        return { status: 'failed' }
+      }
+    },
+    [finalizeDeletedSession],
+  )
+
+  /** Delete one session, parking a blocked refusal as singleton state (the
+   *  label is the session's own name). Used by the direct (non-group)
+   *  gestures; group confirmations park via {@link confirmPendingAction},
+   *  which needs the group's remaining ids in the parked state. */
+  const performDelete = useCallback(
+    async (id: string) => {
+      const result = await attemptDelete(id)
+      if (result.status !== 'blocked') return
+      const name =
+        useSessionStore.getState().sessions?.find((s) => s.id === id)?.name ?? id
+      setBlockedDeleteError(null)
+      setBlockedDelete({
+        sessionIds: [id],
+        sessionName: name,
+        reason: result.block.reason,
+        option: result.block.option,
+      })
+    },
+    [attemptDelete],
   )
 
   const performArchive = useCallback(
@@ -319,20 +412,79 @@ export function useSessionActions(): SessionActions {
 
   const confirmPendingAction = useCallback(async () => {
     if (!pendingAction) return
-    const { kind, sessionId, isArchived, sessionIds } = pendingAction
+    const { kind, sessionId, sessionName, isArchived, sessionIds } = pendingAction
     setPendingAction(null)
     // Group actions (sessionIds set) apply the operation to EVERY member;
-    // each perform* catches its own error, so one failure never breaks the loop.
-    for (const id of sessionIds ?? [sessionId]) {
+    // a per-member failure never breaks the loop. A BLOCKED delete does:
+    // the refusal names a decision about that member's managed worktree, so
+    // the rest of the group is parked with it (the refused member first) —
+    // nothing further is deleted until the user decides.
+    const ids = sessionIds ?? [sessionId]
+    for (const [index, id] of ids.entries()) {
       if (kind === 'delete') {
-        await performDelete(id)
+        const result = await attemptDelete(id)
+        if (result.status === 'blocked') {
+          setBlockedDeleteError(null)
+          setBlockedDelete({
+            sessionIds: ids.slice(index),
+            sessionName,
+            reason: result.block.reason,
+            option: result.block.option,
+          })
+          return
+        }
       } else {
         await performArchive(id, isArchived)
       }
     }
-  }, [pendingAction, performDelete, performArchive])
+  }, [pendingAction, attemptDelete, performArchive])
 
   const cancelPendingAction = useCallback(() => setPendingAction(null), [])
+
+  /**
+   * Re-issue every parked deletion carrying the user's explicit decisions
+   * (the flag named by `blockedDelete.option` set true). Success runs the
+   * shared finalization per member; a RENEWED refusal means another decision
+   * is still missing — the parked state is refreshed in place (remaining ids,
+   * new reason/option) and nothing is cleared; any other failure parks an
+   * inline error message while the parked state stays retryable. Only when
+   * the whole parked set is gone is the state released.
+   */
+  const confirmBlockedDelete = useCallback(
+    async (options: SessionDeleteOptionsUI) => {
+      if (!blockedDelete) return
+      const { sessionIds, sessionName } = blockedDelete
+      setBlockedDeleteError(null)
+      for (const [index, id] of sessionIds.entries()) {
+        try {
+          await deleteSessionWithOptions(id, options)
+        } catch (error) {
+          const block = parseSessionDeleteBlock(error)
+          if (block !== null) {
+            setBlockedDelete({
+              sessionIds: sessionIds.slice(index),
+              sessionName,
+              reason: block.reason,
+              option: block.option,
+            })
+            return
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          logger.error('Failed to delete session:', error)
+          setBlockedDeleteError(message)
+          return
+        }
+        finalizeDeletedSession(id)
+      }
+      setBlockedDelete(null)
+    },
+    [blockedDelete, finalizeDeletedSession],
+  )
+
+  const cancelBlockedDelete = useCallback(() => {
+    setBlockedDelete(null)
+    setBlockedDeleteError(null)
+  }, [])
 
   const startRename = useCallback((id: string, currentName: string) => {
     setRenamingId(id)
@@ -379,5 +531,9 @@ export function useSessionActions(): SessionActions {
     pendingAction,
     confirmPendingAction,
     cancelPendingAction,
+    blockedDelete,
+    blockedDeleteError,
+    confirmBlockedDelete,
+    cancelBlockedDelete,
   }
 }
