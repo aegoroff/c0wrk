@@ -107,11 +107,25 @@ const { chatMocks } = vi.hoisted(() => ({
 vi.mock('@/stores/chatStore', () => ({
   useChatStore: Object.assign(
     (selector: (s: typeof chatMocks) => unknown) => selector(chatMocks),
-    // The creation gestures seed the new session's confirmed-empty transcript
-    // through the store's action surface (ADR-091).
-    { getState: () => ({ ensureEmptyTranscript: vi.fn() }) },
+    // The store's action surface used by the creation gestures AND the
+    // delete finalization (ADR-091 seeding + per-entry cleanup): an
+    // incomplete action set would throw inside the delete flow.
+    {
+      getState: () => ({
+        ensureEmptyTranscript: vi.fn(),
+        clearScrollPosition: vi.fn(),
+        clearStepContextFill: vi.fn(),
+      }),
+    },
   ),
 }))
+
+// Delete failures surface through the app-wide runtime_error toast
+// (useSessionActions); jsdom has no Wails runtime, so the emit is mocked.
+const { runtimeMocks } = vi.hoisted(() => ({
+  runtimeMocks: { emit: vi.fn() },
+}))
+vi.mock('@/api/runtime', () => runtimeMocks)
 
 import { SessionSelector } from './SessionSelector'
 import { useSessionWorkspaceStore } from '@/stores/sessionWorkspaceStore'

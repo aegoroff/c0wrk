@@ -294,6 +294,38 @@ func TestWorkspaceBindingSharedTree(t *testing.T) {
 	}
 }
 
+// TestWorkspaceBindingCountSkipsEmptyBindingRows pins the empty-binding guard
+// of CountManagedWorktreeSessions: no-project CHAT rows carry the schema's
+// DEFAULT empty binding (the binding backfill deliberately leaves
+// __no_project__ rows empty, so such rows exist on every real install), and
+// json_extract on an empty binding raises "malformed JSON" in SQLite — one
+// such row must never fail the co-owner count, or every managed-worktree
+// session deletion wedges.
+func TestWorkspaceBindingCountSkipsEmptyBindingRows(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	root := bindingTestProject(t, s)
+	ctx := context.Background()
+	binding := managedTestBinding(t, root, "shared", "feature/topic")
+	info := SessionInfo{ID: "session-a", ProjectID: testProjectID, Name: "A", CreatedAt: "2026-01-01T00:00:00Z", WorkspaceBinding: cloneWorkspaceBinding(binding)}
+	if err := s.SaveSession(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+	// A no-project CHAT row in its legacy shape: workspace_binding left at
+	// the column's DEFAULT ''.
+	insertTestProject(t, s.db, "__no_project__")
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id, project_id, name, created_at) VALUES ('no-project-chat', '__no_project__', 'Chat', '2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatalf("seed empty-binding row: %v", err)
+	}
+	got, err := s.CountManagedWorktreeSessions(ctx, "shared", "")
+	if err != nil {
+		t.Fatalf("count must skip the '' binding row, got error: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("count = %d, want 1 (only session-a binds the tree)", got)
+	}
+}
+
 // TestManagedWorktreeIndexMigrationDropsUniqueness simulates an install from
 // before the shared-tree revision (UNIQUE idx_session_managed_workspace in
 // place) and pins that reopening the store rewrites it to the plain index,

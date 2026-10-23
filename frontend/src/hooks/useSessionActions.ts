@@ -37,6 +37,7 @@ import {
 } from '@/api/sessions'
 import { parseSessionDeleteBlock, type SessionDeleteBlock } from '@/lib/sessionDeleteBlock'
 import type { SessionDeleteOptionsUI } from '@/types/api'
+import { emit } from '@/api/runtime'
 import { logger } from '@/lib/logger'
 
 /** A destructive action held for user confirmation before execution. */
@@ -268,7 +269,10 @@ export function useSessionActions(): SessionActions {
    * A structured refusal (`session deletion blocked: <reason> (confirm via
    * <option>)`) is recognized and returned to the caller — nothing was
    * deleted, and the caller parks it as blocked-delete state. Any other
-   * failure is logged and reported as 'failed'; the session stays listed.
+   * failure surfaces the backend's message through the app-wide
+   * runtime_error toast (a bare console log would leave the click feeling
+   * dead — the session stays listed with no visible feedback), logs, and
+   * reports 'failed'; the session stays listed.
    */
   const attemptDelete = useCallback(
     async (
@@ -281,6 +285,9 @@ export function useSessionActions(): SessionActions {
       } catch (error) {
         const block = parseSessionDeleteBlock(error)
         if (block !== null) return { status: 'blocked', block }
+        const message = error instanceof Error ? error.message : String(error)
+        const name = useSessionStore.getState().sessions?.find((s) => s.id === id)?.name ?? id
+        emit('runtime_error', { id: crypto.randomUUID(), message: `Failed to delete "${name}": ${message}` })
         logger.error('Failed to delete session:', error)
         return { status: 'failed' }
       }

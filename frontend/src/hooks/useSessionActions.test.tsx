@@ -24,6 +24,7 @@ const spies = vi.hoisted(() => ({
   deleteSessionWithOptions: vi.fn<() => Promise<void>>(),
   pinSession: vi.fn<() => Promise<void>>(),
   logError: vi.fn(),
+  emit: vi.fn(),
 }))
 
 vi.mock('@/api/sessions', () => ({
@@ -38,6 +39,10 @@ vi.mock('@/api/sessions', () => ({
 
 vi.mock('@/lib/logger', () => ({
   logger: { error: spies.logError, warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
+}))
+
+vi.mock('@/api/runtime', () => ({
+  emit: spies.emit,
 }))
 
 vi.mock('@/api/projects', () => ({
@@ -101,6 +106,7 @@ beforeEach(() => {
   spies.deleteSessionWithOptions.mockReset().mockResolvedValue(undefined)
   spies.pinSession.mockReset().mockResolvedValue(undefined)
   spies.logError.mockReset()
+  spies.emit.mockReset()
   useSessionWorkspaceStore.setState({ choices: {}, consumingFor: null })
   useSessionStore.setState({ sessions: [], activeSessionId: null })
   // Group actions consult the live busy overlay — start every test from an
@@ -350,11 +356,31 @@ describe('group actions — branch groups', () => {
 
     expect(spies.deleteSession).toHaveBeenCalledTimes(2)
     expect(spies.logError).toHaveBeenCalledWith('Failed to delete session:', expect.any(Error))
+    // The failure is not a console-only dead end: the app-wide runtime_error
+    // toast names the failed session and carries the backend's message.
+    expect(spies.emit).toHaveBeenCalledWith('runtime_error', expect.objectContaining({
+      message: 'Failed to delete "Session": boom',
+    }))
     // s-1's delete failed → stays listed; s-2's succeeded → removed.
     const ids = useSessionStore.getState().sessions!.map((s) => s.id)
     expect(ids).toContain('s-1')
     expect(ids).not.toContain('s-2')
     expect(captured!.pendingAction).toBeNull()
+  })
+
+  it('a NON-blocked single delete failure surfaces the backend message as a runtime_error toast', async () => {
+    useSessionStore.setState({ sessions: [makeSession('s-1', 'proj-1', { name: 'Stuck' })] })
+    spies.deleteSession.mockRejectedValueOnce(new Error('count sessions sharing worktree "t": malformed JSON'))
+
+    await act(async () => {
+      await captured!.handleDelete('s-1')
+    })
+
+    expect(spies.emit).toHaveBeenCalledWith('runtime_error', expect.objectContaining({
+      message: 'Failed to delete "Stuck": count sessions sharing worktree "t": malformed JSON',
+    }))
+    // The failed session stays listed — the deletion can be retried.
+    expect(useSessionStore.getState().sessions!.map((s) => s.id)).toContain('s-1')
   })
 })
 
@@ -587,6 +613,8 @@ describe('blocked delete — managed-worktree refusal parks, retries, finalizes'
       reason: 'worktree "s-1" is locked',
       option: 'unlock_locked_tree',
     })
+    // A recognized refusal is a decision request, not a failure: no toast.
+    expect(spies.emit).not.toHaveBeenCalled()
   })
 
   it('confirmBlockedDelete retries the whole parked remainder with the decision and releases the state', async () => {
