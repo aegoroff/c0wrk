@@ -30,9 +30,12 @@ export interface ToolResultData {
 export interface ThoughtData { step_num: number; content: string; reasoning?: string; plan_step_id?: string }
 export interface StepData { step_num: number }
 /** Payload of the session-scoped `error` event (backend ErrorData,
- *  backend/session/events.go): both fields are always present on the wire —
- *  neither carries omitempty. */
-export interface ErrorData { error: string; session_id: string }
+ *  backend/session/events.go): `error` is always present on the wire (no
+ *  omitempty); `session_id` is declared optional because its guard stays
+ *  tolerant of absence (Wails serialization edge cases) — a consumer reading
+ *  it does so behind a presence check (CS #31: the type must not promise
+ *  more than the guard enforces). */
+export interface ErrorData { error: string; session_id?: string }
 
 export interface PlanStepData { id?: string; description: string; summary?: string; status: string; depends_on?: string[] }
 
@@ -1318,9 +1321,14 @@ export function isSubAgentPausedData(d: unknown): d is SubAgentPausedData {
   return true
 }
 export function isWorkUnitSettledData(d: unknown): d is WorkUnitSettledData {
-  return isObj(d) && has(d, 'step_id', 'status')
-    && typeof (d as Record<string, unknown>).step_id === 'string'
-    && typeof (d as Record<string, unknown>).status === 'string'
+  if (!isObj(d) || !has(d, 'step_id', 'status')) return false
+  if (typeof (d as Record<string, unknown>).step_id !== 'string') return false
+  if (typeof (d as Record<string, unknown>).status !== 'string') return false
+  // The declared-optional `reason` is pinned like every neighboring new
+  // guard: a present non-string must not slip through typed (CS #49).
+  if ((d as Record<string, unknown>).reason !== undefined
+      && typeof (d as Record<string, unknown>).reason !== 'string') return false
+  return true
 }
 export function isContextFillData(d: unknown): d is ContextFillData { return isObj(d) && has(d, 'fill_percent', 'status') }
 export function isContextCompactionData(d: unknown): d is ContextCompactionData { return isObj(d) && has(d, 'before_percent', 'after_percent') }

@@ -1924,8 +1924,13 @@ func (f *FrontendAPI) SetLogLevel(level string) error {
 	switch level {
 	case "DEBUG", "INFO", "WARN", "ERROR":
 		f.logLevel = level
+		// The sibling call sites nil-check before use (CS #48): a shell app
+		// can have f.app non-nil with no manager yet, and either bare
+		// dereference would panic the RPC.
 		if f.app != nil {
-			f.app.Manager().SetLogLevel(level)
+			if m := f.app.Manager(); m != nil {
+				m.SetLogLevel(level)
+			}
 		}
 		if f.config != nil {
 			f.config.LogLevel = level

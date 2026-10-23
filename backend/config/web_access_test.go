@@ -168,9 +168,13 @@ web_access:
 func TestWebAccess_NonLoopbackBindLoadsWithWarning(t *testing.T) {
 	// Stage 2: a valid non-loopback bind is a deliberate LAN-exposed listener,
 	// not a validity problem — it loads ENABLED with exactly one
-	// network-exposure warning and its values preserved verbatim.
+	// network-exposure warning and its values preserved verbatim. The warning
+	// fires only while the compound gate can actually produce a listener, so
+	// the fixture opens the experimental master switch (CS #65).
 	for _, bind := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5"} {
 		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+experimental:
+  enabled: true
 web_access:
   enabled: true
   bind: "`+bind+`"
@@ -200,6 +204,31 @@ web_access:
 		if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
 			t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
 		}
+	}
+}
+
+func TestWebAccess_NonLoopbackBindSuppressedBehindClosedGate(t *testing.T) {
+	// CS #65: the plain-HTTP exposure warning is present-tense — it must not
+	// fire at load time while the experimental master switch guarantees the
+	// sidecar cannot mount. The section loads enabled and silent; the
+	// runtime recompute after a live gate flip still owns the warning.
+	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+web_access:
+  enabled: true
+  bind: "192.168.1.10"
+  port: 8765
+  token: s3cret-token
+`))
+	if len(warnings) != 0 {
+		t.Fatalf("closed gate must suppress the exposure warning, got %v", warnings)
+	}
+	if !cfg.WebAccess.Enabled {
+		t.Fatal("the section must stay enabled — suppression is about the warning, not the switch")
+	}
+	// Parity: the section-level predicate is unchanged — it still classifies
+	// the exposure; only the load call site gates on the master switch.
+	if got := WebAccessLoadWarnings(cfg.WebAccess); len(got) != 1 {
+		t.Fatalf("WebAccessLoadWarnings must still classify the exposure, got %v", got)
 	}
 }
 
@@ -412,11 +441,14 @@ func TestWebAccess_SaveLoadRoundTrip(t *testing.T) {
 func TestWebAccess_NonLoopbackBindSaveRoundTrip(t *testing.T) {
 	// A valid non-loopback bind is an operator decision, not a validity
 	// problem: it saves without error and re-loads with exactly the
-	// network-exposure warning, values intact.
+	// network-exposure warning, values intact. The exposure warning fires
+	// only while the compound gate can produce a listener, so the fixture
+	// opens the experimental master switch (CS #65).
 	for _, bind := range []string{"0.0.0.0", "192.168.1.10"} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "config.yaml")
 		cfg := minimalValidConfig()
+		cfg.Experimental.Enabled = true
 		cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: bind, Port: 8765, Token: "s3cret-token"}
 		if err := Save(cfg, path); err != nil {
 			t.Fatalf("bind %q: Save must accept a valid non-loopback bind, got %v", bind, err)
@@ -1076,6 +1108,12 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 	})
 
 	t.Run("matches the load pipeline for surviving states", func(t *testing.T) {
+		// Parity holds while the compound gate is OPEN (the runtime recompute
+		// runs after a live gate flip — the warning's own case): the load
+		// pipeline then emits the same exposure warning the section-level
+		// predicate draws. The closed-gate suppression (CS #65) is a
+		// deliberate load-site divergence pinned by
+		// TestWebAccess_NonLoopbackBindSuppressedBehindClosedGate.
 		for name, section := range map[string]WebAccessConfig{
 			"loopback plain":     {Enabled: true, Bind: DefaultWebAccessBind},
 			"non-loopback plain": {Enabled: true, Bind: "192.168.23.2"},
@@ -1083,7 +1121,7 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 				TLS: WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath}},
 			"disabled": {Enabled: false, Bind: "192.168.23.2"},
 		} {
-			live := Config{WebAccess: section}
+			live := Config{WebAccess: section, Experimental: ExperimentalConfig{Enabled: true}}
 			loadWarnings := normalizeWebAccess(&live)
 			got := WebAccessLoadWarnings(section)
 			if len(got) != len(loadWarnings) {

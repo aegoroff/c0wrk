@@ -38,7 +38,7 @@ import { logger } from '@/lib/logger'
 import { useActiveSessionsStore, sweepPendingActions } from '@/stores/activeSessionsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { isSessionListFetchCurrent, issueSessionListFetch } from '@/hooks/useSessionLoader'
+import { isSessionListFetchCurrent, issueSessionListFetch, releaseSessionListFetch } from '@/hooks/useSessionLoader'
 
 /** Triggers arriving within this window of each other coalesce into one run
  *  (the last-scheduled one fires). */
@@ -82,6 +82,10 @@ function runShallowResync(): void {
       })
       .catch((err) => {
         logger.warn('[resync] session list refresh failed:', err)
+        // Release the generation so this failed refresh cannot keep a
+        // superseded-but-succeeded loader fetch poisoned (CS #26, same
+        // failure mode as the sessions:changed re-read).
+        releaseSessionListFetch(fetchId)
       })
   }
 

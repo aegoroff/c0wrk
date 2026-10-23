@@ -860,22 +860,28 @@ func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSen
 	// cleanup). Detected here before activation so ResumeTask's own activation
 	// path is not tripped by a spurious "already processing" check.
 	if !goal && !e2s && m.hasPausedUnfinishedTask(id) {
-		// Emit message_received so the UI shows the user message (mirrors the
-		// normal SendMessage path's emission that the goroutine skips).
-		// IsNudge matches the classification this branch returns
-		// (SendNudgeResume → mergeIsNudgeMetadata): other surfaces render
-		// their card from this event and show the Nudge badge immediately.
-		m.emitFunc(Event{
-			SessionID: id,
-			Type:      "message_received",
-			Data: MessageReceivedData{
-				SessionID:    id,
-				Text:         echoText,
-				ClientSendID: clientSendID,
-				IsNudge:      true,
-			},
-		})
-		return SendNudgeResume, m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
+		resumeErr := m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
+		if resumeErr == nil {
+			// Emit message_received only AFTER the resume commits (CS #66):
+			// this echo drives the card on non-optimistic surfaces, and a
+			// failed resume makes the caller skip the SaveMessage — a
+			// pre-dispatch emission let a card that no persisted row backs
+			// vanish on reload. IsNudge matches the classification this
+			// branch returns (SendNudgeResume → mergeIsNudgeMetadata): other
+			// surfaces render their card from this event and show the Nudge
+			// badge immediately.
+			m.emitFunc(Event{
+				SessionID: id,
+				Type:      "message_received",
+				Data: MessageReceivedData{
+					SessionID:    id,
+					Text:         echoText,
+					ClientSendID: clientSendID,
+					IsNudge:      true,
+				},
+			})
+		}
+		return SendNudgeResume, resumeErr
 	}
 
 	// Determine RESEARCH mode from the session's own research root (the

@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import { AlertTriangle, Check, X, Loader2, Info } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { emit } from '@/api/runtime'
@@ -71,6 +71,18 @@ export function ToolConfirmation({ item }: ToolConfirmationProps) {
   // a second time.
   const disableJudge = metadata?.disable_judge === true
   const judgeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // CS #52: a pending 30s judge timeout must not fire into an unmounted
+  // component — resolving/dismissing (or the card leaving the list) can tear
+  // the component down while an "Ask Agent" evaluation is still in flight.
+  useEffect(() => {
+    return () => {
+      if (judgeTimeoutRef.current) {
+        clearTimeout(judgeTimeoutRef.current)
+        judgeTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   useToolJudgeEvents(sessionId, confirmId, {
     onResponse: (reasoning, error) => {

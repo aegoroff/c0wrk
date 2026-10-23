@@ -469,4 +469,36 @@ describe('useStageAttachments.stageAttachmentFiles (web content upload)', () => 
       expect.objectContaining({ message: 'Failed to attach files' }),
     )
   })
+
+  it('rejects an oversize file BEFORE reading its bytes (CS #34) and stages the rest', async () => {
+    const big = new File([new TextEncoder().encode('x')], 'huge.bin', { type: 'application/octet-stream' })
+    // Shadow the derived size with an above-cap value — the multi-GB drop.
+    Object.defineProperty(big, 'size', { value: 33 * 1024 * 1024 })
+    const bigRead = vi.fn(async () => new ArrayBuffer(0))
+    big.arrayBuffer = bigRead as unknown as typeof big.arrayBuffer
+    const small = new File([new TextEncoder().encode('tiny')], 'tiny.txt', { type: 'text/plain' })
+    spies.attachFileContent.mockResolvedValue([makeAttachment('u1')])
+
+    await act(async () => { await stageFiles('sess-1', [big, small]) })
+
+    // The oversize file never has its bytes read…
+    expect(bigRead).not.toHaveBeenCalled()
+    // …while the within-cap sibling stages.
+    expect(spies.attachFileContent).toHaveBeenCalledOnce()
+    const [onlyArgs] = spies.attachFileContent.mock.calls
+    if (!onlyArgs) throw new Error('expected one upload call')
+    expect(onlyArgs[1].name).toBe('tiny.txt')
+    // …and the rejection surfaces on the attachment banner.
+    expect(useAttachmentsStore.getState().imageErrorBySession['sess-1']).toContain('huge.bin')
+  })
+
+  it('rejects an oversize-only drop without creating a session (CS #34)', async () => {
+    const big = new File([new TextEncoder().encode('x')], 'huge.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(big, 'size', { value: 33 * 1024 * 1024 })
+
+    await act(async () => { await stageFiles(null, [big]) })
+
+    expect(spies.createSession).not.toHaveBeenCalled()
+    expect(useAttachmentsStore.getState().imageErrorBySession[NULL_SESSION_KEY]).toContain('byte attachment limit')
+  })
 })

@@ -285,7 +285,8 @@ describe('resumeTask forwards model/reasoning overrides', () => {
 // (omitempty), and the validator tolerates a legacy null in addition to
 // absent/undefined/array.
 describe('getSessionRuntimeStatus compaction_availability tolerance', () => {
-  const validBase = { active: false, has_unfinished_task: false }
+  // Paused mirrors the Go struct's non-omitempty `paused` — always on the wire.
+  const validBase = { active: false, has_unfinished_task: false, paused: false }
 
   beforeEach(() => {
     delete mockApp.GetSessionRuntimeStatus
@@ -344,5 +345,25 @@ describe('getSessionRuntimeStatus compaction_availability tolerance', () => {
     expect(result).toBeNull()
     expect(logger.error).toHaveBeenCalledTimes(1)
     expect(logger.error).toHaveBeenCalledWith('getSessionRuntimeStatus: unexpected response shape', payload)
+  })
+
+  it('rejects a payload without the required paused flag (CS #51) and reports the shape error', async () => {
+    const payload = { active: false, has_unfinished_task: false }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a non-boolean paused flag (CS #51)', async () => {
+    const payload = { ...validBase, paused: 'yes' }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
   })
 })

@@ -557,6 +557,39 @@ func TestEmit_EventTapReceivesEveryDispatchAlongsideWails(t *testing.T) {
 	}
 }
 
+// TestEmit_PanickingEventTapIsIsolated (CS #32): the tap contract — "must
+// never block, alter, or fail the emit" — is enforced by panic isolation in
+// invokeEventTap, not by convention. A panicking tap must neither kill the
+// caller's goroutine nor suppress the Wails dispatch; the panic surfaces as
+// one expected Warn diagnostic.
+func TestEmit_PanickingEventTapIsIsolated(t *testing.T) {
+	a := &App{}
+	injectExpectedDiagnostics(t, a, diagnosticExpectation{
+		level: slog.LevelWarn, message: "event tap panicked; emit continues",
+		attrs: map[string]string{"event": "ev:boom", "panic": "tap bug"},
+	})
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+	taps := 0
+	a.setEventTap(func(name string, args []interface{}) {
+		taps++
+		if name == "ev:boom" {
+			panic("tap bug")
+		}
+	})
+
+	a.emit("ev:boom", "x")
+	a.emit("ev:after")
+
+	if taps != 2 {
+		t.Fatalf("tap calls = %d, want 2 (the panicking tap must stay installed)", taps)
+	}
+	// The Wails dispatch continues after the recovered panic.
+	if events := rec.snapshot(); len(events) != 2 {
+		t.Fatalf("wails dispatch count = %d, want 2", len(events))
+	}
+}
+
 func TestEmit_EventTapFiresWhenWailsDispatchIsDropped(t *testing.T) {
 	// The tap rides alongside the dispatch: it observes the emit call even
 	// when the Wails side drops it (nil runtime), and the drop diagnostic

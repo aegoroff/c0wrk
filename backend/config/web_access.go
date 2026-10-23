@@ -64,6 +64,7 @@ import (
 	"io/fs"
 	"net"
 	"strings"
+	"time"
 )
 
 // DefaultWebAccessBind is the seeded bind address: loopback IPv4. Seeding the
@@ -242,6 +243,17 @@ func ValidateWebAccessTLS(tlsCfg WebAccessTLSConfig) error {
 	return validateWebAccessTLS(tlsCfg)
 }
 
+// webAccessTLSProbeTimeout bounds the certificate-pair probe (CS #47): the
+// probe reads both PEM files on EVERY config load, so a path on a hanging
+// mount (or a FIFO) would otherwise stall startup unboundedly. The
+// deliberate fail-closed stance (ADR-092) is preserved — a pair that cannot
+// be verified within the budget is reported unusable (the load path then
+// keeps the whole section off), never downgraded to plain HTTP. The
+// goroutine left blocked on a wedged file past the budget is bounded by the
+// probe's rarity (config loads and the interactive TLS/enable boundaries),
+// and its eventual result is drained into the buffered channel.
+const webAccessTLSProbeTimeout = 5 * time.Second
+
 // webAccessTLSPairError is the usability predicate of a tls subsection
 // (ADR-092): structural completeness first (validateWebAccessTLS), then —
 // for an enabled subsection — the pair itself: the config layer READS the
@@ -258,7 +270,16 @@ func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
 	if !tlsCfg.Enabled {
 		return nil
 	}
-	if _, err := tls.LoadX509KeyPair(tlsCfg.Cert, tlsCfg.Key); err != nil {
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := tls.LoadX509KeyPair(tlsCfg.Cert, tlsCfg.Key)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			return nil
+		}
 		// Classify the missing-file family into platform-neutral wording:
 		// the raw strerror is OS-localized ("no such file or directory"
 		// on Linux/macOS, "The system cannot find the file specified." on
@@ -268,8 +289,10 @@ func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
 			return fmt.Errorf("certificate pair failed to load: certificate or key file not found: %w", err)
 		}
 		return fmt.Errorf("certificate pair failed to load: %w", err)
+	case <-time.After(webAccessTLSProbeTimeout):
+		return fmt.Errorf("certificate pair failed to load: reading %s did not complete within %s",
+			tlsCfg.Cert, webAccessTLSProbeTimeout)
 	}
-	return nil
 }
 
 // ValidateWebAccessTLSPair is the exported form of the subsection's
@@ -379,9 +402,11 @@ func defaultWebAccessState() WebAccessConfig {
 // token — never fatal, because a broken section must
 // not keep the app from starting, and must not leave a half-applied unsafe
 // listener either. A VALID non-loopback bind is not a validity problem: the
-// section stays enabled and draws the network-exposure warning while the
-// effective transport is plain HTTP (a stage-2 LAN listener; IsLoopbackBind
-// classifies it, ADR-092 scopes the warning to TLS-off). A disabled section
+// section stays enabled and — while the effective transport is plain HTTP
+// AND the experimental master gate is open (only then can the sidecar
+// actually mount, CS #65) — draws the network-exposure warning (a stage-2
+// LAN listener; IsLoopbackBind classifies it, ADR-092 scopes the warning to
+// TLS-off). A disabled section
 // is inert and accepts anything, exactly like an inactive shell_exec
 // override.
 //
@@ -446,7 +471,17 @@ func normalizeWebAccess(cfg *Config) []string {
 	// combination warns — a TLS-encrypted non-loopback bind loads
 	// warning-free (its exposure stays surfaced by the Settings section
 	// banner and the sidecar start log).
-	warnings = append(warnings, WebAccessLoadWarnings(cfg.WebAccess)...)
+	//
+	// Suppressed while the experimental master switch is closed (CS #65):
+	// the compound gate guarantees the sidecar cannot mount, so the
+	// present-tense "listener is network-accessible, traffic is plain HTTP"
+	// warning would overstate the actual exposure at load time. The runtime
+	// recompute after a live gate flip calls WebAccessLoadWarnings directly
+	// (desktop's refreshWebAccessLoadWarnings) — that is the case the
+	// warning is written for, and it keeps firing there.
+	if cfg.Experimental.Enabled {
+		warnings = append(warnings, WebAccessLoadWarnings(cfg.WebAccess)...)
+	}
 	return warnings
 }
 

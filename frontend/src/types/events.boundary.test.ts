@@ -22,6 +22,7 @@ import {
   isToolJudgeResponseData,
   isToolResultData,
   isVectorIndexPayload,
+  isWorkUnitSettledData,
 } from './events'
 
 describe('isToolCallData (#167 tool, #168 args, #180 source)', () => {
@@ -328,5 +329,25 @@ describe('isVectorIndexPayload (ov_device)', () => {
   it('rejects a present non-string ov_device (VectorIndexDiagnostics matches it against literals)', () => {
     expect(isVectorIndexPayload({ ...base, ov_device: 1 })).toBe(false)
     expect(isVectorIndexPayload({ ...base, ov_device: null })).toBe(false)
+  })
+})
+
+describe('isWorkUnitSettledData (CS #49 optional reason)', () => {
+  const base = { step_id: 's1', status: 'interrupted' }
+
+  it('accepts a canonical payload with and without the optional reason', () => {
+    expect(isWorkUnitSettledData(base)).toBe(true)
+    expect(isWorkUnitSettledData({ ...base, reason: 'workspace switch in progress' })).toBe(true)
+  })
+
+  it('rejects a present non-string reason', () => {
+    expect(isWorkUnitSettledData({ ...base, reason: 42 })).toBe(false)
+    expect(isWorkUnitSettledData({ ...base, reason: { why: 'x' } })).toBe(false)
+  })
+
+  it('still rejects missing/non-string required fields', () => {
+    expect(isWorkUnitSettledData({ step_id: 's1' })).toBe(false)
+    expect(isWorkUnitSettledData({ status: 'interrupted' })).toBe(false)
+    expect(isWorkUnitSettledData({ step_id: 1, status: 'interrupted' })).toBe(false)
   })
 })

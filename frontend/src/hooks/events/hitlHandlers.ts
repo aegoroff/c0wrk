@@ -199,6 +199,30 @@ export function handleToolJudgeFinishedEvent(sessionId: string, _data: ToolJudge
  * the message list (progress panel / status badge), and the sticky
  * pending-HITL override bit is reconciled below for the same reason.
  */
+/**
+ * Wire vocabularies for hitl_resolved decisions, mirroring the Go emitters in
+ * desktop/event_handlers.go (`confirmDecisionString`, `parseStepLimitResponse`).
+ * A recognized decision maps to the UI resolution vocabulary; an unrecognized
+ * non-empty value settles the card NEUTRALLY instead of being coerced to
+ * "denied" or cast unchecked (CS #25 — the guard validates only "some string").
+ */
+const TOOL_CONFIRM_WIRE_DECISIONS: ReadonlySet<string> = new Set(['allow_once', 'deny', 'deny_and_stop'])
+const STEP_LIMIT_WIRE_DECISIONS: ReadonlySet<string> = new Set(['allow_once', 'allow_more', 'allow_always', 'deny'])
+
+/** Map a tool_confirm wire decision to the UI vocabulary; null = no recorded decision. */
+function toolConfirmWireDecision(decision: string | undefined): 'confirmed' | 'denied' | null {
+  if (decision === undefined || decision === '') return null
+  if (decision === 'allow_once') return 'confirmed'
+  if (TOOL_CONFIRM_WIRE_DECISIONS.has(decision)) return 'denied'
+  return null
+}
+
+/** Validate a step_limit wire decision against the enum; null = no recorded decision. */
+function stepLimitWireDecision(decision: string | undefined): StepLimitDecision | null {
+  if (decision === undefined || decision === '') return null
+  return STEP_LIMIT_WIRE_DECISIONS.has(decision) ? (decision as StepLimitDecision) : null
+}
+
 export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedData): void {
   // The goal store mirrors the pending prompt for the progress panel / badge:
   // clear the entry ONLY when it is still this exact prompt, so a newer
@@ -250,9 +274,11 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
 
   if (msg.type === 'tool_confirm') {
     // Converge on the effective decision: allow_once → confirmed,
-    // deny/deny_and_stop → denied, empty → resolved without a recorded
-    // decision (the neutral settled card).
-    const decision = data.decision === 'allow_once' ? 'confirmed' : data.decision ? 'denied' : null
+    // deny/deny_and_stop → denied, anything else (empty or unrecognized wire
+    // value) → resolved without a recorded decision (the neutral settled
+    // card). Validation goes through the per-kind wire vocabulary — an
+    // unknown non-empty decision must not render as "denied" (CS #25).
+    const decision = toolConfirmWireDecision(data.decision)
     if (alreadyResolved) {
       // The card was settled locally — by THIS surface's own answer, or by an
       // earlier broadcast. Overwrite ONLY when this event carries the
@@ -287,7 +313,9 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
   }
 
   if (msg.type === 'step_limit') {
-    const decision = (data.decision ?? null) as StepLimitDecision | null
+    // Validated against the wire enum; an unrecognized non-empty value settles
+    // neutrally instead of an unchecked cast into StepLimitDecision (CS #25).
+    const decision = stepLimitWireDecision(data.decision)
     if (alreadyResolved) {
       // Same convergence rule as tool_confirm above.
       if (decision === null) return
@@ -298,7 +326,7 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
       return
     }
     const resolution: Record<string, unknown> =
-      data.decision ? stepLimitResolved(data.decision as StepLimitDecision) : { resolved: true }
+      decision !== null ? stepLimitResolved(decision) : { resolved: true }
     store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...resolution } })
     store.setActivityStatus(sessionId, null)
     return

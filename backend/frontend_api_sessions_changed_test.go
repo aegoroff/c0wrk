@@ -44,6 +44,41 @@ func TestCreateSession_EmitsSessionsChanged(t *testing.T) {
 	}
 }
 
+// TestCreateSession_EmitsSessionsChangedAfterPersist pins the emission ORDER
+// (CS #33): the event's debounced frontend re-read must see the persisted
+// row, so the announcement happens after the SaveSession attempt — matching
+// ForkSession/Delete/Archive/Pin/promote. At emit time the fresh project's
+// list must already contain exactly the created session.
+func TestCreateSession_EmitsSessionsChangedAfterPersist(t *testing.T) {
+	h := newProjectSwitchHarness(t)
+	defer h.close(t)
+	events := &promoteEventCapture{}
+	h.api.emitEvent = func(name string, _ ...any) {
+		events.emit(name)
+		if name != EventSessionsChanged {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		rows, err := h.api.store.ListSessionsByProject(ctx, h.projectID)
+		if err != nil {
+			t.Errorf("sessions:changed emitted, but listing the project failed: %v", err)
+			return
+		}
+		if len(rows) != 1 {
+			t.Errorf("sessions:changed emitted before the session row was persisted: project rows = %d, want 1", len(rows))
+		}
+	}
+	setActiveProjectForEvents(h)
+
+	if _, err := h.api.CreateSession(); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !events.has(EventSessionsChanged) {
+		t.Fatal("sessions:changed must be emitted after CreateSession")
+	}
+}
+
 func TestCreateSession_ErrorDoesNotEmitSessionsChanged(t *testing.T) {
 	h := newProjectSwitchHarness(t)
 	defer h.close(t)

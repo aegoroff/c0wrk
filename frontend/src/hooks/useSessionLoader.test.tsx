@@ -518,6 +518,36 @@ describe('useSessionLoader', () => {
       expect(useSessionStore.getState().activeSessionId).toBe('saved-session')
     })
 
+    it('un-poisons a succeeded initial fetch when the superseding re-read fails (CS #26)', async () => {
+      vi.useFakeTimers()
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      let releaseInitial!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseInitial = resolve }),
+      )
+      renderLoader()
+
+      // A re-read is issued while the initial load is still in flight — and
+      // FAILS. With ownership marked at issuance the initial load's eventual
+      // success used to stay dropped ("no list, no restore" until the next
+      // trigger); the release-on-failure rollback must make it current again.
+      mocks.listSessionsMock.mockRejectedValueOnce(new Error('re-read rpc down'))
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      releaseInitial([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'freshest', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      await flush()
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual(['freshest', 'saved-session'])
+      expect(useSessionStore.getState().activeSessionId).toBe('saved-session')
+    })
+
     it('supersedes an older in-flight re-read with a newer one', async () => {
       vi.useFakeTimers()
       renderLoader()

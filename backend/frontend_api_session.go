@@ -83,7 +83,6 @@ func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
-	f.emitSessionsChanged()
 	// Persist to SQLite
 	// Best-effort persistence: log and continue to avoid disrupting the user session.
 	if f.store != nil {
@@ -93,6 +92,13 @@ func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 		}
 		cancel()
 	}
+	// Announce AFTER the persist attempt (CS #33, matching
+	// ForkSession/Delete/Archive/Pin/promote): the event's debounced re-read
+	// must see the persisted row — an emission before SaveSession let a slow
+	// (contended pool) save strand the new session out of the sidebar/radar
+	// until the safety poll. A failed save stays log-only best-effort; the
+	// announcement order is what the other emission sites already guarantee.
+	f.emitSessionsChanged()
 	return info, nil
 }
 

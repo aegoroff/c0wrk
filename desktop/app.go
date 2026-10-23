@@ -738,10 +738,11 @@ func (a *App) setEventTap(fn func(name string, args []interface{})) {
 // a.wailsEmit; production code uses wailsRuntime.EventsEmit. Callers must not
 // invoke this before Startup binds a.wailsCtx() (or before a.wailsEmit is set in tests).
 // When a.eventTap is set, every dispatch is also observed by the tap (see the
-// field comment); the tap never alters, blocks, or fails the Wails dispatch.
+// field comment); the tap never alters, blocks, or fails the Wails dispatch —
+// enforced by the panic isolation in invokeEventTap, not by convention.
 func (a *App) emit(eventName string, optionalData ...any) {
 	if tap := a.eventTap.Load(); tap != nil {
-		(*tap)(eventName, optionalData)
+		a.invokeEventTap(*tap, eventName, optionalData)
 	}
 	if a.wailsEmit != nil {
 		a.wailsEmit(eventName, optionalData...)
@@ -752,6 +753,23 @@ func (a *App) emit(eventName string, optionalData ...any) {
 		return
 	}
 	wailsRuntime.EventsEmit(a.wailsCtx(), eventName, optionalData...)
+}
+
+// invokeEventTap calls the side event tap with panic isolation (CS #32): the
+// tap contract — "must never block, alter, or fail the emit" — is enforced
+// here rather than trusted from the tap implementation. Without the recover a
+// panicking tap propagates into whichever goroutine called emit (session
+// producers, the Wails dispatch) and kills it — e.g. a tap bug during a
+// sidecar hot-restart teardown while a hitl_resolved broadcast fires. The
+// panic is logged and the emit continues.
+func (a *App) invokeEventTap(tap func(name string, args []interface{}), eventName string, args []interface{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.log().Warn("event tap panicked; emit continues",
+				"event", eventName, "panic", r)
+		}
+	}()
+	tap(eventName, args)
 }
 
 // showWindow reveals AND raises the main window. Tests can inject a fake by
@@ -1478,6 +1496,19 @@ func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 // references until the paths persist. Failure ordering mirrors the other
 // control RPCs; locking discipline: webAccessMu.
 func (a *App) GenerateWebAccessCertificate() error {
+	err := a.generateWebAccessCertificateLocked()
+	// Regeneration can move the section's load-warning contribution (CS #67):
+	// an unusable pair turned the section off with a load warning, and a
+	// fresh valid pair heals it — the banner would keep claiming a broken
+	// pair until restart without this refresh. Called AFTER the unlock,
+	// mirroring the other control RPCs' after-the-critical-section rule
+	// (idempotent, cheap); the token RPCs' "cannot move the warning state"
+	// argument never covered the certificate RPCs.
+	a.refreshWebAccessLoadWarnings()
+	return err
+}
+
+func (a *App) generateWebAccessCertificateLocked() error {
 	a.webAccessMu.Lock()
 	defer a.webAccessMu.Unlock()
 

@@ -33,6 +33,17 @@ export function isSessionListFetchCurrent(id: number): boolean {
   return id === sessionListFetchSeq
 }
 
+/** Release a FAILED fetch's generation (CS #26): while the failed fetch is
+ *  still the newest one issued, roll the counter back so the fetch it
+ *  superseded — possibly still in flight, possibly already resolved but
+ *  dropped as stale — becomes current again. Ownership of the store must be
+ *  marked by SUCCESS alone: a re-read that bumps the token and then fails
+ *  must not poison the initial load's good result ("no list, no restore"
+ *  until the next trigger). A no-op when a newer fetch was issued since. */
+export function releaseSessionListFetch(id: number): void {
+  if (isSessionListFetchCurrent(id)) sessionListFetchSeq = id - 1
+}
+
 export function useSessionLoader(): void {
   const activeProjectId = useProjectStore(s => s.activeProjectId)
 
@@ -171,7 +182,10 @@ export function useSessionLoader(): void {
             })
             .catch(() => {
               // Already logged by the api wrapper; the current list is kept —
-              // the next event (or switch trigger) retries.
+              // the next event (or switch trigger) retries. Release the
+              // generation so this failed re-read cannot keep the initial
+              // load's (possibly already-resolved) result poisoned — CS #26.
+              releaseSessionListFetch(fetchId)
             })
         }, SESSIONS_CHANGED_DEBOUNCE_MS)
       }),

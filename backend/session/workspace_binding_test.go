@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -73,6 +74,48 @@ func TestWorkspaceBindingRoundTripAndFork(t *testing.T) {
 	loaded, err = s.LoadSession(ctx, info.ID)
 	if err != nil || !loaded.Archived || !reflect.DeepEqual(loaded.WorkspaceBinding, binding) {
 		t.Fatalf("archive: %+v %v", loaded, err)
+	}
+}
+
+// CS #29: BindSessionWorkspace's atomic UPDATE must pin project_id — the one
+// API that mutates binding identity must not let a mismatched project
+// argument persist a cross-project binding. The second project carries the
+// SAME workspace root so the pre-UPDATE validation passes and the WHERE pin
+// itself is what fails the write closed.
+func TestBindSessionWorkspacePinsProject(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	root := bindingTestProject(t, s)
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(context.Background(),
+		`INSERT INTO projects (id, name, workspace_path, created_at) VALUES ('other-project', 'Other', ?, ?)`,
+		root, "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh session, not yet bound — the BindSessionWorkspace window.
+	info := SessionInfo{ID: "fresh", ProjectID: testProjectID, CreatedAt: "2026-01-01T00:00:00Z"}
+	if err := s.SaveSession(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+	binding := managedTestBinding(t, root, "owned", "topic")
+
+	if err := s.BindSessionWorkspace(ctx, "fresh", "other-project", binding); !errors.Is(err, ErrSessionNotFresh) {
+		t.Fatalf("cross-project bind err = %v, want ErrSessionNotFresh", err)
+	}
+	// The fresh session's normalized LOCAL binding (a nil proposal becomes
+	// local for a CODE session) must be untouched by the rejected call.
+	localBinding := &WorkspaceBinding{Kind: WorkspaceLocal, WorkspacePath: root}
+	loaded, err := s.LoadSession(ctx, "fresh")
+	if err != nil || !reflect.DeepEqual(loaded.WorkspaceBinding, localBinding) {
+		t.Fatalf("binding leaked through a mismatched project: %+v %v", loaded, err)
+	}
+
+	// Positive control: the owning project binds normally.
+	if err := s.BindSessionWorkspace(ctx, "fresh", testProjectID, binding); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err = s.LoadSession(ctx, "fresh"); err != nil || !reflect.DeepEqual(loaded.WorkspaceBinding, binding) {
+		t.Fatalf("owning-project bind: %+v %v", loaded, err)
 	}
 }
 

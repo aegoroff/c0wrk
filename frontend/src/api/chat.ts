@@ -267,6 +267,10 @@ function isSessionRuntimeStatus(d: unknown): d is SessionRuntimeStatus {
   return typeof d === 'object' && d !== null
     && typeof (d as Record<string, unknown>).active === 'boolean'
     && typeof (d as Record<string, unknown>).has_unfinished_task === 'boolean'
+    // `paused` is declared-required (the reconcile overlay reads it: an
+    // undefined would collapse paused detection) — validate it like its
+    // boolean siblings (CS #51).
+    && typeof (d as Record<string, unknown>).paused === 'boolean'
     && (!('unfinished_task_status' in d)
       || (d as Record<string, unknown>).unfinished_task_status === undefined
       || typeof (d as Record<string, unknown>).unfinished_task_status === 'string')

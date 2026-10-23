@@ -109,6 +109,10 @@ func (s *SQLiteSessionStore) CountManagedWorktreeSessions(ctx context.Context, w
 // "no transcript rows and no task rows", enforced inside the UPDATE's WHERE
 // so the check and the write are a single atomic statement; a send racing a
 // first persisted message therefore cannot slip a binding past the guard.
+// The WHERE also pins project_id (CS #29): the binding identity is derived
+// from the owning project, so a mismatched project argument must not persist
+// a cross-project binding — the row simply stays untouched and the call
+// reports ErrSessionNotFresh (or not-found) instead.
 // The binding is validated and its managed path derived exactly like
 // SaveSession's (sessionBindingJSON against the owning project), so a
 // tampered proposal fails closed before any row is touched.
@@ -123,9 +127,10 @@ func (s *SQLiteSessionStore) BindSessionWorkspace(ctx context.Context, sessionID
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE sessions SET workspace_binding = ?
 		WHERE id = ?
+		  AND project_id = ?
 		  AND NOT EXISTS (SELECT 1 FROM session_messages WHERE session_messages.session_id = sessions.id)
 		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.session_id = sessions.id)`,
-		bindingJSON, sessionID,
+		bindingJSON, sessionID, projectID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to bind session workspace: %w", err)

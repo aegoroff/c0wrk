@@ -118,6 +118,30 @@ describe('handleHitlResolvedEvent — tool_confirm', () => {
     resolve(sessionId, { kind: 'tool_confirm', id: 'ghost', decision: 'allow_once' })
     expect(selectSessionMessages(useChatStore.getState(), sessionId)).toHaveLength(0)
   })
+
+  it('settles NEUTRALLY on an unrecognized non-empty decision (CS #25: never renders as denied)', () => {
+    const sessionId = `sess-resolved-${idc++}`
+    handleToolConfirmEvent(sessionId, { confirm_id: 'c5', tool: 'bash_exec', args: '{}', reasoning: '' })
+
+    resolve(sessionId, { kind: 'tool_confirm', id: 'c5', decision: 'allow_forever' })
+
+    const card = findMsg(sessionId, 'tool-confirm-c5')
+    expect(card?.metadata?.resolved).toBe(true)
+    expect(card?.metadata?.decision).toBeUndefined()
+  })
+
+  it('never overwrites a settled card with an unrecognized decision (CS #25)', () => {
+    const sessionId = `sess-resolved-${idc++}`
+    handleToolConfirmEvent(sessionId, { confirm_id: 'c6', tool: 'bash_exec', args: '{}', reasoning: '' })
+    const card = findMsg(sessionId, 'tool-confirm-c6')!
+    useChatStore.getState().updateMessage(sessionId, card.id, {
+      metadata: { ...card.metadata, resolved: true, decision: 'confirmed' },
+    })
+
+    resolve(sessionId, { kind: 'tool_confirm', id: 'c6', decision: 'gibberish' })
+
+    expect(findMsg(sessionId, 'tool-confirm-c6')?.metadata?.decision).toBe('confirmed')
+  })
 })
 
 describe('handleHitlResolvedEvent — ask_user / step_limit / plan_review', () => {
@@ -144,6 +168,30 @@ describe('handleHitlResolvedEvent — ask_user / step_limit / plan_review', () =
     const card = findMsg(sessionId, 'step-limit-sl-1')
     expect(card?.metadata?.resolved).toBe(true)
     expect(card?.metadata?.decision).toBe('allow_more')
+  })
+
+  it('settles a step-limit card NEUTRALLY on an unrecognized decision (CS #25: no unchecked cast)', () => {
+    const sessionId = `sess-resolved-${idc++}`
+    handleStepLimitEvent(sessionId, { request_id: 'sl-2', current_step: 10, max_steps: 10 })
+
+    resolve(sessionId, { kind: 'step_limit', id: 'sl-2', decision: 'wave_it_through' })
+
+    const card = findMsg(sessionId, 'step-limit-sl-2')
+    expect(card?.metadata?.resolved).toBe(true)
+    expect(card?.metadata?.decision).toBeUndefined()
+  })
+
+  it('never overwrites a settled step-limit card with an unrecognized decision (CS #25)', () => {
+    const sessionId = `sess-resolved-${idc++}`
+    handleStepLimitEvent(sessionId, { request_id: 'sl-3', current_step: 10, max_steps: 10 })
+    const card = findMsg(sessionId, 'step-limit-sl-3')!
+    useChatStore.getState().updateMessage(sessionId, card.id, {
+      metadata: { ...card.metadata, resolved: true, decision: 'deny' },
+    })
+
+    resolve(sessionId, { kind: 'step_limit', id: 'sl-3', decision: 'gibberish' })
+
+    expect(findMsg(sessionId, 'step-limit-sl-3')?.metadata?.decision).toBe('deny')
   })
 
   it('settles a plan review card', () => {

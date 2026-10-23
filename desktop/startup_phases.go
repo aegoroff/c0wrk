@@ -71,7 +71,10 @@ func (a *App) maybeReinitLogger(level string, sessionLogger *logger.SessionLogge
 	}
 	if sessionLogger != nil {
 		if cerr := sessionLogger.Close(); cerr != nil {
-			current.Error("failed to close session logger", "error", cerr)
+			// Log through the NEW logger (CS #46): `current` wraps the sink
+			// that was just closed, so a diagnostic routed there is silently
+			// dropped by the closed file handle.
+			newLogger.Logger().Warn("failed to close previous session logger", "error", cerr)
 		}
 	}
 	log := newLogger.Logger()

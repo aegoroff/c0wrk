@@ -1170,3 +1170,77 @@ func TestSendMessage_NudgeIntoPausedGoalReentersGoalLoop(t *testing.T) {
 		t.Fatalf("no goal_status event — the paused-goal nudge did not re-enter the goal loop; events=%v", types)
 	}
 }
+
+// resumeFailsAfterGateStore passes the send router's paused gate, then fails
+// the resume's own store reads — simulating the task store going unreadable
+// between the gate check and the resume, so SendMessageClassified returns
+// SendNudgeResume WITH an error.
+type resumeFailsAfterGateStore struct {
+	mockTaskStoreForResumable
+	taskID    string
+	loadCalls int
+}
+
+func (s *resumeFailsAfterGateStore) GetUnfinishedTask(_ context.Context, _ string) (*TaskRecord, error) {
+	return &TaskRecord{ID: s.taskID, OriginalRequest: "long running task", Status: "paused"}, nil
+}
+
+func (s *resumeFailsAfterGateStore) LoadTask(_ context.Context, _ string) (*TaskRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadCalls++
+	if s.loadCalls == 1 {
+		// The send router's paused check (adapter.LoadTaskState): reports the
+		// paused task so the nudge-resume branch is taken.
+		return &TaskRecord{ID: s.taskID, OriginalRequest: "long running task", Status: "paused"}, nil
+	}
+	// The resume's own blackboard restore: fails — the store went unreadable
+	// after the gate passed.
+	return nil, errors.New("task store unreadable")
+}
+
+// TestSendMessage_PausedTask_FailedResumeEmitsNoEcho (CS #66): the
+// message_received echo drives cards on non-optimistic surfaces, and a failed
+// resume makes the RPC caller skip SaveMessage — a pre-dispatch echo would
+// strand a card no persisted row backs (it vanishes on reload). The echo must
+// fire only AFTER the resume commits: a failed resume emits nothing.
+func TestSendMessage_PausedTask_FailedResumeEmitsNoEcho(t *testing.T) {
+	const nudge = "continue from the checkpoint"
+
+	store := &resumeFailsAfterGateStore{taskID: "task-paused-echo-gate"}
+	eventChan := make(chan Event, 100)
+	mgr := NewManager(routingFunctionalFactory(&scriptedLLM{scripted: []*llm.ChatResponse{
+		finishResponse("unused"),
+	}}), func(e Event) { eventChan <- e }, runtimeTempDir(t))
+	t.Cleanup(mgr.Shutdown)
+
+	info, err := mgr.CreateSession(testProjectID, testWorkspacePath(t))
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	mgr.SetTaskStore(store)
+
+	classification, sendErr := mgr.SendMessageClassified(context.Background(), info.ID, nudge, nil, nil, nil, "", "", false, "", false, false)
+	if classification != SendNudgeResume {
+		t.Fatalf("classification = %v, want SendNudgeResume", classification)
+	}
+	if sendErr == nil {
+		t.Fatal("expected the resume failure to surface to the caller")
+	}
+
+	// The echo is emitted synchronously inside sendMessage, so by the time
+	// the error returns, a regression would already have landed in the
+	// buffered channel: no message_received may be there (unrelated earlier
+	// events — e.g. session_created — are fine).
+	for {
+		select {
+		case evt := <-eventChan:
+			if evt.Type == "message_received" {
+				t.Fatal("a failed nudge-resume must not emit the message_received echo")
+			}
+			continue
+		default:
+			return
+		}
+	}
+}
