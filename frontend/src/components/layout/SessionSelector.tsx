@@ -21,6 +21,7 @@ import { useSessionActions } from "@/hooks/useSessionActions";
 import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
+import { SessionDeleteBlockedDialog } from "./SessionDeleteBlockedDialog";
 import { SessionGroupedList } from "./SessionGroupedList";
 import { BranchRow, PinGroupAction, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
@@ -323,6 +324,12 @@ export function SessionSelector() {
         pending={actions.pendingAction}
         onConfirm={actions.confirmPendingAction}
         onCancel={actions.cancelPendingAction}
+      />
+      <SessionDeleteBlockedDialog
+        blocked={actions.blockedDelete}
+        error={actions.blockedDeleteError}
+        onConfirm={actions.confirmBlockedDelete}
+        onCancel={actions.cancelBlockedDelete}
       />
     </div>
   );

@@ -267,7 +267,13 @@ through `worktrees.Owner` — the
 primitives recheck dirty/lock state at removal time, never from a stale
 snapshot. A dirty tree without `confirm_uncommitted_loss`, or a locked tree
 without `unlock_locked_tree`, fails with `*SessionDeleteBlockedError` and the
-session stays fully intact and retryable. A tree that is no longer linked is
+session stays fully intact and retryable — the retry is the user's explicit
+confirmation: the frontend parks the blocked set and `SessionDeleteBlockedDialog`
+(both session-list surfaces) shows the verbatim reason and offers both
+consents as checkboxes, pre-ticking the option the refusal named; confirming
+retries the parked set through `DeleteSessionWithOptions` with exactly the
+ticked flags (a renewed refusal refreshes the park; cancel deletes nothing).
+A tree that is no longer linked is
 already gone (nothing to do); a tree classified non-managed (foreign) is
 never removed. The branch is never deleted. Deletion never resurrects:
 `Manager.DeleteSession` operates only on in-memory sessions (`HasSession`
