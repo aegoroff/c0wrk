@@ -45,27 +45,20 @@ type planModeKeyType struct{}
 // PlanModeKey is the context key for signaling plan-execute mode to buildSystemPrompt.
 var PlanModeKey = planModeKeyType{}
 
-// goalKeyType is the context key for the active goal state. When present, the
-// stored value is a *goal.GoalState that buildSystemPrompt renders into a
-// goal-mode prompt section carrying the condition, verify clause, evidence
-// mandate, and budget to the agent on every turn of the loop.
+// goalKeyType carries the active *goal.GoalState; buildSystemPrompt renders the
+// goal-mode prompt section from it. See specs/domains/goal-mode.md.
 type goalKeyType struct{}
 
-// GoalKey is the context key for the active goal. It mirrors PlanModeKey, but
-// the stored value carries the whole GoalState rather than acting as a mere
-// presence flag, so the prompt builder can read condition/verify/budget/turn-count.
+// GoalKey is the context key for the active goal; unlike PlanModeKey it carries
+// the whole GoalState instead of a presence flag.
 var GoalKey = goalKeyType{}
 
 // WithGoalState returns a context carrying the active goal state under GoalKey.
-// The value carries the whole GoalState; buildSystemPrompt renders the goal-mode
-// section only when a non-nil goal is present.
 func WithGoalState(ctx context.Context, gs *goal.GoalState) context.Context {
 	return context.WithValue(ctx, GoalKey, gs)
 }
 
-// goalStateFromCtx extracts the active goal state from the context, or nil if no
-// goal is active. Used by buildSystemPrompt to decide whether to render the
-// goal-mode section.
+// goalStateFromCtx extracts the active goal state from the context, or nil.
 func goalStateFromCtx(ctx context.Context) *goal.GoalState {
 	if gs, ok := ctx.Value(GoalKey).(*goal.GoalState); ok {
 		return gs
@@ -73,17 +66,14 @@ func goalStateFromCtx(ctx context.Context) *goal.GoalState {
 	return nil
 }
 
-// reviewModeKeyType is the context key signaling that the user's message carries
-// code review feedback. It is a presence flag (like PlanModeKey), not a value
-// carrier: buildSystemPrompt renders a "Code Review" section when it is set,
-// instructing the agent to address the comments by editing code.
+// reviewModeKeyType is a presence flag (like PlanModeKey): when set,
+// buildSystemPrompt renders the Code Review Feedback section. See specs/domains/review.md.
 type reviewModeKeyType struct{}
 
 // ReviewModeKey is the context key for review-feedback mode.
 var ReviewModeKey = reviewModeKeyType{}
 
-// WithReviewMode returns a context carrying ReviewModeKey so buildSystemPrompt
-// renders the Code Review section for this Conductor run.
+// WithReviewMode returns a context carrying ReviewModeKey for this Conductor run.
 func WithReviewMode(ctx context.Context) context.Context {
 	return context.WithValue(ctx, ReviewModeKey, struct{}{})
 }
@@ -93,16 +83,12 @@ func reviewModeFromCtx(ctx context.Context) bool {
 	return ctx.Value(ReviewModeKey) != nil
 }
 
-// DefaultAgentsMDMaxBytes is the default cap on AGENTS.md content injected into
-// prompts. AGENTS.md is treated as untrusted, user-controlled input; an
-// unbounded read would let a workspace inject arbitrarily large content into
-// every system prompt.
+// DefaultAgentsMDMaxBytes caps untrusted AGENTS.md content injected into prompts;
+// see specs/decisions/020-multi-source-agents-md-threat-model.md.
 const DefaultAgentsMDMaxBytes = 65536
 
-// defaultResumeComplexity is the routing complexity used when a resumed task
-// has no persisted routing decision. It selects the standard Conductor mode
-// (checklist + optional delegation, no user sign-off plan) so the agent can
-// continue making progress without requiring a declared plan.
+// defaultResumeComplexity routes a resumed task with no persisted routing
+// decision into standard Conductor mode (checklist + optional delegation).
 const defaultResumeComplexity = 3
 
 // agentsMDCacheEntry holds a cached read of AGENTS.md from a workspace.
@@ -114,39 +100,26 @@ type agentsMDCacheEntry struct {
 
 type injectionDefenseKeyType struct{}
 
-// InjectionDefenseKey is the context key for signaling injection defense is enabled.
-// When set to a non-nil bool pointer in the context, buildSystemPrompt reads it to decide
-// whether to include the injection defense prompt text.
+// InjectionDefenseKey is the context key carrying a non-nil *bool; when set,
+// buildSystemPrompt includes the injection-defense prompt text.
 var InjectionDefenseKey = injectionDefenseKeyType{}
 
-// modelProfilesPromptProfile carries the model-profile SystemPrompt sub-toggle flags
-// from prepareRequestContext to buildSystemPromptWith. It is stored under
-// ModelProfilesLiteKey (a presence flag, like PlanModeKey): when present AND Lite
-// is set, buildSystemPromptWith swaps the verbose OrchestratorSystem core
-// directive for the compact OrchestratorSystemLite directive, and
-// conditionally appends the reasoning scaffold (ReasoningScaffold) and the
-// worked-example few-shot block (FewShot). FewShot and ReasoningScaffold are
-// only honored when Lite is active, since both are tailored to the lite
-// directive's style. The injection-defense and verification sections are
-// appended UNCHANGED in both modes (strict constraint).
+// modelProfilesPromptProfile carries the SystemPrompt sub-toggle flags to
+// buildSystemPromptWith under ModelProfilesLiteKey. See specs/domains/model-profiles.md.
 type modelProfilesPromptProfile struct {
 	Lite              bool
 	FewShot           bool
 	ReasoningScaffold bool
 }
 
-// modelProfilesLiteKeyType is the context key for the model-profile SystemPrompt
-// profile. Its presence signals the variant is active; the carried value is a
-// modelProfilesPromptProfile with the sub-toggle flags.
+// modelProfilesLiteKeyType carries a modelProfilesPromptProfile; presence signals lite is active.
 type modelProfilesLiteKeyType struct{}
 
 // ModelProfilesLiteKey is the context key signaling the model-profile lite prompt profile.
 var ModelProfilesLiteKey = modelProfilesLiteKeyType{}
 
-// WithModelProfilesLite returns a context carrying ModelProfilesLiteKey with the full
-// profile (lite directive + few-shot examples + reasoning scaffold). It is a
-// test/fixture convenience; production wiring uses withModelProfilesPromptProfile
-// to carry the actual config-derived flags.
+// WithModelProfilesLite is a test/fixture convenience with all sub-toggles on;
+// production wiring uses withModelProfilesPromptProfile.
 func WithModelProfilesLite(ctx context.Context) context.Context {
 	return withModelProfilesPromptProfile(ctx, modelProfilesPromptProfile{
 		Lite:              true,
@@ -155,27 +128,19 @@ func WithModelProfilesLite(ctx context.Context) context.Context {
 	})
 }
 
-// withModelProfilesPromptProfile returns a context carrying the model-profile prompt
-// profile under ModelProfilesLiteKey. This is the production entry point used by
-// prepareRequestContext; it carries the config-derived sub-toggle flags so
-// buildSystemPromptWith can gate the lite directive, few-shot examples, and
-// reasoning scaffold independently.
+// withModelProfilesPromptProfile is the production entry point: config-derived
+// flags under ModelProfilesLiteKey.
 func withModelProfilesPromptProfile(ctx context.Context, p modelProfilesPromptProfile) context.Context {
 	return context.WithValue(ctx, ModelProfilesLiteKey, p)
 }
 
-// modelProfilesLiteFromCtx reports whether the model-profile lite prompt profile is
-// active for this run (the variant is enabled and Lite is on). Used by
-// buildSystemPromptWith to decide whether to swap in the compact
-// OrchestratorSystemLite directive.
+// modelProfilesLiteFromCtx reports whether the lite directive swap is active for this run.
 func modelProfilesLiteFromCtx(ctx context.Context) bool {
 	p, ok := ctx.Value(ModelProfilesLiteKey).(modelProfilesPromptProfile)
 	return ok && p.Lite
 }
 
-// modelProfilesPromptProfileFromCtx returns the carried model-profile prompt profile
-// and whether one is present. Used by buildSystemPromptWith to read the
-// FewShot and ReasoningScaffold sub-toggle flags.
+// modelProfilesPromptProfileFromCtx returns the carried profile and whether one is present.
 func modelProfilesPromptProfileFromCtx(ctx context.Context) (modelProfilesPromptProfile, bool) {
 	p, ok := ctx.Value(ModelProfilesLiteKey).(modelProfilesPromptProfile)
 	return p, ok
@@ -190,26 +155,16 @@ type OrchestratorConfig struct {
 	MaxParallelSubagents      int    // cap on concurrent subagents, shared by delegate and plan waves (default: 4)
 	Model                     string // active model name for ModelRegistry.Resolve()
 
-	// ToolCallTimeout, when positive, bounds a SINGLE tool call in the ReAct
-	// loop. It is installed on the Conductor's main executor and, via
-	// conductorDeps.toolCallTimeout, on every subagent executor the launcher
-	// builds. 0 disables the bound (the historical behavior). See
-	// agent.DefaultToolCallTimeout for the recommended value.
+	// ToolCallTimeout bounds a single tool call on the main and every subagent
+	// executor; 0 disables. See specs/domains/tool-system/builtins.md.
 	ToolCallTimeout time.Duration
 
-	// ToolCallTimeoutExemptTools replaces the ceiling's exempt tool-name set
-	// (threaded to the main executor through
-	// orchestration.ConductorConfig.ToolCallTimeoutExemptTools and to every
-	// subagent executor via SetToolCallTimeoutExempt in the launcher). A nil
-	// slice keeps sp4rk's built-in default exempt set; a non-nil (possibly
-	// empty) slice replaces it wholesale.
+	// ToolCallTimeoutExemptTools replaces the ceiling's exempt set wholesale
+	// (nil keeps sp4rk's default; threaded via SetToolCallTimeoutExempt).
 	ToolCallTimeoutExemptTools []string
 
-	// Compaction carries the full executor compaction settings (Model Profiles
-	// context-management overrides already applied by the builder). It feeds
-	// manual conversation-history compaction (CompactConversationHistory);
-	// the per-executor strategies are built from the same values inside
-	// buildContextFactory.
+	// Compaction carries the executor compaction settings for manual history
+	// compaction (per executor via buildContextFactory). See specs/domains/memory/compaction.md.
 	Compaction BuilderCompactionConfig
 
 	// ReasoningEffort is the reasoning effort applied to step executors.
@@ -220,81 +175,49 @@ type OrchestratorConfig struct {
 	// If nil, a default handler is used (deny all extensions).
 	HITLHandler agent.HITLHandler
 
-	// PreWarningPercent is the context fill % that triggers the pre-compaction
-	// store_fact nudge. When fill reaches this threshold (but below predictive),
-	// a warning listing vulnerable tool outputs is appended to the observation.
+	// PreWarningPercent is the context fill % triggering the pre-compaction
+	// store_fact nudge (below the predictive threshold).
 	PreWarningPercent int
 
 	// InjectionDefenseEnabled gates the prompt injection defense prompt text
 	// and the <untrusted-content> wrapping of tool outputs in the context window.
 	InjectionDefenseEnabled bool
 
-	// AgentsMDMaxBytes caps the AGENTS.md content size injected into prompts.
-	// 0 means use the default (DefaultAgentsMDMaxBytes = 65536).
-	// A negative value disables the cap entirely.
-	// The cap applies to the combined content of all AGENTS.md sources.
+	// AgentsMDMaxBytes caps the combined AGENTS.md content injected into prompts;
+	// 0 = DefaultAgentsMDMaxBytes, negative disables the cap.
 	AgentsMDMaxBytes int
 
-	// AgentsMDSearchPaths holds extra absolute paths (outside the workspace)
-	// to search for AGENTS.md files, in priority order. Content from these
-	// paths is concatenated ahead of the workspace-root AGENTS.md, so the
-	// effective order is: searchPaths[0], searchPaths[1], …, workspace root.
-	// Each path points directly at an AGENTS.md file. Missing files are
-	// silently skipped. The combined content is capped by AgentsMDMaxBytes.
+	// AgentsMDSearchPaths holds extra absolute AGENTS.md paths searched ahead of
+	// the workspace-root file (missing silently skipped), capped by AgentsMDMaxBytes.
+	// Threat model: specs/decisions/020-multi-source-agents-md-threat-model.md.
 	AgentsMDSearchPaths []string
 
-	// ConductorHistoryWindow is the maximum number of recent conversation
-	// messages injected into the Conductor's context. 0 = use default (20).
-	// Keeps the prompt bounded for long sessions while preserving enough
-	// dialogue context for the agent to understand follow-up references.
+	// ConductorHistoryWindow is the max number of recent conversation messages
+	// injected into the Conductor's context (0 = default 20).
 	ConductorHistoryWindow int
 
-	// GoalLoop holds settings for the goal-derivation / verification loop.
-	// GoalLoop.Verification gates the independent verifier turn; "off"
-	// disables it so the loop relies solely on the agent's own verdict.
+	// GoalLoop holds goal-loop settings; Verification "off" disables the
+	// independent verifier turn. See specs/domains/goal-mode.md.
 	GoalLoop GoalLoopSettings
 
-	// ModelProfiles holds the model-profile optimization settings. When Enabled, the
-	// profile activates variant behaviors (essential-tools narrowing, prompt
-	// lite swap, loop hardening, sampling) — each variant independently gated
-	// by BOTH the master Enabled toggle and its own sub-toggle
-	// (defense-in-depth). Inert when the master toggle is disabled.
+	// ModelProfiles holds the model-profile settings; every variant is gated by the
+	// master Enabled AND its own sub-toggle. See specs/domains/model-profiles.md.
 	ModelProfiles ModelProfilesSettings
 
-	// E2S holds the E2S (explicit-state) execution-mode settings. Enabled is
-	// the effective availability of the mode (experimental.enabled, mapped by
-	// the builder). When false, an E2S request is rejected fail-closed before
-	// the loop starts; the numeric fields configure the loop (turn budget, Σ
-	// byte cap, retry/observation caps, anti-spin thresholds) and fall back to
-	// the core/e2s defaults when zero.
+	// E2S holds the E2S execution-mode settings: Enabled gates availability
+	// fail-closed; numerics fall back to core/e2s defaults. See specs/domains/e2s.md.
 	E2S E2SSettings
 
-	// MCPServerModes carries the per-server MCP capability-mode map (each
-	// entry a CapabilityModes with a mode per session context: "auto" |
-	// "manual" | "disabled") from the config snapshot the orchestrator was
-	// built with. At task entry the session context (isNoProject) selects
-	// chat_mode vs code_mode, then it drives task-level tool gating: a
-	// "manual" server's tools are hidden (and rejected at dispatch) unless
-	// the user mentioned the server in the task's messages, and "disabled"
-	// servers never surface at all (the builder already refuses to dial a
-	// server disabled in both contexts). Empty (no modes configured) gates
-	// nothing — zero regression.
+	// MCPServerModes: per-server capability-mode map ("auto"/"manual"/"disabled");
+	// empty gates nothing. See specs/decisions/077-explicit-mcp-server-mentions.md.
 	MCPServerModes map[string]CapabilityModes
 	// MCPServerModesResolver supplies the builder's current immutable policy snapshot.
 	// Direct constructors fall back to MCPServerModes when it is nil.
 	MCPServerModesResolver func() map[string]CapabilityModes
 
 	// SkillModes / AgentModes carry the per-name capability-mode maps for the
-	// skill and agent catalogs (same enum and per-context CapabilityModes
-	// shape as MCPServerModes, from capabilities.skills / capabilities.agents).
-	// At task entry attachCapabilitySnapshots resolves the session context and
-	// attaches the flat projections to the request context; the filters then
-	// apply the mirrored three-state semantics: "auto" participates in
-	// implicit discovery (router matching / the "Available Subagents" roster)
-	// and answers explicit mentions; "manual" is hidden from implicit
-	// discovery but activates via an explicit /skill: / /agent: mention;
-	// "disabled" is fully unavailable (mentions silently dropped, delegation
-	// refused fail-closed). Empty maps gate nothing — zero regression.
+	// skill and agent catalogs (same enum and shape as MCPServerModes); see
+	// specs/decisions/084-per-capability-chat-code-activation-modes.md.
 	SkillModes map[string]CapabilityModes
 	// SkillModesResolver supplies the builder's current immutable policy
 	// snapshot. Direct constructors fall back to SkillModes when it is nil.
@@ -306,24 +229,19 @@ type OrchestratorConfig struct {
 	AgentModesResolver func() map[string]CapabilityModes
 }
 
-// E2SSettings is the runtime mirror of BuilderE2SConfig carried on
-// OrchestratorConfig. It is a type alias: the E2S settings are a flat,
-// behavior-only value with no core-side reshaping, so a distinct struct would
-// only duplicate the fields.
+// E2SSettings is the runtime mirror of BuilderE2SConfig: a type alias — the
+// settings are a flat behavior-only value with no core-side reshaping.
 type E2SSettings = BuilderE2SConfig
 
-// GoalLoopSettings mirrors the config-layer GoalLoopConfig for the
-// orchestrator's runtime config field. Verification is "independent"
-// (default) or "off". Suggest configures the post-routing goal-mode
-// suitability gate (core/goal_suggest.go).
+// GoalLoopSettings mirrors the config-layer GoalLoopConfig; Verification is
+// "independent" (default) or "off". See specs/domains/goal-mode.md.
 type GoalLoopSettings struct {
 	Verification string
 	Suggest      GoalSuggestSettings
 }
 
-// GoalSuggestSettings is the runtime mirror of the config-layer
-// GoalSuggestConfig: the goal-mode suggestion feature (offer goal-mode
-// activation when a fresh task's message is obviously goal-suited).
+// GoalSuggestSettings is the runtime mirror of the config-layer GoalSuggestConfig:
+// the post-routing goal-mode suggestion gate. See specs/decisions/086-goal-mode-suggestion.md.
 type GoalSuggestSettings struct {
 	// Enabled gates the whole feature; false suppresses the suggestion gate
 	// entirely (goal mode stays available via the explicit toggle / /goal).
@@ -333,24 +251,19 @@ type GoalSuggestSettings struct {
 	MinComplexity int
 }
 
-// ModelProfilesSettings is the runtime mirror of BuilderModelProfilesConfig, carrying
-// the model-profile variant configuration to the orchestrator. The master Enabled
-// toggle gates every variant (defense-in-depth): when false, no variant
-// activates regardless of its sub-toggle.
+// ModelProfilesSettings mirrors BuilderModelProfilesConfig; the master Enabled
+// toggle gates every variant (defense-in-depth). See specs/domains/model-profiles.md.
 type ModelProfilesSettings struct {
 	Enabled        bool
 	EssentialTools ModelProfilesEssentialSettings
 	SystemPrompt   ModelProfilesSystemPromptSettings
-	// LoopHardening carries the circuit-breaker tightening overrides. The
-	// executor applies them to its circuit breaker at builder level; the E2S
-	// loop (which has no executor) applies the RepeatNudgeThreshold override
-	// to its anti-spin nudge — the same concept under the same profile gate.
+	// LoopHardening carries the circuit-breaker tightening overrides (builder
+	// level; E2S maps RepeatNudgeThreshold onto its anti-spin nudge).
 	LoopHardening ModelProfilesLoopHardeningSettings
 }
 
-// ModelProfilesLoopHardeningSettings is the orchestrator-level projection of the
-// loop-hardening thresholds the E2S path consumes. Zero values mean "keep
-// the configured/baseline threshold" (mirroring applyLoopHardening).
+// ModelProfilesLoopHardeningSettings projects the loop-hardening thresholds the
+// E2S path consumes; zero keeps the configured/baseline threshold (mirrors applyLoopHardening).
 type ModelProfilesLoopHardeningSettings struct {
 	Enabled              bool
 	RepeatNudgeThreshold int
@@ -359,22 +272,16 @@ type ModelProfilesLoopHardeningSettings struct {
 // ModelProfilesEssentialSettings holds the always-present tool-set narrowing settings.
 type ModelProfilesEssentialSettings struct {
 	Enabled bool
-	// AlwaysPresent is the user-pinned list of tool names always exposed when
-	// this variant is active, regardless of routing. Protected orchestration
-	// tools (finish, fact memory, ask_user) and all MCP tools are kept
-	// additionally by SelectTools.
+	// AlwaysPresent is the user-pinned tool list exposed regardless of routing;
+	// SelectTools additionally keeps protected orchestration tools and MCP tools.
 	AlwaysPresent []string
-	// CompactDescriptions swaps full builtin descriptions for one-line
-	// compact variants while the essential-tools variant is active.
-	// Off by default: descriptions stay byte-identical to full form.
+	// CompactDescriptions swaps full builtin descriptions for one-line compact
+	// variants while essential-tools is active; off keeps full form.
 	CompactDescriptions bool
 }
 
-// ModelProfilesSystemPromptSettings holds the prompt-simplification variant
-// settings. Lite is the variant master toggle (there is no separate Enabled —
-// it mirrors config.SystemPromptConfig, where Lite itself gates the variant).
-// FewShot and ReasoningScaffold are independent sub-toggles only honored when
-// Lite is active.
+// ModelProfilesSystemPromptSettings holds the prompt-simplification variant; Lite
+// is the master toggle. See specs/domains/model-profiles.md.
 type ModelProfilesSystemPromptSettings struct {
 	Lite bool
 	// FewShot appends the worked-example ReAct block (requires Lite).
@@ -383,26 +290,16 @@ type ModelProfilesSystemPromptSettings struct {
 	ReasoningScaffold bool
 }
 
-// ContextManagerFactory creates a ContextManager for a new task.
-// The compactionStrategy parameter allows selecting the appropriate strategy.
-// pruningOverrides, when provided, override the global pruning configuration.
-// This allows the Orchestrator to remain decoupled from the memory package.
+// ContextManagerFactory creates a ContextManager for a new task; compactionStrategy
+// selects the strategy, pruningOverrides override the global pruning configuration.
 type ContextManagerFactory func(systemPrompt string, modelMeta llm.ModelMetadata, compactionStrategy string, pruningOverrides ...orchestration.PruningOverride) ContextManager
 
 // BlackboardFactory creates a Blackboard for a new task.
 // The taskID is a unique identifier for the orchestration request.
 type BlackboardFactory func(taskID string) orchestration.Blackboard
 
-// Orchestrator coordinates the agent's reasoning cycle.
-// It handles c0wrk-specific concerns (routing, PersistentBlackboard,
-// conversation history) and delegates the Plan&Execute loop to the sp4rk engine.
-//
-// Lifecycle: One Orchestrator is created per active session via Builder.Build().
-// It lives for the duration of the session and is discarded when the session ends.
-//
-// Concurrency: Only one HandleMessage call may be active at a time per Orchestrator
-// instance. The session manager enforces this contract — concurrent requests to the
-// same session are rejected before reaching HandleMessage.
+// Orchestrator coordinates the agent's reasoning cycle: c0wrk-specific concerns
+// (routing, PersistentBlackboard, history) around the sp4rk Plan&Execute engine.
 type Orchestrator struct {
 	router           *router.Router
 	llm              agent.LLMCaller
@@ -414,106 +311,52 @@ type Orchestrator struct {
 	config           OrchestratorConfig
 	contextFactory   ContextManagerFactory
 	logger           *slog.Logger
-	// serviceMetrics is the builder-owned per-kind collector for the auxiliary
-	// one-shot service calls (issue #64), shared in via OrchestratorDeps so the
-	// manual-compaction summarization call records its telemetry into the same
-	// aggregate as the other service calls. Nil-safe.
+	// serviceMetrics is the builder-owned per-kind collector for auxiliary one-shot
+	// service calls, shared via OrchestratorDeps (nil-safe).
 	serviceMetrics  *ServiceMetrics
 	emitter         Emitter
 	modelRegistry   *llm.ModelRegistry
 	localModelProbe LocalModelProbe // lazily probes OpenAI-compatible endpoints (LM Studio/vLLM/…) for the runtime context window
 	bbFactory       BlackboardFactory
-	// modelMu guards the per-request LLM identity fields config.Model and
-	// config.ReasoningEffort against cross-goroutine access. Writers run on
-	// the request goroutine (ApplyRequestOverrides / SetReasoningEffort,
-	// reached from HandleMessage and the resume path); readers include
-	// Wails-RPC goroutines — the runtime status poll (GetSessionRuntimeStatus
-	// → ManualCompactionAvailability → contextBases) — and the
-	// manual-compaction flow goroutine (contextBases, the summarize wiring).
-	// All access goes through currentModel / setCurrentModel /
-	// currentReasoningEffort / setCurrentReasoningEffort so no raw read or
-	// write of these two fields escapes those helpers; the rest of config is
-	// immutable after Build.
+	// modelMu guards the per-request LLM identity fields (config.Model,
+	// config.ReasoningEffort) — access only via the current*/setCurrent* accessors;
+	// the rest of config is immutable after Build.
 	modelMu sync.RWMutex
 
-	// e2sSettingsOverride, when set, supersedes config.E2S for the effective
-	// E2S execution-mode settings. config is immutable after Build, so a
-	// runtime experimental-features toggle (which flips the effective E2S
-	// gate) cannot mutate it directly — it stores the refreshed settings here
-	// via SetE2SSettings and every reader goes through e2sSettings(). The
-	// pointer is swapped atomically so a toggle is safe against an in-flight
-	// HandleMessage / E2S loop.
+	// e2sSettingsOverride, when set, supersedes config.E2S (immutable after Build)
+	// with settings refreshed via SetE2SSettings; readers go through e2sSettings().
 	e2sSettingsOverride atomic.Pointer[E2SSettings]
 
 	// mcpMentions holds ephemeral intent only for explicitly nonpersistent callers.
 	// Durable tasks load through taskStore on every entry, never from this cache.
 	mcpMentions sync.Map
 
-	// modelProfilesSettingsOverride, when set, supersedes config.ModelProfiles for the effective
-	// model-profile settings. config is immutable after Build, so a runtime ModelProfiles
-	// change (master toggle, profile switch, essential-tools variant flip —
-	// all reach the app through applyModelProfilesChange / UpdateExperimentalFeatures)
-	// cannot mutate it directly: it stores the refreshed settings here via
-	// SetModelProfilesSettings and every reader goes through modelProfilesSettings(). Without
-	// this, an already-built orchestrator would keep the stale build-time
-	// snapshot until an app restart — the exact problem SetE2SSettings solves
-	// for the E2S gate. The pointer is swapped atomically so a toggle is safe
-	// against an in-flight HandleMessage / Resume.
+	// modelProfilesSettingsOverride mirrors e2sSettingsOverride for model-profile
+	// settings (SetModelProfilesSettings / modelProfilesSettings()).
 	modelProfilesSettingsOverride atomic.Pointer[ModelProfilesSettings]
 
-	// historyMu guards conversationHistory against cross-goroutine access.
-	// Writers run on the request goroutine (the recordConversationOutcome /
-	// recordResumeOutcome epilogues, CompactConversationHistory's swap) and
-	// on the session-restore path (SetConversationHistory, before the session
-	// accepts requests); readers include Wails-RPC goroutines — the runtime
-	// status poll (GetSessionRuntimeStatus → ManualCompactionAvailability) and
-	// the manual-compaction flow can observe the history while a request is
-	// finishing, the same cross-goroutine window liveMu covers for
-	// liveMessages. All access goes through historySnapshot /
-	// setConversationHistory / appendHistory so no raw read or write escapes
-	// those helpers.
+	// historyMu guards conversationHistory (request goroutines + Wails-RPC readers);
+	// access only via historySnapshot/setConversationHistory/appendHistory.
 	historyMu sync.RWMutex
-	// conversationHistory holds prior user/assistant exchanges from the
-	// session. Guarded by historyMu.
+	// conversationHistory holds prior user/assistant exchanges from the session.
 	conversationHistory []llm.Message
-	// forecastMu guards compactionForecast against cross-goroutine access:
-	// writers run on the manual-compaction flow goroutine (calibration after
-	// each compaction) and on the session-restore path (SetCompactionForecast);
-	// readers include Wails-RPC goroutines (the runtime status poll → the
-	// per-strategy prediction) and the manual-compaction flow itself (the
-	// Summarize wiring reads the forecast to build deps). All access goes
-	// through compactionForecastSnapshot / SetCompactionForecast.
+	// forecastMu guards compactionForecast (calibration/restore writers, status-poll
+	// readers); access via compactionForecastSnapshot / SetCompactionForecast.
 	forecastMu sync.Mutex
-	// compactionForecast holds the EWMA-calibrated compression-ratio forecasts
-	// for the LLM-backed manual-compaction strategies, seeded from
-	// config.Compaction.Forecast (zero fields fall back to sp4rk's defaults)
-	// and refined after each successful compaction using the observed
-	// before→after token ratio.
+	// compactionForecast holds EWMA-calibrated compression-ratio forecasts for LLM
+	// manual compaction (seeded from config, refined after each compaction).
 	compactionForecast sdkmemory.CompactionForecast
 	taskStore          TaskPersistence       // optional, for ContinueTask blackboard restoration
 	bbRestoreFunc      BlackboardRestoreFunc // optional, restores PersistableBlackboard from store
 	trackingCaller     *llm.TrackingCaller   // for per-step context tracker wiring
 	tokenCounter       llm.TokenCounter      // for token counting in planner history compaction
 	vectorSearchFunc   builtins.VectorSearchFunc
-	// vectorSearchWaitFunc is the bounded readiness waiter paired with
-	// vectorSearchFunc (the desktop search wiring's waitFunc).
-	// injectVectorSearchHints calls it under the SAME deadline as the
-	// search, so readiness waiting and query execution share one budget
-	// instead of the search closure re-waiting (and re-spending) it.
+	// vectorSearchWaitFunc — the readiness waiter paired with vectorSearchFunc;
+	// full semantics on OrchestratorDeps.VectorSearchWaitFunc.
 	vectorSearchWaitFunc builtins.VectorSearchWaitFunc
-	// vectorSearchWaitTimeout bounds how long injectVectorSearchHints waits
-	// for vector-search results before skipping RAG hints. Zero resolves to
-	// defaultVectorSearchWaitTimeout at use time (effective method), so
-	// hint injection never blocks a session start indefinitely — UNLESS
-	// vectorSearchWaitDisabled marks an explicit fail-fast configuration
-	// (vector_index.search_wait_timeout_ms: 0), in which case zero is the
-	// genuine zero-length deadline the user asked for.
+	// Semantics on OrchestratorDeps.VectorSearchWaitTimeout.
 	vectorSearchWaitTimeout time.Duration
-	// vectorSearchWaitDisabled marks an EXPLICIT fail-fast RAG-hint wait
-	// (vector_index.search_wait_timeout_ms: 0). A plain zero-value
-	// OrchestratorDeps (tests, other builders) keeps it false and therefore
-	// keeps the 3s default — 0 alone cannot distinguish "unset" from
-	// "explicitly disabled" at this layer.
+	// Semantics on OrchestratorDeps.VectorSearchWaitDisabled.
 	vectorSearchWaitDisabled bool
 	skillManager             *skills.SkillManager // for skill discovery and activation
 	agentManager             *agents.AgentManager // for subagent discovery (drives "Available/Requested Subagents" prompt sections)
@@ -528,201 +371,103 @@ type Orchestrator struct {
 	circuitBreaker   agent.CircuitBreakerConfig
 
 	// onCleanup is invoked exactly once from Cleanup (session delete or app
-	// shutdown) to release builder-owned resources tied to this orchestrator's
-	// lifetime — currently the session registry's live-tracking entry (see
-	// OrchestratorBuilder.registerSessionRegistry). Nil when no hook is set.
+	// shutdown) to release builder-owned resources; nil when no hook is set.
 	onCleanup func()
 
-	// verifyOnEdit, when non-nil, is the mechanical edit-verification runner
-	// (executor.verify_on_edit). Propagated into conductor deps for CODE-task
-	// conductor runs and their subagent executors; suppressed in No Project
-	// (CHAT) mode and goal-loop turns. See core/verify_on_edit.go.
+	// verifyOnEdit is the edit-verification runner (delta on
+	// OrchestratorDeps.VerifyOnEdit: specs/domains/verify-on-edit.md); nil default.
 	verifyOnEdit agent.EditVerifyRunner
 	// verifyOnEditMaxOutputChars caps the verification output injected into
 	// context; 0 falls back to agent.DefaultVerifyOnEditCap.
 	verifyOnEditMaxOutputChars int
 
-	// isNoProject is set to true when this orchestrator runs inside the
-	// "No Project" pseudo-project. When true, index-dependent tools are
-	// disabled (semantic_search — no vector index without a project),
-	// verify-on-edit is suppressed, and auto-RAG hints are skipped. The
-	// routing domain is NOT overridden: code-flavored CHAT questions route
-	// as "code" (its compaction strategy, sliding_window, assumes no project).
+	// isNoProject: inside the No Project pseudo-project index-dependent tools are
+	// disabled and auto-RAG/verify-on-edit suppressed; code CHAT still routes "code".
 	isNoProject bool
 
-	// requestInFlight enforces the documented "one active request per
-	// *Orchestrator" invariant. HandleMessage CompareAndSwap's it to true on
-	// entry; a concurrent caller observes false->true refused and gets
-	// ErrRequestInFlight back. The defer in HandleMessage stores false again.
+	// requestInFlight enforces the one-active-request invariant (HandleMessage CAS,
+	// concurrent callers get ErrRequestInFlight; defer clears).
 	requestInFlight atomic.Bool
 
-	// agentsMDCache caches AGENTS.md content per workspace path with mtime
-	// check to avoid repeated disk reads on every request. Only accessed from
-	// injectVectorSearchHints called from HandleMessage, which is
-	// single-flight per instance.
+	// agentsMDCache caches AGENTS.md content per workspace path with mtime check;
+	// accessed only from injectVectorSearchHints (single-flight per instance).
 	agentsMDCache map[string]agentsMDCacheEntry
 
-	// goalProposer is the backend hook that submits a {condition, verify}
-	// goal proposal to the user and blocks for approval. Injected by the
-	// builder (via the GoalProposerSetter interface or a constructor field);
-	// zero-value (nil) means goal derivation cannot run — deriveGoal returns
-	// an error, so opts.Goal on HandleMessage fails fast rather than
-	// silently running a non-goal Conductor pass.
+	// goalProposer is the backend hook submitting a {condition, verify} proposal and
+	// blocking for approval; nil → deriveGoal fails fast (goal request errors).
 	goalProposer tools.GoalProposer
 
-	// goalTurnRunner runs ONE turn of the goal loop (route→plan→Conductor for
-	// turn 1; reused-routing ReAct→Conductor for turn >1) and reports how many
-	// tool calls the turn made plus its result. It is the single seam through
-	// which the loop drives the Conductor, kept as a field so tests can inject
-	// a mock that returns canned verdicts/tool-call counts without spinning up
-	// the full routing+LLM+executor stack. The default (nil) resolves to
-	// defaultGoalTurnRunner, which reuses runConductor under the hood.
+	// goalTurnRunner runs ONE goal-loop turn (turn 1: route→plan→Conductor; after:
+	// reused-routing ReAct→Conductor) — single test seam; nil → defaultGoalTurnRunner.
 	goalTurnRunner func(ctx context.Context, turn int, message string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, plansDir string, conversationHistory []llm.Message, deps conductorDeps) (toolCallCount int, result *orchestration.ExecutionResult, err error)
 
-	// goalVerifier is the independent verifier that re-checks an agent's "met"
-	// goal verdict. When the goal loop reaches a "met" verdict and independent
-	// verification is configured (config.GoalLoop.Verification == "independent"),
-	// the verifier runs an ISOLATED Conductor pass — bounded by the same
-	// complexity-derived budget as a normal executor run, restricted to a
-	// read-only/test toolset — that inherits the active skills +
-	// project-context prefix via the goal-verification system prompt. It
-	// reports a structured outcome through
-	// declare_verification.
-	//
-	// It runs on a FRESH blackboard (decoupled from the still-active goal
-	// task's blackboard), seeded with lastTurnOutput (the met turn's work
-	// product) so the verifier's own read_final_result returns the real work.
-	// It branches on gs.VerificationMode: executable re-runs the verify clause;
-	// re_derivation delegates a fresh read-only run of the goal's process.
-	//
-	// It is the single seam through which the loop drives verification, kept as
-	// a field so tests can inject a mock that returns a canned outcome without
-	// spinning up the full Conductor stack. The default (nil) resolves to
-	// defaultGoalVerifier, which reuses RunConductor under the hood (mirroring
-	// goalTurnRunner). It carries message + lastTurnOutput + bb so it can drive
-	// RunConductor on an isolated blackboard seeded with the met turn's work
-	// product (the verifier reads it via read_final_result / step outputs to
-	// inspect the claimed artifacts).
+	// goalVerifier is the independent verifier re-checking a "met" verdict (isolated
+	// pass, fresh blackboard); nil → defaultGoalVerifier. See specs/domains/goal-mode.md.
 	goalVerifier func(ctx context.Context, gs *goal.GoalState, verdict *goal.Verdict, message string, lastTurnOutput string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, deps conductorDeps) (*tools.VerificationOutcome, error)
 
 	// goalSuggester is the goal-mode suitability classifier seam
-	// (Orchestrator.SuggestGoalMode). Nil resolves to the production
-	// implementation, which rides the session's LLM caller through the shared
-	// serviceCall pipeline; tests install a stub to make the verdict
-	// deterministic. See core/goal_suggest.go.
+	// (SuggestGoalMode); nil → production implementation. See core/goal_suggest.go.
 	goalSuggester GoalSuggester
 
 	// goalSuggestionProposer is the desktop-side pending-card bridge for the
-	// post-routing goal-mode suggestion (see GoalSuggestionProposer). Nil
-	// disables the suggestion gate entirely.
+	// post-routing suggestion (see GoalSuggestionProposer); nil disables the gate.
 	goalSuggestionProposer GoalSuggestionProposer
 
-	// goalSuggestionDeclined is the session-scoped suppression flag: the user
-	// declined a goal-mode suggestion once, so the gate stays silent for the
-	// rest of the session. The Orchestrator instance is per-session, so the
-	// flag's lifetime IS the session's (it dies with the session — a fresh
-	// session, or an app restart, re-arms the gate).
+	// goalSuggestionDeclined is the session-scoped suppression flag: after one
+	// decline the gate stays silent for the session's lifetime.
 	goalSuggestionDeclined atomic.Bool
 
-	// activePause is the universal pause signal for the currently-running
-	// conductor (any mode), if any. PauseSession loads the pointer and sets the
-	// atomic; the conductor's executor polls it at every step boundary (via the
-	// pause-checker wired through ConductorConfig.PauseChecker). It is swapped
-	// in at request entry (HandleMessage/Resume) and cleared (nil) on exit so a
-	// stale signal from a prior request cannot pause a future one.
-	//
-	// The pointer field itself is an atomic.Pointer so the cross-goroutine read
-	// in PauseSession (a Wails-RPC goroutine) and the write in the request
-	// goroutine stay race-free. The single-flight requestInFlight flag serializes
-	// HandleMessage/Resume calls against each other, but does NOT cover
-	// PauseSession, which runs independently — hence the atomic pointer. The
-	// *atomic.Bool it points to is, of course, atomic.
+	// activePause is the universal pause signal for the running conductor: swapped
+	// in at request entry, cleared on exit (no stale signal pauses a later request).
 	activePause atomic.Pointer[atomic.Bool]
 
-	// liveMu guards liveMessages — the queue of user messages sent while a
-	// request is already executing (live-send). Producers run on Wails-RPC
-	// goroutines (QueueLiveUserMessage); the sole consumer is the running
-	// request's executor, polling DrainLiveUserMessages at every step boundary
-	// via ConductorConfig.UserMessageSource. The queue is request-scoped in
-	// lifetime (cleared at request entry) but orchestrator-scoped in identity,
-	// so a message queued in the closing window of a finishing request is
-	// drained by the request epilogue (or a later request) rather than lost.
+	// liveMu guards liveMessages — user messages sent mid-request; the executor
+	// drains per step boundary, late arrivals via the epilogue.
 	liveMu sync.Mutex
-	// liveMessages holds queued live user messages in FIFO order. Guarded by
-	// liveMu.
+	// liveMessages holds queued live user messages in FIFO order.
 	liveMessages []string
 
-	// resumeCompactionMu guards resumeCompactionStrategy — the one-shot
-	// "compact on resume" request. The producer (RequestResumeCompaction, a
-	// Wails-RPC goroutine answering the user's strategy choice) and the
-	// consumer (Resume, on the request goroutine) run concurrently, so the
-	// arm/consume pair must be race-free the same way liveMessages is.
+	// resumeCompactionMu guards resumeCompactionStrategy — the one-shot "compact
+	// on resume" request; producer (RequestResumeCompaction) and consumer (Resume)
+	// run concurrently, so arm/consume is mutex-guarded.
 	resumeCompactionMu sync.Mutex
 	// resumeCompactionStrategy holds the strategy name ("sliding_window" |
-	// "summarization" | "hierarchical") armed for the NEXT Resume. Empty (the
-	// default) means no compaction was requested and Resume keeps its normal
-	// routing-derived, threshold-driven compaction behavior. Guarded by
-	// resumeCompactionMu.
+	// "summarization" | "hierarchical") armed for the NEXT Resume; empty keeps the
+	// normal routing-derived, threshold-driven behavior.
 	resumeCompactionStrategy string
 
-	// resumeRerouteMu guards resumeRerouteRequested — the one-shot "re-route
-	// on resume" request. The producer (RequestResumeReroute, called by the
-	// session layer right before resuming a task that never got past routing)
-	// and the consumer (Resume, on the request goroutine) may run on different
-	// goroutines, so the arm/consume pair is mutex-guarded exactly like
-	// resumeCompactionMu.
+	// resumeRerouteMu guards resumeRerouteRequested — the one-shot "re-route on
+	// resume" request; producer (RequestResumeReroute) and consumer (Resume) may
+	// run on different goroutines, so arm/consume is mutex-guarded.
 	resumeRerouteMu sync.Mutex
-	// resumeRerouteRequested is true when the next Resume must re-run the
-	// routing stage because the resumed task's original run never reached it
-	// (no routing decision was persisted and no execution state exists — e.g.
-	// the router's LLM call failed on a network error the moment the task
-	// started). False (the default) keeps Resume's normal
-	// reuse-without-routing behavior, so a task that was actually routed is
-	// never re-classified on resume. Guarded by resumeRerouteMu.
+	// resumeRerouteRequested is true when the next Resume must re-run routing
+	// (original run never reached it); false keeps reuse-without-routing — a routed
+	// task is never re-classified.
 	resumeRerouteRequested bool
 }
 
-// ErrRequestInFlight is returned by HandleMessage when another HandleMessage
-// call on the same *Orchestrator is already running. The orchestrator is
-// designed for one concurrent request per instance — the session layer is
-// responsible for serializing per-session.
+// ErrRequestInFlight is returned by HandleMessage when another call on the same
+// *Orchestrator is already running; the session layer serializes per-session.
 var ErrRequestInFlight = errors.New("orchestrator: request already in flight")
 
-// installPauseSignal installs a fresh pause signal for the duration of the
-// current request and returns a clear function to defer. Every conductor run
-// launched during the request (normal path or goal loop) receives a
-// pause-checker (see newPauseChecker) that reads this signal at each step
-// boundary. PauseSession flips the signal from an independent goroutine; the
-// executor then returns ErrPaused, which the Conductor maps to
-// ExecutionStatusPaused — the request persists the task as paused and exits,
-// releasing the single-flight lock so a later Resume can re-enter.
-//
-// Installing a fresh signal per request (rather than reusing one) guarantees a
-// stale true value from a prior request can never pause a future one.
+// installPauseSignal installs the request's pause signal and returns the clear
+// function to defer (protocol on activePause: specs/domains/goal-mode.md).
 func (o *Orchestrator) installPauseSignal() func() {
 	pause := &atomic.Bool{}
 	o.activePause.Store(pause)
 	return func() { o.activePause.Store(nil) }
 }
 
-// PauseSession signals the currently-running conductor (any mode) to pause at
-// the next step boundary. It is a no-op when no request is in flight (no
-// signal installed). The pause is cooperative: the executor's pause-checker
-// observes the signal at the top of its next iteration, stops with ErrPaused,
-// and the request path persists the task as paused + releases single-flight so
-// a later Resume can re-enter.
+// PauseSession flips the active pause signal; no-op with no request in flight.
+// Cooperative checkpoint semantics: specs/domains/session-lifecycle.md ("Task Resumption").
 func (o *Orchestrator) PauseSession() {
 	if p := o.activePause.Load(); p != nil {
 		p.Store(true)
 	}
 }
 
-// newPauseChecker returns a cooperative pause-checker closure suitable for
-// ConductorConfig.PauseChecker. It reads the active request's pause signal
-// live: when PauseSession flips it, the next step-boundary check returns true
-// and the conductor stops. With no signal installed (no request in flight) it
-// always returns false — the default non-pausing behavior — so installing it
-// unconditionally on every conductor run is safe.
+// newPauseChecker returns the pause-checker closure for ConductorConfig: reads the
+// active pause signal live, always false when none installed.
 func (o *Orchestrator) newPauseChecker() func(context.Context) bool {
 	return func(context.Context) bool {
 		if p := o.activePause.Load(); p != nil {
@@ -732,12 +477,8 @@ func (o *Orchestrator) newPauseChecker() func(context.Context) bool {
 	}
 }
 
-// QueueLiveUserMessage appends a user message to the live queue. The running
-// request's executor drains the queue at its next step boundary and delivers
-// the message to the LLM as a {role:user} interjection (the same landing spot
-// as a resume-with-nudge). Safe to call from any goroutine; a no-op for an
-// empty message. Multiple queued messages are delivered in FIFO order, one per
-// step boundary (the executor drains at most one message per boundary).
+// QueueLiveUserMessage appends a user message to the live queue for delivery at
+// the next step boundary; no-op for empty text (protocol on liveMessages).
 func (o *Orchestrator) QueueLiveUserMessage(text string) {
 	if text == "" {
 		return
@@ -747,11 +488,8 @@ func (o *Orchestrator) QueueLiveUserMessage(text string) {
 	o.liveMessages = append(o.liveMessages, text)
 }
 
-// DrainLiveUserMessages atomically removes and returns the single oldest
-// queued live message (FIFO), or "" when the queue is empty. It is the
-// ConductorConfig.UserMessageSource closure body: the executor polls it at
-// every step boundary, so one message lands per boundary and the rest stay
-// queued for subsequent boundaries.
+// DrainLiveUserMessages removes and returns the oldest queued live message, or ""
+// when empty (per-boundary poll; see also TakeLiveUserMessages).
 func (o *Orchestrator) DrainLiveUserMessages() string {
 	o.liveMu.Lock()
 	defer o.liveMu.Unlock()
@@ -763,11 +501,8 @@ func (o *Orchestrator) DrainLiveUserMessages() string {
 	return msg
 }
 
-// RequestResumeCompaction arms the one-shot "compact on resume" request with
-// the given strategy ("sliding_window" | "summarization" | "hierarchical");
-// the NEXT Resume consumes it. An empty strategy is rejected ("" is the
-// not-armed sentinel); re-arming overwrites the pending strategy. See
-// resumeCompactionStrategy.
+// RequestResumeCompaction arms the one-shot "compact on resume" request (the NEXT
+// Resume consumes it; empty is a no-op, re-arming overwrites). See resumeCompactionStrategy.
 func (o *Orchestrator) RequestResumeCompaction(strategy string) {
 	if strategy == "" {
 		return
@@ -777,19 +512,16 @@ func (o *Orchestrator) RequestResumeCompaction(strategy string) {
 	o.resumeCompactionStrategy = strategy
 }
 
-// ClearResumeCompaction disarms the request. Called via clearResumeRequests
-// when the armed task is cancelled, abandoned, or force-terminated — a stale
-// arm must not force a compaction chosen for a dead task onto an unrelated
-// later one. See resumeCompactionStrategy.
+// ClearResumeCompaction disarms the request (via clearResumeRequests when the
+// armed task dies — a stale arm must not compact an unrelated later task).
 func (o *Orchestrator) ClearResumeCompaction() {
 	o.resumeCompactionMu.Lock()
 	defer o.resumeCompactionMu.Unlock()
 	o.resumeCompactionStrategy = ""
 }
 
-// consumeResumeCompaction atomically reads and clears the armed strategy; ""
-// (not armed, or already consumed) keeps Resume's normal threshold-driven
-// behavior. See resumeCompactionStrategy.
+// consumeResumeCompaction atomically reads and clears the armed strategy; "" keeps
+// Resume's normal threshold-driven behavior. See resumeCompactionStrategy.
 func (o *Orchestrator) consumeResumeCompaction() string {
 	o.resumeCompactionMu.Lock()
 	defer o.resumeCompactionMu.Unlock()
@@ -798,31 +530,26 @@ func (o *Orchestrator) consumeResumeCompaction() string {
 	return strategy
 }
 
-// RequestResumeReroute arms the one-shot "re-route on resume" request for the
-// NEXT Resume (only meaningful for a task that never got past routing — see
-// resumeRerouteRequested). Idempotent re-arm.
+// RequestResumeReroute arms the one-shot "re-route on resume" request for the NEXT
+// Resume (only meaningful when routing never ran — see resumeRerouteRequested).
 func (o *Orchestrator) RequestResumeReroute() {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
 	o.resumeRerouteRequested = true
 }
 
-// ClearResumeReroute drops an armed one-shot resume-re-route request. Called
-// via clearResumeRequests whenever the armed task is cancelled, abandoned, or
-// force-terminated — a stale arm must not re-classify an unrelated later task
-// on the session's long-lived orchestrator (see
-// specs/domains/orchestration/conductor.md, "Never-routed exception").
-// Defense-in-depth only: Resume's `forceReroute && routing == nil` guard, not
-// this clear, bounds a leaked arm — keep the guard if this coverage shrinks.
+// ClearResumeReroute drops an armed request (via clearResumeRequests when the armed
+// task dies — a stale arm must not re-classify a later task); defense-in-depth
+// behind Resume's `forceReroute && routing == nil` guard. See
+// specs/domains/orchestration/conductor.md, "Never-routed exception".
 func (o *Orchestrator) ClearResumeReroute() {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
 	o.resumeRerouteRequested = false
 }
 
-// consumeResumeReroute atomically reads and clears the armed request; false
-// (not armed, or already consumed) keeps Resume's normal reuse-without-routing
-// behavior. See resumeRerouteRequested.
+// consumeResumeReroute atomically reads and clears the armed request; false keeps
+// Resume's reuse-without-routing behavior. See resumeRerouteRequested.
 func (o *Orchestrator) consumeResumeReroute() bool {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
@@ -831,11 +558,8 @@ func (o *Orchestrator) consumeResumeReroute() bool {
 	return requested
 }
 
-// TakeLiveUserMessages atomically removes and returns ALL queued live
-// messages (FIFO order), or nil when the queue is empty. Used by the request
-// epilogue when the task completed without delivering them: the messages
-// become the follow-up task's text, so they must leave the queue atomically
-// (a subsequent live send must not interleave with the take).
+// TakeLiveUserMessages removes and returns ALL queued live messages (FIFO), or nil
+// when empty; the epilogue turns them into the follow-up task's text.
 func (o *Orchestrator) TakeLiveUserMessages() []string {
 	o.liveMu.Lock()
 	defer o.liveMu.Unlock()
@@ -847,22 +571,16 @@ func (o *Orchestrator) TakeLiveUserMessages() []string {
 	return msgs
 }
 
-// DiscardLiveUserMessages drops all queued live messages. Used when the
-// request is cancelled (user stop): an undelivered message in a cancelled run
-// must not leak into a future request — the UI already rendered it, and the
-// user's stop is an explicit decision to halt the exchange.
+// DiscardLiveUserMessages drops all queued live messages (user stop): an
+// undelivered message must not leak into a future request.
 func (o *Orchestrator) DiscardLiveUserMessages() {
 	o.liveMu.Lock()
 	defer o.liveMu.Unlock()
 	o.liveMessages = nil
 }
 
-// emitSessionPaused surfaces a cooperative pause to the user. It emits a
-// service message (carrying a "pause" phase so the frontend can style it) and
-// relies on the existing resumable-task safety net to expose a Resume action:
-// the paused task is left in_progress by persistTaskOutcome, so
-// emitResumableIfUnfinished (driven by taskCompletionInfo mapping Paused to a
-// non-success completion) offers the resume button. Nil-safe like all emitters.
+// emitSessionPaused surfaces a cooperative pause (service message, "pause" phase);
+// the resumable-task safety net offers the Resume action. Nil-safe.
 func (o *Orchestrator) emitSessionPaused() {
 	if o.emitter == nil {
 		return
@@ -871,26 +589,12 @@ func (o *Orchestrator) emitSessionPaused() {
 }
 
 // LocalModelProbe is a best-effort, non-blocking hook that discovers the real
-// context window for a model served from an OpenAI-compatible endpoint (LM
-// Studio, vLLM, TGI, Ollama — local/LAN or self-hosted on a public host) and
-// writes the result into the session's ModelRegistry.
-//
-// It is a no-op for models whose provider is not OpenAI-compatible, and a
-// harmless no-op for a genuine cloud provider (whose /v1/models listing omits
-// the context-window field, so nothing is discovered). The orchestrator
-// invokes it when a model is selected — once for the session's default model
-// at construction, and again on every mid-chat model switch — so token
-// budgets reflect the runtime context window without paying the probe cost at
-// app startup or blocking the request path.
-//
-// Implementations must be safe for concurrent use and must return quickly
-// (the network probe, if any, runs on an internal goroutine with a detached
-// context so it is not tied to the caller's request lifetime).
+// context window for a model served from an OpenAI-compatible endpoint and writes
+// it into the session's ModelRegistry; invoked on model selection (construction +
+// every mid-chat switch). See specs/domains/llm-providers.md, "Lazy local-model probe".
 type LocalModelProbe func(model string)
 
 // OrchestratorDeps holds the runtime dependencies for the Orchestrator.
-// Grouping them into a single struct improves readability when the constructor
-// is called (one struct literal instead of 19 positional arguments).
 type OrchestratorDeps struct {
 	Router         *router.Router
 	LLM            agent.LLMCaller
@@ -901,9 +605,8 @@ type OrchestratorDeps struct {
 	Reflector      *reflector.Reflector // optional, nil-safe
 	Logger         *slog.Logger         // optional, nil-safe
 	Emitter        Emitter              // optional, uses noopEmitter if nil
-	// ServiceMetrics is the builder-owned per-kind collector for the auxiliary
-	// one-shot service calls (issue #64); the orchestrator's manual-compaction
-	// summarization records into it. Optional, nil-safe.
+	// ServiceMetrics is the builder-owned per-kind collector for auxiliary one-shot
+	// service calls (issue #64); manual-compaction summarization records into it.
 	ServiceMetrics   *ServiceMetrics
 	ModelRegistry    *llm.ModelRegistry // optional, nil-safe
 	ToolResultBudget agent.ToolResultBudget
@@ -912,38 +615,25 @@ type OrchestratorDeps struct {
 	TrackingCaller   *llm.TrackingCaller       // optional, for per-step context tracker wiring
 	VectorSearchFunc builtins.VectorSearchFunc // optional, for auto-RAG hint generation
 	// VectorSearchWaitFunc is the bounded readiness waiter paired with
-	// VectorSearchFunc. injectVectorSearchHints calls it (when non-nil)
-	// under the SAME deadline as the search itself, so readiness waiting
-	// and query execution share one budget. The search closure itself is
-	// non-blocking for readiness (HybridSearchNoWait on the desktop wiring),
-	// so without this pre-wait an unready index would skip hints instantly
-	// rather than waiting for the bound.
+	// VectorSearchFunc: one deadline covers both the wait and the search (the search
+	// closure never waits itself — HybridSearchNoWait on the desktop wiring).
 	VectorSearchWaitFunc builtins.VectorSearchWaitFunc // optional
-	// VectorSearchWaitTimeout bounds how long injectVectorSearchHints waits
-	// for vector-search results before skipping RAG hints and proceeding
-	// without them (vector_index.search_wait_timeout_ms). Zero (unset)
-	// defaults to defaultVectorSearchWaitTimeout (3s) — mirroring the
-	// config-layer default — so hint injection never blocks a session start
-	// indefinitely. An EXPLICIT fail-fast (config value 0) is carried by
-	// VectorSearchWaitDisabled, because zero alone is indistinguishable
-	// from "unset" at this layer.
+	// VectorSearchWaitTimeout bounds how long injectVectorSearchHints waits before
+	// skipping RAG hints (vector_index.search_wait_timeout_ms); zero (unset) defaults
+	// to defaultVectorSearchWaitTimeout, explicit fail-fast 0 rides VectorSearchWaitDisabled.
 	VectorSearchWaitTimeout time.Duration
-	// VectorSearchWaitDisabled marks an explicit vector_index.
-	// search_wait_timeout_ms: 0 (fail fast — never wait for index
-	// readiness). Supplied by the desktop layer, where the config defaults
-	// have already resolved "unset" to 3000ms, so a zero reaching it is
-	// unambiguously the user's choice.
+	// VectorSearchWaitDisabled marks an explicit vector_index.search_wait_timeout_ms: 0
+	// (fail fast — never wait for index readiness). The desktop layer resolves "unset"
+	// to 3000ms first, so a zero reaching it is unambiguously the user's choice.
 	VectorSearchWaitDisabled bool
 	SkillManager             *skills.SkillManager // optional, for skill discovery and activation
 	AgentManager             *agents.AgentManager // optional, for subagent discovery ("Available/Requested Subagents" prompt sections); nil-safe
 	CoreToolRegistry         *tools.ToolRegistry  // per-session registry for No-Project tool disabling
 	ModelSwitcher            *llm.Router          // raw LLM router for per-message model override
 
-	// VisionResolver inspects the CURRENT active model (per call) and returns
-	// markitdown connection parameters when that model is vision-capable and
-	// served over an OpenAI-compatible endpoint. Injected into the task
-	// context so document conversions caption embedded images with the model
-	// active at conversion time. Optional, nil-safe (vision assistance off).
+	// VisionResolver inspects the CURRENT active model and returns markitdown
+	// connection parameters when it is vision-capable; injected so document
+	// conversions caption images with the model active at conversion time. Nil-safe.
 	VisionResolver markitdown.VisionResolver
 
 	// Tool result caching and per-tool truncation.
@@ -958,26 +648,17 @@ type OrchestratorDeps struct {
 	// in per-step callers (LoggingLLMCaller wrapping).
 	ProviderName string
 
-	// LocalModelProbe lazily discovers the runtime context window for an
-	// OpenAI-compatible model (LM Studio/vLLM/TGI/Ollama — local/LAN or
-	// self-hosted on a public host) and feeds it to ModelRegistry. Nil when no
-	// OpenAI-compatible providers are configured — in that case mid-chat model
-	// switches and the default model are not probed (they fall back to the
-	// registry's built-in/override metadata). Optional, nil-safe.
+	// LocalModelProbe — see the LocalModelProbe type. Nil when no OpenAI-compatible
+	// providers are configured: switches and the default model go unprobed. Nil-safe.
 	LocalModelProbe LocalModelProbe
 
-	// OnCleanup is invoked exactly once from Cleanup, when the orchestrator's
-	// session is deleted or the app shuts down. The builder uses it to release
-	// the session registry's live-tracking entry (see
-	// registerSessionRegistry). Optional, nil-safe.
+	// OnCleanup is invoked exactly once from Cleanup (session delete or shutdown);
+	// the builder releases the registry's live-tracking entry through it. Nil-safe.
 	OnCleanup func()
 
-	// VerifyOnEdit, when non-nil, arms the mechanical edit-verification hook
-	// (executor.verify_on_edit): after every successful write_file/edit_file
-	// the runner executes the user-configured command and the executor injects
-	// its output as a system observation. Built by buildEditVerifyRunner from
-	// config — never from model input. Nil (default) disables the hook
-	// entirely. Inactive in No Project (CHAT) mode and in goal-loop turns.
+	// VerifyOnEdit arms the mechanical edit-verification hook (executor.verify_on_edit
+	// — specs/domains/verify-on-edit.md): the user-configured command runs after each
+	// successful write_file/edit_file as a system observation. Nil disables.
 	VerifyOnEdit agent.EditVerifyRunner
 
 	// VerifyOnEditMaxOutputChars caps the verification output injected into
@@ -1052,14 +733,9 @@ func NewOrchestrator(cfg OrchestratorConfig, deps OrchestratorDeps) *Orchestrato
 }
 
 // Cleanup releases all resources held by the orchestrator (e.g., per-step dump files).
-// Idempotent — safe to call multiple times.
 func (o *Orchestrator) Cleanup() {
-	// StepDumpTracker cleanup is owned by the session layer; the orchestrator
-	// only holds a reference for per-step dump wiring.
-	//
-	// Run and clear the cleanup hook: clearing before invoking makes repeated
-	// calls no-ops, matching the idempotency contract above (the session
-	// manager calls Cleanup on both session delete and app shutdown).
+	// StepDumpTracker cleanup is owned by the session layer (orchestrator only holds
+	// a reference); clear-before-invoke makes repeated calls no-ops.
 	if o.onCleanup != nil {
 		fn := o.onCleanup
 		o.onCleanup = nil
@@ -1067,12 +743,8 @@ func (o *Orchestrator) Cleanup() {
 	}
 }
 
-// ResolveVisionOptions returns markitdown vision connection parameters for
-// the model CURRENTLY active on this session's router, or nil when the model
-// must not be used for captioning (not vision-capable, unsupported endpoint,
-// missing credentials). Intended for per-document use by callers outside the
-// task-context chain (e.g. the session layer's attachment conversion); each
-// call re-resolves, so a model switch is honored by the next document.
+// ResolveVisionOptions returns markitdown vision parameters for the model CURRENTLY
+// active on the router, or nil when captioning must not use it (re-resolved per call).
 func (o *Orchestrator) ResolveVisionOptions() *markitdown.VisionOptions {
 	if o.visionResolver == nil {
 		return nil
@@ -1081,10 +753,7 @@ func (o *Orchestrator) ResolveVisionOptions() *markitdown.VisionOptions {
 }
 
 // SetGoalProposer injects the goal-proposer hook (the desktop approval flow
-// that propose_goal blocks on) after construction. Implements
-// GoalProposerSetter so the backend session layer can wire the proposer once
-// its pending-confirmation channel + emitter are available. Without a
-// proposer, goal derivation (runGoalLoop) fails fast.
+// propose_goal blocks on); without it, goal derivation fails fast.
 func (o *Orchestrator) SetGoalProposer(proposer tools.GoalProposer) {
 	o.goalProposer = proposer
 }
@@ -1092,12 +761,8 @@ func (o *Orchestrator) SetGoalProposer(proposer tools.GoalProposer) {
 // compile-time assertion that *Orchestrator satisfies GoalProposerSetter.
 var _ GoalProposerSetter = (*Orchestrator)(nil)
 
-// SetGoalSuggestionProposer injects the goal-mode suggestion proposer (the
-// desktop pending-card flow the post-routing gate blocks on) after
-// construction, mirroring SetGoalProposer. A nil proposer (never wired —
-// e.g. direct-constructed orchestrators in tests) disables the suggestion
-// gate entirely: the plain Conductor path runs without consulting the
-// classifier.
+// SetGoalSuggestionProposer injects the suggestion proposer (desktop pending-card
+// flow), mirroring SetGoalProposer; nil disables the suggestion gate entirely.
 func (o *Orchestrator) SetGoalSuggestionProposer(proposer GoalSuggestionProposer) {
 	o.goalSuggestionProposer = proposer
 }
@@ -1139,13 +804,8 @@ func mergeSkillNames(routerMatched, userSpecified []string) []string {
 	return merged
 }
 
-// buildSkillAugmentedRoutingMessage constructs a routing-specific message that
-// restores the skill invocation context stripped by preprocessMessageText.
-// When the user types "/vibespec-check entire codebase", the preprocessor
-// strips the /skill ref, leaving "entire codebase". The router would classify
-// this without context, producing unreliable domain/complexity. This method
-// prepends the skill invocation with its description so the router can
-// classify based on the actual task semantics.
+// buildSkillAugmentedRoutingMessage prepends "/name (skill: description)" per skill
+// so the router classifies actual task semantics, not the stripped bare remainder.
 func (o *Orchestrator) buildSkillAugmentedRoutingMessage(message string, userSkills []string) string {
 	parts := make([]string, 0, len(userSkills))
 	for _, name := range userSkills {
@@ -1165,23 +825,10 @@ func (o *Orchestrator) buildSkillAugmentedRoutingMessage(message string, userSki
 	return prefix + " " + message
 }
 
-// resolveTaskMessage returns the effective task message used for everything
-// downstream of routing: the blackboard's original request, the Conductor's
-// task, and the conversation-history recording.
-//
-// When the user invokes a skill via /skill-name, preprocessMessageText strips
-// the reference — potentially leaving an empty message. That empty message
-// would (a) produce a request with only system messages, which some providers
-// reject with HTTP 400 "messages parameter is illegal", and (b) get recorded
-// as an empty user turn in the conversation history, risking the same failure
-// on subsequent turns. This restores the skill context so the Conductor
-// receives a meaningful task — symmetrically with the router's own
-// augmentation in routeAndActivateSkills (which calls
-// buildSkillAugmentedRoutingMessage directly).
-//
-// The router itself is deliberately excluded from using this: it must receive
-// the raw preprocessed message and augment internally, otherwise the skill
-// reference would be double-prefixed.
+// resolveTaskMessage returns the effective task message for everything downstream
+// of routing: a /skill invocation stripped by preprocessMessageText can leave an
+// empty message (providers reject it, HTTP 400), so skill context is restored; the
+// router keeps the raw message (double-prefix).
 func (o *Orchestrator) resolveTaskMessage(message string, userSkills []string) string {
 	if len(userSkills) == 0 || o.skillManager == nil {
 		return message
@@ -1189,13 +836,9 @@ func (o *Orchestrator) resolveTaskMessage(message string, userSkills []string) s
 	return o.buildSkillAugmentedRoutingMessage(message, userSkills)
 }
 
-// augmentWithAttachments appends a list of the session's attached files to the
-// user message so the LLM knows which attachments are available and can request
-// their content via the read_attachment tool. Only the Conductor sees this
-// section — the clean (un-augmented) message is still recorded in the
-// conversation history, so prior turns don't accumulate repeated attachment
-// listings. On continuation turns the blackboard is restored with all session
-// attachments, so every turn sees the full current set.
+// augmentWithAttachments appends the session's attached-file list to the user
+// message so the LLM can read them via read_attachment. Only the Conductor sees the
+// section — history keeps the clean message (continuations restore from the blackboard).
 func (o *Orchestrator) augmentWithAttachments(message string, bb orchestration.Blackboard) string {
 	attachments := bb.GetAttachments()
 	if len(attachments) == 0 {
@@ -1230,56 +873,20 @@ func (o *Orchestrator) logDebug(msg string, args ...any) {
 	}
 }
 
-// Resume continues execution of a previously interrupted task from its checkpoint state.
-// The blackboard must be pre-loaded with the task's persisted state (via RestoreBlackboard).
-//
-// Error semantics: when the sp4rk engine returns orchestration.ErrExecutionIncomplete with
-// a non-nil ExecutionResult, Resume returns a valid *HandleResult alongside the error.
-// This indicates partial success — the task made progress but did not finish (e.g., step
-// limit reached). Callers should check errors.Is(err, orchestration.ErrExecutionIncomplete)
-// and use the returned HandleResult for partial output, plan state, and blackboard.
-// All other errors indicate complete failure; the task is marked failed and nil is returned.
-// Resume continues execution of a previously interrupted task from its checkpoint state.
-// The blackboard must be pre-loaded with the task's persisted state (via RestoreBlackboard).
-//
-// nudge is an optional user message injected on resume (resume-with-nudge).
-// On the plain Conductor path it rides on the task message (ahead of the
-// auto-resume wave summary), and it is also threaded into every subagent the
-// wave relaunches — so the system-driven wave honors the user's latest
-// steering instead of acting on it only after the fact. On the goal-loop path
-// it keeps the historical mechanism: threaded to the first resumed turn's
-// PendingUserInterjection so it lands as the final user message next to the
-// pending tool result. Empty resumes silently from the checkpoint.
-//
-// Error semantics: when the sp4rk engine returns orchestration.ErrExecutionIncomplete with
-// a non-nil ExecutionResult, Resume returns a valid *HandleResult alongside the error.
-// This indicates partial success — the task made progress but did not finish (e.g., step
-// limit reached). Callers should check errors.Is(err, orchestration.ErrExecutionIncomplete)
-// and use the returned HandleResult for partial output, plan state, and blackboard.
-// All other errors indicate complete failure; the task is marked failed and nil is returned.
-// A cooperative pause (agent.ErrPaused) is handled as a clean checkpoint: the task is
-// persisted as paused (resumable), session_paused is emitted, and Resume returns the
-// HandleResult with a nil error and Status=ExecutionStatusPaused.
+// Resume continues a previously interrupted task from its checkpoint; the
+// blackboard must be pre-loaded with its persisted state (via RestoreBlackboard).
+// Nudge landing and the error contract (ErrExecutionIncomplete partial success,
+// ErrPaused clean checkpoint): specs/domains/session-lifecycle.md ("Task Resumption").
 func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, routing *router.RoutingDecision, plansDir string, resumeSteps []agent.Step, goalState *goal.GoalState, nudge string) (result *HandleResult, err error) {
 	o.logDebug("orchestrator: resume started", "resumeSteps", len(resumeSteps), "nudge", nudge != "")
 
-	// One-shot re-route request: the session layer arms it (RequestResumeReroute)
-	// before resuming a task that never got past routing on its original run.
-	// Consume it once at entry — before any early return — so the one-shot
-	// semantics hold and a stale arm can never leak into a later resume. An
-	// unarmed (false) flag leaves Resume's normal reuse-without-routing
-	// behavior intact.
+	// Consume the one-shot re-route arm before any early return so a stale arm
+	// cannot leak into a later resume (see consumeResumeReroute).
 	forceReroute := o.consumeResumeReroute()
 
-	// Model Profiles goal guard on the resume path: a paused non-terminal goal must
-	// not re-enter the goal loop while the essential-tools narrowing is active
-	// (see ErrGoalBlockedByModelProfiles). Mirrors HandleMessage's goal branch for
-	// resumed goals. Checked before ANY side effect — including the auto-resume
-	// wave below (resumePausedWork), which otherwise relaunches paused delegates
-	// and plan steps — so a direct Resume caller hits the same wall the API
-	// enforces earlier (see FrontendAPI.goalResumeBlockedByModelProfiles and
-	// Manager.ResumeTask). Plain and E2S resumes carry a nil/terminal goalState
-	// and are unaffected.
+	// Model Profiles goal guard (ErrGoalBlockedByModelProfiles,
+	// specs/domains/model-profiles.md): a paused non-terminal goal must not re-enter
+	// the goal loop under essential-tools narrowing — checked before ANY side effect.
 	if goalState != nil && !goalState.Status.IsTerminal() && o.modelProfilesEssentialToolsEnabled() {
 		return nil, ErrGoalBlockedByModelProfiles
 	}
@@ -1288,33 +895,19 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	if err != nil {
 		return nil, err
 	}
-	// Capability snapshots for a resumed task: no fresh mentions exist on
-	// resume (the fresh path threads them through HandleOptions), but the
-	// restored routing decision can still name skills whose mode changed
-	// while the task was paused — the snapshots pin the authorization view
-	// the reactivation filters apply.
+	// Capability snapshots pin the authorization view for a resumed task (no fresh
+	// mentions exist on resume): restored skills may have changed mode while paused.
 	ctx = o.attachCapabilitySnapshots(ctx)
 
-	// One-shot resume-compaction request: when the user selected a compaction
-	// strategy for this resume (manual compaction of a paused task), the
-	// backend armed it via RequestResumeCompaction before re-entering here.
-	// Consume it once at entry — before either branch is chosen — and thread
-	// the strategy into BOTH resume paths (goal loop and plain Conductor), so
-	// the merged trajectory is compacted up front regardless of which path the
-	// task takes. An empty string means "not requested": Resume keeps its
-	// normal routing-derived, threshold-driven compaction behavior.
+	// The user-picked compaction strategy for THIS resume (RequestResumeCompaction),
+	// threaded into BOTH resume paths; empty = not requested.
 	forceCompactionStrategy := o.consumeResumeCompaction()
 
-	// Install the universal pause signal for this resumed request. Every
-	// conductor run reads it via the pause-checker at each step boundary;
-	// PauseSession flips it. Mirrors HandleMessage so a resumed task is
-	// pauseable exactly like a fresh one.
+	// Universal pause signal for this resumed request (as in HandleMessage).
 	defer o.installPauseSignal()()
 
-	// Record the resumed execution's outcome in the in-memory conversation
-	// history so future routing and continuation planning see this exchange.
-	// The user message that spawned the task was recorded when the task first
-	// ran (or restored from the message store after a restart).
+	// Outcome lands in the in-memory history (recordResumeOutcome); the user
+	// message was recorded at first run or restored from the message store.
 	defer func() {
 		o.recordResumeOutcome(ctx, bb, result, err)
 	}()
@@ -1324,17 +917,12 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		ctx = o.injectVectorSearchHints(ctx, origReq)
 	}
 
-	// Vision-assisted document conversion on the resume path, mirroring
-	// prepareRequestContext: the resolver resolves the model active at each
-	// conversion, so a model switched while the task was paused applies to
-	// documents read after resume. Nil-safe no-op.
+	// Vision-assisted document conversion on the resume path (mirrors
+	// prepareRequestContext; per-conversion model resolution). Nil-safe.
 	ctx = markitdown.WithVisionResolver(ctx, o.visionResolver)
 
-	// Model Profiles prompt profile on the resume path, mirroring
-	// prepareRequestContext. Without this the resumed run — including a
-	// resumed goal's independent verifier, a specialized pass assembled by
-	// buildSpecializedSystemPromptWithLite — would miss the Lite swap the
-	// fresh path applied (see applyModelProfilesPromptProfile).
+	// Model Profiles prompt profile on the resume path (mirrors prepareRequestContext);
+	// without it the resumed run — including a resumed goal's verifier — misses Lite.
 	ctx = o.applyModelProfilesPromptProfile(ctx)
 
 	// Wire emitter into restored PersistentBlackboard so persistence warnings
@@ -1347,11 +935,8 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	// Emit initial context_fill
 	o.emitInitialContextFill()
 
-	// Resolve effective domain/complexity for the resumed execution. The task
-	// is NOT re-routed: a persisted routing decision is reused so the system
-	// prompt and compaction strategy match the original run. When no routing
-	// was persisted (nil), the Conductor defaults to the "general" domain so
-	// it runs in standard mode without requiring a plan.
+	// Routing is reused, never re-run; nil falls back to "general"/standard mode
+	// (specs/domains/session-lifecycle.md, "Task Resumption").
 	domain := "general"
 	complexity := defaultResumeComplexity
 	if routing != nil {
@@ -1367,29 +952,16 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 
 	o.logInfo("resume_task", "reflections", len(bb.GetReflections()), "domain", domain, "complexity", complexity)
 
-	// AUTO-RESUME WAVE (system-driven, no LLM): settle everything that was
-	// paused before the first conductor LLM call — paused plan steps continue
-	// via the plan DAG engine, paused delegates are rebuilt from their
-	// persisted specs and re-launched with the SAME ids (their chat blocks
-	// continue). A pause that re-trips mid-wave checkpoints cleanly and ends
-	// the Resume here, without a single LLM call. The wave returns a factual
-	// summary of settled outcomes that rides on the task message below. The
-	// resume nudge is threaded in so the relaunched subagents honor the
-	// user's latest steering — without it, the nudge would first reach the
-	// conductor's LLM call, i.e. only AFTER the wave has already done work.
+	// AUTO-RESUME WAVE (system-driven, no LLM — see resumePausedWork): settles
+	// everything paused before the first LLM call; its factual summary rides along.
 	wave, err := o.resumePausedWork(ctx, bb, nudge)
 	waveFallbackNote := ""
 	if err != nil {
-		// The wave is best-effort scaffolding: a failure to even START the
-		// resume (wiring error) must not doom the whole task — fall through
-		// to the plain conductor path, which still works via the seeded
-		// trajectory. Truly failed subagents surface in their results, not
-		// as a wave error.
+		// The wave is best-effort scaffolding: a wiring failure must not doom the task;
+		// fall through — subagent failures surface in their results, not as a wave error.
 		o.logWarn("resume_task: auto-resume wave skipped", "error", err)
-		// The plan-continuation context must not degrade silently: without
-		// the wave, execute_plan's own soft hints still work, but the
-		// explicit "continue the approved plan" framing would be gone. Tell
-		// the conductor factually when the approved plan has unreached steps.
+		// The plan-continuation context must not degrade silently: without the wave the
+		// "continue the approved plan" framing is gone — note it factually to the conductor.
 		if planHasUnreachedSteps(bb) {
 			waveFallbackNote = "\n\n[Auto-resume note: the system resume wave could not run and the approved plan still has unreached steps; continue it via execute_plan.]"
 		}
@@ -1408,22 +980,14 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		}, nil
 	}
 
-	// Delegate to the Conductor. The restored blackboard carries facts and
-	// step results from the prior run; the Conductor reads them via tools
-	// (search_facts, read_step_output) and continues toward completion. The
-	// prior trajectory (resumeSteps) is seeded into the ContextManager and the
-	// Executor so the resumed run sees the full history and continues the step
-	// counter from where it left off. A plan is NOT required — the Conductor
-	// handles plan-less tasks via a standalone checklist.
+	// The restored blackboard carries prior facts/step results (search_facts/
+	// read_step_output); a plan is not required. Seeding: specs/domains/session-lifecycle.md.
 	availableTools := o.toolRegistry.ListFiltered(o.disabledToolNames())
 
 	availableTools = stripGatedMCPTools(ctx, availableTools)
 
-	// If this task was running a goal loop that was paused (or is still active),
-	// re-enter the goal loop instead of the plain Conductor path. The prior
-	// trajectory (resumeSteps) is seeded into the executor so the resumed goal
-	// loop continues the step counter/history from the checkpoint. A nil or
-	// terminal goal state falls through to the normal resume path.
+	// A paused/still-active goal re-enters the goal loop; resumeSteps seeds the
+	// executor (specs/domains/session-lifecycle.md, "Goal resume").
 	if goalState != nil && !goalState.Status.IsTerminal() {
 		o.logInfo("resume_task: resuming goal loop", "status", goalState.Status, "turn", goalState.TurnCount)
 		goalMessage := bb.GetOriginalRequest()
@@ -1436,30 +1000,18 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		return o.resumeGoalLoop(ctx, goalMessage, bb, availableTools, plansDir, routing, goalState, resumeSteps, nudge, forceCompactionStrategy)
 	}
 
-	// E2S-mode resume: a paused/interrupted E2S task re-enters the E2S loop
-	// with its persisted Σ (loaded best-effort from the task store's optional
-	// E2S capability). Terminal or absent E2S states fall through to the
-	// normal resume path below.
+	// E2S resume: a paused/interrupted E2S task re-enters the E2S loop with its
+	// persisted Σ (specs/domains/e2s.md); terminal/absent states fall through.
 	if e2sState := o.loadE2SResumeState(bb); e2sState != nil {
 		return o.resumeE2SLoop(ctx, bb, availableTools, routing, e2sState, nudge)
 	}
 
-	// Goal-mode-only tools exist solely for goal mode and must not reach a
-	// non-goal resumed Conductor run. The goal-loop resume path above receives
-	// the unstripped list; strip them here for the normal resume path.
+	// Strip goal-mode-only tools for the non-goal resume path (see the
+	// HandleMessage strip).
 	availableTools = tools.StripGoalModeTools(availableTools)
 
-	// Re-route a task whose original run failed before routing completed (armed
-	// by the session layer, see RequestResumeReroute). The persisted routing
-	// decision is absent precisely because nothing executed, so the
-	// domain/complexity defaults resolved above would silently skip the routing
-	// stage and run the Conductor under the wrong domain. Re-run it against the
-	// task's original request (a never-started task has no continuation to
-	// misclassify) and refresh the context with the fresh decision. Both the
-	// goal-loop and E2S resume paths returned above, so this only affects the
-	// plain Conductor path — E2S never routes by design, and a resumed goal
-	// keeps its own routing handling (resumeGoalLoop). Guarded by routing == nil
-	// as well so a persisted decision is always reused, never re-classified.
+	// Armed re-route (RequestResumeReroute): routing never ran, so the defaults above
+	// would run under the wrong domain (rerouteResumedTask; Conductor path only).
 	if forceReroute && routing == nil {
 		routedCtx, decision, rerouteErr := o.rerouteResumedTask(ctx, bb, availableTools)
 		if rerouteErr != nil {
@@ -1467,42 +1019,24 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		}
 		ctx = routedCtx
 		routing = decision
-		// Persist the fresh decision immediately (mirroring HandleMessage /
-		// finalizeResult, resumeGoalLoop and the E2S path): without this, the
-		// re-route armed on this resume would not survive it — the next resume
-		// would find routing still absent while the trajectory is now non-empty,
-		// so no re-route is armed and Resume falls back to domain "general" for
-		// a task classified one resume earlier. Persisting closes the gap this
-		// block exists to prevent.
+		// Persist immediately (mirroring finalizeResult): otherwise the next resume
+		// falls back to "general".
 		if pbb, ok := bb.(PersistableBlackboard); ok {
 			pbb.SetRouting(decision)
 		}
 	}
 
-	// Continuable resume: the task was paused (or interrupted) while its
-	// approved plan still had unreached steps. Seed the resumed Conductor run
-	// so the plan workflow stays active — execute_plan continues the remaining
-	// steps WITHOUT a re-declare, delegate stays disabled, and declare_plan
-	// returns a soft "already approved" hint. A task whose plan is fully done
-	// (or plan-less) resumes without the flag, so a plan restored from a
-	// previous COMPLETED task keeps its restored-plan refusals.
+	// Continuable resume: paused/interrupted with unreached plan steps — seed the run
+	// so the plan workflow stays active (execute_plan without re-declare, delegate
+	// disabled, declare_plan soft-hints). Fully-done/plan-less tasks resume without it.
 	resumedWithPlan := planHasUnreachedSteps(bb)
 	o.logInfo("resume_task", "resumedWithPlan", resumedWithPlan)
 
-	// Task message for the resumed Conductor: the original request. The
-	// auto-resume wave (resumePausedWork, run above) settles everything that
-	// was paused before this run starts and appends a FACTUAL summary of the
-	// settled outcomes to the message below (see resumePausedWork) — data,
-	// never instructions. The stored conversation user message keeps the clean
-	// original request either way (recordResumeOutcome appends just the
-	// assistant side to history).
+	// Task message: original request + the wave's factual summary (see
+	// resumePausedWork); stored history keeps the clean original (assistant side only).
 	taskMessage := bb.GetOriginalRequest()
-	// Resume-with-nudge rides on the task message (ahead of the wave summary)
-	// rather than arriving separately as the conductor's first-call
-	// interjection: the model sees the user's follow-up together with the
-	// request and the wave data, exactly once. runConductor therefore gets an
-	// empty nudge below. The goal-loop branch keeps its own first-turn
-	// interjection mechanism (see resumeGoalLoop).
+	// Resume-with-nudge rides on the task message (specs/domains/
+	// session-lifecycle.md, "Session Pause / Resume / Nudge").
 	if nudge != "" {
 		taskMessage += "\n\n## User follow-up on resume\n\n" + nudge
 	}
@@ -1513,21 +1047,10 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		taskMessage += waveFallbackNote
 	}
 
-	// Reconstruct image content blocks from the conversation history so the
-	// resumed task sees the same images as the original run. The conversation
-	// history (in-memory or restored from the DB via convertChatMessagesToLLM)
-	// carries the user message with ContentBlocks; we find the message
-	// matching the original request and extract its image blocks. The text
-	// block is rebuilt from the directive-carrying task message via
-	// augmentWithAttachments so it reflects both the current attachment state
-	// and the continuation directive. Without this, a resumed image-bearing
-	// task would lose its images (SetTask is text-only).
-	//
-	// The attachment augmentation itself is UNCONDITIONAL (not gated on the
-	// image branch): the "## Attached files" section it produces is the only
-	// place the model learns an attachment's attachment_id — the read_attachment
-	// precondition — so a resumed task must carry it exactly like a fresh send
-	// even when there are no images to re-inject.
+	// Reconstruct the original run's image blocks from the conversation history; the
+	// text block is rebuilt from the directive-carrying task message so it reflects
+	// current attachments (SetTask is text-only). The "## Attached files" augmentation
+	// is UNCONDITIONAL: the only place the model learns an attachment_id.
 	conductorMessage := o.augmentWithAttachments(taskMessage, bb)
 	var resumeContentBlocks []llm.ContentBlock
 	if origReq := bb.GetOriginalRequest(); origReq != "" {
@@ -1536,28 +1059,13 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 		}
 	}
 
-	// Preserve the session's prior dialogue (previous tasks) in the resumed
-	// Conductor's context. HandleMessage injects this same window; Resume
-	// previously passed nil, so a resumed failed task lost all context from
-	// earlier tasks in the session — only the interrupted task's trajectory
-	// (resumeSteps) was visible. The goal-loop resume path already injects the
-	// truncated history (see resumeGoalLoop); the plain Conductor path must
-	// match so follow-up references to earlier exchanges survive a resume.
-	//
-	// A trailing failed exchange of the original request (recorded by
-	// recordConversationOutcome when the task failed) is dropped first: the
-	// resumed taskMessage repeats the original request, and keeping the failed
-	// tail would show the model the same request twice with a failure marker
-	// in between — the injection-time mirror of appendHistory's retry collapse
-	// (dropFailedExchangeTail).
+	// Same history window HandleMessage injects; dropFailedExchangeTail removes
+	// the trailing failed exchange of the original request (see its doc).
 	conversationHistory := truncateHistory(dropFailedExchangeTail(o.historySnapshot(), bb.GetOriginalRequest()), o.config.ConductorHistoryWindow)
 
 	execResult, err := o.runConductor(ctx, conductorMessage, bb, availableTools, plansDir, conversationHistory, resumeSteps, resumeContentBlocks, "", forceCompactionStrategy, resumedWithPlan)
-	// Cooperative pause: a clean, recoverable checkpoint — not a failure.
-	// Surface it, persist the task as resumable (persistTaskOutcome below),
-	// and return the paused result with a nil error so the backend treats it
-	// as a non-success completion (surfacing a Resume action) rather than an
-	// error.
+	// Cooperative pause: a clean checkpoint — surface, persist resumable, return
+	// nil error (specs/domains/session-lifecycle.md, "Task Resumption").
 	if errors.Is(err, agent.ErrPaused) {
 		o.emitSessionPaused()
 		err = nil
@@ -1595,28 +1103,10 @@ func (o *Orchestrator) Resume(ctx context.Context, bb orchestration.Blackboard, 
 	return result, incompleteErr
 }
 
-// rerouteResumedTask re-runs the routing stage for a resumed task whose
-// original run failed before routing completed (see RequestResumeReroute). It
-// classifies the task's original request, activates the matched skills, emits
-// the normal Routing events, and returns the refreshed context (with the new
-// domain/complexity) plus the new decision: routeAndActivateSkills already
-// sets the active skills on the context, and domain/complexity are applied
-// here (as the fresh path applies them at its call site).
-//
-// It mirrors the fresh HandleMessage routing step for the request TEXT, but
-// NOT for an explicit invocation. The frontend strips the /-mention refs
-// (skills and agents) before the request is stored (PreprocessMessageText),
-// so the stored original request seen here carries neither, and the requested
-// UserSkills/UserAgents (which the fresh path threads through HandleOptions)
-// are not available on resume: an explicit /-mention ref is therefore
-// NOT re-applied by a re-route. The refs are persisted nowhere Resume can read
-// (TaskState carries no such field, and Resume/ResumeTask receive no
-// HandleOptions), so closing this gap would require a persistence-schema
-// change; it is recorded here as the known limitation.
-//
-// A routing error is propagated unchanged: routeAndActivateSkills has already
-// marked the (live) task failed on that path — mirroring a fresh task whose
-// router call fails — so the caller can surface it and keep the task resumable.
+// rerouteResumedTask re-runs routing for a resumed task whose original run failed
+// before routing completed (RequestResumeReroute): classify, activate skills, apply
+// domain/complexity, return the refreshed context. Request TEXT only — an explicit
+// /-mention ref is NOT re-applied (conductor.md, "Never-routed exception").
 func (o *Orchestrator) rerouteResumedTask(ctx context.Context, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor) (context.Context, *router.RoutingDecision, error) {
 	o.logInfo("resume_task: no persisted routing decision — re-running the routing stage")
 	routedCtx, decision, _, _, err := o.routeAndActivateSkills(ctx, bb.GetOriginalRequest(), HandleOptions{}, bb, availableTools)
@@ -1628,10 +1118,9 @@ func (o *Orchestrator) rerouteResumedTask(ctx context.Context, bb orchestration.
 	return routedCtx, decision, nil
 }
 
-// resumeWaveOutcome reports what the auto-resume wave settled. summary is a
-// factual, bounded digest of the settled subagent outcomes (empty when the
-// wave had nothing to do); pausedAgain is true when the universal pause
-// signal re-tripped mid-wave, checkpointing the wave's in-flight subagents.
+// resumeWaveOutcome reports what the auto-resume wave settled: summary is a factual,
+// bounded digest of settled subagent outcomes (empty when nothing settled);
+// pausedAgain = the pause signal re-tripped mid-wave, checkpointing in-flight units.
 type resumeWaveOutcome struct {
 	summary     string
 	pausedAgain bool
@@ -1641,53 +1130,21 @@ type resumeWaveOutcome struct {
 // summary so a huge delegation result cannot flood the resumed task message.
 const waveSummaryOutputCap = 300
 
-// resumePausedWork is the system-driven half of the pause invariant: before
-// the resumed task's first LLM call, everything that was paused is settled
-// formally — no model decision involved.
-//
-//   - A plan with unreached steps (paused OR crash-interrupted — uniform
-//     policy) continues through the same DAG engine execute_plan uses:
-//     already-successful steps are replayed, paused steps re-dispatch with
-//     their checkpointed trajectories seeded, unstarted steps run.
-//   - Every delegation unit the task's durable ledger holds — mainline or
-//     goal-verification, at any depth — is settled uniformly: a paused unit is
-//     relaunched from its checkpoint, a not-started/interrupted unit is
-//     relaunched fresh, and an already-terminal unit is replayed (never
-//     re-run). Units keep their SAME ids (so their chat blocks continue), are
-//     depth-ordered so a re-delegating parent resumes only after its children
-//     settled, with the children's outcomes appended to the parent's task
-//     text.
-//
-// A pause that re-trips mid-wave checkpoints cleanly (pausedAgain=true) and
-// the caller ends the Resume without any LLM call. Settled outcomes are
-// returned as a factual summary for the task message — data, never
-// instructions. Wiring failures are returned as errors for the caller to log
-// and fall through to the plain conductor path; individual subagent failures
-// surface in their results, not as wave errors.
-//
-// nudge is the optional resume-with-nudge user message: it is threaded into
-// every relaunched subagent's task text so the wave's work honors the user's
-// latest steering (the wave runs before the conductor's first LLM call, so
-// the nudge would otherwise arrive too late to steer it).
+// resumePausedWork is the system-driven half of the pause invariant: before the
+// resumed task's first LLM call everything paused settles formally — no model
+// decision involved. Outcome contract: specs/domains/session-lifecycle.md
+// (unified recovery ledger) + specs/decisions/048-unified-recovery-ledger.md.
 func (o *Orchestrator) resumePausedWork(ctx context.Context, bb orchestration.Blackboard, nudge string) (resumeWaveOutcome, error) {
-	// Context parity with the Conductor path: the wave relaunches subagents
-	// DIRECTLY through the launcher, bypassing orchestration.Conductor.Run —
-	// the sole place the mainline executor context gains the blackboard-backed
-	// stores (step output / facts / attachments / final result). Without this
-	// the relaunched subagent runs with a ctx whose FactStore is nil, so its
-	// store_fact / search_facts calls fail with "Fact store not available"
-	// (and read_step_output / read_attachment likewise). bb is the run's
-	// blackboard, the exact store source the Conductor injects.
+	// Context parity with the Conductor path: the wave relaunches subagents DIRECTLY
+	// through the launcher, bypassing orchestration.Conductor.Run — the sole place the
+	// executor context gains the BB-backed stores; without them the fact tools fail.
 	ctx = agent.WithStepOutputStore(ctx, orchestration.NewStepOutputStore(bb))
 	ctx = agent.WithFactStore(ctx, orchestration.NewFactStore(bb))
 	ctx = agent.WithAttachmentStore(ctx, orchestration.NewAttachmentStore(bb))
 	ctx = agent.WithFinalResultStore(ctx, orchestration.NewFinalResultStore(bb))
 
-	// One funnel, one enumeration: every unit the task still has in flight —
-	// across all kinds, depths and namespaces, including the units a
-	// goal-verification pass recorded under its own namespace — is lifted from
-	// the durable unit ledger (with a legacy-spec fallback for tasks persisted
-	// before the ledger existed) and settled uniformly below.
+	// One funnel, one enumeration: every in-flight unit (all kinds/depths/namespaces,
+	// including the goal verifier's) lifts from the durable unit ledger and settles below.
 	unitsToSettle := o.resumeUnitsForBlackboard(bb)
 
 	relaunchable := 0
@@ -1706,12 +1163,8 @@ func (o *Orchestrator) resumePausedWork(ctx context.Context, bb orchestration.Bl
 	deps := o.buildConductorDeps(nil, nil)
 	planState := newPlanRunState(true)
 	inlineLifecycle := newInlineStepLifecycle(deps.emitter, bb)
-	// Issue #99: steps whose successful StepResult was restored from the
-	// paused run are settled BEFORE the wave — the fresh lifecycle must
-	// already treat them as completed (a late checklist update must not
-	// re-Start them, the launcher's skip branch and the finish fallback must
-	// not re-announce them). Seeding is silent: their terminal events were
-	// emitted by the run that executed them.
+	// Issue #99: restored-successful steps settle BEFORE the wave, silently —
+	// specs/domains/session-lifecycle.md ("Resume wave: silent replay of completed steps").
 	inlineLifecycle.seedCompletedFromBlackboard()
 	inlineLifecycle.planState = planState
 	deps.lifecycle = inlineLifecycle
@@ -1722,11 +1175,8 @@ func (o *Orchestrator) resumePausedWork(ctx context.Context, bb orchestration.Bl
 
 	// Branch 1 — continue the plan through the DAG engine.
 	if continuablePlan {
-		// Snapshot the plan steps already successful BEFORE the wave: Execute
-		// replays those as skipped "completed" results, and the wave summary
-		// must not re-list work that finished normally in an earlier run —
-		// each resume would otherwise grow the task message by one factually
-		// wrong "settled by the system" line per completed step.
+		// preWaveSuccess keeps the summary from re-listing work finished in an
+		// earlier run (specs/domains/session-lifecycle.md, "Resume wave").
 		preWaveSuccess := make(map[string]bool)
 		if plan := bb.GetPlan(); plan != nil {
 			for _, step := range plan.Steps {
@@ -1769,27 +1219,18 @@ func (o *Orchestrator) resumePausedWork(ctx context.Context, bb orchestration.Bl
 	return outcome, nil
 }
 
-// resumeUnit is one execution unit the resume funnel settles, normalized from
-// the durable unit ledger (the primary source: it carries the rebuild spec,
-// the parent/depth topology, the lifecycle status AND the resume checkpoint)
-// and, for a task persisted before the ledger existed, from the legacy
-// delegation-spec store. Normalizing both sources into one shape is what lets
-// the funnel settle every unit UNIFORMLY — a mainline delegate, a goal-verifier
-// delegate, a nested sub-delegation — without branching on where it came from.
+// resumeUnit is one execution unit the resume funnel settles, normalized from the
+// durable unit ledger or (pre-ledger tasks) the legacy delegation-spec store — one
+// shape so every kind settles uniformly. See specs/domains/orchestration/delegation.md
+// ("Durable Unit Ledger and Resume Relaunch").
 type resumeUnit struct {
 	id   string
 	task tools.DelegationTask
-	// parentID is the delegating unit's id (empty at top level); it scopes a
-	// unit under the parent it was spawned by (a goal-verifier delegate is
-	// parented under the verifier unit).
+	// parentID scopes a unit under its delegating unit ("" at top level; a
+	// goal-verifier delegate is parented under the verifier unit).
 	parentID string
-	// scope keys the wave registry group a unit settles in. Every unit the
-	// mainline funnel enumerates is in the mainline namespace (""), because an
-	// ISOLATED context's units — the goal verifier records under its own
-	// namespace — are filtered out before normalization (relaunching them here
-	// would write the isolated pass's outcome onto the live task blackboard and
-	// duplicate the work the goal loop re-derives). The field is retained so a
-	// group is still keyed by (scope, depth) rather than depth alone.
+	// scope is the wave-registry group key ("" for mainline; isolated-context
+	// units are filtered before normalization — see resumeUnitsForBlackboard).
 	scope   string
 	depth   int
 	status  units.UnitStatus
@@ -1799,22 +1240,15 @@ type resumeUnit struct {
 }
 
 // relaunchable reports whether the funnel must (re)launch the unit — every
-// non-terminal unit. A paused unit resumes from its checkpoint; every other
-// non-terminal unit — not-started (pending), or running/interrupted WITHOUT a
-// durable checkpoint — is relaunched FRESH. A unit whose status reads as
-// running/interrupted but that carries a durable checkpoint is normalized to
-// paused during the ledger read, so a relaunch never discards a usable
-// checkpoint.
+// non-terminal unit (paused from its checkpoint, the rest fresh; see the
+// classification table in specs/domains/orchestration/delegation.md).
 func (u resumeUnit) relaunchable() bool {
 	return !u.terminal()
 }
 
-// terminal reports whether the unit already reached a final outcome
-// (completed or failed). A terminal unit is REPLAYED into the wave registries
-// so dependency resolution sees it — it is never re-run. It delegates to the
-// units package, which owns the single definition of "finished": an
-// `interrupted` unit is deliberately NOT terminal (the funnel relaunches it
-// fresh), while `paused` is a checkpoint the funnel resumes.
+// terminal reports a final outcome (completed/failed): replayed into the wave
+// registries for dependency resolution, never re-run. "Finished" is defined by
+// units.UnitStatus.Terminal (interrupted is deliberately not terminal).
 func (u resumeUnit) terminal() bool {
 	return u.status.Terminal()
 }
@@ -1824,21 +1258,10 @@ func (u resumeUnit) paused() bool {
 	return u.status == units.UnitStatusPaused
 }
 
-// resumeUnitsForBlackboard enumerates every unit the resume funnel must settle
-// for a restored task: the durable ledger's MAINLINE units merged with any
-// legacy delegation specs a task persisted before the ledger still carries.
-// Ledger units win by id, so a unit recorded in both places is never settled
-// twice.
-//
-// Ledger units recorded by an ISOLATED context (the goal verifier's namespace)
-// are deliberately not enumerated: an isolated pass is re-derived by the loop
-// that owns it, its outcome must never land on the live task blackboard, and a
-// resume wave that relaunched it would duplicate work nobody consumes. Its
-// durable status is still surfaced through the session-runtime work-unit
-// snapshot.
-//
-// A ledger read failure is not fatal: the legacy specs (and the plan arm) still
-// work, so the resume proceeds with whatever it can see.
+// resumeUnitsForBlackboard enumerates every unit the resume funnel must settle:
+// the durable ledger's mainline units merged with legacy specs (ledger wins by
+// id); isolated-context units are excluded (the owning loop re-derives them); an
+// unreadable ledger is not fatal — resume proceeds with legacy specs + plan arm.
 func (o *Orchestrator) resumeUnitsForBlackboard(bb orchestration.Blackboard) []resumeUnit {
 	ledger := resumeLedgerFromBlackboard(bb)
 	unitsToSettle, err := resumeUnitsFromLedger(ledger, bb)
@@ -1853,10 +1276,8 @@ func (o *Orchestrator) resumeUnitsForBlackboard(bb orchestration.Blackboard) []r
 	return append(unitsToSettle, legacyResumeUnits(delegationSpecsFromBlackboard(bb), bb, seen)...)
 }
 
-// resumeLedgerFromBlackboard derives the mainline unit ledger from a
-// persistable blackboard (nil for a non-persistable one, which has no durable
-// unit store). It prefers a blackboard-cached ledger so the funnel reads
-// exactly what the prior run wrote.
+// resumeLedgerFromBlackboard derives the mainline unit ledger (nil without a durable
+// unit store); blackboard-cached so the funnel reads what the prior run wrote.
 func resumeLedgerFromBlackboard(bb orchestration.Blackboard) units.Ledger {
 	if pbb, ok := bb.(PersistableBlackboard); ok {
 		return NewBlackboardLedger(pbb)
@@ -1864,15 +1285,8 @@ func resumeLedgerFromBlackboard(bb orchestration.Blackboard) units.Ledger {
 	return nil
 }
 
-// resumeUnitsFromLedger enumerates the ledger's MAINLINE units for the task.
-// Every unit is normalized into a resumeUnit, so the funnel above settles all
-// kinds and depths uniformly. Container units (the task root and the
-// goal-verification pass itself) and plan-step units are skipped: plan steps
-// are owned by the plan arm (the DAG engine), and a container is not a
-// relaunchable execution unit. A unit whose rebuild spec cannot be decoded is
-// skipped too — without a spec it could never be relaunched (its status is
-// still surfaced by the session-runtime work-unit snapshot). Units recorded in
-// an isolated namespace are skipped as well — see resumeUnitsForBlackboard.
+// resumeUnitsFromLedger enumerates the ledger's MAINLINE units into resumeUnits.
+// Skip list: specs/domains/orchestration/delegation.md ("One funnel on Resume").
 func resumeUnitsFromLedger(ledger units.Ledger, bb orchestration.Blackboard) ([]resumeUnit, error) {
 	if ledger == nil {
 		return nil, nil
@@ -1886,14 +1300,11 @@ func resumeUnitsFromLedger(ledger units.Ledger, bb orchestration.Blackboard) ([]
 		if !relaunchableUnitKind(rec.Kind) {
 			continue
 		}
-		// An isolated context's unit (the goal verifier's namespace) is not
-		// this funnel's work: the mainline ledger writes under "".
 		if rec.Namespace != "" {
 			continue
 		}
-		// A unit without a stored rebuild spec cannot be re-launched, so the
-		// funnel skips it (its status is still surfaced by the session-runtime
-		// work-unit snapshot).
+		// No rebuild spec — cannot be relaunched (status still surfaces via
+		// work_units).
 		if len(rec.Spec) == 0 {
 			continue
 		}
@@ -1912,22 +1323,15 @@ func resumeUnitsFromLedger(ledger units.Ledger, bb orchestration.Blackboard) ([]
 		if u.task.ID == "" {
 			u.task.ID = rec.ID
 		}
-		// The resume checkpoint lives in the ledger: the verifier's isolated
-		// pass has no persistent blackboard to hold it, so the ledger is the
-		// only durable copy for those units.
 		if len(rec.Steps) > 0 {
 			var steps []agent.Step
 			if err := json.Unmarshal(rec.Steps, &steps); err == nil {
 				u.steps = steps
 			}
 		}
-		// Reconcile the ledger status with the OTHER durable evidence, because
-		// the ledger is not the only record: persistUnitOutcome writes the
-		// blackboard first and the ledger second (both best-effort), so a crash
-		// between the two writes — or a failed ledger write — leaves them
-		// disagreeing. Classifying from rec.Status alone would then relaunch a
-		// unit FRESH whose delegation had actually COMPLETED (re-running its
-		// side effects), or discard a checkpoint that did land.
+		// Reconcile with the blackboard outcome (written before the ledger — a
+		// crash between the writes leaves them disagreeing):
+		// specs/domains/orchestration/delegation.md ("One funnel on Resume").
 		outcomeKnown := false
 		if bb != nil {
 			if sr, ok := bb.GetStepResult(rec.ID); ok {
@@ -1943,21 +1347,13 @@ func resumeUnitsFromLedger(ledger units.Ledger, bb orchestration.Blackboard) ([]
 				}
 			}
 		}
-		// A durable checkpoint with no matching settle is a paused checkpoint:
-		// Checkpoint and Settle are separate writes, so the checkpoint can land
-		// without the status transition. Resume from it instead of re-running
-		// the trajectory's already-completed steps. This covers interrupted as
-		// well: the crash/exit abandonment sweep flips a still in-flight unit
-		// to interrupted while preserving the Steps column, so an interrupted
-		// unit can carry a usable checkpoint (Resumable). (A terminal status is
-		// left untouched — a completed/failed unit carries its outcome, not a
-		// resumable checkpoint.)
+		// A durable checkpoint under a still-Resumable status is a paused checkpoint
+		// (Checkpoint/Settle are separate writes) — resume, don't re-run; terminal stays.
 		if len(u.steps) > 0 && u.status.Resumable() {
 			u.status = units.UnitStatusPaused
 		}
-		// An isolated context's failure has no blackboard outcome to lift, so
-		// synthesize an error for it so a replay still reports the dependency
-		// as failed, not completed.
+		// A failed unit may have no blackboard step result to lift (ledger-only settles)
+		// — synthesize an error so the replay reports the dependency failed, not completed.
 		if !outcomeKnown && u.status == units.UnitStatusFailed {
 			u.execErr = fmt.Errorf("unit %q failed in a previous run", rec.ID)
 		}
@@ -1966,28 +1362,22 @@ func resumeUnitsFromLedger(ledger units.Ledger, bb orchestration.Blackboard) ([]
 	return out, nil
 }
 
-// relaunchableUnitKind reports whether a ledger unit of this kind is a
-// relaunchable execution unit the funnel settles. Plan steps are excluded (the
-// plan arm owns them), as are the task root and the goal-verification pass
-// (containers, not relaunchable work), and tool units.
+// relaunchableUnitKind reports whether a ledger unit kind is relaunchable work;
+// containers (task root, goal-verification pass), plan steps and tools excluded.
 func relaunchableUnitKind(kind units.UnitKind) bool {
 	switch kind {
 	case units.UnitKindSubagent, "":
-		// "" is the documented default for a delegation (unitKindForDelegation
-		// maps it to subagent), so a unit recorded without an explicit kind is
-		// still a delegate.
+		// "" is the documented default for a delegation (unitKindForDelegation),
+		// so a unit without an explicit kind is still a delegate.
 		return true
 	default:
 		return false
 	}
 }
 
-// legacyResumeUnits lifts a task's legacy delegation specs into resume units so
-// a task persisted before the durable unit ledger existed still resumes. A spec
-// whose id the ledger already covers is skipped (the ledger unit is
-// authoritative). A spec with no blackboard step result never took a
-// checkpoint — the crash-interrupted case — and is classified interrupted,
-// which the funnel now RELAUNCHES FRESH instead of marking failed.
+// legacyResumeUnits lifts legacy delegation specs into resume units so a pre-ledger
+// task still resumes; ids covered by the ledger are skipped (ledger is
+// authoritative). No step result = no checkpoint: crash-interrupted, fresh relaunch.
 func legacyResumeUnits(specs []tools.DelegationSpec, bb orchestration.Blackboard, seen map[string]bool) []resumeUnit {
 	var out []resumeUnit
 	for _, spec := range specs {
@@ -2018,30 +1408,10 @@ func legacyResumeUnits(specs []tools.DelegationSpec, bb orchestration.Blackboard
 	return out
 }
 
-// resumeUnits settles every unit the funnel enumerated. Units are grouped by
-// (scope, depth) and processed deepest-first: a child lives in a deeper (or, at
-// equal depth, a distinct scope) group, so it settles BEFORE the parent that
-// consumes its outcome. Each group gets its OWN registry created at its depth
-// (NewDelegationRegistryWithDepth): a relaunched delegation resumes at its real
-// position in the re-delegation hierarchy, so the maxRedelegDepth cap is
-// measured from the original depth rather than being reset to 0 — a
-// pause/resume cycle must not grant extra re-delegation levels. Only mainline
-// units reach here (see resumeUnitsFromLedger), so the replay below is
-// scope-consistent by construction; it still filters on scope so a unit can
-// never be replayed into a group it does not belong to.
-//
-// Classification is uniform for every kind/depth/namespace:
-//   - paused           → relaunch, seeded with the checkpoint trajectory
-//   - not-started /
-//     interrupted      → relaunch fresh (no usable checkpoint)
-//   - terminal         → replay into the group registry (never re-run)
-//
-// Terminal units are replayed via Register (NOT RegisterTask) so a spec sink
-// can never re-fire: the wave registry never persists, the specs are already
-// durably stored, and re-firing the sink would shift created_at ordering.
-// Register's signature carries everything the replay needs (id, summary, deps,
-// mode); the mode default mirrors RegisterTask, so the registry entry is
-// byte-for-byte identical to a sinkless RegisterTask call.
+// resumeUnits settles every enumerated unit, grouped by (scope, depth) deepest-first
+// (child before parent); each group relaunches into its own registry at the unit's
+// original depth, so a pause/resume cycle never grants extra redelegation levels —
+// specs/domains/orchestration/delegation.md ("One funnel on Resume").
 func (o *Orchestrator) resumeUnits(
 	ctx context.Context,
 	bb orchestration.Blackboard,
@@ -2072,10 +1442,7 @@ func (o *Orchestrator) resumeUnits(
 	for k := range groups {
 		keys = append(keys, k)
 	}
-	// Deepest first: children live in deeper registries (a redelegating
-	// parent's child registry is registry.Depth()+1), so they must settle
-	// BEFORE the parents that consume their outcomes. Scope breaks the tie
-	// deterministically.
+	// Deeper registries settle first; scope breaks depth ties deterministically.
 	slices.SortFunc(keys, func(a, b groupKey) int {
 		if a.depth != b.depth {
 			return cmp.Compare(b.depth, a.depth)
@@ -2086,13 +1453,9 @@ func (o *Orchestrator) resumeUnits(
 	pausedAgain := false
 	for _, k := range keys {
 		registry := tools.NewDelegationRegistryWithDepth(k.depth)
-		// Replay only the terminal units of THIS group's scope. A unit's
-		// namespace keys its registry group, so replaying another scope's unit
-		// here would (a) contradict the isolation guarantee the ledger exists to
-		// provide and (b) make the group's own RegisterTask below collide on the
-		// id, leaving the registry entry carrying the FOREIGN unit's summary and
-		// DependsOn — so the group's dependency resolution would evaluate a unit
-		// that is not in the group.
+		// Replay only THIS group's scope's terminal units — a foreign replay
+		// would collide on the id (specs/domains/orchestration/delegation.md,
+		// "One funnel on Resume").
 		for _, s := range settled {
 			if s.scope != k.scope {
 				continue
@@ -2110,49 +1473,33 @@ func (o *Orchestrator) resumeUnits(
 		tasks := make([]tools.DelegationTask, 0, len(groupUnits))
 		for _, u := range groupUnits {
 			t := u.task
-			// The wave settles everything deterministically before the
-			// conductor's first LLM call: even an originally-async delegation
-			// re-launches blocking-in-wave (its async-ness was a property of
-			// the original run's context, not of the work itself).
+			// The wave relaunches blocking (delegation.md, "One funnel on
+			// Resume").
 			t.Mode = "blocking"
-			// A re-delegating parent resumes only after its children settled
-			// (deeper groups first). Surface their outcomes in the parent's
-			// task text so its first LLM call sees them without extra
-			// discovery.
+			// Surface settled children in the parent's task text: a
+			// re-delegating parent resumes only after its children settled.
 			if childSummary := childDelegationOutcomes(bb, unitsToSettle, u.id); childSummary != "" {
 				t.Task += childSummary
 			}
-			// Resume-with-nudge: the user's steering must reach the
-			// relaunched subagent BEFORE it does wave work — the conductor
-			// only sees the nudge at its first LLM call, after the wave.
+			// Nudge lands before wave work (specs/domains/session-lifecycle.md,
+			// "Session Pause / Resume / Nudge").
 			if nudge != "" {
 				t.Task += "\n\n## User follow-up provided on resume\n\n" + nudge
 			}
-			// Seed the checkpoint onto the blackboard before the launch: the
-			// launcher seeds a resumed subagent from the blackboard's paused
-			// step result (pausedCheckpoint). The mainline blackboard already
-			// holds its own checkpoint; an isolated-context unit (a
-			// goal-verifier delegate) does not, so its durable ledger
-			// checkpoint is lifted here. A not-started (pending) unit has no
-			// checkpoint and is deliberately relaunched fresh. An interrupted
-			// unit that DID checkpoint never reaches this point as fresh: the
-			// ledger read normalized it to paused (see resumeUnit.paused), so
-			// only the checkpoint-less interrupted units are relaunched fresh.
+			// Seed the paused checkpoint before launch (buildSubAgentTask seeds from the
+			// blackboard's paused step result); not-started units relaunch fresh
+			// (delegation.md, "One funnel on Resume").
 			if u.paused() {
 				if sr, ok := bb.GetStepResult(u.id); !ok || !isPaused(sr.Error) {
 					bb.SetStepResult(u.id, "", agent.ErrPaused, u.steps)
 				}
 			}
 			tasks = append(tasks, t)
-			// Register the relaunched task itself so its lifecycle transitions
-			// (Start/Complete from Launch) are not silent no-ops and the
-			// registry state matches what actually runs. Safe against the
-			// terminal replay above: classification is exclusive per id, and the
-			// replay is scope-scoped.
+			// Register the relaunched task so its lifecycle transitions from
+			// Launch are not silent no-ops (classification is exclusive per id).
 			if err := registry.RegisterTask(t); err != nil {
-				// Swallowing this would leave the group's dependency resolution
-				// evaluating another entry's summary/DependsOn for this id —
-				// surface the conflict instead.
+				// Dependency resolution would otherwise evaluate another
+				// entry's summary/DependsOn for this id — surface the conflict.
 				o.logWarn("resume_task: failed to register relaunched unit in its wave registry",
 					"unit", t.ID, "scope", k.scope, "depth", k.depth, "error", err)
 			}
@@ -2172,8 +1519,7 @@ func (o *Orchestrator) resumeUnits(
 }
 
 // childDelegationOutcomes builds a bounded factual digest of the settled
-// sub-delegations spawned by the given parent unit (units whose parentID ==
-// parentID), for injection into the parent's resumed task text.
+// sub-delegations of the given parent unit, for the parent's resumed task text.
 func childDelegationOutcomes(bb orchestration.Blackboard, unitsToSettle []resumeUnit, parentID string) string {
 	var sb strings.Builder
 	for _, u := range unitsToSettle {
@@ -2220,8 +1566,7 @@ func waveDetail(output string, execErr error) string {
 	}
 	detail = strings.Join(strings.Fields(detail), " ")
 	if len(detail) > waveSummaryOutputCap {
-		// Back the cut up to a rune boundary so a multi-byte character is
-		// never sliced in half — a broken rune would surface as U+FFFD
+		// Back the cut up to a rune boundary — a sliced rune would surface as U+FFFD
 		// replacement characters after JSON marshaling.
 		end := waveSummaryOutputCap
 		for end > 0 && !utf8.RuneStart(detail[end]) {
@@ -2232,9 +1577,8 @@ func waveDetail(output string, execErr error) string {
 	return detail
 }
 
-// delegationSpecsFromBlackboard reads the task's persisted delegation specs
-// via the optional DelegationSpecReader capability. Blackboards without the
-// capability (plain MapBlackboard, test fakes) have no resumable delegates.
+// delegationSpecsFromBlackboard reads the task's persisted delegation specs via the
+// optional DelegationSpecReader capability (absent → no resumable delegates).
 func delegationSpecsFromBlackboard(bb orchestration.Blackboard) []tools.DelegationSpec {
 	reader, ok := bb.(DelegationSpecReader)
 	if !ok {
@@ -2243,15 +1587,10 @@ func delegationSpecsFromBlackboard(bb orchestration.Blackboard) []tools.Delegati
 	return reader.DelegationSpecs()
 }
 
-// planHasUnreachedSteps reports whether the blackboard carries a declared plan
-// with at least one step that has not completed successfully — i.e. a plan
-// worth continuing. A step counts as reached only when it has a successful
-// (error-free) StepResult; never-run and failed steps both keep the plan
-// continuable. This is the Resume-side computation that seeds the Conductor
-// run's planRunState (conductorDeps.resumedWithPlan): the approved plan stays
-// authoritative for the resumed run, so execute_plan works without a
-// re-declare. A fully-completed (or absent) plan returns false — restarting a
-// completed task must not silently re-enter the plan workflow.
+// planHasUnreachedSteps reports whether the blackboard carries a declared plan with
+// a step lacking a successful StepResult — a plan worth continuing; it seeds the
+// resumed run's planRunState (execute_plan without a re-declare). Completed/absent
+// returns false — restarting a completed task must not re-enter the plan workflow.
 func planHasUnreachedSteps(bb orchestration.Blackboard) bool {
 	if bb == nil {
 		return false
@@ -2270,9 +1609,7 @@ func planHasUnreachedSteps(bb orchestration.Blackboard) bool {
 }
 
 // lastReasoningContent extracts the last non-empty reasoning content from the
-// blackboard's step results. This is needed so that assistant messages echoed
-// back to reasoning models (e.g. DeepSeek) include the reasoning_content field
-// those models require.
+// blackboard's step results (reasoning models require the field, e.g. DeepSeek).
 func lastReasoningContent(bb orchestration.Blackboard) string {
 	var last string
 	for _, sr := range bb.GetAllStepResults() {
@@ -2286,16 +1623,11 @@ func lastReasoningContent(bb orchestration.Blackboard) string {
 }
 
 // defaultVectorSearchWaitTimeout mirrors vectorindex.DefaultSearchWaitTimeout
-// (the config-layer default for vector_index.search_wait_timeout_ms, 3s). It
-// is duplicated here because core cannot import core/vectorindex, which
-// itself imports core.
+// (search_wait_timeout_ms default); duplicated — core cannot import core/vectorindex.
 const defaultVectorSearchWaitTimeout = 3 * time.Second
 
-// effectiveVectorSearchWaitTimeout resolves the RAG-hint wait bound: an
-// explicit fail-fast (VectorSearchWaitDisabled) waits zero; an unset (zero)
-// OrchestratorDeps.VectorSearchWaitTimeout falls back to the 3s default so
-// hint injection never blocks a session start indefinitely; any positive
-// value is used as configured.
+// effectiveVectorSearchWaitTimeout resolves the RAG-hint wait bound per the
+// VectorSearchWait* deps field semantics documented above.
 func (o *Orchestrator) effectiveVectorSearchWaitTimeout() time.Duration {
 	if o.vectorSearchWaitDisabled {
 		return 0
@@ -2306,28 +1638,16 @@ func (o *Orchestrator) effectiveVectorSearchWaitTimeout() time.Duration {
 	return defaultVectorSearchWaitTimeout
 }
 
-// injectVectorSearchHints queries the vector index for relevant files and
-// attaches the results as VectorSearchHints on the returned context.
-// It also reads AGENTS.md from the workspace root and injects its full
-// content via WithAgentsMD, as well as prepending it as the first hint.
-// If the vector search function is nil or the search fails, hints are
-// still injected if AGENTS.md exists. Hints are a nice-to-have, not critical.
+// injectVectorSearchHints attaches relevant files (vector search) and the combined
+// AGENTS.md content (WithAgentsMD, prepended first). Best-effort: a search failure
+// or nil function only drops the vector hints — AGENTS.md injection is unaffected.
 func (o *Orchestrator) injectVectorSearchHints(ctx context.Context, query string) context.Context {
 	var hints *VectorSearchHints
 
-	// Vector search (optional, non-blocking). Skipped entirely for No
-	// Project (CHAT mode), where the vector index is disabled: no
-	// collection is built, so querying would only yield stale results from
-	// a previously-active CODE project. AGENTS.md injection below is
-	// unaffected (it is workspace-local, not vector-index-dependent).
+	// Vector search is skipped for No Project (CHAT): no collection exists, so queries
+	// would yield stale results from a prior CODE project; AGENTS.md stays workspace-local.
 	if !o.isNoProject && o.vectorSearchFunc != nil {
-		// One deadline covers BOTH stages: the bounded readiness wait
-		// (vectorSearchWaitFunc — embedder load + index readiness, the same
-		// waiter the semantic_search tool uses) and the search execution
-		// itself. The search closure never waits for readiness on its own
-		// (NoWait form), so this pre-wait is what grants the RAG path its
-		// bounded wait — and because it shares ragCtx, waiting can never
-		// double-spend the knob.
+		// One deadline covers both stages (see OrchestratorDeps.VectorSearchWaitFunc).
 		ragCtx, ragCancel := context.WithTimeout(ctx, o.effectiveVectorSearchWaitTimeout())
 		var waitErr error
 		if o.vectorSearchWaitFunc != nil {
@@ -2358,10 +1678,8 @@ func (o *Orchestrator) injectVectorSearchHints(ctx context.Context, query string
 		}
 	}
 
-	// Read AGENTS.md from all configured sources and concatenate in priority
-	// order: search paths (global → c0wrk-specific) first, then the
-	// workspace-root file (project-specific). Each source is cached per path
-	// with an mtime check; missing files are silently skipped.
+	// AGENTS.md sources and priority order: specs/domains/orchestration/README.md;
+	// each source is mtime-cached per path, missing files silently skipped.
 	agentsMDPaths := o.collectAgentsMDPaths(ctx)
 	var agentsParts []string
 	for _, p := range agentsMDPaths {
@@ -2398,24 +1716,16 @@ func (o *Orchestrator) injectVectorSearchHints(ctx context.Context, query string
 		ctx = WithVectorSearchHints(ctx, hints)
 	}
 
-	// Build the research-awareness snapshot (RESEARCH mode only) alongside the
-	// AGENTS.md injection above. Best-effort: a parse failure is logged and
-	// leaves the context without a research block — it never breaks the task.
+	// Build the research-awareness snapshot (RESEARCH mode only), mirroring the
+	// best-effort AGENTS.md injection: failures log and never break the task.
 	ctx = o.injectResearchContext(ctx)
 
 	return ctx
 }
 
-// injectResearchContext builds the research-awareness snapshot for RESEARCH
-// mode and attaches it to the context, so buildSystemPrompt and the router can
-// render a concise context block. It is a no-op outside RESEARCH mode.
-//
-// The snapshot is derived from the parsed research catalog (research-root path,
-// the current active R-NNN from the index, and a phase hint from the
-// hypothesis-graph metrics). All methodology rules stay in the research-*
-// skill bodies — this is pure awareness, never policy. Best-effort: a missing
-// or unreadable root, or a parse error, is logged and leaves the context
-// unchanged (no research block) so the task is never broken.
+// injectResearchContext builds the research-awareness snapshot for RESEARCH mode
+// (no-op otherwise) for buildSystemPrompt and the router; methodology stays in the
+// research-* skills — pure awareness, never policy. Best-effort: failures log.
 func (o *Orchestrator) injectResearchContext(ctx context.Context) context.Context {
 	if !tools.IsResearch(ctx) {
 		return ctx
@@ -2438,12 +1748,9 @@ func (o *Orchestrator) injectResearchContext(ctx context.Context) context.Contex
 	return ctx
 }
 
-// buildResearchContextSnapshot derives the concise ResearchContext snapshot
-// from a parsed research root. It is a pure function (no I/O) so it can be
-// unit-tested in isolation. The active R-NNN is the latest index entry
-// (chronological append order), falling back to the highest-numbered project
-// directory when there is no index yet. The phase hint comes from the active
-// project's hypothesis-graph metrics.
+// buildResearchContextSnapshot derives the ResearchContext snapshot from a parsed
+// research root (pure, no I/O): the active R-NNN is the latest index entry (fallback:
+// highest-numbered project dir); the phase hint comes from the graph metrics.
 func buildResearchContextSnapshot(rootPath string, root *research.ResearchRoot) *ResearchContext {
 	rc := &ResearchContext{
 		RootPath:     rootPath,
@@ -2468,10 +1775,8 @@ func buildResearchContextSnapshot(rootPath string, root *research.ResearchRoot) 
 	return rc
 }
 
-// researchPhaseHint derives a short, human-readable phase label from a
-// research project's hypothesis-graph metrics. It is a pure mapping over the
-// metrics struct — no I/O — mirroring the lifecycle vocabulary in the
-// research-* skills.
+// researchPhaseHint maps a research project's hypothesis-graph metrics to a
+// short phase label (pure; vocabulary mirrors the research-* skills).
 func researchPhaseHint(p *research.ResearchProject) string {
 	if p == nil {
 		return "unknown"
@@ -2498,12 +1803,8 @@ func researchPhaseHint(p *research.ResearchProject) string {
 	return "falsified: all " + strconv.Itoa(m.Total) + " hypotheses refuted"
 }
 
-// collectAgentsMDPaths returns the ordered list of AGENTS.md file paths to
-// consult: the configured search paths (global → c0wrk-specific, already
-// absolute and pointing at an AGENTS.md file) followed by the workspace-root
-// AGENTS.md. The workspace-root entry is omitted when there is no workspace
-// path in the context (e.g., No Project / CHAT mode), so only the global and
-// c0wrk files are read in that case.
+// collectAgentsMDPaths returns the ordered AGENTS.md paths: the configured search
+// paths (already absolute) then the workspace-root file (none without a workspace).
 func (o *Orchestrator) collectAgentsMDPaths(ctx context.Context) []string {
 	paths := make([]string, 0, len(o.config.AgentsMDSearchPaths)+1)
 	paths = append(paths, o.config.AgentsMDSearchPaths...)
@@ -2513,18 +1814,10 @@ func (o *Orchestrator) collectAgentsMDPaths(ctx context.Context) []string {
 	return paths
 }
 
-// readAgentsMD reads AGENTS.md from disk with a per-path cache that
-// invalidates on mtime change. This avoids repeated disk reads on every
-// HandleMessage call while still picking up edits. Write-through: every cache
-// miss re-reads the file and updates modTime. The content is read through a
-// per-file byte cap (the same AgentsMDMaxBytes cap capAgentsMD applies to the
-// combined content), so a huge workspace-controlled file is never fully
-// materialized before any cap is applied. The per-file cap equals the combined
-// cap, so the final combined-truncated content is identical to reading
-// uncapped — the allocation is what stays bounded. A file larger than the
-// cap is clipped per source with the SAME truncation note and UTF-8/line
-// snapping capAgentsMD applies to the combined content; the note reports the
-// file's true on-disk size (Stat), not the clipped read length.
+// readAgentsMD reads AGENTS.md through a per-path mtime-invalidated cache and a
+// per-file byte cap equal to capAgentsMD's combined cap — a huge workspace-controlled
+// file is never fully materialized. The capped result (same note, snapping, true
+// size) is identical to reading uncapped; only the allocation stays bounded.
 func (o *Orchestrator) readAgentsMD(path string) (string, error) {
 	if o.agentsMDCache == nil {
 		o.agentsMDCache = make(map[string]agentsMDCacheEntry)
@@ -2544,12 +1837,9 @@ func (o *Orchestrator) readAgentsMD(path string) (string, error) {
 		return cached.content, nil
 	}
 
-	// Open through safeio (regular-file check: refuses FIFOs/devices) and read
-	// through io.LimitReader so at most cap+1 bytes are buffered — the extra
-	// byte DETECTS an oversized file instead of silently clipping it at the
-	// raw reader boundary (which would lose capAgentsMD's truncation note and
-	// UTF-8/line snapping). A negative cap disables capping entirely (mirrors
-	// capAgentsMD's opt-out).
+	// Open through safeio (refuses FIFOs/devices); read through io.LimitReader with
+	// cap+1 bytes — the extra byte DETECTS oversize instead of silently clipping
+	// (losing capAgentsMD's note and snapping). A negative cap disables capping.
 	f, readErr := safeio.Open(path)
 	if readErr != nil {
 		o.agentsMDCache[path] = agentsMDCacheEntry{err: readErr, modTime: info.ModTime()}
@@ -2571,14 +1861,8 @@ func (o *Orchestrator) readAgentsMD(path string) (string, error) {
 		return "", readErr
 	}
 	if truncated {
-		// Byte-precise snap with the note's own size RESERVED from the cap:
-		// the marker becomes part of the produced content, so a clip that
-		// spends the full cap window pushes the note past maxBytes — and the
-		// oversize leftover is then re-truncated by capAgentsMD, producing a
-		// second marker and a false "original was" size (the inflated,
-		// note-carrying length). Reserving the note room keeps the capped
-		// result within the cap exactly once, note included, so the combined
-		// pass below passes it through untouched.
+		// Byte-precise snap with the note's size RESERVED from the cap (rationale on
+		// capAgentsMD): a full-cap clip would re-truncate — second marker, false size.
 		maxBytes := o.agentsMDMaxBytes()
 		note := agentsMDTruncationNote(maxBytes, info.Size())
 		clipped := snapAgentsMDWindow(content, maxBytes-int64(len(note)))
@@ -2591,10 +1875,9 @@ func (o *Orchestrator) readAgentsMD(path string) (string, error) {
 	return contentStr, nil
 }
 
-// agentsMDMaxBytes resolves the effective AGENTS.md byte cap shared by
-// readAgentsMD (per-file read bound) and capAgentsMD (combined truncation):
-// 0 means the default (DefaultAgentsMDMaxBytes); a negative cap disables
-// capping entirely.
+// agentsMDMaxBytes resolves the effective AGENTS.md byte cap shared by readAgentsMD
+// (per-file bound) and capAgentsMD (combined truncation): 0 = the default
+// (DefaultAgentsMDMaxBytes), negative disables capping.
 func (o *Orchestrator) agentsMDMaxBytes() int64 {
 	maxBytes := o.config.AgentsMDMaxBytes
 	if maxBytes == 0 {
@@ -2603,21 +1886,16 @@ func (o *Orchestrator) agentsMDMaxBytes() int64 {
 	return int64(maxBytes)
 }
 
-// agentsMDTruncationNote renders the marker appended to clipped AGENTS.md
-// content: maxBytes is the effective cap, originalSize the true pre-truncation
-// size. Shared by readAgentsMD (per-file clip) and capAgentsMD (combined cap)
-// so both stages emit byte-identical markers.
+// agentsMDTruncationNote renders the marker appended to clipped AGENTS.md content
+// (shared by readAgentsMD and capAgentsMD so both emit byte-identical markers).
 func agentsMDTruncationNote(maxBytes, originalSize int64) string {
 	return fmt.Sprintf("\n\n[…AGENTS.md truncated at %d bytes; original was %d bytes]", maxBytes, originalSize)
 }
 
-// snapAgentsMDWindow returns the longest byte-precise prefix of content that
-// fits budget bytes AND ends at a line boundary: the last '\n' within the
-// budget window, or — when the window holds no newline at all — a UTF-8 rune
-// boundary so a multibyte rune is never split. Byte-precise on purpose: a
-// rune-counting trim (strutil.TruncateUTF8AtLineBoundary) would let multibyte
-// content overflow the byte budget by up to 4x. Content that already fits the
-// budget is returned unchanged; a non-positive budget yields nil.
+// snapAgentsMDWindow returns the longest byte-precise prefix of content that fits
+// budget bytes AND ends at a line boundary: the last '\n' in the window, or — with
+// no newline — a UTF-8 rune boundary. Byte-precise on purpose: a rune-counting trim
+// (strutil.TruncateUTF8AtLineBoundary) would overflow the byte budget by up to 4x.
 func snapAgentsMDWindow(content []byte, budget int64) []byte {
 	if budget <= 0 {
 		return nil
@@ -2638,15 +1916,10 @@ func snapAgentsMDWindow(content []byte, budget int64) []byte {
 	return window
 }
 
-// capAgentsMD applies the AgentsMDMaxBytes cap to the combined AGENTS.md
-// content. A cap of 0 means use the default (DefaultAgentsMDMaxBytes); a
-// negative cap disables truncation entirely. Truncation is byte-precise and
-// snaps to the last newline within the budget, falling back to a UTF-8 rune
-// boundary; the truncation note's own size is RESERVED from the cap, so the
-// marker can never push the result past maxBytes (which would leave the
-// oversize to a second-stage clip — duplicate markers, false reported size).
-// The note always survives: for a pathological cap smaller than the note
-// itself the note alone is returned rather than silently dropping content.
+// capAgentsMD applies the AgentsMDMaxBytes cap to the combined AGENTS.md content
+// (0 = default, negative = no cap). Truncation snaps to the last newline (fallback:
+// UTF-8 rune boundary); the note's size is RESERVED from the cap, else a second-stage
+// clip would duplicate markers and misreport size; a pathological cap returns the note.
 func (o *Orchestrator) capAgentsMD(content string) string {
 	originalSize := int64(len(content))
 	maxBytes := o.agentsMDMaxBytes()
@@ -2659,29 +1932,10 @@ func (o *Orchestrator) capAgentsMD(content string) string {
 	return string(clipped) + note
 }
 
-// emitInitialContextFill emits a 0% context_fill so the frontend has a baseline.
-// It also injects the model's advertised context window into the emitter so that
-// the user-facing fill display (status bar, compaction messages) is computed
-// relative to the real window, not the internal "effective max" the executor
-// uses for compaction.
-//
-// Resolution is deliberately ResolveLocal (network-free): this runs on every
-// HandleMessage on the UI-critical path, where a full Resolve could fire a
-// HuggingFace lookup (10s timeout) for an unknown self-hosted model id and
-// stall the initial fill. The local tiers cover the meaningful sources —
-// config override, observed runtime (lazy server probe), built-in catalog,
-// lazy cache — and a late-arriving probe result refreshes the display via
-// SetDisplayContextWindowForModel once it lands.
-// resetDynamicStepScope clears the root emitter's dynamic plan-step scope, if
-// it supports one. Task-boundary insurance: SetCurrentStepID("") normally
-// happens in the inline lifecycle's completeStep/completeAll, but a
-// pause→abandon path, a panic, or a hard crash mid-run can leave the scope
-// pointing at a previous task's step; every later empty-stepID ContextFill
-// (E2S turns, the orchestrator's initial fill, the manual-compaction refresh)
-// would then inherit that stale id and land under a step it does not belong
-// to. Called unconditionally at task entry and before session-root emissions
-// that must never inherit a scope; the Conductor re-scopes each inline step on
-// start, so resetting here never disturbs a resumed step.
+// resetDynamicStepScope clears the root emitter's dynamic plan-step scope (if it
+// supports one). Task-boundary insurance: a pause→abandon, panic or crash mid-run
+// leaves the scope at a previous task's step, which later empty-stepID ContextFills
+// would inherit; the Conductor re-scopes inline steps on start, so resumes are safe.
 func (o *Orchestrator) resetDynamicStepScope() {
 	if o.emitter == nil {
 		return
@@ -2691,10 +1945,11 @@ func (o *Orchestrator) resetDynamicStepScope() {
 	}
 }
 
+// emitInitialContextFill emits a 0% context_fill baseline and injects the model's
+// advertised context window so the user-facing fill is computed against the real
+// window. Resolution is deliberately ResolveLocal (network-free): a full Resolve on
+// this UI-critical path could stall on a HuggingFace lookup; a probe refreshes later.
 func (o *Orchestrator) emitInitialContextFill() {
-	// Task boundary: drop any stale dynamic step scope left by a previous
-	// task (pause→abandon, crash) so this baseline fill and every subsequent
-	// empty-stepID emission start session-root.
 	o.resetDynamicStepScope()
 	var contextWindow int
 	if o.modelRegistry != nil {
@@ -2712,14 +1967,8 @@ func (o *Orchestrator) emitInitialContextFill() {
 	o.emitter.ContextFill(0, 0, contextWindow, "ok", "")
 }
 
-// SetNoProjectMode configures this orchestrator for No Project mode:
-// disables index-dependent tools (semantic_search — no vector index exists
-// without a project). The routing domain is kept honest (no code→general
-// rewrite): code-flavored CHAT questions route as "code", whose compaction
-// strategy (sliding_window) requires no project. Shell commands are not
-// additionally restricted here: the global security.groups.execute policy
-// (including its destructive blocklist) applies uniformly to CODE and CHAT
-// sessions.
+// SetNoProjectMode configures No Project (CHAT) mode: disables index-dependent
+// tools. Tool scope, honest routing, shell policy: specs/domains/orchestration/router.md.
 func (o *Orchestrator) SetNoProjectMode() {
 	o.isNoProject = true
 	if o.coreToolRegistry == nil {
@@ -2731,10 +1980,9 @@ func (o *Orchestrator) SetNoProjectMode() {
 	o.coreToolRegistry.SetDisabledTools(NoProjectDisabledTools)
 }
 
-// Emitter returns the orchestrator's event emitter for use by external callers
-// that need to emit plan step events (e.g., after feedback-driven replanning).
-// Returns a noop emitter when the orchestrator has no emitter configured,
-// preventing nil-pointer panics in callers.
+// Emitter returns the orchestrator's event emitter for external plan-step emissions
+// (e.g. after feedback-driven replanning); a noop emitter when none is configured,
+// so callers cannot nil-panic.
 func (o *Orchestrator) Emitter() Emitter {
 	if o.emitter == nil {
 		return &noopEmitter{}
@@ -2743,19 +1991,16 @@ func (o *Orchestrator) Emitter() Emitter {
 }
 
 // ToolRegistry returns the orchestrator's per-session tool registry — the
-// session-scoped clone Build created, whose tool judge rides the session's
-// own router (see builder.bindSessionJudge). External callers use
-// it to evaluate pending confirmations with the session's judge, so a manual
-// "Judge" evaluation follows the same provider/model the session runs on —
-// exactly like automatic escalations. Returns nil when no registry was wired;
-// callers must nil-check.
+// session-scoped clone Build created, whose tool judge rides the session's own
+// router (builder.bindSessionJudge) — so manual "Judge" evaluations follow the
+// same provider/model as automatic escalations. nil when not wired; nil-check.
 func (o *Orchestrator) ToolRegistry() *tools.ToolRegistry {
 	return o.coreToolRegistry
 }
 
 // LookupSkillDescriptors converts skill names to SkillDescriptors using the
-// orchestrator's skill manager. Unknown names are silently skipped. Returns nil
-// if the skill manager is not available.
+// orchestrator's skill manager; unknown names are silently skipped. Returns nil
+// when the skill manager is not available.
 func (o *Orchestrator) LookupSkillDescriptors(names []string) []skills.SkillDescriptor {
 	if o.skillManager == nil || len(names) == 0 {
 		return nil
@@ -2778,8 +2023,7 @@ func (o *Orchestrator) currentModel() string {
 }
 
 // CurrentModel returns the session's active model identity (the bare model
-// name), synchronized for cross-goroutine readers. The session layer uses it
-// to scope the persisted compaction forecast per model.
+// name), synchronized for cross-goroutine readers.
 func (o *Orchestrator) CurrentModel() string {
 	return o.currentModel()
 }
@@ -2822,12 +2066,8 @@ func (o *Orchestrator) SetReasoningEffort(effort string) {
 	}
 }
 
-// SetE2SSettings replaces the effective E2S execution-mode settings. It exists
-// for runtime config changes (the experimental-features toggle) that must
-// reach orchestrators built before the change: OrchestratorConfig is immutable
-// after Build, so the refreshed settings are stored in an atomic override
-// (e2sSettingsOverride) that e2sSettings reads. It is safe to call while a
-// task runs — the override is swapped atomically and read once per request.
+// SetE2SSettings stores refreshed E2S settings (e2sSettingsOverride); safe while a
+// task runs.
 func (o *Orchestrator) SetE2SSettings(settings E2SSettings) {
 	o.e2sSettingsOverride.Store(&settings)
 }
@@ -2841,20 +2081,14 @@ func (o *Orchestrator) e2sSettings() E2SSettings {
 	return o.config.E2S
 }
 
-// SetModelProfilesSettings replaces the effective model-profile settings. It exists for
-// runtime config changes (the master toggle, a profile switch, or the
-// essential-tools variant flip) that must reach orchestrators built before
-// the change: OrchestratorConfig is immutable after Build, so the refreshed
-// settings are stored in an atomic override (modelProfilesSettingsOverride) that
-// modelProfilesSettings reads. Mirrors SetE2SSettings. It is safe to call while a task
-// runs — the override is swapped atomically and read once per request.
+// SetModelProfilesSettings replaces the effective model-profile settings at
+// runtime (see modelProfilesSettingsOverride); mirrors SetE2SSettings.
 func (o *Orchestrator) SetModelProfilesSettings(settings ModelProfilesSettings) {
 	o.modelProfilesSettingsOverride.Store(&settings)
 }
 
-// modelProfilesSettings returns the effective model-profile settings: the runtime override
-// when a config change has refreshed them, otherwise the build-time config
-// snapshot.
+// modelProfilesSettings returns the effective model-profile settings: the runtime
+// override when refreshed, otherwise the build-time config snapshot.
 func (o *Orchestrator) modelProfilesSettings() ModelProfilesSettings {
 	if p := o.modelProfilesSettingsOverride.Load(); p != nil {
 		return *p
@@ -2862,13 +2096,10 @@ func (o *Orchestrator) modelProfilesSettings() ModelProfilesSettings {
 	return o.config.ModelProfiles
 }
 
-// ApplyRequestOverrides applies per-request model and reasoning-effort
-// overrides to all LLM-calling components (router, reflector, the direct LLM
-// caller, and config.Model for metadata resolution). It is the shared step 0
-// of HandleMessage (fresh task and continuation) AND the session manager's
-// resume-an-interrupted-task path, which bypasses HandleMessage — without
-// calling this, a model/reasoning switch on a resume message would be
-// silently dropped. When both overrides are empty it is a no-op.
+// ApplyRequestOverrides applies per-request model and reasoning-effort overrides
+// to every LLM-calling component (router, reflector, the direct caller,
+// config.Model). Shared step 0 of HandleMessage AND the resume path — a resume
+// that skips it silently drops the switch.
 func (o *Orchestrator) ApplyRequestOverrides(ctx context.Context, modelOverride, reasoningEffort string) {
 	o.SetReasoningEffort(reasoningEffort)
 	if modelOverride != "" && o.modelSwitcher != nil {
@@ -2879,19 +2110,13 @@ func (o *Orchestrator) ApplyRequestOverrides(ctx context.Context, modelOverride,
 		} else {
 			bare := llm.BareModel(modelOverride)
 			o.setCurrentModel(bare)
-			// Lazily probe the newly-selected model's real context window when
-			// it is served from an OpenAI-compatible endpoint. The probe is
-			// fire-and-forget (returns immediately); the discovered window
-			// lands in the model registry and is picked up by subsequent
-			// context-budget math.
+			// Fire-and-forget probe of the new model's real context window;
+			// the result lands in the model registry for context-budget math.
 			if o.localModelProbe != nil {
 				o.localModelProbe(bare)
 			}
-			// Synchronize the emitter's cached model so the initial
-			// context_fill — emitted before the first LLM call reports usage —
-			// carries the newly-selected model instead of the previous task's
-			// model. Without this the status bar shows a stale model in a
-			// continuation until the first token-usage report arrives.
+			// Sync the emitter's cached model so the initial context_fill
+			// (emitted before the first usage report) shows the new model.
 			family := ""
 			if o.modelRegistry != nil {
 				if meta, _ := o.modelRegistry.Resolve(ctx, bare); meta.Family != "" {
@@ -2906,33 +2131,26 @@ func (o *Orchestrator) ApplyRequestOverrides(ctx context.Context, modelOverride,
 }
 
 // SetTaskStore sets the TaskPersistence store for blackboard restoration.
-// This is used by HandleMessage continuations to restore a completed task's blackboard.
 func (o *Orchestrator) SetTaskStore(store TaskPersistence) {
 	o.taskStore = store
 }
 
-// SetConversationHistory sets the full conversation history for the session.
-// Call this during session restore to pre-populate the history from persistent storage,
-// ensuring the planner sees all previous messages even after a backend restart.
+// SetConversationHistory sets the full conversation history; session restore
+// pre-populates it from persistence so planning sees prior messages.
 func (o *Orchestrator) SetConversationHistory(history []llm.Message) {
 	o.setConversationHistory(history)
 }
 
-// ConversationHistory returns a copy of the current conversation history (for
-// testing and for the session layer's compaction-marker snapshot). The copy is
-// deliberate: callers run on other goroutines (the marker is marshaled on the
-// compaction flow's goroutine while a resumed request may append) and must not
-// alias the live slice.
+// ConversationHistory returns a snapshot copy (historySnapshot); exported for
+// tests and the session layer's compaction-marker snapshot.
 func (o *Orchestrator) ConversationHistory() []llm.Message {
 	return o.historySnapshot()
 }
 
 // historySnapshot returns a deep copy of the conversation history taken under
-// historyMu. Cross-goroutine readers (routing, conductor context seeding, SDK
-// compaction, token counting, the no-op predicate) operate on the copy so a
-// concurrent append or swap on the request goroutine can never race them —
-// neither on the slice header nor on the backing array (appendHistory's
-// retry-collapse rewrites slots a stale header snapshot would still cover).
+// historyMu, so cross-goroutine readers never race a concurrent append or swap —
+// not even on the backing array (appendHistory's retry-collapse rewrites slots a
+// stale header snapshot would still cover).
 func (o *Orchestrator) historySnapshot() []llm.Message {
 	o.historyMu.RLock()
 	defer o.historyMu.RUnlock()
@@ -2951,12 +2169,10 @@ func (o *Orchestrator) setConversationHistory(history []llm.Message) {
 	o.conversationHistory = history
 }
 
-// appendHistory appends msgs to the conversation history in one atomic step
-// under historyMu. When retryMessage is non-empty and the history ends with a
-// failed attempt of that exact user message, the failed exchange is collapsed
-// first — the continuation-retry dedup (see recordConversationOutcome). The
-// collapse and the append share one critical section so a concurrent reader
-// can never observe the collapsed-but-not-yet-reappended state.
+// appendHistory appends msgs to the conversation history in one atomic step under
+// historyMu. With retryMessage set, a trailing failed exchange of that exact message
+// is collapsed first — the continuation-retry dedup (see recordConversationOutcome);
+// collapse and append share one critical section (no half-collapsed reader state).
 func (o *Orchestrator) appendHistory(retryMessage string, msgs ...llm.Message) {
 	o.historyMu.Lock()
 	defer o.historyMu.Unlock()
@@ -2972,17 +2188,10 @@ func (o *Orchestrator) appendHistory(retryMessage string, msgs ...llm.Message) {
 	o.conversationHistory = append(o.conversationHistory, msgs...)
 }
 
-// dropFailedExchangeTail returns history with a trailing failed exchange for
-// the given request removed — the injection-time mirror of appendHistory's
-// retry collapse. A resume (or a same-message retry entering as a fresh
-// workflow) injects the conversation history alongside the task message,
-// which repeats the original request; when the history tail is the recorded
-// failure of that exact request (user message + HistoryNoteFailed assistant
-// note), the model would otherwise see the same request twice with a failure
-// marker in between. Cancelled exchanges ([HistoryNoteCancelled]) are kept:
-// appendHistory does not collapse them either, and a cancelled task's record
-// is legitimate dialogue context. Returns history unchanged when request is
-// empty or the tail does not match.
+// dropFailedExchangeTail removes a trailing failed exchange for the given request —
+// the injection-time mirror of appendHistory's retry collapse: a resume repeats the
+// original request, and without this the model sees it twice with a failure marker
+// between. Cancelled notes stay; unmatched tails pass through.
 func dropFailedExchangeTail(history []llm.Message, request string) []llm.Message {
 	if request == "" {
 		return history
@@ -2999,27 +2208,22 @@ func dropFailedExchangeTail(history []llm.Message, request string) []llm.Message
 	return history
 }
 
-// HistoryNoteCancelled is the assistant-side conversation-history note
-// recorded when a task is cancelled before completion. The backend uses the
-// same note when reconstructing history from the message store so live and
-// restored histories stay identical.
+// HistoryNoteCancelled is the assistant-side history note for a task cancelled
+// before completion (shared with the backend's history reconstruction).
 const HistoryNoteCancelled = "[Task was cancelled before completion]"
 
 // historyNoteFailedPrefix is the prefix of failure notes produced by
 // HistoryNoteFailed; used to recognize a previously recorded failed attempt.
 const historyNoteFailedPrefix = "[Task failed before completion: "
 
-// HistoryNoteFailed formats the assistant-side conversation-history note
-// recorded when a task fails before completion. Shared with the backend's
-// history reconstruction (see HistoryNoteCancelled).
+// HistoryNoteFailed formats the assistant-side history note for a failed task,
+// shared with the backend's history reconstruction (see HistoryNoteCancelled).
 func HistoryNoteFailed(errText string) string {
 	return historyNoteFailedPrefix + errText + "]"
 }
 
-// buildContentBlocks assembles structured content blocks (text + images) for
-// the Conductor's task user message. The first block is the text task;
-// subsequent blocks are the images. Returns nil when there are no images so
-// the legacy text-only SetTask path is preserved (backward compatible).
+// buildContentBlocks assembles the task message's content blocks: text first, then
+// images; nil without images (legacy text-only SetTask path).
 func buildContentBlocks(text string, images []llm.ContentBlock) []llm.ContentBlock {
 	if len(images) == 0 {
 		return nil
@@ -3030,14 +2234,9 @@ func buildContentBlocks(text string, images []llm.ContentBlock) []llm.ContentBlo
 	return blocks
 }
 
-// imageBlocksForRequest searches the conversation history for a user message
-// matching the given request text and returns its image content blocks
-// (Type == "image"). This is used on resume to reconstruct the image content
-// blocks that were part of the original task's user message — the conversation
-// history (in-memory or restored from the DB via convertChatMessagesToLLM)
-// carries the blocks, so they can be re-injected into the resumed Conductor
-// run without persisting them separately. Returns nil when no matching message
-// is found or it carries no image blocks.
+// imageBlocksForRequest returns the image content blocks of the history user message
+// matching request, so a resume re-injects the original task's images from history
+// without separate persistence. nil when no match or no image blocks.
 func imageBlocksForRequest(history []llm.Message, request string) []llm.ContentBlock {
 	for _, msg := range history {
 		if msg.Role == "user" && msg.Content == request && len(msg.ContentBlocks) > 0 {
@@ -3053,28 +2252,15 @@ func imageBlocksForRequest(history []llm.Message, request string) []llm.ContentB
 	return nil
 }
 
-// recordConversationOutcome appends the current exchange to the in-memory
-// conversation history. It is invoked (via defer) for EVERY terminal outcome
-// of HandleMessage — success, partial success, failure, cancellation —
-// failure, and cancellation — so the router and continuation planner always
-// see the full dialogue, not just successful exchanges.
-//
-// contentBlocks, when non-nil, carries structured content (text + images) for
-// the user message. The history user message is emitted with ContentBlocks
-// set so providers that support multimodal input see the images on
-// continuation turns. nil preserves the legacy text-only history entry.
+// recordConversationOutcome appends the current exchange to the in-memory history
+// via defer for every terminal HandleMessage outcome, so routing and continuation
+// planning see the full dialogue (contentBlocks carries multimodal task content).
 func (o *Orchestrator) recordConversationOutcome(ctx context.Context, message string, contentBlocks []llm.ContentBlock, result *HandleResult, err error) {
 	userMsg := llm.Message{Role: "user", Content: message, ContentBlocks: contentBlocks}
 
-	// Continuation fallback: the session manager retries a failed
-	// continuation as a fresh workflow with the same message. If the last
-	// recorded exchange is a failed attempt of this exact message, replace
-	// it with the retry's outcome instead of duplicating the user message.
-	// This also matches how the persisted store reads after a restart
-	// (consecutive assistant entries collapse to the most recent one).
-	// The collapse and the append run as ONE locked step (appendHistory) —
-	// historyMu's other readers are Wails-RPC goroutines, so the epilogue
-	// must not touch the field directly.
+	// Continuation fallback: the session manager retries a failed continuation as a
+	// fresh workflow with the same message; a prior failed exchange of this exact
+	// message is replaced, not duplicated (persisted-store collapse parity).
 
 	switch {
 	case err == nil || errors.Is(err, orchestration.ErrExecutionIncomplete):
@@ -3086,11 +2272,8 @@ func (o *Orchestrator) recordConversationOutcome(ctx context.Context, message st
 		if result.Blackboard != nil {
 			reasoning = lastReasoningContent(result.Blackboard)
 		}
-		// Failure-mode guard: if the assistant output contains tool-call
-		// syntax printed as text (```bash_exec etc. instead of a tool_use
-		// block), the "finish" was a stuck-model artifact, not a real
-		// answer. Record a failure note instead of the hallucinated text
-		// so future routing/planning sees an honest failure, not garbage.
+		// Failure-mode guard: tool-call syntax printed as text is a stuck-model artifact,
+		// not an answer — record a failure note so routing sees an honest failure.
 		assistantContent := result.Output
 		if agent.DetectToolCallSyntaxInContent(assistantContent) {
 			assistantContent = HistoryNoteFailed("task ended in failure-mode: model printed tool-call syntax as text instead of using tool_use blocks")
@@ -3110,14 +2293,9 @@ func (o *Orchestrator) recordConversationOutcome(ctx context.Context, message st
 	}
 }
 
-// recordResumeOutcome appends the outcome of a resumed execution (interrupted
-// task) to the in-memory conversation history. The
-// user message that spawned the task was recorded when the task first ran (or
-// restored from the message store after a restart), so the assistant side is
-// what gets appended here — except on failure, where appendResumeFailure
-// re-anchors the recorded exchange at the original request so repeated
-// failed resumes keep the [user:request, failed] tail shape (see its doc
-// comment).
+// recordResumeOutcome appends a resumed execution's outcome to the in-memory
+// history. Only the assistant side is appended (the user message was recorded on
+// first run or restored); on failure appendResumeFailure re-anchors the exchange.
 func (o *Orchestrator) recordResumeOutcome(ctx context.Context, bb orchestration.Blackboard, result *HandleResult, err error) {
 	switch {
 	case (err == nil || errors.Is(err, orchestration.ErrExecutionIncomplete)) && result != nil:
@@ -3136,34 +2314,12 @@ func (o *Orchestrator) recordResumeOutcome(ctx context.Context, bb orchestration
 	}
 }
 
-// appendResumeFailure records a failed resumed execution as exactly one
-// well-formed [user:originalRequest, assistant:failed] exchange, in ONE
-// locked step (historyMu discipline mirrors appendHistory — other readers
-// are Wails-RPC goroutines).
-//
-// Why not a plain appendHistory("", failedNote): repeated failed resumes
-// would stack assistant-only failure notes ([user:req, failed1, failed2, …])
-// and dropFailedExchangeTail — which matches exactly [user:req, failed] —
-// would stop working from the second resume on. And why not the review's
-// minimal appendHistory(origReq, failedNote): after the retry collapse drops
-// the prior [user:req, failed1] pair, the re-appended note alone leaves an
-// assistant-only tail, so the NEXT resume still cannot match.
-//
-// The stored tail is re-anchored at the original request in every case:
-//
-//   - tail [user:req, failedN] (task failed before — recorded by
-//     recordConversationOutcome or an earlier failed resume): the replaceable
-//     assistant run is dropped and one fresh failed note recorded, so the
-//     stored history re-collapses to [user:req, failed] which
-//     dropFailedExchangeTail matches on the next resume.
-//   - tail [user:req] alone (restored paused/crash-interrupted task whose
-//     outcome was never recorded): the lone user message is kept and the
-//     failed note appended after it — never a duplicated user message.
-//   - replaceable notes are prior failure notes and empty pause records;
-//     real assistant output and HistoryNoteCancelled records are legitimate
-//     dialogue and stay (mirroring dropFailedExchangeTail's cancelled rule).
-//   - no anchoring user message at all: the full pair is appended so the
-//     stored history still reads as a proper exchange.
+// appendResumeFailure records a failed resume as exactly one well-formed
+// [user:originalRequest, assistant:failed] exchange, re-anchored at the original
+// request in one locked step: a plain appendHistory would stack assistant-only notes
+// across repeated failed resumes and break dropFailedExchangeTail's exact match.
+// Replaceable tail: failure notes and empty pause records; real output and
+// HistoryNoteCancelled stay; a lone restored user message is kept, never duplicated.
 func (o *Orchestrator) appendResumeFailure(origReq string, failed llm.Message) {
 	o.historyMu.Lock()
 	defer o.historyMu.Unlock()
@@ -3193,10 +2349,8 @@ func (o *Orchestrator) SetBlackboardRestoreFunc(fn BlackboardRestoreFunc) {
 	o.bbRestoreFunc = fn
 }
 
-// truncateHistory returns the last window messages of history. If window <= 0
-// or len(history) <= window, history is returned as-is. The most recent
-// messages are preserved so the agent sees the dialogue context leading up to
-// the current message.
+// truncateHistory returns the last window messages of history; window <= 0 or
+// a shorter history is returned as-is.
 func truncateHistory(history []llm.Message, window int) []llm.Message {
 	if window <= 0 || len(history) <= window {
 		return history
@@ -3206,12 +2360,9 @@ func truncateHistory(history []llm.Message, window int) []llm.Message {
 	return truncated
 }
 
-// HandleMessage is the unified entry point for processing user messages.
-// It supports two flows: first message and continuation.
-// For first messages, a plan is always generated first, then executed via Plan&Execute.
-// For continuations (TaskID != ""), the P&E continuation path is used.
-//   - TaskID="": First message (create new blackboard)
-//   - TaskID!="": Continuation (restore existing blackboard)
+// HandleMessage is the unified entry point for user messages: a first message
+// (TaskID == "") or a continuation, dispatched to the plain, goal, or E2S mode. See
+// specs/domains/orchestration/README.md and specs/domains/goal-mode.md.
 func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID string, opts HandleOptions) (result *HandleResult, err error) {
 	// W-8: Enforce single-flight — only one HandleMessage per *Orchestrator.
 	if !o.requestInFlight.CompareAndSwap(false, true) {
@@ -3219,35 +2370,18 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	}
 	defer o.requestInFlight.Store(false)
 
-	// Install the universal pause signal for this request. Every conductor run
-	// (normal path or goal loop) reads it via the pause-checker at each step
-	// boundary; PauseSession flips it. Cleared on exit so a stale signal can
-	// never pause a future request.
+	// Install the universal pause signal for this request; cleared on exit so
+	// a stale signal can never pause a future request (see installPauseSignal).
 	defer o.installPauseSignal()()
 
-	// Resolve the effective task message. When the user invokes a skill via
-	// /skill-name, preprocessMessageText strips the reference — potentially
-	// leaving an empty message. resolveTaskMessage rebuilds it so the
-	// Conductor receives a meaningful task and the conversation history never
-	// records an empty user message (which some providers reject with HTTP
-	// 400 "messages parameter is illegal"). The raw `message` is still passed
-	// to the router below, which applies its own augmentation — using the
-	// augmented message there would double-prefix the skill reference.
 	taskMessage := o.resolveTaskMessage(message, opts.UserSkills)
 
-	// contentBlocks carries structured content (text + images) for the task
-	// user message. Built after augmentWithAttachments when the request
-	// includes staged image attachments (opts.PendingImages). Declared here
-	// (before the defer) so the recordConversationOutcome closure captures it
-	// by reference and records the blocks in the conversation history. nil
-	// preserves the legacy text-only path.
+	// contentBlocks carries the structured task content (text + images); declared
+	// before the defer so recordConversationOutcome captures it by reference.
 	var contentBlocks []llm.ContentBlock
 
-	// Record the exchange in the in-memory conversation history for EVERY
-	// terminal outcome (success, failure, cancellation) of HandleMessage
-	// cancellation) so future routing and continuation planning always see
-	// the full dialogue. Registered after the single-flight guard so a
-	// rejected concurrent request is not recorded.
+	// Registered after the single-flight guard so a rejected request is not
+	// recorded (the recording contract lives on recordConversationOutcome).
 	defer func() {
 		o.recordConversationOutcome(ctx, taskMessage, contentBlocks, result, err)
 	}()
@@ -3276,36 +2410,21 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	}
 	opts.UserMCPServers = UserMCPServersFromContext(ctx)
 
-	// Skill/agent capability snapshots: the session context (o.isNoProject,
-	// including a CHAT→CODE promotion already applied to this orchestrator)
-	// selects each entry's chat_mode/code_mode ONCE here, and the snapshots
-	// ride the context so routing, the roster, and delegation all see one
-	// immutable view for the whole task. Mentions of disabled capabilities
-	// are dropped (manual mentions pass — that is how a manual capability
-	// activates); the filtered lists replace opts for every downstream path
-	// (Conductor, E2S, goal) in one place.
+	// Capability snapshots resolve chat_mode/code_mode ONCE per task entry; mentions
+	// of capabilities disabled here are dropped. See specs/domains/capabilities.md.
 	ctx = o.attachCapabilitySnapshots(ctx)
 	opts.UserSkills = mentionedSkillsForTask(ctx, opts.UserSkills)
 	opts.UserAgents = mentionedAgentsForTask(ctx, opts.UserAgents)
 
-	// Augment the Conductor's task message with the session's attached files.
-	// The router and conversation history keep the clean `taskMessage`; only the
-	// Conductor receives this section so the LLM can call read_attachment.
-	// Images are NOT included here — they travel as structured ContentBlocks
-	// (below), not as text in the blackboard/augmentWithAttachments section.
+	// Only the Conductor sees attachments (augmentWithAttachments); images
+	// travel as ContentBlocks below.
 	conductorMessage := o.augmentWithAttachments(taskMessage, bb)
 
-	// Build structured content blocks when the request carries staged image
-	// attachments. The first block is the (attachment-augmented) text task;
-	// subsequent blocks are the images from opts.PendingImages. These flow
-	// through runConductor → ConductorConfig.ContentBlocks → SetTaskWithBlocks
-	// so the ContextManager emits a Message carrying ContentBlocks (providers
-	// give blocks precedence over the plain Content string). Images never
-	// enter the blackboard or augmentWithAttachments — they are pure content
-	// blocks, not read_attachment targets.
+	// Structured content blocks: attachment-augmented text task first, then the staged
+	// images; providers give blocks precedence. Images never enter the blackboard.
 	contentBlocks = buildContentBlocks(conductorMessage, opts.PendingImages)
 
-	// 2. Get available tools (exclude disabled tools in No Project mode).
+	// Get available tools (exclude disabled tools in No Project mode).
 	availableTools := o.toolRegistry.ListFiltered(o.disabledToolNames())
 	mcpCount := 0
 	for _, t := range availableTools {
@@ -3317,15 +2436,9 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 
 	availableTools = stripGatedMCPTools(ctx, availableTools)
 
-	// E2S MODE: an explicit-execution-state request enters runE2SLoop instead
-	// of the route→Conductor flow. The run maintains an externalized state Σ
-	// the model reads and patches each turn (bounded O(1) context), with
-	// actions dispatching through the tool registry and delegation through
-	// the same launcher a Conductor run uses. E2S and Goal are mutually
-	// exclusive — both set is a wiring mistake, surfaced as an explicit error
-	// rather than a silent preference. This branch must precede the goal
-	// branch: the goal check below would otherwise win and swallow the E2S
-	// request (and the conflict).
+	// E2S MODE: an explicit-execution-state request enters runE2SLoop instead of the
+	// route→Conductor flow; E2S and Goal are mutually exclusive. This branch must
+	// precede the goal branch (else it swallows the E2S request). See specs/domains/e2s.md.
 	if opts.E2S {
 		if opts.Goal {
 			return nil, ErrE2SGoalConflict
@@ -3333,89 +2446,51 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		if !o.e2sSettings().Enabled {
 			return nil, ErrE2SModeDisabled
 		}
-		// Commit point for an E2S continuation (mirrors the goal branch):
-		// reactivation happens only now, after blackboard restore succeeded.
+		// Commit point (mirrors the goal branch): reactivate only now, after
+		// blackboard restore succeeded.
 		o.reactivateContinuationTask(bb, opts.TaskID)
-		// taskMessage (resolveTaskMessage) — not the raw message: skill-ref
-		// preprocessing can leave the raw text empty ("/skill"-only sends),
-		// and the E2S objective seeds Σ from it, so it must match what the
-		// Conductor path and the blackboard record.
+		// taskMessage, not the raw message: /skill-only sends strip to empty
+		// and the E2S objective seeds Σ from it.
 		return o.runE2SLoop(ctx, taskMessage, opts, bb, availableTools)
 	}
 
 	// GOAL MODE: a goal request enters the multi-turn goal loop instead of the
-	// single-pass route→Conductor flow. The loop derives a crisp {condition,
-	// verify} goal (with user sign-off), then iterates the Conductor
-	// turn-by-turn until the agent declares the goal met, the budget is
-	// exhausted, the agent goes idle (anti-spin), or the goal is paused.
-	// Goal mode is entered on BOTH a fresh task (TaskID == "") and on a
-	// continuation (TaskID != ""): on a continuation the prior task's
-	// blackboard is restored and the agent runs the goal loop on the inherited
-	// facts/history, deriving a fresh goal from the new message.
+	// single-pass route→Conductor flow, on BOTH a fresh task and a continuation (a
+	// fresh goal derives on the restored blackboard). See specs/domains/goal-mode.md.
 	if opts.Goal {
-		// Goal mode is refused while the Model Profiles essential-tools narrowing is
-		// active. The narrowing is applied only on the non-goal Conductor path
-		// and the E2S branch — both run after this early return — so it never
-		// narrows a goal run today; the two are declared mutually exclusive so
-		// the toggle cannot be a silent no-op in goal mode. If the narrowing
-		// were ever applied to a goal run it would hide the goal-loop tooling
-		// (propose_goal, declare_goal_status, declare_verification) and make
-		// the loop unrunnable. Refuse BEFORE the continuation reactivation
-		// side effect. The frontend API and the session manager reject this
-		// even earlier with a user-facing message; the sentinel keeps the
-		// invariant for direct callers.
+		// Goal mode is hard-blocked under Model Profiles essential-tools narrowing (it
+		// would strip the goal-loop tooling) — refused BEFORE the reactivation side
+		// effect. See specs/domains/model-profiles.md (goal-mode gate).
 		if o.modelProfilesEssentialToolsEnabled() {
 			return nil, ErrGoalBlockedByModelProfiles
 		}
-		// Commit point for a goal continuation: the restored task is
-		// reactivated only now (see reactivateContinuationTask) — a failure
-		// before this point (e.g. blackboard restore) leaves the anchor's
+		// Commit point: reactivate only now — an earlier failure leaves the anchor's
 		// terminal status intact for the manager's fresh-workflow fallback.
 		o.reactivateContinuationTask(bb, opts.TaskID)
-		// taskMessage (resolveTaskMessage) — not the raw message: skill-ref
-		// preprocessing can leave the raw text empty ("/goal /skill"-only
-		// sends), and the goal derivation seeds from this message, so it must
-		// match what the Conductor path, the E2S branch, and the blackboard
-		// record. (runGoalLoop passes the non-attachment-augmented value to
-		// routing internally, so this stays consistent with its own contract.)
+		// taskMessage, not the raw message: /goal /skill-only sends strip to
+		// empty and the goal derivation seeds from it.
 		return o.runGoalLoop(ctx, taskMessage, opts, bb, availableTools, opts.SessionPlansDir)
 	}
 
-	// Goal-mode-only tools (propose_goal, declare_goal_status, declare_verification)
-	// exist solely for goal mode and must not reach a non-goal Conductor run. Strip
-	// them here so neither the router nor the Conductor's available-tool view ever
-	// offers them when goal mode is off. The goal path above receives the unstripped
-	// list: the independent verifier's verifierToolFilter/verifierReDerivationToolFilter
-	// build their read-only toolset (which must include declare_verification) from it.
-	// The unstripped list is captured first for the goal-mode SUGGESTION entry
-	// below: an accepted suggestion enters runGoalLoopRouted after routing (so
-	// the loop needs the goal tools back), without re-running the router.
+	// Goal-mode-only tools must not reach a non-goal Conductor run: strip them from
+	// the router/Conductor view; the unstripped list serves the verifier toolsets and
+	// an accepted goal suggestion (runGoalLoopRouted reuses this routing).
 	goalAvailableTools := availableTools
 	availableTools = tools.StripGoalModeTools(availableTools)
 
-	// 3. Route and activate skills.
-	// Continuation fast-path: routeOrContinue skips the router when a restored
-	// task has an existing plan + routing (the router is blind to the plan and
-	// would misclassify continuation messages).
-	// NOTE: the raw preprocessed `message` is passed here (not taskMessage)
-	// because the router augments the skill context itself — passing the
-	// already-augmented taskMessage would double-prefix the skill reference.
+	// 3. Route and activate skills. routeOrContinue skips the router on a
+	// restored task (blind to the existing plan — it would misclassify the
+	// continuation); the raw message goes in (see resolveTaskMessage).
 	ctx, routing, _, _, err := o.routeOrContinue(ctx, message, opts, bb, availableTools)
 	if err != nil {
-		// Routing failed BEFORE the continuation committed: the anchor task
-		// keeps its prior terminal status (reactivation happens only below),
-		// so the manager's fresh-workflow fallback cannot orphan it.
+		// Routing failed before the commit point below: the anchor task keeps
+		// its terminal status, so the fresh-workflow fallback cannot orphan it.
 		return nil, err
 	}
 
-	// GOAL-MODE SUGGESTION GATE: on a fresh plain task whose routing just ran,
-	// judge whether goal mode is obviously the better fit and, when it is,
-	// offer the user to activate it BEFORE any execution starts. An accepted
-	// offer enters the goal loop with THIS routing decision (one routing per
-	// goal task, no second router call); a decline suppresses suggestions for
-	// the rest of the session; every failure fails OPEN to the plain path.
-	// The gate sits before the continuation commit point — on the fresh tasks
-	// it targets, that commit is a no-op.
+	// GOAL-MODE SUGGESTION GATE: offer goal activation on a fresh plain task whose
+	// routing just ran, BEFORE any execution; an accepted offer re-enters the goal
+	// loop with THIS routing. See specs/decisions/086-goal-mode-suggestion.md.
 	if o.goalSuggestionApplicable(opts) && o.goalSuggestRoutingEligible(routing) {
 		switch o.runGoalSuggestionGate(ctx, sessionID, message, routing) {
 		case gateAccepted:
@@ -3434,9 +2509,8 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		}
 	}
 
-	// Commit point for the continuation: routing succeeded, execution is
-	// about to start — flip the anchor task back to in_progress (no-op for
-	// fresh tasks, whose PersistNewTask row already is in_progress).
+	// Commit point: routing succeeded, execution starts — flip the anchor task
+	// back to in_progress (no-op for fresh tasks, already in_progress).
 	o.reactivateContinuationTask(bb, opts.TaskID)
 
 	// 4. Enrich context with domain/complexity/user-skills for execution.
@@ -3446,57 +2520,34 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 		ctx = WithUserSkills(ctx, opts.UserSkills)
 	}
 
-	// 5. Execute via the Conductor (single ReAct loop owning the task).
-	// Persist the routing decision on the blackboard so the Conductor and
-	// finalization can retrieve it.
+	// 5. Execute via the Conductor (single ReAct loop owning the task); persist
+	// the routing decision on the blackboard so the Conductor and finalization
+	// can retrieve it.
 	if pbb, ok := bb.(PersistableBlackboard); ok {
 		pbb.SetRouting(routing)
 	}
 
-	// Model Profiles essential-tools filter: when enabled, narrow the conductor's
-	// tool set ONCE here (before the ReAct loop starts) to reduce per-prompt
-	// schema overhead. Goal mode is the only documented exception: it returns
-	// early above (runGoalLoop), before this point, so the goal-mode tool set
-	// — including the verifier-required goal-mode-only tools
-	// (declare_verification etc.) that SelectTools would otherwise drop — is
-	// never narrowed. E2S also returns earlier, but applies the SAME filter
-	// inside its own branch (runE2SWithState) for full profile parity. Runs
-	// exactly once per task, never inside the step loop.
-	// When the profile is OFF (default) this is a no-op passthrough.
-	// Turn-scoped agent guarantee: when the user explicitly requested
-	// subagents (#mentions threaded into ctx by enrichAgentContext earlier in
-	// the flow), the Conductor prompt renders a "## Requested Subagents"
-	// directive — the delegate tool must survive narrowing or the directive
-	// would reference a tool the model cannot call. Without mentions the
-	// helper returns nil and the filter behaves exactly as before.
+	// Model Profiles essential-tools narrowing: once per task, before the ReAct loop
+	// (goal returned earlier; E2S filters in its own branch). The delegate tool
+	// survives narrowing on explicit subagent requests. See specs/domains/model-profiles.md.
 	availableTools = o.applyModelProfilesToolFilter(availableTools, modelProfilesAgentGuaranteedTools(ctx)...)
 
-	// Truncate conversation history to the configured window so long
-	// sessions don't overflow the Conductor's context. The most recent
-	// messages are kept — they carry the dialogue context the agent needs
-	// to understand follow-up references (e.g. "implement variant a").
-	// A trailing failed exchange of this exact message (recorded when its
-	// previous run failed) is dropped first — the task message repeats the
-	// request, so the model must not see it twice with a failure marker in
-	// between (dropFailedExchangeTail, the injection-time mirror of
-	// appendHistory's retry collapse).
+	// Window the history to ConductorHistoryWindow (recent messages carry the
+	// follow-up context); dropFailedExchangeTail drops a trailing failed exchange first.
 	conductorHistory := truncateHistory(dropFailedExchangeTail(o.historySnapshot(), message), o.config.ConductorHistoryWindow)
 
 	plansDir := opts.SessionPlansDir
 	execResult, err := o.runConductor(ctx, conductorMessage, bb, availableTools, plansDir, conductorHistory, nil, contentBlocks, "", "", false)
-	// Cooperative pause: a clean, recoverable checkpoint — not a failure.
-	// Surface it, persist the task as resumable (persistTaskOutcome via
-	// finalizeResult), and return the paused result with a nil error so the
-	// backend surfaces a Resume action rather than an error.
+	// Cooperative pause is a checkpoint, not a failure: return the paused result with
+	// a nil error so the backend surfaces a Resume action.
 	if errors.Is(err, agent.ErrPaused) {
 		o.emitSessionPaused()
 		err = nil
 	}
 	// C-5: propagate ErrExecutionIncomplete alongside best-effort result.
 	if err != nil && !errors.Is(err, orchestration.ErrExecutionIncomplete) {
-		// Mark the task as failed so it is not left lingering in_progress
-		// (which would make it a silent-resume candidate). Mirrors the Resume
-		// path and the routing-error path below.
+		// Mark the task failed so it cannot become a silent-resume candidate;
+		// mirrors the Resume and routing-error paths.
 		if pbb, ok := bb.(PersistableBlackboard); ok {
 			pbb.FailTask()
 		}
@@ -3504,7 +2555,6 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	}
 	incompleteErr := err
 
-	// Guard against nil execResult.
 	if execResult == nil {
 		execResult = &orchestration.ExecutionResult{}
 	}
@@ -3519,10 +2569,8 @@ func (o *Orchestrator) HandleMessage(ctx context.Context, message, sessionID str
 	return result, nil
 }
 
-// disabledToolNames returns the set of tool names disabled for the current
-// mode (e.g. CHAT / No-Project mode disables glob/ripgrep/semantic_search),
-// or nil if no tools are disabled / the core registry is unavailable. Used to
-// build the Conductor's available-tool view and the per-mode subagent toolset.
+// disabledToolNames returns the tool names disabled for the current mode (CHAT/
+// No-Project disables filesystem tools) or nil; Conductor view + subagent toolset.
 func (o *Orchestrator) disabledToolNames() map[string]bool {
 	if o.coreToolRegistry == nil {
 		return nil
@@ -3530,21 +2578,12 @@ func (o *Orchestrator) disabledToolNames() map[string]bool {
 	return o.coreToolRegistry.DisabledTools()
 }
 
-// delegateToolName is the conductor-only delegation channel. It is normally a
-// narrowable orchestration tool, but becomes turn-scoped guaranteed whenever
-// the user explicitly requested subagents (see modelProfilesAgentGuaranteedTools).
+// delegateToolName is the conductor-only delegation channel.
 const delegateToolName = "delegate"
 
-// modelProfilesAgentGuaranteedTools returns the extra tool names that must join the
-// model-profile guaranteed set for THIS turn, derived from the request context
-// populated by enrichAgentContext. When the user explicitly requested
-// subagents (#agent mentions → WithUserAgents), the Conductor's system prompt
-// renders a "## Requested Subagents" directive instructing it to delegate —
-// narrowing must then keep the delegate tool visible, or the directive would
-// reference a tool the model cannot call. The guarantee is turn-scoped, like
-// the MCP-sourced class: without an explicit request the helper returns nil
-// and delegate keeps its default semantics (a conductor-only tool excluded
-// by the narrowing). Static config validation is unaffected.
+// modelProfilesAgentGuaranteedTools returns the turn-scoped guaranteed tool names
+// for THIS request: delegate when the user explicitly requested subagents (the
+// narrowing must keep them callable); nil otherwise. See specs/domains/model-profiles.md.
 func modelProfilesAgentGuaranteedTools(ctx context.Context) []string {
 	if len(UserAgentsFromContext(ctx)) > 0 {
 		return []string{delegateToolName}
@@ -3552,27 +2591,12 @@ func modelProfilesAgentGuaranteedTools(ctx context.Context) []string {
 	return nil
 }
 
-// applyModelProfilesToolFilter narrows the conductor's available-tool set when the
-// model-profile profile is active. It delegates to modelprofiles.SelectTools, which
-// unions the user's always-present list, the protected orchestration tools
-// (finish + memory + ask_user), and every MCP-sourced tool — a static
-// selection with no quantitative budget and no router matching. It runs
-// exactly once per task on the Conductor path (before the ReAct loop) and
-// once inside the E2S branch (runE2SWithState); goal mode is intentionally
-// never narrowed (HandleMessage returns before either call site).
-//
-// The optional extraGuaranteed names are turn-scoped guaranteed tools passed
-// by the caller (see modelProfilesAgentGuaranteedTools): currently the delegate
-// tool when the request explicitly asks for subagents. Like the MCP class,
-// the guarantee is scoped to this call and never part of static config
-// validation.
-//
-// When the profile is OFF (the default), it returns the tools untouched — zero
-// behavior change.
+// applyModelProfilesToolFilter narrows the conductor's available-tool set while a
+// profile with essential-tools narrowing is active; OFF (default) is a no-op
+// passthrough. Runs once per task on the Conductor path and once in the E2S branch;
+// goal mode is never narrowed (HandleMessage returns first). Rules: specs/domains/model-profiles.md.
 func (o *Orchestrator) applyModelProfilesToolFilter(in []sdktools.ToolDescriptor, extraGuaranteed ...string) []sdktools.ToolDescriptor {
 	sc := o.modelProfilesSettings()
-	// Master toggle AND the essential-tools variant must both be enabled.
-	// When either is off, return the input untouched (zero behavior change).
 	if !o.modelProfilesEssentialToolsEnabled() {
 		return in
 	}
@@ -3581,21 +2605,16 @@ func (o *Orchestrator) applyModelProfilesToolFilter(in []sdktools.ToolDescriptor
 	return modelprofiles.MaybeCompactDescriptions(filtered, sc.EssentialTools.CompactDescriptions)
 }
 
-// modelProfilesEssentialToolsEnabled reports whether the model-profile profile's
-// essential-tools narrowing is active: master toggle AND the essential-tools
-// variant both on. Reads the effective settings (the runtime override when a
-// config change refreshed them), so a runtime toggle is honored without an
-// app restart.
+// modelProfilesEssentialToolsEnabled reports whether essential-tools narrowing is
+// active (master toggle AND variant on), reading effective settings so a runtime
+// toggle needs no restart.
 func (o *Orchestrator) modelProfilesEssentialToolsEnabled() bool {
 	sc := o.modelProfilesSettings()
 	return sc.Enabled && sc.EssentialTools.Enabled
 }
 
-// ModelProfilesNarrowingEnabled is the exported accessor for modelProfilesEssentialToolsEnabled.
-// The session manager uses it to pre-check a resume against the same fresh
-// effective settings the orchestrator's goal guard reads (see
-// Manager.ResumeTask) — so the frontend API's pre-flight and the manager's
-// choke point agree with the orchestrator's invariant.
+// ModelProfilesNarrowingEnabled exposes modelProfilesEssentialToolsEnabled so the
+// session manager's resume pre-check reads the same invariant (Manager.ResumeTask).
 func (o *Orchestrator) ModelProfilesNarrowingEnabled() bool {
 	return o.modelProfilesEssentialToolsEnabled()
 }

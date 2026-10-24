@@ -550,6 +550,15 @@ User clicks "Resume" (after task_failed_resumable)
           └─ Conductor continues toward completion (no plan required)
 ```
 
+**Error semantics.** `orchestration.ErrExecutionIncomplete` carrying a non-nil
+`ExecutionResult` returns a valid `*HandleResult` alongside the error (partial
+success — e.g. a step limit): callers `errors.Is`-check and still consume the
+result's partial output, plan state and blackboard. Any other error is a complete
+failure: the task is marked failed and a nil result is returned. A cooperative
+pause (`agent.ErrPaused`) is a clean checkpoint: the task persists as paused
+(resumable), `session_paused` is emitted, and `Resume` returns a nil error with
+`Status` = `ExecutionStatusPaused`.
+
 #### Task-scoped MCP authorization
 
 `prepareTaskMCP` (`core/orchestrator_mcp_prepare.go`) is shared by
@@ -620,6 +629,14 @@ verifier's units survive a restart. The same ledger is surfaced to the UI as the
 `work_units` field of `GetSessionRuntimeStatus` (below). See
 [ADR-048](../decisions/048-unified-recovery-ledger.md) and
 [delegation.md](orchestration/delegation.md#durable-unit-ledger-and-resume-relaunch).
+
+The wave is the system-driven half of the pause invariant: everything paused
+settles formally before the resumed task's first LLM call, with no model
+decision involved. Its outcome contract (see `resumePausedWork`): a pause
+signal re-tripped mid-wave checkpoints cleanly (`pausedAgain=true`, no LLM
+call); wave wiring failures return as errors and the caller falls through;
+subagent failures surface in their results — the wave summary is factual data
+for the resumed task, never instructions.
 
 `recordResumeOutcome` appends **only the assistant side** of the resumed
 execution to the in-memory conversation history — no user/assistant pair is
@@ -841,7 +858,7 @@ User clicks "Resume" (optionally with model/reasoning-effort overrides)
           └─ orchestrator.Resume → resumeGoalLoop (goal task) or plain Conductor
 ```
 
-`ResumeSession(sessionID, modelOverride, reasoningEffort, nudge)` delegates to `ResumeTask`. The optional `nudge` is injected as a trailing user message into the first resumed turn (one-shot). An empty nudge resumes silently from the checkpoint. `session_resumed` clears the UI's paused state (complementary to `session_paused`).
+`ResumeSession(sessionID, modelOverride, reasoningEffort, nudge)` delegates to `ResumeTask`. The optional `nudge` is injected as a trailing user message into the first resumed turn (one-shot). An empty nudge resumes silently from the checkpoint. On the Conductor path the nudge rides on the reconstructed task message — under the "User follow-up on resume" heading, ahead of the auto-resume wave summary — and threads into every subagent the wave relaunches BEFORE wave work (the Conductor itself sees it only at its first LLM call, after the wave). On the goal-loop path it lands as the final user message next to the pending tool result (`PendingUserInterjection`). `session_resumed` clears the UI's paused state (complementary to `session_paused`).
 
 **Nudge-resume (sending a message into a paused session):**
 
