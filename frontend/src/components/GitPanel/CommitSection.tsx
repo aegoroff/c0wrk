@@ -90,7 +90,15 @@ export function CommitSection() {
   const stagedCount = entries.filter((e) => e.staged).length;
   const isEmpty = commitMessage.trim().length === 0;
   const isDisabled = stagedCount === 0 || isEmpty || isCommitting;
-  const isGenerateDisabled = stagedCount === 0 || isGenerating || isCommitting;
+  // The branch is unresolved from app start (EMPTY_BRANCH_INFO) and for one
+  // status-RPC window after every focus/checkout switch (ADR-098). A draft
+  // written in that window would land in the hidden '' fallback slot and
+  // vanish from the box when the real branch resolves — so the box is
+  // read-only and Generate disabled until the branch resolves, and the
+  // write paths below additionally skip as a guard.
+  const branchResolved = branchName !== "";
+  const isGenerateDisabled =
+    stagedCount === 0 || isGenerating || isCommitting || !branchResolved;
 
   // Auto-height: expand up to ~6 lines
   const adjustHeight = useCallback(() => {
@@ -168,7 +176,10 @@ export function CommitSection() {
       // An empty staged diff (e.g. stale entries) is reported by the
       // backend as an error and surfaced below.
       const message = await generateCommitMessage();
-      setCommitMessage(projectId, branch, message);
+      // Guard (the button is disabled while the branch is unresolved):
+      // never write into the hidden '' fallback slot — the result would
+      // vanish when the branch resolves (ADR-098).
+      if (branch !== "") setCommitMessage(projectId, branch, message);
     } catch (err) {
       setCommitError(projectId, err instanceof Error ? err.message : "Failed to generate commit message");
     } finally {
@@ -189,8 +200,12 @@ export function CommitSection() {
       <textarea
         ref={textareaRef}
         value={commitMessage}
+        // Read-only while the branch is unresolved: a keystroke now would
+        // be attributed to the hidden '' fallback slot and vanish when the
+        // branch resolves (ADR-098).
+        readOnly={!branchResolved}
         onChange={(e) => {
-          if (activeProjectId === null) return;
+          if (activeProjectId === null || !branchResolved) return;
           setCommitMessage(activeProjectId, branchName, e.target.value);
           if (error) setCommitError(activeProjectId, null);
           suppressedFlow.setSuppressed(null);

@@ -762,6 +762,21 @@ describe('gitPanelStore — per-project commit state', () => {
     expect(bogus.commitMessageByBranch).toEqual({})
   })
 
+  it('merge drops a branch literally named __proto__ (prototype setter — fail-closed)', () => {
+    const current = useGitPanelStore.getState()
+    // JSON.parse creates `__proto__` as an OWN enumerable property — the
+    // exact shape a real localStorage payload for a (legal) git branch of
+    // that name produces; an object literal in source would instead invoke
+    // the prototype setter and never carry the key at all.
+    const persisted = JSON.parse(
+      '{"commitMessageByBranch":{"p1":{"main":"keep","__proto__":"sneaky"}}}',
+    ) as unknown
+    const merged = mergeGitPanel(persisted, current)
+    // The branch's draft is dropped rather than silently lost to the
+    // prototype setter; the legitimate branch survives.
+    expect(merged.commitMessageByBranch).toEqual({ p1: { main: 'keep' } })
+  })
+
   it('merge defaults commitMessageByBranch to {} for legacy state without it', () => {
     const current = useGitPanelStore.getState()
     const merged = mergeGitPanel({ viewMode: 'tree', expandedDirs: ['src'] }, current)

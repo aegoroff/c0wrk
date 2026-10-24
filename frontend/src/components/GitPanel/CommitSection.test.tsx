@@ -309,6 +309,36 @@ describe('CommitSection — per-project commit state', () => {
     expect(textarea().value).toBe('')
   })
 
+  it('REGRESSION: typing while the branch is unresolved writes nothing into the \'\' fallback slot', () => {
+    useGitPanelStore.setState({
+      entries: [makeEntry({ path: 'a.ts', staged: true })],
+      // branch.name starts '' (EMPTY_BRANCH_INFO) until the first status
+      // refresh resolves it — the ADR-098 write-window.
+      branch: { name: '', upstream: '', ahead: 0, behind: 0 },
+    })
+    render()
+    // The box is read-only and Generate disabled until the branch resolves…
+    expect(textarea().readOnly).toBe(true)
+    expect(generateBtn().disabled).toBe(true)
+    // …and even a synthetic input (readOnly only stops native typing)
+    // cannot write into the hidden '' slot.
+    typeDraft('typed before the branch resolved')
+    expect(useGitPanelStore.getState().commitMessageByBranch).toEqual({})
+    expect(textarea().value).toBe('')
+
+    // The branch resolves: the box becomes editable, Generate is enabled,
+    // and the draft lands in the resolved branch's slot.
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'main', upstream: '', ahead: 0, behind: 0 })
+    })
+    expect(textarea().readOnly).toBe(false)
+    expect(generateBtn().disabled).toBe(false)
+    typeDraft('feat: typed after resolve')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']).toEqual({
+      main: 'feat: typed after resolve',
+    })
+  })
+
   it('survives GitPanel unmount (CHAT mode) in memory', () => {
     render()
     typeDraft('feat: keep me')
@@ -391,6 +421,39 @@ describe('CommitSection — per-project commit state', () => {
     // Switching back to A surfaces the stored error.
     switchProject('proj-a')
     expect(container.textContent).toContain('model offline')
+  })
+
+  it('REGRESSION: generate result lands in the branch captured at click time, not the focused one', async () => {
+    useGitPanelStore.setState({
+      entries: [makeEntry({ path: 'a.ts', staged: true })],
+      commitMessageByBranch: { 'proj-a': { main: 'feat: drafted on main' } },
+    })
+    const pending = deferred<string>()
+    gitMocks.generateCommitMessage.mockReturnValueOnce(pending.promise)
+
+    render()
+    await act(async () => {
+      generateBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    // The focused branch moves mid-generation (a session switch onto
+    // another worktree): the capture-at-click-time contract pins the WRITE
+    // target, mirroring the commit-path regression above.
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'dev', upstream: '', ahead: 0, behind: 0 })
+    })
+    await act(async () => {
+      pending.resolve('feat: generated for main')
+    })
+    await flush()
+
+    // The result landed in the captured branch's slot; the now-focused
+    // branch's draft is untouched and the box (showing dev) stays empty.
+    const byBranch = useGitPanelStore.getState().commitMessageByBranch['proj-a']!
+    expect(byBranch.main).toBe('feat: generated for main')
+    expect(byBranch.dev).toBeUndefined()
+    expect(textarea().value).toBe('')
+    expect(container.textContent).not.toContain('feat: generated for main')
   })
 
   it('commits the active project draft, records it in the console and clears the draft', async () => {

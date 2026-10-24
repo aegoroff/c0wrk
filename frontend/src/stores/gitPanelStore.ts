@@ -474,6 +474,13 @@ export function mergeGitPanel(
       if (branches === null || typeof branches !== 'object') continue
       const record: Record<string, string> = {}
       for (const [branch, message] of Object.entries(branches)) {
+        // `__proto__` is a legal git branch name but a prototype setter on a
+        // plain object literal: `record[branch] = message` would silently
+        // fail to create an own property, so the draft would vanish on
+        // rehydrate while the in-memory computed-key write keeps it. Drop
+        // the key — fail-closed, same direction as the corrupt-entry rule
+        // below.
+        if (branch === '__proto__') continue
         if (typeof message === 'string' && message !== '') {
           record[branch] = message
         }
