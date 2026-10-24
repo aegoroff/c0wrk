@@ -154,7 +154,14 @@ export function SystemNotificationSettings() {
         if (isWebTransport()) {
           setPermission(outcome === 'denied' ? 'denied' : 'neutral')
         }
-        if (outcome === 'granted' && permission !== 'denied') {
+        // Suppression derives from the FRESH verdict, not the render-scope
+        // closure: on the web the outcome IS the current permission (a
+        // re-enable after a since-fixed denial resolves 'granted' while the
+        // closure still reads the old 'denied'); on the desktop the outcome
+        // is a constant no-op, so the mount probe's OS verdict stays the
+        // real denial signal.
+        const denied = isWebTransport() ? outcome === 'denied' : permission === 'denied'
+        if (outcome === 'granted' && !denied) {
           void sendSystemNotification({
             kind: 'success',
             title: 'c0wrk — System notifications enabled',

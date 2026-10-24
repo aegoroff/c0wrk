@@ -734,9 +734,10 @@ func ApplyDefaults(cfg *Config) {
 	// (an absent section, or an explicit `enabled: false`) never starts the
 	// sidecar. Only the bind address is seeded, so the persisted shape always
 	// names the explicit loopback default even for an operator who only flips
-	// `enabled` on; port 0 (auto) and the empty token (ephemeral per-launch)
-	// are the zero values by design. An UNSAFE enabled section is not handled
-	// here: normalizeWebAccess (load pipeline) warns and resets the section.
+	// `enabled` on; port 0 (auto) and the empty token (minted once at the
+	// first start, then persisted) are the zero values by design. An UNSAFE
+	// enabled section is not handled here: normalizeWebAccess (load pipeline)
+	// warns and resets the section.
 	if cfg.WebAccess.Bind == "" {
 		cfg.WebAccess.Bind = DefaultWebAccessBind
 	}

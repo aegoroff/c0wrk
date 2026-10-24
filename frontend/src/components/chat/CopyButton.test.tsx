@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
@@ -225,6 +225,10 @@ describe('CopyButton', () => {
 describe('CopyButton in web transport (no native save dialog)', () => {
   let container: HTMLElement
   let root: Root
+  // The anchor-download test's spy, restored in afterEach: clearAllMocks
+  // does NOT restore spies, so a leaked no-op click would silently break
+  // real anchor clicks in later tests.
+  let anchorClickSpy: MockInstance | null = null
   const createObjectURL = vi.fn<(obj: Blob) => string>(() => 'blob:mock-url')
   const revokeObjectURL = vi.fn<(url: string) => void>(() => {})
 
@@ -247,6 +251,8 @@ describe('CopyButton in web transport (no native save dialog)', () => {
       window.dispatchEvent(new Event('blur'))
     })
     act(() => root.unmount())
+    anchorClickSpy?.mockRestore()
+    anchorClickSpy = null
     vi.mocked(isWebTransport).mockReturnValue(false)
     vi.clearAllMocks()
     vi.useRealTimers()
@@ -261,7 +267,7 @@ describe('CopyButton in web transport (no native save dialog)', () => {
     render({ text: 'markdown body' })
     pressShift()
 
-    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     const button = container.querySelector('button')!
     await act(async () => {
       button.click()
@@ -272,7 +278,7 @@ describe('CopyButton in web transport (no native save dialog)', () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     const blob = createObjectURL.mock.calls[0]?.[0]
     expect(await blob?.text()).toBe('markdown body')
-    expect(anchorClick).toHaveBeenCalledTimes(1)
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1)
     // The anchor download cannot report failure — the feedback claims only
     // that it started, never "Saved".
     expect(container.textContent).toContain('Download started')

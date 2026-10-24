@@ -14,14 +14,19 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { isWailsReadyMock, transportDetectionMock } = vi.hoisted(() => ({
+const { isWailsReadyMock, transportDetectionMock, loggerWarnMock } = vi.hoisted(() => ({
   isWailsReadyMock: vi.fn((): boolean => false),
   transportDetectionMock: vi.fn((): Promise<'wails' | 'web' | 'none'> => Promise.resolve('web')),
+  loggerWarnMock: vi.fn(),
 }))
 
 vi.mock('@/api/runtime', () => ({
   isWailsReady: isWailsReadyMock,
   transportDetection: transportDetectionMock,
+}))
+
+vi.mock('@/lib/logger', () => ({
+  logger: { warn: loggerWarnMock, error: vi.fn(), debug: vi.fn() },
 }))
 
 import { armWhenRuntimeReady } from './armWhenRuntimeReady'
@@ -43,6 +48,7 @@ async function flushMicrotasks(): Promise<void> {
 beforeEach(() => {
   isWailsReadyMock.mockReset().mockReturnValue(false)
   transportDetectionMock.mockReset().mockResolvedValue('web')
+  loggerWarnMock.mockReset()
 })
 
 describe('armWhenRuntimeReady', () => {
@@ -135,6 +141,32 @@ describe('armWhenRuntimeReady', () => {
     await flushMicrotasks()
 
     expect(attach).toHaveBeenCalledTimes(1)
+    dispose()
+  })
+
+  it('logs a rejected probe and stays disarmed (no unhandled rejection)', async () => {
+    transportDetectionMock.mockRejectedValue(new Error('probe down'))
+    const attach = vi.fn(() => vi.fn())
+
+    const dispose = armWhenRuntimeReady(attach)
+    await flushMicrotasks()
+
+    expect(attach).not.toHaveBeenCalled()
+    expect(loggerWarnMock).toHaveBeenCalledTimes(1)
+    expect(String(loggerWarnMock.mock.calls[0]?.[0])).toContain('stay disarmed')
+    dispose()
+  })
+
+  it('logs a throwing async attach (the sync wails path propagates instead)', async () => {
+    const attach = vi.fn((): (() => void) => {
+      throw new Error('boom')
+    })
+
+    const dispose = armWhenRuntimeReady(attach)
+    await flushMicrotasks()
+
+    expect(attach).toHaveBeenCalledTimes(1)
+    expect(loggerWarnMock).toHaveBeenCalledTimes(1)
     dispose()
   })
 })

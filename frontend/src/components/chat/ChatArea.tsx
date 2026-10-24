@@ -18,9 +18,9 @@ import { BlackboardPanel } from './BlackboardPanel'
 import { BookmarksPanel } from './BookmarksPanel'
 import { ChatInput } from './ChatInput'
 import { ArchivedBanner } from './ArchivedBanner'
+import { ChatAreaPlaceholder } from './ChatAreaPlaceholder'
 import { ScrollProvider } from './ScrollContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { Loader2, MessageCircle } from 'lucide-react'
 import { logger } from '@/lib/logger'
 
 export function ChatArea() {
@@ -144,56 +144,26 @@ export function ChatArea() {
   }, [displayItems])
 
   if (!activeSessionId) {
-    return (
-      <div className="flex flex-1 flex-col">
-        <div className="flex-1 flex items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-3">
-            <MessageCircle className="h-12 w-12 opacity-20" />
-          </div>
-        </div>
-        <ChatInput />
-      </div>
-    )
+    return <ChatAreaPlaceholder sessionId={null} historyInFlight={false} inputMode={inputMode} isArchived={false} />
   }
 
   const hasContent = messages.length > 0 || !!streamingText
 
-  // Archived sessions are read-only: swap the input shell for an "Archived"
-  // banner. Hoisted into a single const so the archived gate lives in one
-  // place (used by both render branches below). activeSessionId is guaranteed
-  // non-null past the early return above, so no extra null check is needed.
-  const inputShell = isArchived ? <ArchivedBanner sessionId={activeSessionId} /> : <ChatInput />
-
   if (!hasContent) {
-    // History (GetSessionHistory + reconcile) still in flight with nothing to
-    // show: spin in place of the empty-session icon so a cold start and a
-    // session switch A→B don't flash the "empty session" placeholder. The
-    // marker settles on BOTH resolve and reject (loader's finally), so a
-    // failed load stops the spin and the error card explains the empty chat;
-    // a resync re-run never reaches this branch while content is on screen.
-    const historyInFlight = !historyLoaded
     return (
-      <div className="flex flex-1 flex-col">
-        <div className="flex-1 flex items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-3">
-            {historyInFlight
-              ? <Loader2 className="size-8 animate-spin opacity-30" aria-label="Loading session history" />
-              : <MessageCircle className="h-12 w-12 opacity-20" />}
-          </div>
-        </div>
-        <ErrorBoundary fallback={<div className="text-xs text-destructive p-2">Panel error</div>}>
-          <ExecutionPanels />
-          <BlackboardPanel />
-        </ErrorBoundary>
-        <ErrorBoundary
-          resetKeys={[activeSessionId, inputMode, isArchived]}
-          fallback={<div className="text-xs text-destructive p-2">Input error</div>}
-        >
-          {inputShell}
-        </ErrorBoundary>
-      </div>
+      <ChatAreaPlaceholder
+        sessionId={activeSessionId}
+        historyInFlight={!historyLoaded}
+        inputMode={inputMode}
+        isArchived={isArchived}
+      />
     )
   }
+
+  // Archived sessions are read-only: swap the input shell for an "Archived"
+  // banner. activeSessionId is guaranteed non-null past the early return
+  // above, so no extra null check is needed.
+  const inputShell = isArchived ? <ArchivedBanner sessionId={activeSessionId} /> : <ChatInput />
 
   return (
     <ScrollProvider>

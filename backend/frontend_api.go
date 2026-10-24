@@ -583,7 +583,7 @@ func (f *FrontendAPI) seedAcquire() {
 // lives on FrontendAPILifecycle — NOT directly on FrontendAPI — because every
 // exported FrontendAPI method is promoted onto desktop.App and bound as a
 // frontend-callable Wails RPC; Init is a startup-only infrastructure operation
-// (it republishes all 16 seed fields of the LIVE app instance) and must never
+// (it republishes every seed field of the LIVE app instance) and must never
 // be callable from the renderer — the same charter as SetConfigLoadState (see
 // the FrontendAPILifecycle doc). The desktop App embeds a *FrontendAPI seed
 // (allocated once in NewApp) whose pointer the Wails binding dispatch re-reads

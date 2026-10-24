@@ -386,20 +386,13 @@ func (s *Server) wsReadPump(c *WSConn) {
 		if err != nil {
 			return
 		}
+		// readMessage answers interleaved control frames (ping/pong/close)
+		// internally, so only data messages reach this switch.
 		switch opcode {
 		case opText, opBinary:
 			if s.wsInbound != nil {
 				s.wsInbound(c, payload)
 			}
-		case opPing:
-			if err := c.writeFrame(opPong, payload); err != nil {
-				return
-			}
-		case opPong:
-			// keepalive replies are absorbed silently
-		case opClose:
-			_ = c.writeFrame(opClose, payload)
-			return
 		}
 	}
 }

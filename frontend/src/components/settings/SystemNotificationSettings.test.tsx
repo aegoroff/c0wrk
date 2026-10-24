@@ -244,6 +244,29 @@ describe('SystemNotificationSettings', () => {
     expect(mocks.send).not.toHaveBeenCalled()
   })
 
+  it('toggle-on on the web previews the banner after a since-fixed denial (outcome, not the stale closure)', async () => {
+    // The mount probe read a real denial, the user lifted the block in the
+    // browser's site settings, and the re-enable click's ensure resolves
+    // 'granted'. The render-scope `permission` closure still reads 'denied'
+    // at that point — suppression must derive from the fresh outcome, or
+    // the confirmation banner never fires.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.ensureNotificationPermission.mockResolvedValue('granted')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    expect(mocks.send).toHaveBeenCalledTimes(1)
+    const [content] = mocks.send.mock.calls[0] as [{ title: string }]
+    expect(content.title).toBe('c0wrk — System notifications enabled')
+  })
+
   it('toggle-on on the web still derives the section state from the prompt outcome', async () => {
     // The web outcome IS a permission verdict, so the derivation must keep
     // running there: a denied prompt keeps the browser-specific hint.

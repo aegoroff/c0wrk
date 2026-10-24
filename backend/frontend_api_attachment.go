@@ -201,7 +201,7 @@ func (f *FrontendAPI) AttachFileContent(sessionID, fileName, mimeType string, da
 		return nil, fmt.Errorf("attach file content: write temp file: %w", err)
 	}
 
-	infos, err := f.app.Manager().AttachFiles(context.Background(), sessionID, []string{path})
+	infos, err := f.app.Manager().AttachFiles(f.ctx(), sessionID, []string{path})
 	if err != nil {
 		return infos, fmt.Errorf("attach file content: %w", err)
 	}

@@ -37,6 +37,7 @@
 // pending detection when not, and is safe to call twice — the exact
 // effect-cleanup shape the arming hooks need.
 import { isWailsReady, transportDetection } from '@/api/runtime'
+import { logger } from '@/lib/logger'
 
 export function armWhenRuntimeReady(attach: () => () => void): () => void {
   let disposed = false
@@ -53,10 +54,17 @@ export function armWhenRuntimeReady(attach: () => () => void): () => void {
   // The probe is a one-round-trip promise per page load; by the time the app
   // root mounts it has usually settled already, so this is near-instant in
   // both transports.
-  void transportDetection().then((mode) => {
-    if (disposed || detach !== null || mode === 'none') return
-    detach = attach()
-  })
+  void transportDetection()
+    .then((mode) => {
+      if (disposed || detach !== null || mode === 'none') return
+      detach = attach()
+    })
+    // A rejected detection or a throwing attach() must not become an
+    // unhandled rejection — the sync wails path propagates to the caller,
+    // so the async path at least logs and leaves the triggers disarmed.
+    .catch((err: unknown) => {
+      logger.warn('armWhenRuntimeReady: transport detection/attach failed; triggers stay disarmed', err)
+    })
 
   return () => {
     disposed = true

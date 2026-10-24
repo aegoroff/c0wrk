@@ -113,8 +113,8 @@ func TestHandleGoalProposalResponse_MissingDecision(t *testing.T) {
 	a.handleGoalProposalResponse(map[string]any{
 		"request_id": "req-5",
 	}, expectedDiagnostics(t, diagnosticExpectation{
-		level: slog.LevelWarn, message: "goal proposal response missing decision field",
-		attrs: map[string]string{"request_id": "req-5"},
+		level: slog.LevelWarn, message: "goal proposal response has unknown or missing decision",
+		attrs: map[string]string{"decision": "", "request_id": "req-5"},
 	}))
 
 	select {
@@ -122,6 +122,38 @@ func TestHandleGoalProposalResponse_MissingDecision(t *testing.T) {
 		t.Error("expected no dispatch for payload missing decision")
 	default:
 		// pass: channel empty
+	}
+}
+
+// TestHandleGoalProposalResponse_UnknownDecision verifies a payload carrying
+// a decision outside the accepted enum (approve/cancel) is skipped: the
+// malformed response must not consume the pending proposal as an implicit
+// cancel (mirrors parsePlanApprovalDecision's discipline).
+func TestHandleGoalProposalResponse_UnknownDecision(t *testing.T) {
+	a := &App{}
+	ch := make(chan goalProposalResponse, 1)
+	a.pendingGoalProposals.Store("req-6", &pendingGoalProposalEntry{
+		ch:        ch,
+		sessionID: "sess-6",
+	})
+	t.Cleanup(func() { a.pendingGoalProposals.Delete("req-6") })
+
+	a.handleGoalProposalResponse(map[string]any{
+		"request_id": "req-6",
+		"decision":   "maybe",
+	}, expectedDiagnostics(t, diagnosticExpectation{
+		level: slog.LevelWarn, message: "goal proposal response has unknown or missing decision",
+		attrs: map[string]string{"decision": "maybe", "request_id": "req-6"},
+	}))
+
+	select {
+	case <-ch:
+		t.Error("expected no dispatch for unknown decision")
+	default:
+		// pass: channel empty
+	}
+	if _, stillThere := a.pendingGoalProposals.Load("req-6"); !stillThere {
+		t.Error("pending proposal entry must stay alive for a valid retry")
 	}
 }
 

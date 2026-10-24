@@ -279,6 +279,7 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
     // card). Validation goes through the per-kind wire vocabulary — an
     // unknown non-empty decision must not render as "denied" (CS #25).
     const decision = toolConfirmWireDecision(data.decision)
+    const tool = typeof msg.metadata?.tool === 'string' ? msg.metadata.tool : undefined
     if (alreadyResolved) {
       // The card was settled locally — by THIS surface's own answer, or by an
       // earlier broadcast. Overwrite ONLY when this event carries the
@@ -290,7 +291,7 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
       const current = getToolConfirmResolution(msg.metadata)
       if (current === decision) return
       store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...toolConfirmResolved(decision) } })
-      store.setActivityStatus(sessionId, null)
+      store.setActivityStatus(sessionId, decision === 'confirmed' && tool ? `Running tool: ${tool}...` : null)
       return
     }
     const resolution: Record<string, unknown> =
@@ -307,7 +308,6 @@ export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedDat
         })
       }
     }
-    const tool = typeof msg.metadata?.tool === 'string' ? msg.metadata.tool : undefined
     store.setActivityStatus(sessionId, decision === 'confirmed' && tool ? `Running tool: ${tool}...` : null)
     return
   }

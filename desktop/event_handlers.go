@@ -107,6 +107,21 @@ func parsePlanApprovalDecision(v string) (string, bool) {
 	}
 }
 
+// parseGoalProposalDecision validates a frontend-supplied goal-proposal
+// decision string against the accepted enum (goalProposalResponse: approve /
+// cancel). Returns ok=false on missing or unrecognized values, mirroring
+// parsePlanApprovalDecision's defense-in-depth discipline: an unrecognized
+// decision is a malformed response, not an implicit cancel, so the pending
+// proposal stays alive for a valid retry instead of being consumed.
+func parseGoalProposalDecision(v string) (string, bool) {
+	switch v {
+	case "approve", "cancel":
+		return v, true
+	default:
+		return "", false
+	}
+}
+
 // stringField extracts a string field from a payload, logging a warning if the
 // field is missing or has the wrong type.
 func stringField(payload map[string]any, key, eventName string, log *slog.Logger) (string, bool) {
@@ -527,9 +542,11 @@ func (a *App) handleGoalProposalResponse(payload map[string]any, log *slog.Logge
 	if !ok {
 		return
 	}
-	decision, _ := payload["decision"].(string)
-	if decision == "" {
-		log.Warn("goal proposal response missing decision field", "request_id", requestID)
+	rawDecision, _ := payload["decision"].(string)
+	decision, ok := parseGoalProposalDecision(rawDecision)
+	if !ok {
+		log.Warn("goal proposal response has unknown or missing decision",
+			"decision", rawDecision, "request_id", requestID)
 		return
 	}
 	condition, _ := payload["condition"].(string)

@@ -186,20 +186,47 @@ func TestWebInboundDispatch_GoalProposalResolves(t *testing.T) {
 	ch := make(chan goalProposalResponse, 1)
 	a.pendingGoalProposals.Store("req-1", &pendingGoalProposalEntry{ch: ch, sessionID: "sess-1"})
 
+	// "approve" is the enum value the frontend sends (GoalProposalPanel's
+	// Decision vocabulary, same as the RPC path).
 	dispatchInbound(a, webInboundFrame(t, "goal_proposal_response",
-		map[string]any{"request_id": "req-1", "decision": "accepted",
+		map[string]any{"request_id": "req-1", "decision": "approve",
 			"condition": "tests pass", "verify": "go test ./...", "verification_mode": "command"}), silentUIEmit(), silentLogger())
 
 	select {
 	case got := <-ch:
-		if got.Decision != "accepted" || got.Condition != "tests pass" || got.Verify != "go test ./..." {
-			t.Errorf("got %+v, want the accepted proposal", got)
+		if got.Decision != "approve" || got.Condition != "tests pass" || got.Verify != "go test ./..." {
+			t.Errorf("got %+v, want the approved proposal", got)
 		}
 	default:
 		t.Fatal("no goal-proposal decision delivered")
 	}
 	if _, ok := a.pendingGoalProposals.Load("req-1"); ok {
 		t.Error("pending goal proposal entry not cleaned up")
+	}
+}
+
+func TestWebInboundDispatch_GoalProposalRejectsUnknownDecision(t *testing.T) {
+	a := &App{}
+	ch := make(chan goalProposalResponse, 1)
+	a.pendingGoalProposals.Store("req-1", &pendingGoalProposalEntry{ch: ch, sessionID: "sess-1"})
+
+	// "accepted" is not one of the catalog enum values (approve / cancel) —
+	// the malformed response must be dropped, mirroring the plan-approval
+	// discipline above: an unrecognized decision is a malformed response,
+	// not an implicit cancel.
+	dispatchInbound(a, webInboundFrame(t, "goal_proposal_response",
+		map[string]any{"request_id": "req-1", "decision": "accepted",
+			"condition": "tests pass", "verify": "go test ./...", "verification_mode": "command"}), silentUIEmit(), silentLogger())
+
+	select {
+	case got := <-ch:
+		t.Fatalf("malformed decision was delivered: %+v", got)
+	default:
+	}
+	// Fail-closed: the malformed response does not consume the pending
+	// proposal — a valid retry can still resolve it.
+	if _, ok := a.pendingGoalProposals.Load("req-1"); !ok {
+		t.Error("pending goal proposal entry was consumed by a malformed decision")
 	}
 }
 

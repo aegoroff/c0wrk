@@ -41,8 +41,9 @@ vi.mock('@/lib/logger', () => ({
 
 import { WebAccessSettings } from './WebAccessSettings'
 import { logger } from '@/lib/logger'
+import type { WebAccessInfo } from '@/api/webAccess'
 
-const runningInfo = {
+const runningInfo: WebAccessInfo = {
   enabled: true,
   running: true,
   url: 'http://127.0.0.1:8765',
@@ -51,13 +52,14 @@ const runningInfo = {
   configuredPort: 8765,
   bindIsLoopback: true,
   token: 'tok-abcdef0123456789',
+  tokenPinned: true,
   tlsEnabled: false,
   tlsCert: '',
   tlsKey: '',
   certStatus: '',
   certDetail: '',
 }
-const offInfo = {
+const offInfo: WebAccessInfo = {
   enabled: false,
   running: false,
   url: '',
@@ -66,6 +68,7 @@ const offInfo = {
   configuredPort: 0,
   bindIsLoopback: true,
   token: '',
+  tokenPinned: false,
   tlsEnabled: false,
   tlsCert: '',
   tlsKey: '',
