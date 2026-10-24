@@ -746,6 +746,9 @@ func (f *FrontendAPI) switchProjectSetupWatcher(switchCtx context.Context, p *pr
 		// Project-local agents live under <workspace>/.agents/agents — same
 		// reasoning. Invalidate the agent cache so ListAgents rescans.
 		f.invalidateAgentCache()
+		// Project-local commands live under <workspace>/.agents/commands —
+		// same reasoning. Invalidate the command cache so ListCommands rescans.
+		f.invalidateCommandCache()
 
 		// Only trigger vector re-indexing when at least one changed path is
 		// indexable. Churn inside ignored locations (.git maintenance: gc,
@@ -878,6 +881,8 @@ func (f *FrontendAPI) reScopeNoProjectWatcherLocked(root string) error {
 		f.invalidateSkillCache()
 		// Invalidate agent cache in case project-local agents changed.
 		f.invalidateAgentCache()
+		// Invalidate command cache in case project-local commands changed.
+		f.invalidateCommandCache()
 		// Same ignore-cache invalidation as CODE mode (see switchProjectSetupWatcher).
 		if f.app != nil && f.app.Manager() != nil {
 			f.app.Manager().InvalidateIgnoreCache(changedPaths)

@@ -34,6 +34,18 @@ var defaultAgentDirs = []string{
 	"~/.agents/agents",
 }
 
+// defaultCommandDirs is the default list of custom command discovery
+// directories used when the `commands.dirs` config key is omitted. Mirrors
+// defaultSkillDirs for command template files: the c0wrk global directory
+// (`~/.c0wrk/.agents/commands`) outranks the user's `~/.agents/commands`.
+// The current project's `.agents/commands` directory is always scanned
+// automatically (see backend/frontend_api_commands.go) and does NOT need to
+// be listed here.
+var defaultCommandDirs = []string{
+	"~/.c0wrk/.agents/commands",
+	"~/.agents/commands",
+}
+
 // defaultModelProfilesAlwaysPresent is the default always-present tool allow-list
 // exposed when the model-profile essential-tools variant is active. It balances a
 // minimal schema footprint against enough capability to navigate, edit,
@@ -86,6 +98,12 @@ func ApplyDefaults(cfg *Config) {
 	// => user explicitly opted out of base dirs, keep it empty). Mirrors skills.
 	if cfg.Agents.Dirs == nil {
 		cfg.Agents.Dirs = append([]string(nil), defaultAgentDirs...)
+	}
+
+	// Custom command discovery defaults (nil => apply defaults; empty slice
+	// => user explicitly opted out of base dirs, keep it empty). Mirrors skills.
+	if cfg.Commands.Dirs == nil {
+		cfg.Commands.Dirs = append([]string(nil), defaultCommandDirs...)
 	}
 
 	// Subagent concurrency cap. 4 is a safe default: enough parallelism to

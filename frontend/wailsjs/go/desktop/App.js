@@ -506,6 +506,10 @@ export function ListBookmarks(arg1) {
   return window['go']['desktop']['App']['ListBookmarks'](arg1);
 }
 
+export function ListCommands() {
+  return window['go']['desktop']['App']['ListCommands']();
+}
+
 export function ListDirectory(arg1, arg2) {
   return window['go']['desktop']['App']['ListDirectory'](arg1, arg2);
 }
