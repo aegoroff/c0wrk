@@ -8,7 +8,7 @@ import rehypeHighlight from 'rehype-highlight'
 import rehypeExternalLinks from 'rehype-external-links'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import { cn } from '@/lib/utils'
-import { isLocalFileHref, isExternalUrl, parseLocalFileHref, normalizePath } from '@/lib/localFileLink'
+import { isAbsolutePath, isLocalFileHref, isExternalUrl, parseLocalFileHref, resolveFileRefPath } from '@/lib/localFileLink'
 import { readFileAsDataURL } from '@/api/workspace'
 import { openExternalURL } from '@/api/runtime'
 import { EXTERNAL_SRC_RE, candidateImagePaths } from '@/lib/markdownImageResolve'
@@ -94,8 +94,10 @@ const MarkdownLink = ({ href, children, node: _node, workspaceRoot, ...rest }: M
   const handleClick = async () => {
     const { path, line } = parseLocalFileHref(href!)
     const rootPath = workspaceRoot || (await resolveChatWorkspaceRoot())
-    if (!rootPath) return
-    const resolved = normalizePath(rootPath, path)
+    // Absolute inputs (POSIX, drive, UNC) normalize without a root; only
+    // relative paths need the workspace root to join.
+    if (!rootPath && !isAbsolutePath(path)) return
+    const resolved = resolveFileRefPath(rootPath, path)
     if (line !== undefined) {
       useFileViewerStore.getState().openFileAtLine(resolved, line)
     } else {

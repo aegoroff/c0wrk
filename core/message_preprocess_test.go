@@ -9,9 +9,10 @@ import (
 // on the @file → fileref:// conversion, including GitHub-style line/line-range
 // anchors (#L20, #L20-L36, #L5-10), legacy bare-number anchors (#42, #5-10),
 // the single-quoted (@'my file.go') and legacy escaped-space (@my\ file.go)
-// path forms, plain paths, /-mention stripping (plain and collision-qualified
-// forms for both skills and agents, ADR-076), the "/goal" command
-// interaction, and multi-space collapsing.
+// path forms, plain paths, Windows drive/UNC absolute paths (canonical
+// forward-slash form, never joined with the workspace), /-mention stripping
+// (plain and collision-qualified forms for both skills and agents, ADR-076),
+// the "/goal" command interaction, and multi-space collapsing.
 func TestPreprocessMessageText(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -382,6 +383,53 @@ func TestPreprocessMessageText(t *testing.T) {
 			text:      "@x.go#L10",
 			workspace: "",
 			want:      "fileref://x.go#L10",
+		},
+
+		// Windows drive and UNC paths are absolute in their own dialect:
+		// canonicalized to the forward-slash URI form and never joined with
+		// the workspace — with or without a workspace (mirrors the frontend
+		// localFileLink.ts canonical forms).
+		{
+			name:      "windows drive path becomes canonical fileref",
+			text:      `@C:\Documents\f.md`,
+			workspace: "/ws",
+			want:      "fileref://C:/Documents/f.md",
+		},
+		{
+			name:      "windows drive path with L-range anchor",
+			text:      `@C:\docs\notes.md#L5-L10`,
+			workspace: "/ws",
+			want:      "fileref://C:/docs/notes.md#L5-L10",
+		},
+		{
+			name:      "quoted windows drive path with spaces and anchor",
+			text:      `@'C:\My Docs\my file.md'#L20-L36`,
+			workspace: "/ws",
+			want:      "fileref://C:/My Docs/my file.md#L20-L36",
+		},
+		{
+			name:      "quoted windows drive path with anchor inside quotes",
+			text:      `@'C:\My Docs\f.md#L20'`,
+			workspace: "/ws",
+			want:      "fileref://C:/My Docs/f.md#L20",
+		},
+		{
+			name:      "windows drive path with dot segments cleaned",
+			text:      `@C:\docs\..\notes.md`,
+			workspace: "/ws",
+			want:      "fileref://C:/notes.md",
+		},
+		{
+			name:      "unc path not joined with workspace",
+			text:      `@\\server\share\f.md`,
+			workspace: "/ws",
+			want:      "fileref:////server/share/f.md",
+		},
+		{
+			name:      "windows drive path canonical without workspace",
+			text:      `@C:\Documents\f.md`,
+			workspace: "",
+			want:      "fileref://C:/Documents/f.md",
 		},
 	}
 

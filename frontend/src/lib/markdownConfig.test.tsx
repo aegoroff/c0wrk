@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
@@ -18,6 +18,23 @@ vi.mock('mermaid', () => ({
     initialize: vi.fn(),
     render: vi.fn().mockResolvedValue({ svg: '<svg id="d" width="10" height="10"/>' }),
   },
+}))
+
+// The viewer store is mocked so local-file link clicks assert exactly which
+// path reaches the viewer; the workspace-root resolver is mocked to control
+// the No-Project (null root) vs rooted scenarios.
+const fileViewerMock = vi.hoisted(() => ({
+  openFile: vi.fn(),
+  openFileAtLine: vi.fn(),
+}))
+const chatRootMock = vi.hoisted(() => ({
+  resolveChatWorkspaceRoot: vi.fn(),
+}))
+vi.mock('@/stores/fileViewerStore', () => ({
+  useFileViewerStore: { getState: () => fileViewerMock },
+}))
+vi.mock('@/lib/chatWorkspaceRoot', () => ({
+  resolveChatWorkspaceRoot: chatRootMock.resolveChatWorkspaceRoot,
 }))
 
 import { Markdown } from './markdownConfig'
@@ -100,6 +117,93 @@ describe('Markdown heading anchors', () => {
     const a = container.querySelector('a')
     expect(a?.getAttribute('href')).toBe('#sub-section')
     expect(a?.textContent).toBe('jump')
+  })
+})
+
+describe('Markdown local-file links', () => {
+  let container: HTMLElement
+  let root: Root
+
+  beforeEach(() => {
+    fileViewerMock.openFile.mockClear()
+    fileViewerMock.openFileAtLine.mockClear()
+    chatRootMock.resolveChatWorkspaceRoot.mockReset()
+    container = document.createElement('div')
+    document.body.replaceChildren(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+    document.body.replaceChildren()
+  })
+
+  function render(content: string, workspaceRoot: string | null = null) {
+    return act(async () => {
+      root.render(<Markdown content={content} workspaceRoot={workspaceRoot} />)
+      // Flush the async root resolution + click handler chain.
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  const link = () => container.querySelector('span[role="link"]') as HTMLElement | null
+
+  it('renders a drive-prefix markdown href as an inert anchor (stripped upstream)', async () => {
+    await render('[doc](C:\\Doc\\f.md)')
+    // react-markdown's default urlTransform clears hrefs whose scheme is not
+    // in its safe list (`c` is not) — the href never reaches MarkdownLink's
+    // local-file classification at all. Pre-existing sanitize boundary: the
+    // link stays an inert <a>, never a viewer open and never an external
+    // dispatch.
+    const a = container.querySelector('p a')
+    expect(a).toBeTruthy()
+    expect(a!.getAttribute('href')).toBeNull()
+    expect(link()).toBeNull()
+    expect(fileViewerMock.openFile).not.toHaveBeenCalled()
+  })
+
+  it('opens a root-less POSIX absolute link unchanged', async () => {
+    await render('[x](/abs/dir/a.ts)')
+    await act(async () => {
+      link()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('/abs/dir/a.ts')
+  })
+
+  it('keeps a root-less relative link inert (nothing to join)', async () => {
+    await render('[x](rel/dir/a.ts)')
+    await act(async () => {
+      link()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(fileViewerMock.openFile).not.toHaveBeenCalled()
+  })
+
+  it('joins a relative link with the workspace root when one exists', async () => {
+    await render('[x](src/a.ts)', '/repo')
+    await act(async () => {
+      link()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('/repo/src/a.ts')
+  })
+
+  it('never joins an absolute link onto the workspace root', async () => {
+    await render('[x](/abs/dir/a.ts)', '/repo')
+    await act(async () => {
+      link()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(fileViewerMock.openFile).toHaveBeenCalledWith('/abs/dir/a.ts')
   })
 })
 

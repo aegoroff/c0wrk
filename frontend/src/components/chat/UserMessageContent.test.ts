@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { parseSegments } from './userMessageSegments'
+import { resolveFileRefPath } from '@/lib/localFileLink'
 
 describe('parseSegments', () => {
   it.each([
@@ -293,5 +294,19 @@ describe('parseSegments', () => {
     expect(segs.map((s) => s.type)).toEqual(['ref', 'text', 'file'])
     expect(segs[0]).toMatchObject({ type: 'ref', content: 'review' })
     expect(segs[2]).toMatchObject({ type: 'file' })
+  })
+})
+
+describe('windows @file segments', () => {
+  it("resolves the @'C:\\Doc\\f.md' segment to the canonical drive path", () => {
+    const segs = parseSegments("@'C:\\Doc\\f.md'")
+    expect(segs).toHaveLength(1)
+    const file = segs[0]!
+    expect(file.type).toBe('file')
+    expect(file.path).toBe('C:\\Doc\\f.md')
+    // What handleFileClick hands to the file viewer: the drive prefix is
+    // preserved and never joined onto the workspace root.
+    expect(resolveFileRefPath('C:\\ws', file.path!)).toBe('C:/Doc/f.md')
+    expect(resolveFileRefPath('/posix/root', file.path!)).toBe('C:/Doc/f.md')
   })
 })

@@ -1777,6 +1777,54 @@ func (b *OrchestratorBuilder) GetAgentDescriptors(projectAgentDir string) []agen
 	return am.List()
 }
 
+// ResolveSkillResourcePath resolves a read_skill_resource tool call's
+// (skill, path) arguments to the absolute file path the tool actually read.
+// The skill is looked up in the same discovery set a session's SkillManager
+// scans — the project-local directory first when set, then the shared base
+// dirs, highest priority first, first name occurrence wins — and the resource
+// path is resolved through skills.SafeResolvePath, the SAME traversal guard
+// the read_skill_resource tool itself applies. Used by the frontend
+// ResolveSkillResourcePath RPC so a tool-call card can open the resource in
+// the viewer. Returns an error when no skill directories are configured, the
+// skill is unknown to the catalog, or the relative path escapes the skill
+// directory; the frontend falls back to rendering the path as plain text.
+func (b *OrchestratorBuilder) ResolveSkillResourcePath(projectSkillDir, skillName, relPath string) (string, error) {
+	if skillName == "" {
+		return "", errors.New("skill name is required")
+	}
+	if relPath == "" {
+		return "", errors.New("resource path is required")
+	}
+
+	b.mu.RLock()
+	baseDirs := append([]string(nil), b.baseSkillDirs...)
+	b.mu.RUnlock()
+
+	dirs := make([]string, 0, len(baseDirs)+1)
+	if projectSkillDir != "" {
+		dirs = append(dirs, projectSkillDir)
+	}
+	dirs = append(dirs, baseDirs...)
+	if len(dirs) == 0 {
+		return "", errors.New("no skill directories configured")
+	}
+
+	sm := skills.NewSkillManager(dirs, b.log())
+	if err := sm.Scan(); err != nil {
+		b.log().Warn("ResolveSkillResourcePath scan failed", "error", err, "dirs", dirs)
+	}
+
+	skillDir, ok := sm.SkillPath(skillName)
+	if !ok {
+		return "", fmt.Errorf("skill %q not found", skillName)
+	}
+
+	// context.TODO(): no session case-sensitivity flag exists on this path —
+	// IsWithinRoot falls back to the case-sensitive containment check, the
+	// same behavior SafeResolvePath's documented nil-ctx fallback gives.
+	return skills.SafeResolvePath(context.TODO(), skillDir, relPath)
+}
+
 // buildSessionSkillManager constructs a per-session SkillManager that always
 // scans the current project's `.agents/skills` (when workspacePath is set) in
 // addition to the shared base dirs. Scan errors are logged and do not abort
