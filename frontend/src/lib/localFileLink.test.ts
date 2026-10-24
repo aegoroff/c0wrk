@@ -162,7 +162,7 @@ describe('isAbsolutePath', () => {
     expect(isAbsolutePath('C:')).toBe(false)
   })
 
-  it('returns false for single-backslash rooted Windows paths (ADR-092 decision 7)', () => {
+  it('returns false for single-backslash rooted Windows paths (ADR-095 decision 7)', () => {
     // `\x` is rooted against the current drive's root on Windows; one leading
     // separator is below the UNC threshold, so it stays "relative" and joins
     // the workspace root — the accepted, documented limitation (the join
@@ -388,7 +388,7 @@ describe('resolveFileRefPath', () => {
   })
 
   it('normalizes absolute paths without any root (No-Project markdown links)', () => {
-    // The MarkdownLink no-root path (ADR-092 decision 6): absolute inputs —
+    // The MarkdownLink no-root path (ADR-095 decision 6): absolute inputs —
     // POSIX, drive, UNC — resolve without a workspace root; only the drive
     // href never arrives (cleared upstream by react-markdown's URL transform),
     // so the pin guards the resolver the component delegates to.

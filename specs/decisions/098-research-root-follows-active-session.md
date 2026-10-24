@@ -1,4 +1,4 @@
-# ADR-093: Research/papers root follows the active session
+# ADR-098: Research/papers root follows the active session
 
 ## Status
 

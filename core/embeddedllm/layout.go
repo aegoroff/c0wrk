@@ -140,7 +140,7 @@ const mlxRuntimePrefix = "mtplx-"
 // installed into it, and the pack pointer) — there is no llama-style
 // staging/retire swap, because the engine has no binary whose replacement
 // races a resident process: the step-0 stop guarantees nothing executes from
-// the tree while a rebuild replaces it (ADR-090 records the deviation).
+// the tree while a rebuild replaces it (ADR-092 records the deviation).
 func MLXRuntimeDirName() string {
 	return mlxRuntimePrefix + MTPLXVersion
 }

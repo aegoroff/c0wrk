@@ -10,7 +10,7 @@ import { getSessionWorkspace } from '@/api/workspace'
  * workspace_path otherwise. Returns `null` while the path is unavailable.
  *
  * Rule: specs/domains/session-worktrees.md (User-facing workspace roots);
- * specs/decisions/092-chat-file-reference-path-semantics.md (Consequences).
+ * specs/decisions/095-chat-file-reference-path-semantics.md (Consequences).
  */
 export function useWorkspacePath(): string | null {
   const projects = useProjectStore((s) => s.projects)

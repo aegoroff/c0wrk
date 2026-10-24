@@ -2539,6 +2539,74 @@ func TestExtractArchiveRefusesSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestExtractArchiveCreatesSymlinkParents reproduces the shape of the pinned
+// managed-CPython archive (python-build-standalone): no directory entries at
+// all, and the archive's very FIRST entry is a symlink nested under paths no
+// earlier entry created (python/bin/2to3). Extraction must create the missing
+// parents lazily instead of failing with ENOENT — the bug that broke every
+// mtplx install at the "extracting python archive" stage.
+func TestExtractArchiveCreatesSymlinkParents(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Entry order matters: the symlink precedes every regular file in its
+	// directory, and no TypeDir entry ever appears — the real archive's shape.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	symlink := &tar.Header{
+		Name:     "python/bin/2to3",
+		Typeflag: tar.TypeSymlink,
+		Linkname: "2to3-3.12",
+		Mode:     0o777,
+		ModTime:  testInstallInstant,
+	}
+	if err := tw.WriteHeader(symlink); err != nil {
+		t.Fatalf("tar header: %v", err)
+	}
+	script := &tar.Header{
+		Name:     "python/bin/2to3-3.12",
+		Typeflag: tar.TypeReg,
+		Mode:     0o755,
+		Size:     int64(len("#!/bin/sh\n")),
+		ModTime:  testInstallInstant,
+	}
+	if err := tw.WriteHeader(script); err != nil {
+		t.Fatalf("tar header: %v", err)
+	}
+	if _, err := tw.Write([]byte("#!/bin/sh\n")); err != nil {
+		t.Fatalf("tar body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	path := filepath.Join(root, "archive.tar.gz")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := extractArchive(path, dest); err != nil {
+		t.Fatalf("extractArchive: %v", err)
+	}
+	link := filepath.Join(dest, "python", "bin", "2to3")
+	resolved, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("the archive's first entry was not extracted: %v", err)
+	}
+	if resolved != "2to3-3.12" {
+		t.Errorf("symlink target = %q, want %q", resolved, "2to3-3.12")
+	}
+	if _, err := os.Stat(link); err != nil {
+		t.Errorf("the symlink does not resolve to the extracted file: %v", err)
+	}
+}
+
 func TestExtractArchiveRejectsUnknownFormat(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "artifact.rar")

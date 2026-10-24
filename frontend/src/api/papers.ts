@@ -403,27 +403,18 @@ export async function recordFlashcardReview(
 
 // --- Literature-graph run (study-paper literature.py) ---
 
-/**
- * Outcome of running the literature helper for a paper. `ok` carries the written
- * JSON; every other value is an EXPLICIT degradation the UI must surface (the
- * helper needs the network, a managed Python, and a resolvable seed):
- *   - `offline`      the helper could not reach OpenAlex/Crossref/arXiv (exit 2)
- *   - `unresolved`   the seed could not be resolved (exit 1)
- *   - `rate_limited` a source kept returning HTTP 429 (exit 3)
- *   - `no_python`    the managed Python interpreter is not installed
- *   - `no_script`    the seeded literature.py helper is missing
- *   - `no_seed`      the paper carries no identifier/title to seed with
- *   - `error`        any other failure (carries the helper's stderr tail)
- */
+/** Outcome of running the literature helper for a paper; every non-`ok` value
+ *  is an EXPLICIT degradation the UI must surface (the helper needs the
+ *  network, a managed Python, and a resolvable seed). */
 export type PaperLiteratureStatus =
-  | 'ok'
-  | 'offline'
-  | 'unresolved'
-  | 'rate_limited'
-  | 'no_python'
-  | 'no_script'
-  | 'no_seed'
-  | 'error'
+  | 'ok' // carries the written JSON
+  | 'offline' // could not reach OpenAlex/Crossref/arXiv (exit 2)
+  | 'unresolved' // the seed could not be resolved (exit 1)
+  | 'rate_limited' // a source kept returning HTTP 429 (exit 3)
+  | 'no_python' // the managed Python interpreter is not installed
+  | 'no_script' // the seeded literature.py helper is missing
+  | 'no_seed' // the paper carries no identifier/title to seed with
+  | 'error' // any other failure (carries the helper's stderr tail)
 
 /** The normalized wire shape of RunPaperLiterature (backend.PaperLiteratureDTO). */
 export interface PaperLiteratureResult {

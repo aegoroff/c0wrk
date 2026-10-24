@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/v0lka/c0wrk/core/cli"
 )
 
 // writeMarker creates a file containing marker text inside dir.
@@ -270,74 +272,44 @@ func TestPathContains(t *testing.T) {
 	}
 }
 
-func TestParseSelfUpdateFlags(t *testing.T) {
+// TestSelfUpdateArgsRoundTrip pins the machine contract between the two
+// processes of the self-update dance: the argv built by SelfUpdateArgs (what
+// the running app re-execs) must parse back through the unified core/cli
+// parser into exactly the SelfUpdateRequest that main.go hands to
+// ApplySelfUpdate — same action, same PID/stage/target values.
+func TestSelfUpdateArgsRoundTrip(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
-		want    bool
-		wantErr bool
-		wantPID int
+		name string
+		req  cli.SelfUpdateRequest
 	}{
 		{
-			name:    "complete",
-			args:    []string{"--self-update", "--pid", "12345", "--stage", "/s", "--target", "/t"},
-			want:    true,
-			wantPID: 12345,
+			name: "typical",
+			req:  cli.SelfUpdateRequest{PID: 12345, Stage: "/tmp/c0wrk-update-abc", Target: "/opt/c0wrk-desktop"},
 		},
 		{
-			name:    "not self update",
-			args:    []string{"--foo", "bar"},
-			want:    false,
-			wantPID: 0,
+			name: "paths with spaces",
+			req:  cli.SelfUpdateRequest{PID: 7, Stage: "/tmp/my updates/c0wrk-update-1", Target: "/Applications/c0wrk Desktop.app"},
 		},
 		{
-			name:    "missing pid",
-			args:    []string{"--self-update", "--stage", "/s", "--target", "/t"},
-			want:    true,
-			wantErr: true,
-		},
-		{
-			name:    "missing stage",
-			args:    []string{"--self-update", "--pid", "5", "--target", "/t"},
-			want:    true,
-			wantErr: true,
-		},
-		{
-			name:    "missing target",
-			args:    []string{"--self-update", "--pid", "5", "--stage", "/s"},
-			want:    true,
-			wantErr: true,
-		},
-		{
-			name:    "invalid pid",
-			args:    []string{"--self-update", "--pid", "abc", "--stage", "/s", "--target", "/t"},
-			want:    true,
-			wantErr: true,
-		},
-		{
-			name:    "pid missing value",
-			args:    []string{"--self-update", "--pid"},
-			want:    true,
-			wantErr: true,
+			name: "minimal pid",
+			req:  cli.SelfUpdateRequest{PID: 1, Stage: "/", Target: "/"},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			opts, isSelfUpdate, err := ParseSelfUpdateFlags(c.args)
-			if isSelfUpdate != c.want {
-				t.Fatalf("isSelfUpdate = %v, want %v", isSelfUpdate, c.want)
-			}
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				return
-			}
+			argv := SelfUpdateArgs(c.req.PID, c.req.Stage, c.req.Target)
+			parsed, err := cli.Parse(argv)
 			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+				t.Fatalf("cli.Parse(%q): %v", argv, err)
 			}
-			if opts.PID != c.wantPID {
-				t.Errorf("PID = %d, want %d", opts.PID, c.wantPID)
+			if parsed.Action != cli.ActionSelfUpdate {
+				t.Fatalf("parsed action = %v, want ActionSelfUpdate", parsed.Action)
+			}
+			if parsed.SelfUpdate == nil {
+				t.Fatal("parsed request carries no SelfUpdate payload")
+			}
+			if got := *parsed.SelfUpdate; got != c.req {
+				t.Errorf("round trip = %+v, want %+v", got, c.req)
 			}
 		})
 	}
@@ -751,8 +723,8 @@ func TestApplySelfUpdate_Smoke(t *testing.T) {
 	}
 	t.Cleanup(func() { relaunchFn = origRelaunch })
 
-	opts := SelfUpdateOptions{PID: dead, StageDir: stageDir, TargetDir: target}
-	if err := ApplySelfUpdate(opts, slog.Default()); err != nil {
+	req := cli.SelfUpdateRequest{PID: dead, Stage: stageDir, Target: target}
+	if err := ApplySelfUpdate(req, slog.Default()); err != nil {
 		t.Fatalf("ApplySelfUpdate: %v", err)
 	}
 
@@ -788,7 +760,7 @@ func TestApplySelfUpdate_RejectsNonStandardTarget(t *testing.T) {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := ApplySelfUpdate(SelfUpdateOptions{PID: dead, StageDir: t.TempDir(), TargetDir: target}, slog.Default())
+	err := ApplySelfUpdate(cli.SelfUpdateRequest{PID: dead, Stage: t.TempDir(), Target: target}, slog.Default())
 	if !errors.Is(err, ErrNonStandardLocation) {
 		t.Fatalf("expected ErrNonStandardLocation for Downloads target, got: %v", err)
 	}

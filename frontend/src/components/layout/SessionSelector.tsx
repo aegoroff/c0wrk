@@ -21,6 +21,7 @@ import { useSessionActions } from "@/hooks/useSessionActions";
 import { useCollapsibleSections } from "@/hooks/useCollapsibleSections";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
+import { SessionDeleteBlockedDialog } from "./SessionDeleteBlockedDialog";
 import { SessionGroupedList } from "./SessionGroupedList";
 import { BranchRow, PinGroupAction, branchActionItemClasses } from "./BranchRow";
 import { SessionSelectorToolbar } from "./SessionSelectorToolbar";
@@ -75,12 +76,15 @@ export function SessionSelector() {
 
   // Grouping model (grouped mode only, but cheap enough to always compute):
   // classification + ordering live entirely in lib/sessionGroups; the search
-  // filter there hides groups left without members. The GROUPED Archived
-  // section renders from it too (and the Archived header count uses it in
-  // both modes); flat mode renders archived rows from `visibleArchived`.
+  // filter there hides groups left without members, and the active session
+  // floats its branch group and own row (LIVE sections only — the Archived
+  // section and this model's archived buckets keep the pure freshness rules).
+  // The GROUPED Archived section renders from it too (and the Archived header
+  // count uses it in both modes); flat mode renders archived rows from
+  // `visibleArchived`.
   const groups = useMemo(
-    () => buildSessionGroups(sessions ?? [], { search, pinnedBranches }),
-    [sessions, search, pinnedBranches],
+    () => buildSessionGroups(sessions ?? [], { search, pinnedBranches, activeSessionId }),
+    [sessions, search, pinnedBranches, activeSessionId],
   );
   // The UNFILTERED grouping (no search) — group actions act on the WHOLE
   // branch even while a search narrows the visible rows, so the confirmation
@@ -320,6 +324,12 @@ export function SessionSelector() {
         pending={actions.pendingAction}
         onConfirm={actions.confirmPendingAction}
         onCancel={actions.cancelPendingAction}
+      />
+      <SessionDeleteBlockedDialog
+        blocked={actions.blockedDelete}
+        error={actions.blockedDeleteError}
+        onConfirm={actions.confirmBlockedDelete}
+        onCancel={actions.cancelBlockedDelete}
       />
     </div>
   );

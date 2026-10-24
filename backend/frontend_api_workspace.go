@@ -126,7 +126,7 @@ func (f *FrontendAPI) resolveWorkspacePath(filePath string) (absPath, absRoot st
 // limited to non-canonical ones: the Windows dialects (previously mounted
 // as rooted junk) and dot-segment-carrying POSIX absolutes, which are now
 // returned verbatim instead of filepath.Abs-cleaned — dot-segment
-// canonicalization is the emitter's job (ADR-092 decisions 2 and 8).
+// canonicalization is the emitter's job (ADR-095 decisions 2 and 8).
 func (f *FrontendAPI) resolveReadablePath(filePath string) (string, error) {
 	cleaned := stripLineAnchor(filePath)
 	if len(cleaned) > 1 && cleaned[0] == '/' && cleaned[1] != '/' &&

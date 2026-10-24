@@ -13,7 +13,7 @@ import { useSessionStore } from '@/stores/sessionStore'
  * transient desync between the active session and the file tree after a
  * project switch.
  *
- * Rule: specs/decisions/092-chat-file-reference-path-semantics.md (Decision 6);
+ * Rule: specs/decisions/095-chat-file-reference-path-semantics.md (Decision 6);
  * specs/domains/session-worktrees.md (User-facing workspace roots).
  */
 export async function resolveChatWorkspaceRoot(): Promise<string | null> {

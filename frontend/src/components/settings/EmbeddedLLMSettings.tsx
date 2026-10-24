@@ -101,7 +101,7 @@ export function EmbeddedLLMSettings() {
   // the mtplx engine there is no separately removable vision projector — the
   // backend refuses the scope with ErrNoProjectionOnMLX, but only AFTER it has
   // stopped the model and cleared the install record — so the menu entry
-  // self-disables instead of leading the operator into that path (ADR-090 D7),
+  // self-disables instead of leading the operator into that path (ADR-092 D7),
   // and the refusal text explains why.
   const projectionRefusal =
     status?.engine === 'mtplx' ? 'not removable under the MTPLX engine' : undefined

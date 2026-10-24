@@ -777,6 +777,9 @@ func (f *FrontendAPI) reScopeCodeWatcherLocked(watchRoot, checkoutResearchRoot s
 		// caches so the next ListSkills / ListAgents rescans.
 		f.invalidateSkillCache()
 		f.invalidateAgentCache()
+		// Project-local commands live under <workspace>/.agents/commands —
+		// same reasoning. Invalidate the command cache so ListCommands rescans.
+		f.invalidateCommandCache()
 
 		// Only trigger vector re-indexing when at least one changed path is
 		// indexable — churn inside ignored locations (.git maintenance,
@@ -914,6 +917,8 @@ func (f *FrontendAPI) reScopeNoProjectWatcherLocked(root string) error {
 		f.invalidateSkillCache()
 		// Invalidate agent cache in case project-local agents changed.
 		f.invalidateAgentCache()
+		// Invalidate command cache in case project-local commands changed.
+		f.invalidateCommandCache()
 		// Same ignore-cache invalidation as CODE mode (see switchProjectSetupWatcher).
 		if f.app != nil && f.app.Manager() != nil {
 			f.app.Manager().InvalidateIgnoreCache(changedPaths)

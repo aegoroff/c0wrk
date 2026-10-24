@@ -132,7 +132,7 @@ vector `NotifyFileChange` — route at the WATCHED root (per-root registry,
 [ADR-081](../decisions/081-vector-per-root-registry.md)), so a managed
 tree's churn refreshes that tree's Git-panel state and wakes only that
 tree's index manager, never the checkout's. Recursive research-tree watches
-([ADR-093](../decisions/093-research-root-follows-active-session.md): the
+([ADR-098](../decisions/098-research-root-follows-active-session.md): the
 checkout's `.research` plus the watched root's own when it differs,
 admitted via `AllowRoot` when they live outside the root) are re-registered
 on every re-scope and create nothing on disk (Issue 52). Git operations and

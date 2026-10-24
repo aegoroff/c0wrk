@@ -267,7 +267,13 @@ through `worktrees.Owner` — the
 primitives recheck dirty/lock state at removal time, never from a stale
 snapshot. A dirty tree without `confirm_uncommitted_loss`, or a locked tree
 without `unlock_locked_tree`, fails with `*SessionDeleteBlockedError` and the
-session stays fully intact and retryable. A tree that is no longer linked is
+session stays fully intact and retryable — the retry is the user's explicit
+confirmation: the frontend parks the blocked set and `SessionDeleteBlockedDialog`
+(both session-list surfaces) shows the verbatim reason and offers both
+consents as checkboxes, pre-ticking the option the refusal named; confirming
+retries the parked set through `DeleteSessionWithOptions` with exactly the
+ticked flags (a renewed refusal refreshes the park; cancel deletes nothing).
+A tree that is no longer linked is
 already gone (nothing to do); a tree classified non-managed (foreign) is
 never removed. The branch is never deleted. Deletion never resurrects:
 `Manager.DeleteSession` operates only on in-memory sessions (`HasSession`
@@ -429,7 +435,7 @@ Rules:
   checkout is only the fallback for unbound sessions. The frontend
   click-resolution root (`resolveChatWorkspaceRoot()`) applies the same
   session-first rule to markdown links and tool-card paths (see
-  [ADR-092](../decisions/092-chat-file-reference-path-semantics.md),
+  [ADR-095](../decisions/095-chat-file-reference-path-semantics.md),
   Decision 6).
 - **Canonical form is forward-slash.** Drive/UNC inputs pass through
   `core.NormalizeAbsPath`: backslashes become `/`, dot segments are
@@ -450,7 +456,7 @@ Rules:
 
 Quoted paths with spaces (`@'C:\My Docs\f.md'#L5`) follow the same rules
 after quote stripping. See
-[ADR-092](../decisions/092-chat-file-reference-path-semantics.md) for the
+[ADR-095](../decisions/095-chat-file-reference-path-semantics.md) for the
 full decision record, and
 [rendering.md](frontend/rendering.md) § Markdown Element Handling for how
 the frontend consumes these URIs.
@@ -1541,4 +1547,4 @@ type HandleResult struct {
 - [../contracts/event-catalog.md](../contracts/event-catalog.md) — task lifecycle events
 - [prompt-suggestions.md](prompt-suggestions.md) — proactive chat-input follow-ups generated after task outcomes `full`/`partial`; they consume this domain's `is_nudge` stamp and the task-finish outcome gate
 - [../decisions/030-session-context-restore.md](../decisions/030-session-context-restore.md) — saved-first restore, effective-activity semantics, archived exclusion, last-context startup restore
-- [../decisions/092-chat-file-reference-path-semantics.md](../decisions/092-chat-file-reference-path-semantics.md) — `fileref://` URI emission: GOOS-independent drive/UNC detection, canonical forward-slash forms, no migration
+- [../decisions/095-chat-file-reference-path-semantics.md](../decisions/095-chat-file-reference-path-semantics.md) — `fileref://` URI emission: GOOS-independent drive/UNC detection, canonical forward-slash forms, no migration

@@ -34,10 +34,12 @@ git RPC, the worktree listing and deletion RPCs, and the pinned-branch refusal) 
 - `backend/frontend_api_vector.go` — vector-index RPC surface (`SearchVectorStore`/`GetVectorIndexStatus`/`ReindexVectorIndex`, all routed to the Git-panel FOCUS root), focus-target resolution (`resolveVectorIndexTarget` — the project switch resolves the saved session's tree), worktree-scoped storage (`config.WorktreeVectorIndexPath`), release cleanup (`deleteWorktreeVectorIndex`: registry release → storage → per-tree cache) and provisioning seeding (`seedWorktreeEmbeddingCache`: copies the checkout's embedding cache into a fresh tree's cache root)
 - `backend/vector_roots.go` — the per-root registry (ADR-081): one `vectorindex.Manager` per workspace root (single-flight creation, LRU-bounded live set with the focus pinned), agent-side routing by the executor context's workspace root, `ApplyFocus`/`LeaveFocus`, `Release`/`ReleaseProject`/`ShutdownAll`, and `Application.buildVectorRouter` (the shared search closures)
 - `core/vectorindex/git.go` — `resolveGitDir` follows a linked worktree's `.git` pointer file to the private git directory that owns HEAD, so the vector index's branch monitoring works inside managed trees; `backend/config/paths.go` `ManagedWorktreeNameFromPath`/`WorktreeVectorIndexPath` derive the per-tree index storage
-- `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
+- `frontend/src/lib/gitFocus.ts` + `frontend/src/hooks/useGitFocusSync.ts` — the frontend side: serialized/supersede-guarded focus applies and the follow-the-session effect (project/session switches and the active session's send-time-bind transition move the focus to the active session's execution workspace); the hook is mounted once at the App root (beside `useVectorIndexStatus`) — the Git panel lives only while the git tab is active, and the follow must also run on chat-area session switches with any other tab open
 - `frontend/src/stores/sessionWorkspaceStore.ts` — the chat-side pending-choice state (ADR-091): per-fresh-session recorded workspace choices plus the single-slot `consumingFor` consumption window; transient by design
 - `frontend/src/components/chat/SessionWorkspaceSelector.tsx` + `frontend/src/components/GitPanel/BranchPicker.tsx` + `frontend/src/components/layout/SessionSelector.tsx` — the choice's selection surfaces: the chat toolbar selector (`local` / `branch…` while the active session is FRESH, read-only pinned display for existing sessions), the session selector's grouped-view "+" per managed branch row (`handleNewSessionOnBranch` — presets a `createBranch=false` choice, so the first send ADOPTS the branch's existing tree and the new session executes in the same worktree), and the BranchPicker's intent-separated pick mode (`branchPickerMode: 'draft'`) that records a picked/created branch without any checkout (remote-tracking rows are pick targets too: picking `origin/x` records a create-branch request — local `x` from `origin/x`); the picker's always-visible Worktrees section (`WorktreesSection` — focus switching plus linked-tree deletion through the mandatory `WorktreeDeleteConfirmDialog`, shown in pick mode too) and `NewBranchSection`'s Worktree checkbox (routes creation through `CreateBranchInWorktree`, never moving the focus) round out the panel-side management; in manage mode both surfaces render the ACTIVE managed session's pin (`frontend/src/hooks/useSessionWorktreePin.ts`) — a lock instead of the check on the pinned branch and the session's own tree row, no delete affordance on either, and a disabled Rename on the pinned branch (see the focus model's pin-rendering bullet)
 - `frontend/src/components/chat/WorktreePreparingIndicator.tsx` — the send-time bind's icon-only, focusable preparation status with a hover/focus tooltip, rendered beside the chosen branch label while the consumption window is open
+- `frontend/src/components/layout/SessionDeleteBlockedDialog.tsx` — the session-deletion refusal dialog (the `*SessionDeleteBlockedError` consumer): count-aware copy naming the parked session(s) or branch-named group, the verbatim refusal reason, both worktree consents as explicit checkboxes pre-ticked to the option the refusal named; confirm retries the parked set through `DeleteSessionWithOptions`, cancel deletes nothing (see [Release](#release-deletion))
+- `frontend/src/components/layout/SessionDeleteBlockedDialog.test.tsx` — the dialog's render/consent/reset/retry contract (null renders nothing, verbatim reason, pre-tick permutations, confirm payloads, inline error, park renewal)
 
 ## Core Types
 
@@ -277,6 +279,21 @@ commits (and is counted — release skipped) or commits after the removal and
 rolls itself back (see Creation), and of two simultaneous co-owner
 deletions the second always observes the first's row gone and releases.
 
+The blocked refusal is a user-facing decision point, not a dead end: the
+frontend parks it (`useSessionActions.blockedDelete` — the refused session
+first, then every group member still pending; a group keeps its branch-name
+label) and `SessionDeleteBlockedDialog` — mounted on both session-list
+surfaces (`SessionList`, `SessionSelector`) — names the parked session(s),
+explains that confirming deletes the session(s) and their worktree
+director{y/ies} while the git branch is kept, shows the verbatim refusal
+reason, and offers both consents as explicit checkboxes
+(`confirmUncommittedLoss` / `unlockLockedTree`), pre-ticking the one the
+refusal named. Confirm retries the whole parked set through
+`DeleteSessionWithOptions` carrying exactly the ticked flags — a renewed
+refusal refreshes the park in place (new reason/option, remaining ids), any
+other failure surfaces inline while the set stays parked and retryable, and
+cancel/dismiss releases the park deleting nothing.
+
 A tree that is no longer linked is already gone (nothing to do); a tree
 classified non-managed (main/external/foreign) is NEVER removed. Deletion
 never resurrects: `Manager.DeleteSession` operates only on in-memory sessions
@@ -315,6 +332,8 @@ clears the override (a stale focus never bricks every git RPC).
 frontend (useGitFocusSync, mounted at the App root)  backend
   project/session switch ──► GetSessionWorkspace(sessionID)
                             └► SetGitPanelFocus(session workspace)   // default target
+  binding transition ───────► (same session-default re-apply)        // the send-time bind's
+                                                                      // post-send mirror
   worktree switcher ────────► SetGitPanelFocus(tree path)            // explicit
   worktree delete ──────────► DeleteWorktree(path, force, unlock)     // any linked tree; focus re-resolved
   branch-in-new-worktree ───► CreateBranchInWorktree(name, base)      // focus neither switched nor consulted
@@ -327,6 +346,25 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   against the live `git worktree list` of the active project (checkout,
   managed tree, or external linked tree — foreign paths fail with
   `ErrWorktreeNotLinked`) and stores the canonical entry path.
+- The follow sync's third trigger — the send-time-bind re-apply: the hook
+  also subscribes to the session list and re-applies the session default
+  when the ACTIVE session's `workspace_binding` TRANSITIONS (in practice
+  absent/local → managed_worktree — the send-time bind landing). The
+  trigger exists because the binding reaches the session store only after
+  the fact — the post-send sessions refresh (`refreshSessionRow`) mirrors
+  the backend fact once `bindSessionWorkspace` has committed — so without
+  it the panel would keep the pre-bind focus target until the next
+  unrelated switch. The comparison key is a PRIMITIVE string derived from
+  the binding (`<kind>:<workspace_path>`), so a duplicate list delivery
+  (fresh binding object, equal content), another session's transition, or
+  a `last_active_at`-only update yields an equal key and never re-applies.
+  The re-apply rides the same serialized/supersede-guarded apply chain as
+  every other focus apply. It intentionally OVERRIDES an explicit focus
+  choice made before the bind — the freshly bound tree is the session
+  default, exactly what a session switch would apply; an explicit choice
+  made AFTER the bind persists until the next project/session switch or
+  binding transition — the hook re-applies on a dependency change, never
+  continuously.
 - Every accepted focus move also re-points the per-root vector registry
   (`focusVectorRoots` → `ApplyFocus`): a non-empty focus lands on the
   canonical tree path, and the empty reset lands on the project checkout —
@@ -404,7 +442,11 @@ frontend (useGitFocusSync, mounted at the App root)  backend
   inside the session is never a valid move), the pinned branch row's
   Rename action is disabled with a pinned reason (the branch name is part
   of the immutable binding), and the pinned branch row is a no-op click
-  regardless of `is_current`. Focus switching stays allowed on
+  regardless of `is_current`, its tooltip rendering the pinned reason as
+  cause — consequence — remedy: `Pinned: this branch is held by this
+  session's managed worktree — the Git panel follows that tree; switch the
+  focus in the Worktrees section to work on other branches`.
+  Focus switching stays allowed on
   every row, the locked ones included; other sessions' managed trees keep
   their delete affordance. The pin props are dropped in pick mode —
   `Choose Branch` selects a workspace for a FRESH session and no session pin
@@ -446,7 +488,7 @@ of the active project (the binding's path, or the backend
 `GetSessionWorkspace` RPC while the binding row has not landed), the
 checkout for `local`/unbound sessions, with a project-ID membership guard
 so a foreign session's tree never leaks into another project's window
-([ADR-092](../decisions/092-chat-file-reference-path-semantics.md),
+([ADR-095](../decisions/095-chat-file-reference-path-semantics.md),
 Decision 6). The research/papers roots and the workspace watcher follow the
 same session-first rule (below and
 [workspace.md](workspace.md#filesystem-watcher)); agent-side execution
@@ -457,7 +499,7 @@ workspace regardless of which session is active.
 
 The RESEARCH and papers subsystems resolve their root the same way the
 explorer does — by the ACTIVE SESSION, not the project row (the "research
-root follows the active session" protocol, [ADR-093](../decisions/093-research-root-follows-active-session.md)):
+root follows the active session" protocol, [ADR-098](../decisions/098-research-root-follows-active-session.md)):
 
 - The agent writes research artifacts under `<session-workspace>/.research`
   (`session/Manager.researchProjectInfo` derives the root from the session's
@@ -516,12 +558,12 @@ root follows the active session" protocol, [ADR-093](../decisions/093-research-r
   is invalid.
 - `GitPanelTarget` may name only the owning project's checkout or one of its
   managed trees; it can never change `ExecutionWorkspace`.
-- The research/papers root follows the active session (ADR-093): a
+- The research/papers root follows the active session (ADR-098): a
   panel-side resolver may derive the root only from the requesting project's
   active session workspace or its checkout — never from another project's
   session — and containment uses the workspace the root was derived from.
 - The workspace root for user-facing path resolution follows the active
-  session (ADR-092 Decision 6, ADR-093): chat file references, the file
+  session (ADR-095 Decision 6, ADR-098): chat file references, the file
   viewer, and every panel-side root resolver answer the ACTIVE SESSION's
   execution workspace — the managed tree for a bound session, the project
   checkout otherwise — never another project's workspace.
@@ -619,11 +661,13 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 
 ## Extension Points
 
-- Frontend UI for the managed lifecycle: the send-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…` while the active session is FRESH, and the BranchPicker's pick mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch request from the remote ref) into `sessionWorkspaceStore`; provisioning runs at the session's FIRST send via `SendMessage`'s `workspace` argument with no in-place checkout (ADR-091). Remaining consumer work: the `*SessionDeleteBlockedError` confirmation dialog → `DeleteSessionWithOptions` with the named option, and rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
+- Frontend UI for the managed lifecycle: the send-time branch selection is landed — the chat toolbar's workspace selector (`SessionWorkspaceSelector`) offers `local` and `branch…` while the active session is FRESH, and the BranchPicker's pick mode records a picked existing branch, a drafted new branch (+ start point), or a picked remote-tracking branch (create-branch request from the remote ref) into `sessionWorkspaceStore`; provisioning runs at the session's FIRST send via `SendMessage`'s `workspace` argument with no in-place checkout (ADR-091), and the blocked-deletion refusal has its confirmation surface — `SessionDeleteBlockedDialog` on both session-list surfaces retrying through `DeleteSessionWithOptions` (see [Release](#release-deletion)). Remaining consumer work: rendering of the `service` (`phase: "orchestration"`) recreation warning (the chat row rendering itself is live; a dedicated visual treatment may follow). The RPC protocol is complete.
 - Git panel: the focus model is landed — `SetGitPanelFocus`/
   `GetGitPanelFocus`/`ListProjectWorktrees` with the worktree switcher
   (BranchPicker + BranchDropdown) and the
-  follow-the-session sync (`useGitFocusSync`, mounted at the App root) —
+  follow-the-session sync (`useGitFocusSync`, mounted at the App root —
+  project/session switches plus the active session's send-time-bind
+  transition, re-applying the session default) —
   together with the panel-side management RPCs and their UI: `DeleteWorktree`
   behind the Worktrees section's hover delete (mandatory
   `WorktreeDeleteConfirmDialog`, section shown in pick mode too) and
@@ -648,7 +692,7 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 - [session-lifecycle.md](session-lifecycle.md) — creation/restore/fork flows this binds into
 - [ADR-080 Typed Session Workspace Bindings](../decisions/080-session-worktrees.md)
 - [ADR-082 Shared Managed Worktrees](../decisions/082-shared-managed-worktrees.md)
-- [ADR-093 Research/papers root follows the active session](../decisions/093-research-root-follows-active-session.md)
+- [ADR-098 Research/papers root follows the active session](../decisions/098-research-root-follows-active-session.md)
 - [ADR-030 Session Context Restore](../decisions/030-session-context-restore.md)
 - [backend-core.md](../contracts/backend-core.md) — the factory's workspace parameter is the execution workspace
 - [git-auto-fetch.md](git-auto-fetch.md) — remote refresh funnels through the same focus-resolving `resolveGitRepoRoot` (equivalent for fetch: the common dir is shared by every worktree)

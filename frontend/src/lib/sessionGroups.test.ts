@@ -416,6 +416,124 @@ describe('buildSessionGroups — search filtering', () => {
   })
 })
 
+// --- Active-session awareness (live sections only) ---
+
+describe('buildSessionGroups — activeSessionId (live sections only)', () => {
+  it('floats the group holding the active session above fresher unpinned groups, below a GROUP-pinned group', () => {
+    const groups = buildSessionGroups(
+      [
+        managedSession('a1', 'feat/stale', '2026-01-01T10:00:00Z'),
+        managedSession('f1', 'feat/fresh', '2026-01-05T10:00:00Z'),
+        managedSession('m1', 'feat/mid', '2026-01-03T10:00:00Z'),
+      ],
+      { pinnedBranches: ['feat/fresh'], activeSessionId: 'a1' },
+    )
+    // feat/stale holds the active session: it beats the fresher unpinned
+    // feat/mid but still loses to the GROUP-pinned feat/fresh. Without the
+    // option the freshness order would be fresh → mid → stale.
+    expect(groups.worktrees.map((g) => g.branch)).toEqual([
+      'feat/fresh',
+      'feat/stale',
+      'feat/mid',
+    ])
+  })
+
+  it('surfaces the active session inside its group right below pinned members', () => {
+    const groups = buildSessionGroups(
+      [
+        managedSession('p1', 'feat/a', '2026-01-01T10:00:00Z', { pinned: true }),
+        managedSession('f1', 'feat/a', '2026-01-05T10:00:00Z'),
+        managedSession('act', 'feat/a', '2026-01-02T10:00:00Z'),
+        managedSession('m1', 'feat/a', '2026-01-03T10:00:00Z'),
+      ],
+      { activeSessionId: 'act' },
+    )
+    // Pinned p1 leads; the active session cuts in below it (beating the
+    // fresher m1/f1); the rest keep the freshness order.
+    expect(groups.worktrees[0]!.sessions.map((s) => s.id)).toEqual([
+      'p1',
+      'act',
+      'f1',
+      'm1',
+    ])
+  })
+
+  it('applies the same member rule to the local bucket — active first below pinned locals', () => {
+    const groups = buildSessionGroups(
+      [
+        makeSession({
+          id: 'lp',
+          workspace_binding: LOCAL_BINDING,
+          last_active_at: '2026-01-01T10:00:00Z',
+          pinned: true,
+        }),
+        makeSession({ id: 'lf', workspace_binding: LOCAL_BINDING, last_active_at: '2026-01-05T10:00:00Z' }),
+        makeSession({ id: 'lact', workspace_binding: LOCAL_BINDING, last_active_at: '2026-01-02T10:00:00Z' }),
+        makeSession({ id: 'lu', last_active_at: '2026-01-01T11:00:00Z' }),
+      ],
+      { activeSessionId: 'lact' },
+    )
+    expect(groups.local.map((s) => s.id)).toEqual(['lp', 'lact', 'lf', 'lu'])
+  })
+
+  it('keeps the previous ordering for a null/undefined active id', () => {
+    const sessions = [
+      managedSession('s1', 'feat/a', '2026-01-01T10:00:00Z', { pinned: true }),
+      managedSession('s2', 'feat/a', '2026-01-03T10:00:00Z'),
+      managedSession('s3', 'feat/b', '2026-01-02T10:00:00Z'),
+      makeSession({ id: 'l1', workspace_binding: LOCAL_BINDING, last_active_at: '2026-01-04T10:00:00Z' }),
+    ]
+    const baseline = buildSessionGroups(sessions)
+    expect(buildSessionGroups(sessions, { activeSessionId: null })).toEqual(baseline)
+    expect(buildSessionGroups(sessions, { activeSessionId: undefined })).toEqual(baseline)
+  })
+
+  it('keeps the previous ordering for an unknown active id', () => {
+    const sessions = [
+      managedSession('s1', 'feat/a', '2026-01-01T10:00:00Z'),
+      managedSession('s2', 'feat/a', '2026-01-02T10:00:00Z'),
+      makeSession({ id: 'l1', workspace_binding: LOCAL_BINDING }),
+    ]
+    const baseline = buildSessionGroups(sessions)
+    expect(buildSessionGroups(sessions, { activeSessionId: 'no-such-id' })).toEqual(baseline)
+  })
+
+  it('leaves both archived buckets byte-identical when the option is set', () => {
+    const sessions = [
+      managedSession('n-arch', 'feat/newer', '2026-01-05T10:00:00Z', { archived: true }),
+      managedSession('f-arch', 'feat/dead', '2026-01-02T10:00:00Z', { archived: true }),
+      managedSession('p-arch', 'feat/dead', '2026-01-01T10:00:00Z', { archived: true, pinned: true }),
+      makeSession({ id: 'l-arch', archived: true, last_active_at: '2026-01-04T10:00:00Z' }),
+      makeSession({ id: 'u-arch', archived: true, last_active_at: '2026-01-03T10:00:00Z' }),
+      managedSession('live1', 'feat/alive', '2026-01-06T10:00:00Z'),
+    ]
+    const baseline = buildSessionGroups(sessions)
+    // The option naming a LIVE session changes nothing in the archive…
+    const liveActive = buildSessionGroups(sessions, { activeSessionId: 'live1' })
+    expect(liveActive.archivedWorktrees).toEqual(baseline.archivedWorktrees)
+    expect(liveActive.archivedLocal).toEqual(baseline.archivedLocal)
+    // …and neither does naming an ARCHIVED session — no active awareness at
+    // all: feat/dead (holding f-arch) must not float above feat/newer, and
+    // f-arch must not cut in below the pinned p-arch.
+    const archivedActive = buildSessionGroups(sessions, { activeSessionId: 'f-arch' })
+    expect(archivedActive.archivedWorktrees).toEqual(baseline.archivedWorktrees)
+    expect(archivedActive.archivedLocal).toEqual(baseline.archivedLocal)
+  })
+
+  it('does not float the active group or member when search hides the active session', () => {
+    const sessions = [
+      managedSession('act', 'feat/stale', '2026-01-01T10:00:00Z', { name: 'Active work' }),
+      managedSession('f1', 'feat/a', '2026-01-05T10:00:00Z', { name: 'Sidebar fix' }),
+      managedSession('m1', 'feat/a', '2026-01-03T10:00:00Z', { name: 'Sidebar polish' }),
+    ]
+    const searched = buildSessionGroups(sessions, { search: 'sidebar', activeSessionId: 'act' })
+    // The active session (and its whole group) is filtered out; the surviving
+    // group keeps the plain freshness order of its remaining members.
+    expect(searched.worktrees.map((g) => g.branch)).toEqual(['feat/a'])
+    expect(searched.worktrees[0]!.sessions.map((s) => s.id)).toEqual(['f1', 'm1'])
+  })
+})
+
 // --- Purity ---
 
 describe('buildSessionGroups — purity', () => {
