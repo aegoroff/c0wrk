@@ -1,4 +1,4 @@
-# ADR-090: Unified CLI argument handling (one strict parser in `core/cli`)
+# ADR-094: Unified CLI argument handling (one strict parser in `core/cli`)
 
 ## Status
 

@@ -102,7 +102,7 @@ None — the grammar is compiled in; there is no config.yaml surface.
 
 ## Related Specs
 
-- [090-cli-argument-handling.md](../decisions/090-cli-argument-handling.md) - the ADR behind this grammar (single parser, strictness, ordering)
+- [094-cli-argument-handling.md](../decisions/094-cli-argument-handling.md) - the ADR behind this grammar (single parser, strictness, ordering)
 - [023-auto-update.md](../decisions/023-auto-update.md) - the self-update re-exec dance this parser serves; its "main.go detects `--self-update` before the Wails lifecycle starts" wording stays accurate
 - [075-single-instance-lock.md](../decisions/075-single-instance-lock.md) - the app-level lock the ordering contract must precede
 - [crash-logging.md](crash-logging.md) - the crash capture whose fd 1/2 redirect motivates diagnostics-first ordering
