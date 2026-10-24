@@ -11,7 +11,7 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { listAllSessions, forkSession } from '@/api/sessions'
+import { listAllSessions, forkSession, deleteSessionWithOptions } from '@/api/sessions'
 import { isSessionInfo } from '@/types/guards'
 
 const validSessionInfo = {
@@ -101,6 +101,73 @@ describe('listAllSessions', () => {
     mockApp.ListAllSessions = vi.fn(() => Promise.reject(new Error('db is locked')))
 
     await expect(listAllSessions()).rejects.toThrow('db is locked')
+  })
+})
+
+describe('deleteSessionWithOptions', () => {
+  const BLOCKED_ERROR = new Error(
+    'session deletion blocked: the session\'s worktree "s-1" (branch main) contains ' +
+      'uncommitted changes (confirm via confirm_uncommitted_loss)',
+  )
+
+  beforeEach(() => {
+    delete mockApp.DeleteSessionWithOptions
+  })
+
+  it('passes the id and both flags to the binding (no decision taken implicitly)', async () => {
+    mockApp.DeleteSessionWithOptions = vi.fn(() => Promise.resolve())
+
+    await deleteSessionWithOptions('s-1', { confirmUncommittedLoss: true, unlockLockedTree: true })
+
+    expect(mockApp.DeleteSessionWithOptions).toHaveBeenCalledTimes(1)
+    expect(mockApp.DeleteSessionWithOptions).toHaveBeenCalledWith('s-1', {
+      confirm_uncommitted_loss: true,
+      unlock_locked_tree: true,
+    })
+  })
+
+  it('maps the flat camelCase options onto both snake_case flags, defaulting to false', async () => {
+    mockApp.DeleteSessionWithOptions = vi.fn(() => Promise.resolve())
+
+    await deleteSessionWithOptions('s-1')
+    expect(mockApp.DeleteSessionWithOptions).toHaveBeenCalledWith('s-1', {
+      confirm_uncommitted_loss: false,
+      unlock_locked_tree: false,
+    })
+
+    await deleteSessionWithOptions('s-2', { unlockLockedTree: true })
+    expect(mockApp.DeleteSessionWithOptions).toHaveBeenLastCalledWith('s-2', {
+      confirm_uncommitted_loss: false,
+      unlock_locked_tree: true,
+    })
+
+    await deleteSessionWithOptions('s-3', { confirmUncommittedLoss: true })
+    expect(mockApp.DeleteSessionWithOptions).toHaveBeenLastCalledWith('s-3', {
+      confirm_uncommitted_loss: true,
+      unlock_locked_tree: false,
+    })
+  })
+
+  it('refuses an empty or whitespace id without touching the backend', async () => {
+    mockApp.DeleteSessionWithOptions = vi.fn(() => Promise.resolve())
+
+    await expect(deleteSessionWithOptions('')).rejects.toThrow('session id is required')
+    await expect(deleteSessionWithOptions('   ')).rejects.toThrow('session id is required')
+    expect(mockApp.DeleteSessionWithOptions).not.toHaveBeenCalled()
+  })
+
+  it('propagates the blocked refusal unchanged — parseable, unlogged, unwrapped', async () => {
+    mockApp.DeleteSessionWithOptions = vi.fn(() => Promise.reject(BLOCKED_ERROR))
+
+    await expect(deleteSessionWithOptions('s-1')).rejects.toBe(BLOCKED_ERROR)
+  })
+
+  it('propagates ordinary RPC failures unchanged', async () => {
+    mockApp.DeleteSessionWithOptions = vi.fn(() => Promise.reject(new Error('session manager not initialized')))
+
+    await expect(deleteSessionWithOptions('s-1', { unlockLockedTree: true })).rejects.toThrow(
+      'session manager not initialized',
+    )
   })
 })
 

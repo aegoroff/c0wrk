@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -63,6 +64,35 @@ func (f *FrontendAPI) ListSkills() []SkillDescriptorDTO {
 func (f *FrontendAPI) RefreshSkills() []SkillDescriptorDTO {
 	f.invalidateSkillCache()
 	return f.ListSkills()
+}
+
+// ResolveSkillResourcePath resolves a read_skill_resource tool call's
+// (skill, path) arguments to the absolute file path the tool actually read,
+// so a tool-call card can open the resource in the viewer. The resolution is
+// delegated to the builder (core/builder.go), which scans the same skill
+// catalog the tool's per-session SkillManager does — the active project's
+// .agents/skills directory first, then the shared base dirs — and applies the
+// tool's own SafeResolvePath traversal guard. Returns an error when the
+// backend is not ready, the skill is unknown, or the path escapes the skill
+// directory; the frontend falls back to rendering the path as plain text.
+func (f *FrontendAPI) ResolveSkillResourcePath(skill, path string) (string, error) {
+	b := f.builder()
+	if b == nil {
+		return "", errors.New("backend is not ready")
+	}
+
+	// Same workspace snapshot ListSkills uses: the active project's
+	// .agents/skills directory joins the front of the discovery set.
+	f.activeProjectMu.RLock()
+	wsPath := f.activeProjectPath
+	f.activeProjectMu.RUnlock()
+
+	projectSkillDir := ""
+	if wsPath != "" {
+		projectSkillDir = config.ProjectSkillsPath(wsPath)
+	}
+
+	return b.ResolveSkillResourcePath(projectSkillDir, skill, path)
 }
 
 // The c0wrk-owned skill packs (the research-* methodology skills and the

@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Plus, Search } from "lucide-react";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { SessionItem, type SessionItemSummary } from "./SessionListItem";
 import { SessionActionConfirmDialog } from "./SessionActionConfirmDialog";
+import { SessionDeleteBlockedDialog } from "./SessionDeleteBlockedDialog";
 import { PromoteSessionDialog } from "./PromoteSessionDialog";
 
 /**
@@ -43,6 +44,10 @@ export function SessionList() {
     pendingAction,
     confirmPendingAction,
     cancelPendingAction,
+    blockedDelete,
+    blockedDeleteError,
+    confirmBlockedDelete,
+    cancelBlockedDelete,
   } = useSessionActions();
 
   const [search, setSearch] = useState("");
@@ -173,6 +178,12 @@ export function SessionList() {
         )}
       </div>
       <SessionActionConfirmDialog pending={pendingAction} onConfirm={confirmPendingAction} onCancel={cancelPendingAction} />
+      <SessionDeleteBlockedDialog
+        blocked={blockedDelete}
+        error={blockedDeleteError}
+        onConfirm={confirmBlockedDelete}
+        onCancel={cancelBlockedDelete}
+      />
       {promoteTarget && (
         <PromoteSessionDialog
           key={promoteTarget.id}

@@ -43,19 +43,23 @@ export function sessionRegionId(key: string): string {
 export interface ManagedBranchGroup {
   /** The pinned branch name (from `workspace_binding.branch`). */
   readonly branch: string
-  /** Group members, ordered pinned → freshness. */
+  /** Group members, ordered pinned → freshness — live groups add the
+   *  active-session tier (pinned → active → freshness) when the
+   *  `activeSessionId` option is set; archived groups never do. */
   readonly sessions: SessionInfo[]
 }
 
 /**
  * The ordered sidebar grouping model for one project's sessions:
  *
- * 1. `worktrees` — branch groups, GROUP-pinned first, then by each group's
+ * 1. `worktrees` — branch groups, GROUP-pinned first, then the group holding
+ *    the active session (when `activeSessionId` is set), then by each group's
  *    freshest session.
  * 2. `local` — sessions pinned to the project checkout (`kind: 'local'`) or
  *    carrying no `workspace_binding` at all (older backends / CHAT).
  * 3. `archivedWorktrees` — archived sessions on managed branches, grouped by
- *    branch under the same rules as `worktrees`.
+ *    branch under the pre-active `worktrees` rules (GROUP-pin → freshness →
+ *    alphabetical; members pinned → freshness) — active-unaware by design.
  * 4. `archivedLocal` — archived sessions with a local binding or no binding.
  */
 export interface SessionGroups {
@@ -73,6 +77,12 @@ export interface BuildSessionGroupsOptions {
    *  a pinned group floats above the unpinned ones of its section. Does NOT
    *  touch per-session pins, which only order members inside a group. */
   readonly pinnedBranches?: readonly string[]
+  /** Id of the session the user is currently viewing. LIVE SECTIONS ONLY:
+   *  the active session surfaces right below pinned members inside its live
+   *  group/bucket, and its whole live worktrees group floats below
+   *  GROUP-pinned groups. Archived buckets ignore it entirely. A null,
+   *  undefined or unknown id degrades to the ordering without the option. */
+  readonly activeSessionId?: string | null
 }
 
 // ──────────────────────────────── Sorting ────────────────────────────────────
@@ -118,6 +128,34 @@ function sortByActivity(sessions: readonly SessionInfo[]): SessionInfo[] {
   return [...sessions].sort(compareByActivity)
 }
 
+/** Live-member comparator: pinned → active → freshness. The middle tier
+ *  surfaces the active session (the `activeSessionId` option) right below a
+ *  bucket/group's pinned members; archived buckets never receive an active
+ *  id and keep the plain pinned → freshness rule. A null activeId makes this
+ *  byte-identical to {@link compareByActivity}. */
+function compareLiveActivity(
+  a: SessionInfo,
+  b: SessionInfo,
+  activeId: string | null,
+): number {
+  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+  if (activeId !== null) {
+    const aActive = a.id === activeId
+    const bActive = b.id === activeId
+    if (aActive !== bActive) return aActive ? -1 : 1
+  }
+  return lastActiveTime(b) - lastActiveTime(a)
+}
+
+/** Live-bucket variant of {@link sortByActivity}: pinned → active →
+ *  freshness. Pure: does not mutate the input array or any session object. */
+function sortLiveByActivity(
+  sessions: readonly SessionInfo[],
+  activeId: string | null,
+): SessionInfo[] {
+  return [...sessions].sort((a, b) => compareLiveActivity(a, b, activeId))
+}
+
 /** Branch key of a managed binding. The backend always pins `branch`; fall
  *  back to the tree name (then a sentinel) so a malformed payload still
  *  groups. */
@@ -138,18 +176,28 @@ function addToBranchGroups(
 }
 
 /** Materialise branch groups under the canonical rules: members sorted
- *  pinned → freshness, groups ordered by the GROUP-level pin (pinned groups
- *  first), then each group's freshest session (most recent first),
- *  alphabetical branch name as the deterministic tiebreak. */
+ *  pinned → active (live only) → freshness, groups ordered by the GROUP-level
+ *  pin (pinned groups first), then — live sections only — by whether the
+ *  group contains the active session, then each group's freshest session
+ *  (most recent first), alphabetical branch name as the deterministic
+ *  tiebreak. `activeId === null` (the archived section) keeps the exact
+ *  pre-active rules. */
 function orderedBranchGroups(
   byBranch: Map<string, SessionInfo[]>,
   pinned: ReadonlySet<string>,
+  activeId: string | null,
 ): ManagedBranchGroup[] {
   return [...byBranch.entries()]
-    .map(([branch, members]) => ({ branch, sessions: sortByActivity(members) }))
+    .map(([branch, members]) => ({ branch, sessions: sortLiveByActivity(members, activeId) }))
     .sort((a, b) => {
       const byGroupPin = Number(pinned.has(b.branch)) - Number(pinned.has(a.branch))
       if (byGroupPin !== 0) return byGroupPin
+      if (activeId !== null) {
+        const byContainsActive =
+          Number(b.sessions.some((s) => s.id === activeId)) -
+          Number(a.sessions.some((s) => s.id === activeId))
+        if (byContainsActive !== 0) return byContainsActive
+      }
       const byFreshness = freshestActivity(b.sessions) - freshestActivity(a.sessions)
       if (byFreshness !== 0) return byFreshness
       return a.branch.localeCompare(b.branch)
@@ -164,8 +212,8 @@ function orderedBranchGroups(
  * Classification (per session, after the optional search filter):
  *
  * - `session.archived` on a managed binding → the `archivedWorktrees` group of
- *   `binding.branch`, under exactly the grouping/ordering rules of the live
- *   `worktrees` section;
+ *   `binding.branch`, under the pre-active `worktrees` rules (the archived
+ *   section never sees `activeSessionId`);
  * - other archived sessions (local binding or none) → `archivedLocal`;
  * - `workspace_binding.kind === 'managed_worktree'` → the worktrees group of
  *   `binding.branch`; sessions sharing one branch merge into a single group
@@ -174,11 +222,16 @@ function orderedBranchGroups(
  *
  * Ordering:
  *
- * - sessions inside every bucket/group: pinned → freshness (the
- *   {@link compareByActivity} order);
- * - managed branch groups: GROUP-pinned branches first (the
- *   `pinnedBranches` option), then by their freshest session, most recent
- *   first; alphabetical branch name as the deterministic tiebreak.
+ * - live sections (`worktrees`, `local`): members ordered pinned → active →
+ *   freshness — the session named by `activeSessionId` surfaces right below
+ *   the bucket/group's pinned members;
+ * - live managed branch groups: GROUP-pinned branches first (the
+ *   `pinnedBranches` option), then the group containing the active session,
+ *   then by their freshest session, most recent first; alphabetical branch
+ *   name as the deterministic tiebreak;
+ * - archived buckets are active-unaware: members keep the plain
+ *   pinned → freshness order and groups keep the GROUP-pin → freshness →
+ *   alphabetical order.
  *
  * Search filters by name (case-insensitive substring, trimmed); groups left
  * without members simply do not appear in the result, so the UI hides them.
@@ -200,6 +253,7 @@ export function buildSessionGroups(
   const byBranch = new Map<string, SessionInfo[]>()
   const archivedByBranch = new Map<string, SessionInfo[]>()
   const pinned = new Set(options.pinnedBranches ?? [])
+  const activeId = options.activeSessionId ?? null
 
   for (const session of visible) {
     const binding = session.workspace_binding
@@ -219,9 +273,10 @@ export function buildSessionGroups(
   }
 
   return {
-    worktrees: orderedBranchGroups(byBranch, pinned),
-    local: sortByActivity(local),
-    archivedWorktrees: orderedBranchGroups(archivedByBranch, pinned),
+    worktrees: orderedBranchGroups(byBranch, pinned, activeId),
+    local: sortLiveByActivity(local, activeId),
+    // Archived buckets are active-unaware by design — exact pre-option rules.
+    archivedWorktrees: orderedBranchGroups(archivedByBranch, pinned, null),
     archivedLocal: sortByActivity(archivedLocal),
   }
 }

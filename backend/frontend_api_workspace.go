@@ -16,6 +16,7 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
+	"github.com/v0lka/c0wrk/core"
 	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/sp4rk/safeio"
 )
@@ -101,16 +102,42 @@ func (f *FrontendAPI) resolveWorkspacePath(filePath string) (absPath, absRoot st
 }
 
 // resolveReadablePath resolves a file path for the read-path RPCs (ReadFile,
-// GetFileIcon, GetFileDiff). Unlike resolveWorkspacePath it does NOT enforce
-// workspace containment and does NOT require an active project — the file
-// viewer must be able to display any file path surfaced by the agent (e.g.
-// files in the sp4rk SDK, system files referenced in chat, paths from
-// external tools). Only the line-anchor fragment is stripped (defence in
-// depth) and the path is made absolute. Containment for the destructive /
+// GetFileIcon, ReadImageAsDataURL, GetFileDiff). Unlike resolveWorkspacePath
+// it does NOT enforce workspace containment and does NOT require an active
+// project — the file viewer must be able to display any file path surfaced by
+// the agent (e.g. files in the sp4rk SDK, system files referenced in chat,
+// paths from external tools). Containment for the destructive /
 // trust-boundary RPCs (WriteFile, ListDirectory) remains enforced by
 // resolveWorkspacePath.
+//
+// Absolute paths are recognized lexically via core.IsAbsolutePath, which
+// classifies identically on every GOOS: POSIX ("/a/b"), Windows drive-rooted
+// ("C:\x\f.md") and Windows UNC ("\\srv\share\f.md"). A recognized absolute
+// path is returned verbatim after the line-anchor strip — feeding a
+// Windows-dialect path through filepath.Abs on POSIX would mount it as
+// rooted junk ("/C:\x\f.md") that no filesystem can open. The legacy rooted
+// spelling the frontend once emitted ("/C:/x/f.md" — a POSIX slash bolted
+// onto a Windows path) is un-rooted: the leading slash is stripped whenever
+// the remainder is itself a Windows-dialect absolute path. A remainder that
+// starts with "/" is a canonical forward-slash UNC ("//srv/share") and stays
+// intact, as do genuine POSIX-absolute paths. Relative paths keep the
+// historical filepath.Abs resolution against the process CWD. Canonical
+// spellings resolve byte-for-byte exactly as before; changed behavior is
+// limited to non-canonical ones: the Windows dialects (previously mounted
+// as rooted junk) and dot-segment-carrying POSIX absolutes, which are now
+// returned verbatim instead of filepath.Abs-cleaned — dot-segment
+// canonicalization is the emitter's job (ADR-095 decisions 2 and 8).
 func (f *FrontendAPI) resolveReadablePath(filePath string) (string, error) {
-	absPath, err := filepath.Abs(stripLineAnchor(filePath))
+	cleaned := stripLineAnchor(filePath)
+	if len(cleaned) > 1 && cleaned[0] == '/' && cleaned[1] != '/' &&
+		core.IsAbsolutePath(cleaned[1:]) {
+		// Legacy rooted Windows spelling "/C:/x/f.md" → "C:/x/f.md".
+		return cleaned[1:], nil
+	}
+	if core.IsAbsolutePath(cleaned) {
+		return cleaned, nil
+	}
+	absPath, err := filepath.Abs(cleaned)
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}

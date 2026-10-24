@@ -260,6 +260,8 @@ export function ListAllSessions():Promise<Array<session.SessionInfo>>;
 
 export function ListBookmarks(arg1:string):Promise<Array<session.SessionBookmark>>;
 
+export function ListCommands():Promise<Array<backend.CommandDescriptorDTO>>;
+
 export function ListDirectory(arg1:string,arg2:boolean):Promise<Array<workspace.FileNode>>;
 
 export function ListFontFamilies(arg1:boolean):Promise<backend.FontFamiliesResponse>;

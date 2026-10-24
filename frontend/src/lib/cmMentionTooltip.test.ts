@@ -29,6 +29,9 @@ vi.mock('@/api/skills', () => ({
 vi.mock('@/api/agents', () => ({
   listAgents: vi.fn().mockResolvedValue([]),
 }))
+vi.mock('@/api/commands', () => ({
+  listCommands: vi.fn().mockResolvedValue([]),
+}))
 vi.mock('@/api/mcp', () => ({
   getMCPMentionableServers: (...args: unknown[]) => getMCPMentionableServersMock(...args),
   // Pure helper mirrored verbatim: the chip-display predicate (≥1 context) is

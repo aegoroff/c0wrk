@@ -89,11 +89,19 @@ func (s *SQLiteSessionStore) migrateSharedManagedWorktrees() error {
 // archived session can be unarchived and then executes in its tree again.
 // The deletion protocol uses this to release a shared tree only when its
 // last binding goes away.
+//
+// The workspace_binding <> "" guard skips the no-project CHAT rows whose
+// binding is the schema's DEFAULT empty string (the binding backfill
+// deliberately leaves __no_project__ rows empty): json_extract on an empty
+// binding raises "malformed JSON" in SQLite, so one such legacy row would
+// fail every co-owner count and wedge all managed-worktree session
+// deletions. The guard mirrors the partial index's own WHERE clause.
 func (s *SQLiteSessionStore) CountManagedWorktreeSessions(ctx context.Context, worktreeName, excludeSessionID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sessions
 		WHERE id <> ?
+		  AND workspace_binding <> ''
 		  AND json_extract(workspace_binding, '$.kind') = 'managed_worktree'
 		  AND json_extract(workspace_binding, '$.worktree_name') = ?`,
 		excludeSessionID, worktreeName).Scan(&n)

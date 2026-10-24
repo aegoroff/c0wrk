@@ -4,7 +4,7 @@
 
 ## Comment Policy
 
-Created by [ADR-092](specs/decisions/092-comment-policy.md), which records why the policy exists as a standalone document; the policy text itself lives here and evolves here.
+Created by [ADR-097](specs/decisions/097-comment-policy.md), which records why the policy exists as a standalone document; the policy text itself lives here and evolves here.
 
 ### Context
 

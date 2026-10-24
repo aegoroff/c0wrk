@@ -71,7 +71,7 @@ const (
 	ComponentCudart  Component = "cudart" // Windows CUDA only: the paired DLL archive
 	ComponentModel   Component = "model"
 	ComponentMMProj  Component = "mmproj"
-	// mtplx-engine components (ADR-090): the managed CPython archive, the
+	// mtplx-engine components (ADR-092): the managed CPython archive, the
 	// closed wheel set of the engine venv, and the MLX weight pack (vision
 	// tower and MTP head inside — no separate projector).
 	ComponentPython       Component = "python"

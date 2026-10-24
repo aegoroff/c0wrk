@@ -58,19 +58,15 @@ const GROUP_BY_VALUES = new Set<GroupBy>(['none', 'status', 'directory'])
 export const GIT_PANEL_TAB_VALUES = new Set<GitPanelTab>(['files', 'changes', 'history'])
 
 /**
- * Per-project state for the commit box: the draft message, the AI-generation
- * flag, the commit-in-flight flag, and the inline draft/generation error.
- * Keyed by project id so a draft survives project switches and CHAT↔CODE mode
- * switches (GitPanel unmount), and so a mid-generation project switch can
- * never land text in the wrong project's box. Transient — NOT persisted.
- *
- * Commit OUTCOMES (success or failure) are deliberately absent: they are a
- * git operation result and land in the git-operation console
+ * Transient per-project commit-box state: the AI-generation flag, the
+ * commit-in-flight flag, and the inline draft/generation error. The draft
+ * MESSAGE is not here — it lives in `commitMessageByBranch` (branch-scoped,
+ * persisted). Commit OUTCOMES are deliberately absent: they are a git
+ * operation result and land in the git-operation console
  * (`operationByProject`) through `runGitOperation`, never inline here.
+ * Contract: specs/domains/frontend/stores.md (gitPanelStore).
  */
 export interface CommitDraftState {
-  /** Draft commit message shown in the textarea. */
-  message: string
   /** True while an AI commit-message generation is in flight. */
   isGenerating: boolean
   /** True while the commit RPC itself is in flight (disables the buttons). */
@@ -89,7 +85,6 @@ export interface CommitDraftState {
  * without allocating inside Zustand selectors.
  */
 export const EMPTY_COMMIT_DRAFT: CommitDraftState = {
-  message: '',
   isGenerating: false,
   isCommitting: false,
   error: null,
@@ -180,8 +175,20 @@ export const EMPTY_GIT_OPERATION: GitOperationRecord = {
 interface GitPanelState {
   viewMode: 'flat' | 'tree'
   entries: GitPanelEntry[]
-  /** Transient per-project commit-box state, keyed by project id. Not persisted. */
+  /** Transient per-project commit-box flags/error, keyed by project id. Not persisted. */
   commitByProject: Record<string, CommitDraftState>
+  /**
+   * Persisted commit-message drafts, keyed by project id, then branch name —
+   * the focused worktree's branch (`branch.name`) at read/write time, so a
+   * session switch onto another worktree swaps the draft with the branch.
+   * Detached HEAD keys the literal "HEAD"; an unresolved/unborn branch keys ''
+   * (a per-project fallback slot). A successful commit deletes the branch key;
+   * dropProjectCommitState deletes the project shell. Rehydrated
+   * entry-by-entry, non-string values dropped. Contract:
+   * specs/domains/frontend/stores.md (gitPanelStore); decision:
+   * specs/decisions/098-branch-scoped-commit-drafts.md.
+   */
+  commitMessageByBranch: Record<string, Record<string, string>>
   /**
    * Transient per-project result of the most recent git operation, keyed by
    * project id. Not persisted. Keeps the last op's outcome (success or
@@ -268,8 +275,8 @@ interface GitPanelState {
 
 interface GitPanelActions {
   setViewMode: (mode: 'flat' | 'tree') => void
-  /** Set the commit-message draft for a project. */
-  setCommitMessage: (projectId: string, message: string) => void
+  /** Set (or clear — an empty message deletes the key) a branch's commit-message draft. */
+  setCommitMessage: (projectId: string, branch: string, message: string) => void
   loadEntries: (entries: GitPanelEntry[]) => void
   setBranch: (branch: BranchInfo) => void
   setBranches: (branches: Branch[]) => void
@@ -345,6 +352,7 @@ const initialState: GitPanelState = {
   viewMode: 'flat',
   entries: [],
   commitByProject: {},
+  commitMessageByBranch: {},
   operationByProject: {},
   branch: EMPTY_BRANCH_INFO,
   branches: [],
@@ -371,7 +379,8 @@ const initialState: GitPanelState = {
 
 /**
  * Select the slice of state persisted to localStorage. `expandedDirs` (a Set)
- * is serialized to an array; `sortBy`/`groupBy` are persisted directly (D8).
+ * is serialized to an array; `sortBy`/`groupBy` are persisted directly (D8);
+ * `commitMessageByBranch` carries the branch-scoped commit drafts (ADR-098).
  * Transient slices (`commitByProject`, `operationByProject`, `entries`, …) are
  * deliberately omitted — live feedback is never rehydrated from a prior run.
  */
@@ -384,6 +393,7 @@ export function partializeGitPanel(
   groupBy: GroupBy
   activeTabByProject: Record<string, GitPanelTab>
   skipCommitSuppressByProject: Record<string, boolean>
+  commitMessageByBranch: Record<string, Record<string, string>>
 } {
   return {
     viewMode: state.viewMode,
@@ -392,6 +402,7 @@ export function partializeGitPanel(
     groupBy: state.groupBy,
     activeTabByProject: state.activeTabByProject,
     skipCommitSuppressByProject: state.skipCommitSuppressByProject,
+    commitMessageByBranch: state.commitMessageByBranch,
   }
 }
 
@@ -415,6 +426,7 @@ export function mergeGitPanel(
     groupBy?: GroupBy
     activeTabByProject?: Record<string, unknown>
     skipCommitSuppressByProject?: Record<string, unknown>
+    commitMessageByBranch?: Record<string, unknown>
   }
   const sortBy: SortBy =
     p.sortBy !== undefined && SORT_BY_VALUES.has(p.sortBy)
@@ -449,6 +461,35 @@ export function mergeGitPanel(
       }
     }
   }
+  // Branch-scoped commit drafts (ADR-098), validated the same way one level
+  // deeper: a project entry must be an object and every draft a string —
+  // anything else (corrupt or future-shaped localStorage) is dropped rather
+  // than trusted. An empty branch record never survives rehydration.
+  const commitMessageByBranch: Record<string, Record<string, string>> = {}
+  if (
+    p.commitMessageByBranch !== null &&
+    typeof p.commitMessageByBranch === 'object'
+  ) {
+    for (const [projectId, branches] of Object.entries(p.commitMessageByBranch)) {
+      if (branches === null || typeof branches !== 'object') continue
+      const record: Record<string, string> = {}
+      for (const [branch, message] of Object.entries(branches)) {
+        // `__proto__` is a legal git branch name but a prototype setter on a
+        // plain object literal: `record[branch] = message` would silently
+        // fail to create an own property, so the draft would vanish on
+        // rehydrate while the in-memory computed-key write keeps it. Drop
+        // the key — fail-closed, same direction as the corrupt-entry rule
+        // below.
+        if (branch === '__proto__') continue
+        if (typeof message === 'string' && message !== '') {
+          record[branch] = message
+        }
+      }
+      if (Object.keys(record).length > 0) {
+        commitMessageByBranch[projectId] = record
+      }
+    }
+  }
   return {
     ...current,
     viewMode: p.viewMode ?? current.viewMode,
@@ -457,6 +498,7 @@ export function mergeGitPanel(
     groupBy,
     activeTabByProject,
     skipCommitSuppressByProject,
+    commitMessageByBranch,
   }
 }
 
@@ -503,6 +545,23 @@ export function selectLastOperation(
   return state.operationByProject[projectId]
 }
 
+/**
+ * Pure selector for a branch's persisted commit-message draft. Returns a
+ * PRIMITIVE (safe as a Zustand selector return value — no allocation); ''
+ * when no project is active, the branch is not resolved, or no draft is
+ * stored for the pair. `branch` is the focused worktree's branch name
+ * (`gitPanelStore.branch.name`), including the "HEAD" and '' fallback slots.
+ */
+export function selectCommitMessage(
+  state: Pick<GitPanelState, 'commitMessageByBranch'>,
+  projectId: string | null | undefined,
+  branch: string | null | undefined,
+): string {
+  if (projectId === null || projectId === undefined) return ''
+  if (branch === null || branch === undefined) return ''
+  return state.commitMessageByBranch[projectId]?.[branch] ?? ''
+}
+
 // --- Store ---
 
 /**
@@ -527,6 +586,42 @@ function withCommitDraft(
         ...current,
         ...patch,
       },
+    },
+  }
+}
+
+/**
+ * Write one branch's draft in the persisted `commitMessageByBranch` map.
+ * An empty message DELETES the branch key (and the project shell when its
+ * last branch goes), so cleared drafts never accumulate; a write equal to
+ * the stored value is a reference-equal no-op — the same stability contract
+ * `withCommitDraft` and the per-key stores follow.
+ */
+function withBranchMessage(
+  s: GitPanelState,
+  projectId: string,
+  branch: string,
+  message: string,
+): GitPanelState | Pick<GitPanelState, 'commitMessageByBranch'> {
+  const branches = s.commitMessageByBranch[projectId]
+  if (message === '') {
+    if (branches === undefined || branches[branch] === undefined) return s
+    if (Object.keys(branches).length === 1) {
+      const next = { ...s.commitMessageByBranch }
+      delete next[projectId]
+      return { commitMessageByBranch: next }
+    }
+    const nextBranches = { ...branches }
+    delete nextBranches[branch]
+    return {
+      commitMessageByBranch: { ...s.commitMessageByBranch, [projectId]: nextBranches },
+    }
+  }
+  if (branches?.[branch] === message) return s
+  return {
+    commitMessageByBranch: {
+      ...s.commitMessageByBranch,
+      [projectId]: { ...branches, [branch]: message },
     },
   }
 }
@@ -566,8 +661,8 @@ export const useGitPanelStore = create<GitPanelState & GitPanelActions>()(
 
       setViewMode: (mode) => set({ viewMode: mode }),
 
-      setCommitMessage: (projectId, message) =>
-        set((s) => withCommitDraft(s, projectId, { message })),
+      setCommitMessage: (projectId, branch, message) =>
+        set((s) => withBranchMessage(s, projectId, branch, message)),
 
       setLoading: (loading) => set({ isLoading: loading }),
 
@@ -596,14 +691,21 @@ export const useGitPanelStore = create<GitPanelState & GitPanelActions>()(
       dropProjectCommitState: (projectId) => {
         set((s) => {
           const hasDraft = s.commitByProject[projectId] !== undefined
+          const hasBranchMessages =
+            s.commitMessageByBranch[projectId] !== undefined
           const hasSkip =
             s.skipCommitSuppressByProject[projectId] !== undefined
-          if (!hasDraft && !hasSkip) return s
+          if (!hasDraft && !hasBranchMessages && !hasSkip) return s
           const patch: Partial<GitPanelState> = {}
           if (hasDraft) {
             const nextCommit = { ...s.commitByProject }
             delete nextCommit[projectId]
             patch.commitByProject = nextCommit
+          }
+          if (hasBranchMessages) {
+            const nextMessages = { ...s.commitMessageByBranch }
+            delete nextMessages[projectId]
+            patch.commitMessageByBranch = nextMessages
           }
           if (hasSkip) {
             const nextSkip = { ...s.skipCommitSuppressByProject }
@@ -710,6 +812,7 @@ export const useGitPanelStore = create<GitPanelState & GitPanelActions>()(
           expandedDirs: new Set<string>(),
           // Fresh empty maps — never share the initial-state objects across resets.
           commitByProject: {},
+          commitMessageByBranch: {},
           operationByProject: {},
           activeTabByProject: {},
           skipCommitSuppressByProject: {},

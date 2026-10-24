@@ -4,6 +4,7 @@ import { getApp } from './runtime'
 import { logger } from '@/lib/logger'
 import { isSessionInfo, isArrayOf, isProjectInfo } from '@/types/guards'
 import type { ProjectInfo, SessionInfo } from '@/types/models'
+import type { SessionDeleteOptionsUI } from '@/types/api'
 
 export async function createSession(): Promise<SessionInfo> {
   try {
@@ -28,6 +29,33 @@ export async function deleteSession(id: string): Promise<void> {
     logger.error('Failed to delete session:', err)
     throw err
   }
+}
+
+/**
+ * Delete a session carrying the user's explicit decisions about its managed
+ * worktree — the typed counterpart of `DeleteSessionWithOptions`.
+ * `confirmUncommittedLoss` confirms discarding the tree's uncommitted
+ * changes, `unlockLockedTree` authorizes removing a locked tree; neither is
+ * ever taken implicitly. Unlike `deleteSession` this wrapper does not log or
+ * wrap the failure: the backend refuses a missing decision with a
+ * `session deletion blocked: <reason> (confirm via <option>)` error that
+ * must reach the caller intact — recognize it with
+ * `parseSessionDeleteBlock`, then re-issue the deletion with the named
+ * option once the user confirms. A blocked deletion leaves the session, its
+ * tree, and its branch fully intact and retryable.
+ */
+export async function deleteSessionWithOptions(
+  id: string,
+  options: SessionDeleteOptionsUI = {},
+): Promise<void> {
+  if (typeof id !== 'string' || id.trim() === '') {
+    throw new Error('deleteSessionWithOptions: session id is required')
+  }
+  const app = getApp()
+  await app.DeleteSessionWithOptions(id.trim(), {
+    confirm_uncommitted_loss: options.confirmUncommittedLoss === true,
+    unlock_locked_tree: options.unlockLockedTree === true,
+  })
 }
 
 export async function listSessions(): Promise<SessionInfo[]> {

@@ -72,13 +72,13 @@ func TestResolveSkillDirs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Hijack the home-dir lookup by wrapping expandTilde directly:
-			// resolveSkillDirs reads os.UserHomeDir which we cannot stub from
+			// resolveCatalogDirs reads os.UserHomeDir which we cannot stub from
 			// the test, so we exercise expandTilde with our `home` value
 			// indirectly by checking the integration via inputs that use
 			// "/users/test" as a literal in the want slice. The actual home
 			// dir on the test runner may differ; we therefore prepend it
 			// from the runtime when comparing.
-			got := resolveSkillDirs(tt.in, agentDir, expandEnv, nil)
+			got := resolveCatalogDirs(tt.in, agentDir, expandEnv, nil)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d entries, want %d (%v)", len(got), len(tt.want), got)
 			}

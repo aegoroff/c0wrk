@@ -164,6 +164,15 @@ export function extractFileHint(args: Args, rawArgs: string): string | undefined
   return str(parsed, 'path') || str(parsed, 'file_path') || undefined
 }
 
+// extractSkillName returns the skill name from read_skill_resource args, or
+// undefined when absent — the companion of extractFileHint ('path') for that
+// tool; both feed the card's link resolution (which skill catalog dir the
+// path must be resolved against).
+export function extractSkillName(args: Args, rawArgs: string): string | undefined {
+  const parsed = safeParseArgs(args, rawArgs)
+  return str(parsed, 'skill') || undefined
+}
+
 // extractFileLine returns the first line number to position the file viewer at
 // for file tools that carry a line range (e.g. read_file with start_line).
 // Returns undefined when no line is specified, so the file opens without a

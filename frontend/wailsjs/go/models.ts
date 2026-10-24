@@ -323,6 +323,26 @@ export namespace backend {
 	        this.auth_url = source["auth_url"];
 	    }
 	}
+	export class CommandDescriptorDTO {
+	    name: string;
+	    description: string;
+	    agent: string;
+	    model: string;
+	    template: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CommandDescriptorDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.agent = source["agent"];
+	        this.model = source["model"];
+	        this.template = source["template"];
+	    }
+	}
 	export class CommitSuppression {
 	    hooks?: string[];
 	    signing_repo?: boolean;
@@ -836,6 +856,9 @@ export namespace backend {
 	    installing: boolean;
 	    loading: boolean;
 	    loaded: boolean;
+	    engine: string;
+	    python_version: string;
+	    pack_revision: string;
 	    packing: string;
 	    backend: string;
 	    port: number;
@@ -880,6 +903,9 @@ export namespace backend {
 	        this.installing = source["installing"];
 	        this.loading = source["loading"];
 	        this.loaded = source["loaded"];
+	        this.engine = source["engine"];
+	        this.python_version = source["python_version"];
+	        this.pack_revision = source["pack_revision"];
 	        this.packing = source["packing"];
 	        this.backend = source["backend"];
 	        this.port = source["port"];

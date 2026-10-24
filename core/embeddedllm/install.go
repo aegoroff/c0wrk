@@ -2191,6 +2191,14 @@ func createExtractSymlink(destDir, target, linkname string) error {
 	if !within {
 		return fmt.Errorf("archive symlink %q points outside the runtime tree", linkname)
 	}
+	// The managed-CPython archive (python-build-standalone) carries no
+	// directory entries at all, and its first entry is a symlink deep inside
+	// the tree (python/bin/2to3). The parent must therefore be created lazily
+	// here, exactly like writeExtractEntry does for a regular file, or
+	// os.Symlink fails with ENOENT before anything else has made the path.
+	if err := mkdirAll(filepath.Dir(target)); err != nil {
+		return err
+	}
 	_ = os.Remove(target)
 	if err := os.Symlink(linkname, target); err != nil {
 		return fmt.Errorf("creating symlink %q: %w", target, err)

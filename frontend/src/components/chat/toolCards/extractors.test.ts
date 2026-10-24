@@ -7,7 +7,7 @@ import {
   extractDelegationId,
   extractFileHint, extractFileLine, extractBashHint, extractSearchHint,
   extractDelegateTitle, extractReflectTitle, extractDeclarePlanTitle,
-  extractExecutePlanTitle, extractProposeGoalTitle,
+  extractExecutePlanTitle, extractProposeGoalTitle, extractSkillName,
 } from './extractors'
 
 describe('extractBashTitle', () => {
@@ -260,5 +260,18 @@ describe('extractProposeGoalTitle', () => {
   })
   it('returns fallback when empty', () => {
     expect(extractProposeGoalTitle(undefined, '{}')).toBe('goal')
+  })
+})
+
+describe('extractSkillName', () => {
+  it('extracts skill from parsedArgs', () => {
+    expect(extractSkillName({ skill: 'vibespec-explore', path: 'references/api.md' }, '')).toBe('vibespec-explore')
+  })
+  it('falls back to raw args', () => {
+    expect(extractSkillName(undefined, '{"skill":"study-paper"}')).toBe('study-paper')
+  })
+  it('returns undefined when absent', () => {
+    expect(extractSkillName({ path: 'references/api.md' }, '')).toBeUndefined()
+    expect(extractSkillName(undefined, '')).toBeUndefined()
   })
 })

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
-// SidebarHeader — the Settings gear follows the tab-bar flag: when the
-// workspace tab bar is enabled it carries its own Settings affordance and
-// the header drops its gear; disabled, the header keeps today's UI.
+// SidebarHeader — the Settings gear lives here in BOTH tab-bar modes: it is
+// unconditional (the same single entry point it has always been), whether the
+// workspace tab bar is enabled or not.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
@@ -14,6 +14,7 @@ vi.mock('@/hooks/useProjectSwitchState', () => ({ useProjectSwitchState: () => a
 
 import { SidebarHeader } from './SidebarHeader'
 import { useUIStore } from '@/stores/uiStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { useProjectStore } from '@/stores/projectStore'
 
 let container: HTMLDivElement
@@ -34,6 +35,7 @@ function gear(): HTMLButtonElement | null {
 
 beforeEach(() => {
   useUIStore.setState({ tabsEnabled: false })
+  useSettingsStore.setState({ open: false, activeTab: 'general' })
   useProjectStore.setState({ projects: null })
 })
 
@@ -45,31 +47,29 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-describe('SidebarHeader settings gear vs the tab-bar flag', () => {
-  it('keeps the gear when the tab bar is off (today\'s UI)', () => {
+describe('SidebarHeader settings gear', () => {
+  it("renders the gear with the tab bar off (today's UI)", () => {
     renderHeader()
     expect(gear()).not.toBeNull()
   })
 
-  it('drops the gear when the tab bar is on (the bar carries Settings)', () => {
+  it('renders the gear with the tab bar on too (the header keeps its entry point)', () => {
     act(() => {
       useUIStore.setState({ tabsEnabled: true })
     })
     renderHeader()
-    expect(gear()).toBeNull()
     // The rest of the header is untouched — collapse and mode toggles stay.
     expect(container.querySelector('button[aria-label="Collapse sidebar"]')).not.toBeNull()
+    expect(gear()).not.toBeNull()
   })
 
-  it('re-gains the gear when the flag turns off again', () => {
-    act(() => {
-      useUIStore.setState({ tabsEnabled: true })
-    })
+  it('opens Settings on the default tab', () => {
     renderHeader()
-    expect(gear()).toBeNull()
     act(() => {
-      useUIStore.setState({ tabsEnabled: false })
+      gear()?.click()
     })
-    expect(gear()).not.toBeNull()
+    const settings = useSettingsStore.getState()
+    expect(settings.open).toBe(true)
+    expect(settings.activeTab).toBe('general')
   })
 })

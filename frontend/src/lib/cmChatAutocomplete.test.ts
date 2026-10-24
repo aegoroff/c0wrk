@@ -8,7 +8,7 @@ import type { FileEntry } from '@/types/models'
 import { NO_PROJECT_ID } from '@/types/models'
 import { useFileTreeStore } from '@/stores/fileTreeStore'
 
-const { listDirectoryMock, getSessionWorkspaceMock, getMCPMentionableServersMock, getCapabilityModesMock } =
+const { listDirectoryMock, getSessionWorkspaceMock, getMCPMentionableServersMock, getCapabilityModesMock, listCommandsMock } =
   vi.hoisted(() => ({
     listDirectoryMock: vi.fn(),
     getSessionWorkspaceMock: vi.fn(),
@@ -16,6 +16,7 @@ const { listDirectoryMock, getSessionWorkspaceMock, getMCPMentionableServersMock
     // Empty sections = every catalog entry reads as auto = nothing filtered.
     // clearAllMocks keeps this implementation; tests override per fixture.
     getCapabilityModesMock: vi.fn().mockResolvedValue({ skills: {}, agents: {}, mcp: {} }),
+    listCommandsMock: vi.fn().mockResolvedValue([]),
   }))
 
 vi.mock('@/api/workspace', () => ({
@@ -27,6 +28,9 @@ vi.mock('@/api/skills', () => ({
 }))
 vi.mock('@/api/agents', () => ({
   listAgents: vi.fn().mockResolvedValue([]),
+}))
+vi.mock('@/api/commands', () => ({
+  listCommands: (...args: unknown[]) => listCommandsMock(...args),
 }))
 vi.mock('@/api/mcp', () => ({
   getMCPMentionableServers: (...args: unknown[]) => getMCPMentionableServersMock(...args),
@@ -538,7 +542,7 @@ describe('cmChatAutocomplete unified /-source', () => {
     })
   }
 
-  it('opens one combined list: Subagents, MCP Servers, Skills; plain insert without collision', async () => {
+  it('opens one combined list: Commands, Subagents, MCP Servers, Skills; plain insert without collision', async () => {
     // A distinct project id per test guarantees a store transition → cache
     // invalidation → fresh catalog fetch (the previous afterEach reset it to
     // null).
@@ -546,6 +550,7 @@ describe('cmChatAutocomplete unified /-source', () => {
     vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
     vi.mocked(listSkills).mockResolvedValue([{ name: 'commit', description: 'Commit helper' }])
     getMCPMentionableServersMock.mockResolvedValue([{ name: 'context7', chat_mode: 'auto', code_mode: 'auto' }])
+    listCommandsMock.mockResolvedValue([])
 
     const view = newSlashView()
     typeAndComplete(view, '/')
@@ -558,12 +563,14 @@ describe('cmChatAutocomplete unified /-source', () => {
     const agent = completions.find((c) => c.label === 'code-reviewer')!
     const mcp = completions.find((c) => c.label === 'context7')!
     const skill = completions.find((c) => c.label === 'commit')!
-    expect(agent.section).toEqual({ name: 'Subagents', rank: 0 })
+    // With no commands in the catalog the Commands section is absent; the
+    // mention sections keep their relative order one rank down.
+    expect(agent.section).toEqual({ name: 'Subagents', rank: 1 })
     expect(agent.type).toBe('agent')
     // MCP Servers sits BETWEEN Subagents and Skills.
-    expect(mcp.section).toEqual({ name: 'MCP Servers', rank: 1 })
+    expect(mcp.section).toEqual({ name: 'MCP Servers', rank: 2 })
     expect(mcp.type).toBe('mcp')
-    expect(skill.section).toEqual({ name: 'Skills', rank: 2 })
+    expect(skill.section).toEqual({ name: 'Skills', rank: 3 })
     expect(skill.type).toBe('skill')
     // Subagents are offered ahead of MCP servers, which lead skills.
     expect(completions.indexOf(agent)).toBeLessThan(completions.indexOf(mcp))
@@ -591,6 +598,84 @@ describe('cmChatAutocomplete unified /-source', () => {
     await vi.advanceTimersByTimeAsync(100)
     acceptCompletion(view)
     expect(view.state.doc.toString()).toBe('/code-reviewer ')
+  })
+
+  it('offers the Commands section first (rank 0) and qualifies a colliding name', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-commands' })
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([])
+    getMCPMentionableServersMock.mockResolvedValue([])
+    listCommandsMock.mockResolvedValue([
+      { name: 'deploy', description: 'Deploy the service', agent: '', model: '', template: 'T' },
+      // Collides with the code-reviewer agent: the qualified spelling is the
+      // only unambiguous insert.
+      { name: 'code-reviewer', description: 'Review command', agent: '', model: '', template: 'T' },
+    ])
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'deploy'),
+      'commands to appear',
+    )
+
+    const completions = currentCompletions(view.state)
+    const plain = completions.find((c) => c.label === 'deploy')!
+    const colliding = completions.find((c) => c.label === '/command: code-reviewer')!
+    const agent = completions.find((c) => c.label === '/agent: code-reviewer')!
+    expect(plain.section).toEqual({ name: 'Commands', rank: 0 })
+    expect(plain.type).toBe('command')
+    expect(plain.detail).toBe('Deploy the service')
+    // The colliding command is offered ONLY in its qualified spelling, and
+    // the colliding agent is qualified against the command catalog too.
+    expect(colliding.type).toBe('command')
+    expect(colliding.section).toEqual({ name: 'Commands', rank: 0 })
+    expect(agent.section).toEqual({ name: 'Subagents', rank: 1 })
+
+    await vi.advanceTimersByTimeAsync(100)
+    acceptCompletion(view)
+    expect(view.state.doc.toString()).toBe('/deploy ')
+    // Restore the shared mock: clearAllMocks keeps implementations, so a
+    // leaking non-empty command catalog would hijack the neighboring
+    // fixtures (the per-fixture-override convention).
+    listCommandsMock.mockResolvedValue([])
+  })
+
+  it('renders command rows with the command-item class, never the file fallback', async () => {
+    useProjectStore.setState({ projects: [], activeProjectId: 'slash-command-item' })
+    vi.mocked(listAgents).mockResolvedValue([{ name: 'code-reviewer', description: 'Reviews code' }])
+    vi.mocked(listSkills).mockResolvedValue([])
+    getMCPMentionableServersMock.mockResolvedValue([])
+    listCommandsMock.mockResolvedValue([
+      { name: 'deploy', description: 'Deploy the service', agent: '', model: '', template: 'T' },
+    ])
+
+    const view = newSlashView()
+    typeAndComplete(view, '/')
+    await until(
+      () => currentCompletions(view.state).some((c) => c.label === 'deploy'),
+      'commands to appear',
+    )
+    // optionClass lands on the rendered tooltip li.
+    await until(() => document.querySelector('li.command-item') !== null, 'command row to render')
+
+    const commandRow = document.querySelector('li.command-item')!
+    expect(commandRow.textContent).toContain('deploy')
+    // The mention sibling keeps its own class — file-item stays file-only.
+    expect(document.querySelector('li.agent-item')).not.toBeNull()
+    expect(commandRow.className).not.toContain('file-item')
+
+    // index.css pins the label tint for the new kind (token-based, sibling style).
+    const css = readFileSync('src/index.css', 'utf8')
+    const rule = css.match(/\.cm-tooltip-autocomplete li\.command-item \.cm-completionLabel\s*\{[^}]+\}/)?.[0]
+    expect(rule).toBeDefined()
+    expect(rule).toContain('var(--color-warning)')
+
+    await vi.advanceTimersByTimeAsync(100)
+    acceptCompletion(view)
+    expect(view.state.doc.toString()).toBe('/deploy ')
+    // Per-fixture-override convention (see the sibling test above).
+    listCommandsMock.mockResolvedValue([])
   })
 
   it('offers auto+manual servers and hides disabled ones for the ACTIVE session kind (chat)', async () => {
