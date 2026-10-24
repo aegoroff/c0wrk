@@ -411,8 +411,11 @@ func (f *FrontendAPI) comparisonsRootForProject(p *project.ProjectInfo) string {
 // Manager's researchProjectInfo derives the root from the SESSION's execution
 // workspace), so every research/papers read and mutation path must resolve
 // the SAME root. The root is <workspace-of-the-active-session>/.research,
-// where the active session is the project's most recently active
-// non-archived session, resolved through the READ-ONLY
+// where the active session is the project's USER-SELECTED session when a
+// usable selection is persisted (project_ui_state.saved_session_id — the
+// same choice the session picker, file tree, chat links and git panel
+// follow), falling back to the most recently active non-archived session;
+// resolved through the READ-ONLY
 // Manager.WorkspacePathFor lookup with project-ID membership decided exactly
 // as GetSessionWorkspace decides it (activeSessionWorkspace). It falls back
 // to the project checkout (<proj.WorkspacePath>/.research) when no session
@@ -449,8 +452,14 @@ func (f *FrontendAPI) researchRootWithBoundary(p *project.ProjectInfo) (root, bo
 }
 
 // activeSessionWorkspace resolves the workspace of the project's active
-// session: the most recently active non-archived session of projectID,
-// through the READ-ONLY Manager.WorkspacePathFor lookup — never
+// session: the USER-SELECTED session when a usable selection is persisted
+// (project_ui_state.saved_session_id — the same choice the session picker,
+// file tree, chat links and git panel follow, written by
+// SaveProjectActiveSession on every switch), falling back to the project's
+// most recently active non-archived session when no usable selection
+// resolves (fresh project, empty pointer, a pointer at an archived or
+// foreign session). Resolved through the READ-ONLY
+// Manager.WorkspacePathFor lookup — never
 // GetSessionWorkspacePath, whose lazy restore would rebuild a full
 // orchestrator on a pure path lookup (the same rule the terminal and
 // explorer paths follow). Membership is by project ID, GetSessionWorkspace's
@@ -473,7 +482,7 @@ func (f *FrontendAPI) activeSessionWorkspace(projectID string) (string, bool) {
 	ctx, cancel := context.WithTimeout(f.ctx(), terminalPathLookupTimeout)
 	defer cancel()
 
-	sessionID, err := f.latestSessionID(ctx, mgr, projectID)
+	sessionID, err := f.activeSessionID(ctx, mgr, projectID)
 	if err != nil || sessionID == "" {
 		return "", false
 	}
@@ -497,17 +506,71 @@ func (f *FrontendAPI) activeSessionWorkspace(projectID string) (string, bool) {
 	return "", false
 }
 
+// activeSessionID resolves which of projectID's sessions is "active": the
+// persisted user selection first, the activity-latest session as the
+// fallback — ONE definition for every backend consumer (the research/papers
+// RPCs, the CODE watcher and its tracked emit roots, the WatchDirectory
+// freshness check), so a backend root can no longer disagree with the session
+// the UI shows. The saved pointer is validated against the same non-archived
+// membership list the fallback orders — one ListSessionsByProjectCtx
+// round-trip serves both — mirroring resolveSavedSessionForProject's rule
+// (exists, belongs to the project, not archived; the list query IS the
+// project-membership filter, no manager-level fallback). A selection-read
+// failure is fail-soft here: nothing is written on this path, so it degrades
+// to the activity-latest session instead of failing the resolution (the
+// do-not-clobber-a-valid-pointer rule governs SaveProjectActiveSession
+// writes, not read paths).
+func (f *FrontendAPI) activeSessionID(ctx context.Context, mgr *session.Manager, projectID string) (string, error) {
+	sessions, err := mgr.ListSessionsByProjectCtx(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	if saved := f.savedSessionIDForProject(ctx, projectID); saved != "" {
+		for _, s := range sessions {
+			if s.ID == saved && !s.Archived {
+				return saved, nil
+			}
+		}
+	}
+	return latestOfSessions(sessions), nil
+}
+
+// savedSessionIDForProject reads project_ui_state.saved_session_id — the
+// frontend's persisted selection (SaveProjectActiveSession). A missing
+// subsystem or a store error yields "" (fail-soft, Debug-logged): the caller
+// falls back to the activity-latest session.
+func (f *FrontendAPI) savedSessionIDForProject(ctx context.Context, projectID string) string {
+	if f.projStore == nil {
+		return ""
+	}
+	state, err := f.projStore.LoadUIState(ctx, projectID)
+	if err != nil {
+		f.log().Debug("failed to load saved session selection", "project", projectID, "error", err)
+		return ""
+	}
+	if state == nil {
+		return ""
+	}
+	return strings.TrimSpace(state.SavedSessionID)
+}
+
 // latestSessionID returns the id of projectID's most recently active
-// non-archived session: the SessionInfo.LastActiveAt ordering
-// ListSessionsByProjectCtx exposes (falling back to created_at), with
-// archived sessions excluded — they are read-only and hidden from the picker,
-// so they must never be selected as the active one. The list query itself IS
-// the project-ID membership filter.
+// non-archived session (the activity-latest fallback of activeSessionID),
+// through one ListSessionsByProjectCtx call.
 func (f *FrontendAPI) latestSessionID(ctx context.Context, mgr *session.Manager, projectID string) (string, error) {
 	sessions, err := mgr.ListSessionsByProjectCtx(ctx, projectID)
 	if err != nil {
 		return "", err
 	}
+	return latestOfSessions(sessions), nil
+}
+
+// latestOfSessions returns the most recently active non-archived session of
+// the list: the SessionInfo.LastActiveAt ordering ListSessionsByProjectCtx
+// exposes (falling back to created_at). Archived sessions are skipped — they
+// are read-only and hidden from the picker, so they must never be selected as
+// the active one.
+func latestOfSessions(sessions []session.SessionInfo) string {
 	latestID := ""
 	var latestTS time.Time
 	for _, candidate := range sessions {
@@ -520,7 +583,7 @@ func (f *FrontendAPI) latestSessionID(ctx context.Context, mgr *session.Manager,
 			latestTS = ts
 		}
 	}
-	return latestID, nil
+	return latestID
 }
 
 // emitPapersChanged checks whether any of the changed paths fall inside the

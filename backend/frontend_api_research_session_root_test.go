@@ -295,3 +295,89 @@ func TestFollowSessionResearchRoots_IgnoresForeignPath(t *testing.T) {
 	}
 	f.watcherMu.Unlock()
 }
+
+// TestActiveSessionWorkspace_PrefersSavedSelection pins the ONE-definition
+// rule: the persisted user selection (project_ui_state.saved_session_id)
+// steers the active-session resolution even when another session is more
+// recently active — the research RPCs, the watcher and the tracked emit roots
+// must follow the session the user actually selected, not the activity-latest
+// one. A selection that no longer resolves (archived, foreign) or an empty
+// one falls back to the activity-latest session.
+func TestActiveSessionWorkspace_PrefersSavedSelection(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	f := h.api
+	ctx := context.Background()
+	checkout := h.project.WorkspacePath
+
+	// An older MANAGED session (its own tree) and a newer LOCAL session (the
+	// checkout): the activity-latest resolution picks the local one.
+	managed := f.mustManagedSession(t, "", true, "")
+	tree := managed.WorkspaceBinding.WorkspacePath
+	local, err := h.manager.CreateSession(h.project.ID, checkout)
+	if err != nil {
+		t.Fatalf("CreateSession (local): %v", err)
+	}
+	local.LastActiveAt = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	local.CreatedAt = local.LastActiveAt
+	if err := h.store.SaveSession(ctx, *local); err != nil {
+		t.Fatalf("SaveSession (local): %v", err)
+	}
+
+	if ws, ok := f.activeSessionWorkspace(h.project.ID); !ok || ws != checkout {
+		t.Fatalf("no-selection workspace = %q (ok=%v), want the checkout %q", ws, ok, checkout)
+	}
+
+	// Persisting the OLDER managed session's selection flips the resolution
+	// to its tree although the local session is more recently active.
+	if err := f.SaveProjectActiveSession(h.project.ID, managed.ID); err != nil {
+		t.Fatalf("SaveProjectActiveSession(managed): %v", err)
+	}
+	if ws, ok := f.activeSessionWorkspace(h.project.ID); !ok || ws != tree {
+		t.Fatalf("saved-selection workspace = %q (ok=%v), want the managed tree %q", ws, ok, tree)
+	}
+	if got := f.effectiveResearchRoot(h.project); got != config.ProjectResearchPath(tree) {
+		t.Fatalf("research root = %q, want the managed tree's %q", got, config.ProjectResearchPath(tree))
+	}
+
+	// An ARCHIVED saved selection no longer resolves: fallback to latest.
+	archived := *managed
+	archived.Archived = true
+	if err := h.store.SaveSession(ctx, archived); err != nil {
+		t.Fatalf("SaveSession (archive managed): %v", err)
+	}
+	if ws, ok := f.activeSessionWorkspace(h.project.ID); !ok || ws != checkout {
+		t.Fatalf("archived-selection workspace = %q (ok=%v), want the checkout fallback %q", ws, ok, checkout)
+	}
+	archived.Archived = false
+	if err := h.store.SaveSession(ctx, archived); err != nil {
+		t.Fatalf("SaveSession (unarchive managed): %v", err)
+	}
+
+	// A stale FOREIGN pointer (a row written before the session moved or was
+	// deleted) must not steer the root either — written past the RPC's
+	// validation to simulate the stale state.
+	foreignDir := t.TempDir()
+	foreignProj, err := f.projectManager.CreateProject("Foreign", foreignDir)
+	if err != nil {
+		t.Fatalf("CreateProject (foreign): %v", err)
+	}
+	foreignSession, err := h.manager.CreateSession(foreignProj.ID, foreignDir)
+	if err != nil {
+		t.Fatalf("CreateSession (foreign): %v", err)
+	}
+	if err := f.projStore.SaveSavedSessionID(ctx, h.project.ID, foreignSession.ID); err != nil {
+		t.Fatalf("SaveSavedSessionID (stale foreign row): %v", err)
+	}
+	if ws, ok := f.activeSessionWorkspace(h.project.ID); !ok || ws != checkout {
+		t.Fatalf("foreign-selection workspace = %q (ok=%v), want the checkout fallback %q", ws, ok, checkout)
+	}
+
+	// Clearing the selection restores the activity-latest fallback: the local
+	// session is newer, and its workspace IS the checkout.
+	if err := f.SaveProjectActiveSession(h.project.ID, ""); err != nil {
+		t.Fatalf("SaveProjectActiveSession(clear): %v", err)
+	}
+	if ws, ok := f.activeSessionWorkspace(h.project.ID); !ok || ws != checkout {
+		t.Fatalf("cleared-selection workspace = %q (ok=%v), want the checkout %q", ws, ok, checkout)
+	}
+}

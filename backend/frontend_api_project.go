@@ -704,10 +704,12 @@ func (f *FrontendAPI) switchProjectActivate(switchCtx context.Context, p *projec
 // recursive (it only reports events for explicitly-added directories, even
 // on macOS), so the root choice decides what is watched at all.
 //
-// The watcher is created here for the most recently active session (if any)
-// and re-scoped on every session switch via WatchDirectory. When no session
-// exists yet (fresh CHAT start), creation is deferred until the first session
-// is activated — WatchDirectory creates the watcher lazily.
+// The watcher is created here for the active session (if any) and re-scoped
+// on every session switch via WatchDirectory — the active session is
+// activeSessionWorkspace's rule: the persisted user selection when one
+// resolves, else the most recently active non-archived session. When no
+// session exists yet (fresh CHAT start), creation is deferred until the first
+// session is activated — WatchDirectory creates the watcher lazily.
 //
 // The CODE branch RETURNS the active-session workspace it resolved, and the
 // caller threads that same snapshot into switchProjectActivate so the tracked

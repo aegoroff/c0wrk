@@ -126,7 +126,15 @@ the session is bound to one, the project checkout otherwise — resolved at
 switch time through the READ-ONLY session lookup, and re-scoped on every
 session switch by the panel's `WatchDirectory` call, whose renderer-supplied
 path is containment-validated first (inside the active workspace, or one of
-its managed worktrees; a foreign path is rejected and changes nothing). The
+its managed worktrees; a foreign path is rejected and changes nothing). A
+re-scope additionally re-checks the active-session authority at execution
+time (`scopeRootMatchesActiveSessionLocked`, under the watcher lock —
+[ADR-099](../decisions/099-research-root-follows-active-session.md)):
+binding calls race, so a late request for an older tree is skipped instead
+of parking the watcher — and the tracked research emit roots with it — on
+the wrong tree; the frontend orders the call after the selection persist
+(`selectionPersisted`), and a skipped re-scope self-heals on the next panel
+mount or session switch. The
 per-root consumers the callback feeds — git status/ignore caches and the
 vector `NotifyFileChange` — route at the WATCHED root (per-root registry,
 [ADR-081](../decisions/081-vector-per-root-registry.md)), so a managed

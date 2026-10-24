@@ -501,6 +501,13 @@ The RESEARCH and papers subsystems resolve their root the same way the
 explorer does — by the ACTIVE SESSION, not the project row (the "research
 root follows the active session" protocol, [ADR-099](../decisions/099-research-root-follows-active-session.md)):
 
+- The ACTIVE SESSION is the project's user-selected session when a usable
+  selection is persisted (`project_ui_state.saved_session_id`, written by
+  `SaveProjectActiveSession` on every picker switch), falling back to the
+  most recently active non-archived session when no usable selection
+  resolves — ONE definition (`activeSessionID`) shared by every backend
+  consumer, so the panel, papers surfaces, watcher and tracked emit roots can
+  never disagree with the session the UI shows.
 - The agent writes research artifacts under `<session-workspace>/.research`
   (`session/Manager.researchProjectInfo` derives the root from the session's
   own execution workspace), so every panel-side read/mutation path

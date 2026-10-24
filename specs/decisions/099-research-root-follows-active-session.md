@@ -45,12 +45,19 @@ One protocol, documented once on the resolver declaration
 
 - The effective research root of a project is
   `<workspace-of-the-active-session>/.research`, where the active session is
-  the project's most recently active non-archived session
-  (`ListSessionsByProjectCtx` ordering), resolved through the READ-ONLY
+  the project's USER-SELECTED session when a usable selection is persisted
+  (`project_ui_state.saved_session_id` — the same choice the session picker,
+  file tree, chat links and git panel follow, written by
+  `SaveProjectActiveSession`), falling back to the project's most recently
+  active non-archived session (`ListSessionsByProjectCtx` ordering) when no
+  usable selection resolves: a fresh project, an empty pointer, or a pointer
+  at an archived or foreign session. Resolved through the READ-ONLY
   `Manager.WorkspacePathFor` lookup with project-ID membership decided exactly
-  as `GetSessionWorkspace` decides it (`activeSessionWorkspace`: store row
-  `ProjectID`, resident in-memory fallback; both reads share one
-  `terminalPathLookupTimeout`-bounded context).
+  as `GetSessionWorkspace` decides it (`activeSessionWorkspace` →
+  `activeSessionID`: store row `ProjectID`, resident in-memory fallback; the
+  saved pointer is validated against the same non-archived membership list the
+  fallback orders — one `ListSessionsByProjectCtx` round-trip serves both; all
+  reads share one `terminalPathLookupTimeout`-bounded context).
 - Fallback to the project checkout (`<proj.WorkspacePath>/.research`) when no
   session workspace resolves: a fresh project without sessions, a
   manager/store unavailability, or a foreign (other-project) session — a
@@ -77,6 +84,15 @@ One protocol, documented once on the resolver declaration
   re-scopes it and moves the tracked emit roots in one step; the dedicated
   re-pointing helper is gone. See `specs/domains/workspace.md`, Filesystem
   Watcher.]
+- A re-scope is applied only when the requested root still matches the
+  active-session authority at execution time
+  (`scopeRootMatchesActiveSessionLocked`, under `watcherMu`): Wails binding
+  calls race, so a late request for an older tree is skipped instead of
+  parking the watcher — and the tracked emit roots with it — on the wrong
+  tree. The frontend orders its `WatchDirectory` call after the selection
+  persist (`selectionPersisted`), so the check never rejects the tree the
+  user actually selected; a degraded (slow/failed) authority lookup also
+  skips, and the next panel mount or session switch re-issues the call.
 - Call sites carry only deltas; the protocol lives on the resolver
   declaration alone (no per-caller restatements, no caller enumerations).
 
@@ -85,8 +101,9 @@ One protocol, documented once on the resolver declaration
 - Research produced in a worktree session is visible in the Research panel
   and the Papers/Compare surfaces immediately; the incremental
   `research:file_changed` path works for session trees.
-- Root changes are now session-driven: switching the active session (by
-  activity) moves the panel's root. The existing
+- Root changes are now session-driven: switching the active session (by user
+  selection, falling back to activity when no usable selection is persisted)
+  moves the panel's root. The existing
   `errResearchRootChanged` guards naturally cover this — a root that moved
   between resolution and the mutation's re-check fails the RPC and the
   frontend refreshes.
@@ -120,3 +137,20 @@ One protocol, documented once on the resolver declaration
   concurrently running sessions of one project would share (and overwrite)
   research state; the session-local root is deliberate agent-side behavior
   (pinned by test) and ADR-080's isolation principle.
+- **Resolve the active session by activity alone** (most recently messaged)
+  — rejected: selection in the picker does not advance the stored activity
+  (only `SendMessage` does), so the research RPCs would follow a different
+  session than the one the user explicitly selected — the panel, papers
+  surfaces, watcher and tracked emit roots would read and mutate another
+  session's `.research` until a message landed in the selected one, and the
+  re-scoped watcher would stop emitting for the displayed tree. Both halves
+  of this protocol converge on the persisted selection instead
+  (`activeSessionID`), with activity as the fallback.
+- **Gate the watcher re-scope on arrival order alone** (record the newest
+  requested root and skip older ones) — rejected: the reorder this guard
+  exists for happens between the binding goroutines themselves, so arrival
+  order at the server IS the wrong order and an epoch cannot recover the
+  true one. The authority re-check compares against the session the user
+  actually selected, which is ordering-independent; the frontend's
+  `selectionPersisted` await closes the one window the authority cannot see
+  (a watch racing the persist of its own selection).

@@ -442,3 +442,100 @@ func TestWatchDirectory_CodeRescopesToSessionTree(t *testing.T) {
 		t.Fatal("repeated WatchDirectory with an unchanged root replaced the watcher")
 	}
 }
+
+// TestWatchDirectory_CodeStaleRescopeSkipped pins the re-scope freshness
+// guard: Wails binding calls race, so a LATE WatchDirectory for a tree the
+// active-session authority no longer resolves to must be skipped — neither
+// the watcher root nor the tracked research/papers emit roots may move back,
+// and the live watcher must survive the rejected request untouched.
+func TestWatchDirectory_CodeStaleRescopeSkipped(t *testing.T) {
+	h := newWTHarness(t, wtFactory())
+	f := h.api
+	checkout := h.project.WorkspacePath
+	t.Cleanup(closeAPIWatcher(f))
+	f.emitEvent = func(string, ...any) {}
+
+	// Fresh project, no sessions: the checkout IS the authority fallback, so
+	// a checkout-rooted request goes through (and creates the watcher).
+	if err := f.WatchDirectory(checkout); err != nil {
+		t.Fatalf("WatchDirectory(checkout, no sessions): %v", err)
+	}
+	if root := codeWatcherRoot(t, f); root != checkout {
+		t.Fatalf("watcher root = %q, want the checkout %q", root, checkout)
+	}
+
+	// A managed session, SELECTED by the user (persisted): the authority —
+	// and with it the switch-time watcher root — moves to the session tree.
+	managed := f.mustManagedSession(t, "", true, "")
+	tree := managed.WorkspaceBinding.WorkspacePath
+	if err := f.SaveProjectActiveSession(h.project.ID, managed.ID); err != nil {
+		t.Fatalf("SaveProjectActiveSession(managed): %v", err)
+	}
+	sessionWS, hasSessionWS := f.switchProjectSetupWatcher(context.Background(), h.project)
+	// The tracked roots: switchProjectActivate derives them through
+	// trackedSessionRoots from the SAME snapshot the setup returns — mirror
+	// that here (calling activate itself would need the full orchestrator
+	// builder the harness does not wire).
+	researchRoot, papersRoot, comparisonsRoot := trackedSessionRoots(h.project, sessionWS, hasSessionWS)
+	f.activeProjectMu.Lock()
+	f.activeResearchRoot = researchRoot
+	f.activePapersRoot = papersRoot
+	f.activeComparisonsRoot = comparisonsRoot
+	f.activeProjectMu.Unlock()
+	if root := codeWatcherRoot(t, f); root != tree {
+		t.Fatalf("switch root = %q, want the selected session tree %q", root, tree)
+	}
+	f.activeProjectMu.RLock()
+	switchTracked := f.activeResearchRoot
+	f.activeProjectMu.RUnlock()
+	if want := config.ProjectResearchPath(tree); switchTracked != want {
+		t.Fatalf("tracked research root after switch = %q, want the session tree's %q", switchTracked, want)
+	}
+
+	// The late stale request (the checkout) is skipped: root and tracked
+	// research root stay on the selected tree, and the watcher instance is
+	// kept — a rejected re-scope must not tear the live watcher down.
+	f.watcherMu.Lock()
+	live := f.watcher
+	f.watcherMu.Unlock()
+	if err := f.WatchDirectory(checkout); err != nil {
+		t.Fatalf("WatchDirectory(stale checkout): %v", err)
+	}
+	if root := codeWatcherRoot(t, f); root != tree {
+		t.Fatalf("watcher root after stale request = %q, want the session tree %q (a stale re-scope must be skipped)", root, tree)
+	}
+	f.activeProjectMu.RLock()
+	tracked := f.activeResearchRoot
+	f.activeProjectMu.RUnlock()
+	if want := config.ProjectResearchPath(tree); tracked != want {
+		t.Fatalf("tracked research root = %q, want the session tree's %q", tracked, want)
+	}
+	f.watcherMu.Lock()
+	kept := f.watcher == live
+	f.watcherMu.Unlock()
+	if !kept {
+		t.Fatal("a skipped stale re-scope must not replace the watcher")
+	}
+
+	// The authority moves to the checkout (a selected LOCAL session): the
+	// same checkout request now goes through — the guard tracks the
+	// authority, not the first accepted root.
+	local, err := h.manager.CreateSession(h.project.ID, checkout)
+	if err != nil {
+		t.Fatalf("CreateSession (local): %v", err)
+	}
+	local.LastActiveAt = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	local.CreatedAt = local.LastActiveAt
+	if err := h.store.SaveSession(context.Background(), *local); err != nil {
+		t.Fatalf("SaveSession (local): %v", err)
+	}
+	if err := f.SaveProjectActiveSession(h.project.ID, local.ID); err != nil {
+		t.Fatalf("SaveProjectActiveSession(local): %v", err)
+	}
+	if err := f.WatchDirectory(checkout); err != nil {
+		t.Fatalf("WatchDirectory(checkout, local selected): %v", err)
+	}
+	if root := codeWatcherRoot(t, f); root != checkout {
+		t.Fatalf("watcher root after authority move = %q, want the checkout %q", root, checkout)
+	}
+}

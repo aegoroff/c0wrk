@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 import { useFileTreeStore } from '@/stores/fileTreeStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useProjectStore } from '@/stores/projectStore'
+import { selectionPersisted } from '@/stores/sessionStore'
 import { listDirectory, getGitStatus, watchDirectory, unwatchDirectory } from '@/api/workspace'
 import { useWorkspaceRootState } from '@/hooks/useWorkspacePath'
 import { subscribe } from '@/api/runtime'
@@ -319,8 +320,14 @@ export function FileTreePanel() {
           if (!cancelled) setRootLoadError(describeListError(err))
         }),
     ]
-    // Start watching the workspace root for changes.
-    ops.push(watchDirectory(workspacePath))
+    // Start watching the workspace root for changes. Ordered AFTER the
+    // project's selection persist: the backend's WatchDirectory freshness
+    // check resolves the active session from the PERSISTED selection
+    // (project_ui_state.saved_session_id, ADR-099), so a watch sent while the
+    // persist of the selection this root is based on is still in flight could
+    // be (correctly) skipped as stale — awaiting it first keeps the re-scope
+    // on the tree the user actually selected.
+    ops.push(selectionPersisted(activeProjectId).then(() => watchDirectory(workspacePath)))
     // Skip git status for No Project
     if (!isNoProject) {
       ops.push(getGitStatus(workspacePath).then((status) => { if (!cancelled) setGitStatus(status) }))
