@@ -25,6 +25,7 @@ The pilot pass applied the classifier to `frontend/src/lib/chatInputLock.ts`, `f
 - A comment is as short as its meaning allows: every sentence must carry information the identifier, the body, the declaration comments of the constructs involved, or the linked spec does not already say.
 - Comments that state a cross-cutting invariant (anything a second subsystem, a contract partner, or a future refactor depends on) belong in a spec, not in the file.
 - Links use the spec path from the repo root (e.g. `specs/domains/prompt-suggestions.md`); per META.md, no line anchors.
+- A de-duplication pass covers every comment block in its declared scope — declaration docs, inline paragraphs, and trailing comments alike — each classified individually. A sweep over a subset of the blocks in scope is a spot-fix, not a pass.
 - Prose reduction target for a de-duplication pass over touched files: large (≥3-line) comment blocks shrink by ≥70% in total.
 - Enum-like constructs — TS string-literal union types, Go enum-style `const` blocks, and similar variant sets — are commented in place: a short header comment carries the shared context, and each variant carries its own inline comment (see the canonical shape below).
 - Tightening prose is the only way to shorten a comment. Joining a multi-line comment's lines into one long single-line comment is forbidden: a stretched comment produces a disproportionately long line, defeats the wrapping the block already had, and reads worse in diffs and side-by-side views.
@@ -59,6 +60,7 @@ export type PaperLiteratureStatus =
 - Every enum-like construct carries a short header comment plus one inline comment per variant, with each description adjacent to its variant.
 - Tightening prose is the only way to shorten a comment.
 - The ≥70% shrink target applies to de-duplication passes, not to everyday comments — a new C-class comment may legitimately be 3 lines.
+- A de-duplication pass covers every comment block in its scope; the volume reduction follows from full coverage (most bulk in a spec-duplicated file is class A), not from a minimization mandate — genuine class-C mechanics is preserved.
 - Every state protocol is documented once, at the declaration; accessor comments carry deltas only, and caller enumeration stays in tooling.
 
 ## Anti-Patterns
@@ -70,3 +72,4 @@ export type PaperLiteratureStatus =
 - **A caller census in a doc comment** — enumerating a callee's current callers (with per-site glosses) duplicates the call graph in prose and drifts at every new call site; replace with the modal-form contract plus the stable funnel name, and let tooling enumerate.
 - **A protocol restated at every accessor** — the state's contract retold by each of its accessors, drowned in "safe to call / mutex-guarded / idempotent" boilerplate; the protocol lives once at the state declaration, each accessor carries only its delta.
 - **A caller restating the callee's documented contract** — retelling the callee's doc comment at the call site duplicates the declaration's contract and drifts when the callee changes; the call site carries only its delta, the contract lives at the callee's declaration.
+- **A spot-fix billed as a pass** — a sweep over a subset of the blocks in scope (declaration docs only, drift fixes only) while the file's inline bulk stays unclassified; the file appears touched but remains non-compliant, and the pass target is claimed without the coverage that defines a pass.
