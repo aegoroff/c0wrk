@@ -202,7 +202,9 @@ describe('LocalBranchRow', () => {
       expect(container.querySelector('[aria-label="Pinned to this session"]')).not.toBeNull()
       expect(row(container).getAttribute('aria-current')).toBe('true')
       // The pin is communicated up front, not discovered through dead clicks.
-      expect(row(container).title).toBe('Pinned to this session — branch switching is disabled')
+      expect(row(container).title).toBe(
+        'Pinned: this branch is held by this session\'s managed worktree — the Git panel follows that tree; switch the focus in the Worktrees section to work on other branches',
+      )
     })
 
     it('renders no delete action and disables rename', () => {
