@@ -18,9 +18,23 @@ export interface ProjectAPI {
   pickDirectory(): Promise<string>
 }
 
+/** Flat, camelCase deletion decisions the UI collects from the user. The API
+ *  wrapper maps them onto the backend's snake_case SessionDeleteOptions —
+ *  neither decision is ever taken implicitly. When a required decision is
+ *  missing the backend refuses with a `session deletion blocked: <reason>
+ *  (confirm via <option>)` error (see `parseSessionDeleteBlock`) and the
+ *  session stays fully intact and retryable. */
+export interface SessionDeleteOptionsUI {
+  /** Confirm discarding uncommitted changes in the session's managed worktree. */
+  confirmUncommittedLoss?: boolean
+  /** Authorize unlocking and removing a locked worktree. */
+  unlockLockedTree?: boolean
+}
+
 export interface SessionAPI {
   createSession(): Promise<SessionInfo>
   deleteSession(id: string): Promise<void>
+  deleteSessionWithOptions(id: string, options?: SessionDeleteOptionsUI): Promise<void>
   listSessions(): Promise<SessionInfo[]>
   renameSession(id: string, name: string): Promise<void>
   archiveSession(id: string): Promise<void>

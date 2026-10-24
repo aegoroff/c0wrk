@@ -14,7 +14,7 @@
 // Mount this hook ONCE at the app root (App.tsx). The focus listener arms
 // through armWhenRuntimeReady — the shared readiness gate: on the desktop
 // the Wails bridge is detected synchronously and the listener attaches at
-// mount; a web-transport tab (ADR-090) attaches once the transport probe
+// mount; a web-transport tab (ADR-098) attaches once the transport probe
 // resolves 'web'; the transportless 'none' environment never arms, because
 // before a serving transport exists the RPC is a guaranteed no-op and
 // focus events during the splash phase would be dead weight. (`backend:ready`

@@ -142,7 +142,7 @@ export function LocalBranchRow({
         draftBlocked
           ? (draftBlockedReason ?? undefined)
           : isPinned
-            ? 'Pinned to this session — branch switching is disabled'
+            ? 'Pinned: this branch is held by this session\'s managed worktree — the Git panel follows that tree; switch the focus in the Worktrees section to work on other branches'
             : checkoutBlocked
               ? (checkoutBlockedReason ?? undefined)
               : undefined

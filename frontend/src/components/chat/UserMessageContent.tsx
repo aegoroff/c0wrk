@@ -8,7 +8,7 @@
 import { useMemo, useCallback, useEffect, useState } from 'react'
 import { Markdown } from '@/lib/markdownConfig'
 import { resolveChatWorkspaceRoot } from '@/lib/chatWorkspaceRoot'
-import { normalizePath } from '@/lib/localFileLink'
+import { resolveFileRefPath } from '@/lib/localFileLink'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { cachedRefCatalogs, loadRefCatalogs, type RefCatalogs } from '@/lib/refCatalogs'
 import { parseSegments, type Segment } from './userMessageSegments'
@@ -72,7 +72,10 @@ export function UserMessageContent({ content }: UserMessageContentProps) {
 
     const handleFileClick = useCallback(async (path: string, startLine?: number) => {
         const rootPath = await resolveChatWorkspaceRoot()
-        const fullPath = rootPath && !path.startsWith('/') ? normalizePath(rootPath, path) : path
+        // resolveFileRefPath recognizes absolute inputs itself (POSIX `/`,
+        // Windows drive `C:\`, UNC `\\srv\share`) and normalizes them without
+        // joining the root; relative paths resolve against it.
+        const fullPath = resolveFileRefPath(rootPath, path)
         if (startLine !== undefined) {
             useFileViewerStore.getState().openFileAtLine(fullPath, startLine)
         } else {

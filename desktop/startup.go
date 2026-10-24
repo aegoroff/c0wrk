@@ -540,7 +540,7 @@ func (a *App) Startup(ctx context.Context) {
 	// when LLM is unconfigured.
 	a.emitBackendReady(cachedProjects, projectMgr, cfg.LLM.DefaultModel == "", log)
 
-	// ── Web access sidecar (browser mirror, ADR-090) ─────────────────
+	// ── Web access sidecar (browser mirror, ADR-098) ─────────────────
 	// Mounted only when web_access.enabled: constructs internal/webaccess
 	// over the live FrontendAPI (reflection dispatch target), the embedded
 	// SPA tree and the CSP middleware, registers the emit event tap, and

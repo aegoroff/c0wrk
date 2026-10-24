@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_test.go — the desktop lifecycle of the browser web-access
-// sidecar (ADR-090): the startup mount, the bounded shutdown stop, the
+// sidecar (ADR-098): the startup mount, the bounded shutdown stop, the
 // hot-restart toggle, and the isolation invariant that the control RPCs are
 // unreachable from the web dispatch surface.
 //
@@ -35,7 +35,7 @@ import (
 // writeWebAccessConfig writes a loadable config.yaml (the smallest document
 // the loader accepts) with an optional web_access block, loads it through the
 // real pipeline, and returns the live config plus its path. The experimental
-// master gate (web access is an experimental feature, ADR-090) is OPEN —
+// master gate (web access is an experimental feature, ADR-098) is OPEN —
 // these tests exercise the sidecar's own lifecycle, not the gate.
 func writeWebAccessConfig(t *testing.T, webAccess string) (cfg *config.Config, path string) {
 	t.Helper()
@@ -162,7 +162,7 @@ web_access:
 		t.Errorf("info.Port = 0, want the resolved auto port")
 	}
 	// An empty config token is minted once at the first start and persisted
-	// (ADR-090) — the login screen credential must exist, and it is only
+	// (ADR-098) — the login screen credential must exist, and it is only
 	// ever revealed here.
 	if info.Token == "" {
 		t.Error("info.Token is empty — the browser login could never authenticate")
@@ -274,7 +274,7 @@ func TestGetWebAccessInfo_BindFields(t *testing.T) {
 // every-interface listener, which no browser can open by its wildcard name —
 // while every specific address is reported exactly as bound, and the scheme
 // follows the transport the sidecar actually serves (https under TLS,
-// ADR-092 decision 1). The live wildcard path through GetWebAccessInfo is
+// ADR-099 decision 1). The live wildcard path through GetWebAccessInfo is
 // pinned by TestGetWebAccessInfo_BindFields; this table pins the mapping
 // itself.
 func TestWebAccessBrowserURL(t *testing.T) {

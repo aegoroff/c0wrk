@@ -29,7 +29,7 @@ import { Toggle } from './ModelProfilesControls'
 import { WebAccessTLSSettings } from './WebAccessTLSSettings'
 
 /**
- * Settings → General → Web Access (ADR-090): the browser sidecar's control
+ * Settings → General → Web Access (ADR-098): the browser sidecar's control
  * surface. The toggle writes through App.SetWebAccessEnabled — which persists
  * AND applies in the same call (start/stop on the fly) — so writes are
  * optimistic with a rollback on rejection, and the authoritative post-toggle
@@ -55,7 +55,7 @@ import { WebAccessTLSSettings } from './WebAccessTLSSettings'
  * itself is network-reachable over plain HTTP, which carries its own
  * stronger warning.
  *
- * ADR-092: the transport-affecting writes (the enable toggle, the address
+ * ADR-099: the transport-affecting writes (the enable toggle, the address
  * pin, the TLS switch and its path commits) also refresh the top-of-Settings
  * config warning banner through onConfigChanged — the backend recomputes the
  * section's config-load warnings on each, so the banner must re-read them.
@@ -63,7 +63,7 @@ import { WebAccessTLSSettings } from './WebAccessTLSSettings'
  */
 
 /** Renders the persisted (bind, port) pin as the full URL the single field
- *  displays and edits: the scheme follows the persisted TLS switch (ADR-092
+ *  displays and edits: the scheme follows the persisted TLS switch (ADR-099
  *  — what the field shows is the transport the sidecar will serve), plus the
  *  bind (an IPv6 bind bracketed) and the port only when pinned (0 = auto =
  *  omitted). Empty bind = the empty default draft. */
@@ -143,7 +143,7 @@ export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () =>
       setSaving(true)
       try {
         await setWebAccessEnabled(next)
-        // ADR-092: the enable flip is a transport change, so the backend has
+        // ADR-099: the enable flip is a transport change, so the backend has
         // recomputed the section's config-load warnings — tell the banner to
         // re-read them.
         onConfigChanged?.()
@@ -204,7 +204,7 @@ export function WebAccessSettings({ onConfigChanged }: { onConfigChanged?: () =>
     setAddressError(null)
     try {
       await setWebAccessConnection(parsed.bind, parsed.port)
-      // ADR-092: a re-bind can move the exposure warning in or out of the
+      // ADR-099: a re-bind can move the exposure warning in or out of the
       // loopback class — the banner re-reads the recomputed warnings.
       onConfigChanged?.()
       const fresh = await getWebAccessInfo()

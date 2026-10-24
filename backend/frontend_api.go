@@ -298,6 +298,24 @@ type FrontendAPI struct {
 	agentWatchers   []*workspace.Watcher
 	agentWatchersMu sync.Mutex
 
+	// Command cache (invalidated on project switch). Mirrors the skill cache
+	// for custom command template discovery (ADR-096).
+	commandCache            []CommandDescriptorDTO
+	commandCacheGen         uint64 // atomic — bumped to invalidate
+	commandCacheGenSnapshot uint64
+	commandCacheProjectDir  string
+	commandCacheMu          sync.Mutex
+
+	// commandDirs holds the resolved global command directories (the same
+	// list the watchers get), stored once at startup; guarded by
+	// commandWatchersMu.
+	commandDirs []string
+
+	// Command directory watchers monitor global command dirs (outside any
+	// workspace) for changes. Mirrors skillWatchers.
+	commandWatchers   []*workspace.Watcher
+	commandWatchersMu sync.Mutex
+
 	// Vector search: the per-root registry (ADR-080). One manager per
 	// workspace root, created on demand through the late-bound factory;
 	// vectorRootsMu guards the lazy construction of the registry itself
@@ -391,7 +409,7 @@ type FrontendAPI struct {
 	// onExperimentalChanged is the desktop hook invoked by
 	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate
 	// persist: the web-access sidecar mount follows the gate live instead of
-	// waiting for the next launch (ADR-090). Installed through the
+	// waiting for the next launch (ADR-098). Installed through the
 	// FrontendAPIConfig seam inside Init — alongside the other seed fields
 	// and before the seedPublished flag — so seedAcquire gives every toggle
 	// RPC the happens-before edge and no install can race a toggle already
@@ -469,7 +487,7 @@ type FrontendAPIConfig struct {
 	QuitApp func()
 	// OnExperimentalChanged is the desktop hook invoked by
 	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate persist
-	// (ADR-090): the web-access sidecar mount follows the master gate live
+	// (ADR-098): the web-access sidecar mount follows the master gate live
 	// instead of waiting for the next launch. It rides the same construction
 	// seam as AppCtx/QuitApp — wired by desktop inside buildFrontendAPI and
 	// consumed by Init together with the other seed fields, so the write is
@@ -737,7 +755,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// workspace). Changes invalidate the skill cache and emit skills:changed
 	// so the frontend autocomplete refreshes without an app restart.
 	if cfg.Config != nil && len(cfg.Config.Skills.Dirs) > 0 {
-		dirs := resolveSkillDirs(cfg.Config.Skills.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		dirs := resolveCatalogDirs(cfg.Config.Skills.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
 		f.startSkillsWatchers(dirs)
 		warnIfSeedDirUndiscovered(f.logger, "skills", seedSkillsDir, dirs)
 	} else {
@@ -748,11 +766,24 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	// skill watchers: changes invalidate the agent cache and emit
 	// agents:changed so the frontend #-autocomplete refreshes.
 	if cfg.Config != nil && len(cfg.Config.Agents.Dirs) > 0 {
-		dirs := resolveSkillDirs(cfg.Config.Agents.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		dirs := resolveCatalogDirs(cfg.Config.Agents.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
 		f.startAgentsWatchers(dirs)
 		warnIfSeedDirUndiscovered(f.logger, "agents", seedAgentsDir, dirs)
 	} else {
 		warnIfSeedDirUndiscovered(f.logger, "agents", seedAgentsDir, nil)
+	}
+
+	// Start watchers for global custom command directories (ADR-096). Mirrors
+	// the skill watchers: changes invalidate the command cache and emit
+	// commands:changed so the frontend autocomplete refreshes. The resolved
+	// list also seeds ListCommands's discovery — the backend owns command
+	// scanning (core never consumes commands).
+	if cfg.Config != nil && len(cfg.Config.Commands.Dirs) > 0 {
+		dirs := resolveCatalogDirs(cfg.Config.Commands.Dirs, cfg.AgentDir, config.ExpandEnvVars, f.logger)
+		f.setCommandBaseDirs(dirs)
+		f.startCommandsWatchers(dirs)
+	} else {
+		f.setCommandBaseDirs(nil)
 	}
 
 	// Route the session manager's one-shot service LLM requests (session title
@@ -790,7 +821,7 @@ const webAccessLoadWarningPrefix = "web_access"
 
 // RefreshWebAccessLoadWarnings recomputes the web_access section's
 // contribution to the config-load-warning channel (GetConfig().config_errors
-// → the Settings "Configuration warning" banner, ADR-092): every entry with
+// → the Settings "Configuration warning" banner, ADR-099): every entry with
 // the webAccessLoadWarningPrefix is dropped and the warnings the section's
 // CURRENT state draws (config.WebAccessLoadWarnings) are appended, so an
 // HTTP→HTTPS flip, a re-bind, or the enable toggle moves the banner with the
@@ -1040,6 +1071,7 @@ func (l *FrontendAPILifecycle) Cleanup() {
 	cleanupStep("workspaceWatcherClose")
 	f.closeSkillsWatchers()
 	f.closeAgentsWatchers()
+	f.closeCommandsWatchers()
 	cleanupStep("skillAgentWatchersClose")
 	if f.store != nil {
 		if err := f.store.Close(); err != nil {

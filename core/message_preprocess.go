@@ -37,9 +37,12 @@ var multiSpaceRe = regexp.MustCompile(`  +`)
 //  2. Converts @file-path references to fileref:// URIs, resolving each
 //     relative path against workspacePath so the LLM receives unambiguous
 //     absolute paths. Both the quoted (@'my file.go') and the legacy
-//     backslash-escaped (@my\ file.go) forms are recognized. Absolute and
-//     home-relative (~/...) paths, and refs when workspacePath is empty, are
-//     left unchanged.
+//     backslash-escaped (@my\ file.go) forms are recognized. POSIX-absolute
+//     and home-relative (~/...) paths are left unchanged; Windows drive
+//     (C:\…) and UNC (\\server\…) paths are absolute in their own dialect —
+//     canonicalized to forward-slash form and never joined with the
+//     workspace. Relative paths are left unchanged when workspacePath is
+//     empty.
 //
 // Stripping is catalog-gated and fail-closed: only names the caller threaded
 // (the send path extracted them from the text and partitioned them against
@@ -250,17 +253,23 @@ func normalizeFileRefPath(refPath string) string {
 	return strings.ReplaceAll(refPath, `\ `, " ") + anchor
 }
 
-// resolveFileRefPath resolves an @file reference's path portion against the
-// workspace root so the LLM prompt contains unambiguous absolute paths.
+// resolveFileRefPath resolves an @file reference's path portion so the LLM
+// prompt contains unambiguous absolute paths.
 //
 // The path may carry a trailing GitHub-style line anchor (#N, #N-M, #LN,
 // #LN-LN) which is split off before resolution and re-attached verbatim.
 //
 // Resolution rules:
-//   - If workspacePath is empty, the path is returned unchanged.
-//   - Absolute paths (leading "/") and home-relative paths (leading "~/") are
-//     left as-is — they are already unambiguous.
-//   - All other (relative) paths are joined with workspacePath and cleaned.
+//   - POSIX-absolute (leading "/") and home-relative (leading "~/") paths
+//     are left as-is — they are already unambiguous.
+//   - Windows drive-rooted ("C:\…") and UNC ("\\server\share\…") paths are
+//     absolute in their own dialect: they are canonicalized to the
+//     forward-slash URI form (NormalizeAbsPath) and never joined with the
+//     workspace — independent of workspacePath, so the shape does not change
+//     between chat (no workspace) and CODE mode.
+//   - Relative paths are joined with workspacePath when it is non-empty;
+//     with an empty workspace there is nothing to resolve against and the
+//     path is returned unchanged.
 //
 // The result is the path component of a fileref:// URI, which is a logical
 // identifier rather than an OS filesystem path. The POSIX-oriented path
@@ -268,10 +277,8 @@ func normalizeFileRefPath(refPath string) string {
 // slashes and is platform-independent, whereas filepath.Join would produce
 // OS-native separators (backslashes on Windows) and filepath.IsAbs would
 // reject Unix-style absolute paths on Windows — both breaking the URI.
+// Absolute-dialect detection is lexical (IsAbsolutePath) for the same reason.
 func resolveFileRefPath(refPath, workspacePath string) string {
-	if workspacePath == "" {
-		return refPath
-	}
 	// Split a trailing line anchor (#N, #L20-L36, …) so path.Join does
 	// not treat it as a path component.
 	anchor := ""
@@ -282,8 +289,18 @@ func resolveFileRefPath(refPath, workspacePath string) string {
 	if refPath == "" {
 		return anchor
 	}
-	// Leave already-absolute and home-relative paths untouched.
+	// Leave already-absolute (POSIX) and home-relative paths untouched.
 	if strings.HasPrefix(refPath, "/") || strings.HasPrefix(refPath, "~") {
+		return refPath + anchor
+	}
+	// Windows drive-rooted and UNC paths are absolute in their own dialect:
+	// canonical forward-slash form, never joined with the workspace.
+	if IsAbsolutePath(refPath) {
+		return NormalizeAbsPath(refPath) + anchor
+	}
+	// Relative paths need the workspace; without one there is nothing to
+	// resolve against and the path is returned unchanged.
+	if workspacePath == "" {
 		return refPath + anchor
 	}
 	// path.Join cleans dot segments (./, ../) and joins with a forward slash,

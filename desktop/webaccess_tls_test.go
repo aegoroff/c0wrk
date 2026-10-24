@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_tls_test.go — the TLS surface of the web-access control RPCs
-// (ADR-092): SetWebAccessTLS toggles the web_access.tls subsection with the
+// (ADR-099): SetWebAccessTLS toggles the web_access.tls subsection with the
 // section's persist + hot-restart + rollback discipline (an unloadable pair
 // fails closed and never leaves the sidecar down), GenerateWebAccessCertificate
 // writes the fixed app-owned pair for the pinned bind into an isolated agent
@@ -112,7 +112,7 @@ func tlsRootPool(t *testing.T, certPath string) *x509.CertPool {
 	return pool
 }
 
-// TestSetWebAccessEnabled_BrokenTLSPairRefused: ADR-092's interactive gate
+// TestSetWebAccessEnabled_BrokenTLSPairRefused: ADR-099's interactive gate
 // on the enable flip — turning the section on while its TLS subsection
 // points at an unloadable pair is refused before anything is mutated or
 // persisted, so the toggle never produces a persisted-on switch above a
@@ -334,7 +334,7 @@ func TestSetWebAccessTLS_TogglePersistsAndHotRestarts(t *testing.T) {
 // is untouched and a running sidecar is never rebuilt (the pair-load
 // validation runs ahead of the persist and the restart, so the old
 // rollback-on-restart path is not even reached). The mount-time fail-closed
-// check stays as the backstop for hand-edited configs (ADR-092 decision 2).
+// check stays as the backstop for hand-edited configs (ADR-099 decision 2).
 func TestSetWebAccessTLS_UnreadablePairRejected(t *testing.T) {
 	dir := t.TempDir()
 	garbageCert := filepath.Join(dir, "garbage.crt")
@@ -578,7 +578,7 @@ func TestGenerateWebAccessCertificate_IsolatedHome(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	if reloaded.WebAccess.TLS.Enabled {
-		t.Error("generation flipped tls.enabled on (it must never, ADR-092 decision 3)")
+		t.Error("generation flipped tls.enabled on (it must never, ADR-099 decision 3)")
 	}
 	if reloaded.WebAccess.TLS.Cert != certPath || reloaded.WebAccess.TLS.Key != keyPath {
 		t.Errorf("disk TLS paths = (%q, %q), want the standard pair (%q, %q)",
@@ -651,7 +651,7 @@ func TestGenerateWebAccessCertificate_RestartsLiveSidecarOntoFreshPair(t *testin
 }
 
 // TestGetWebAccessInfo_CertStatusMatrix pins the classification vocabulary
-// (ADR-092 decision 5): empty when unconfigured, ok when the pair covers the
+// (ADR-099 decision 5): empty when unconfigured, ok when the pair covers the
 // pinned bind, mismatch after a bind change (the canonical trigger),
 // unreadable for an unloadable pair, expired past NotAfter or not yet valid
 // before NotBefore (the same clock-derived bucket) — and the
@@ -797,7 +797,7 @@ func mustSidecarAddr(t *testing.T, a *App) string {
 	return addr
 }
 
-// TestWebAccessControlRPCsRefreshConfigLoadWarnings pins the ADR-092 wire
+// TestWebAccessControlRPCsRefreshConfigLoadWarnings pins the ADR-099 wire
 // end-to-end: the transport-affecting control RPCs keep the UI's
 // config-load-warning channel (GetConfig().config_errors → the Settings
 // "Configuration warning" banner) in step with the live section — an

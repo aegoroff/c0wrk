@@ -385,14 +385,13 @@ func (m *Manager) CancelSessionCompaction(sessionID string) error {
 	return nil
 }
 
-// clearResumeRequests discards any armed one-shot resume request
-// (resume-compaction and/or resume-re-route) on the session's in-memory
-// orchestrator. Called when the session's unfinished task is cancelled or
-// abandoned: an armed flag belonged to THAT task's future resume and must not
-// leak into an unrelated later one. The flags live only on the in-memory
-// orchestrator, so a session that is not currently in memory cannot have one —
-// a plain map lookup suffices (no store restore). Best-effort and race-free
-// with a concurrent Resume consume (mutex-guarded on the orchestrator).
+// clearResumeRequests disarms both one-shot resume requests (compaction +
+// reroute) on the session's in-memory orchestrator. Must be called on every
+// transition where the task an arm was set for can no longer be resumed and
+// consumed by a later Resume (cancel, abandon, mode takeover,
+// force-terminate) — a stale arm must not leak into an unrelated later task.
+// The flags live only in memory, so a session that is not currently in memory
+// cannot carry one: a plain map lookup, no store restore.
 func (m *Manager) clearResumeRequests(sessionID string) {
 	m.mu.RLock()
 	sess := m.sessions[sessionID]

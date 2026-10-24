@@ -3,7 +3,7 @@
 // nodeps_test.go — import-hygiene guard for the webaccess package: the
 // sidecar core depends on the STDLIB and backend/config only (backend itself
 // appears solely in _test files), and NEVER on desktop or Wails. This is the
-// executable form of the ADR-090 isolation rule: webaccess is mountable from
+// executable form of the ADR-098 isolation rule: webaccess is mountable from
 // any layer because it drags none of them in.
 
 package webaccess

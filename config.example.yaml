@@ -692,6 +692,25 @@ agents:
   max_parallel_subagents: 4
 
 # ---------------------------------------------------------------------------
+# Custom Commands Discovery
+# ---------------------------------------------------------------------------
+# Custom commands are markdown prompt templates invoked with a leading
+# /name token in the chat input: `.agents/commands/<name>.md` with an
+# optional YAML frontmatter (`description`, `agent`, `model`) and the
+# template body supporting $ARGUMENTS and $1..$N positional placeholders.
+#
+# Paths may be absolute or relative to the agent directory (~/.c0wrk).
+# Directories are scanned in priority order (highest first).
+# Omitting the key entirely keeps the defaults below; an explicit empty
+# list opts out of the base directories (mirrors `skills.dirs`).
+commands:
+  dirs:
+    - "~/.c0wrk/.agents/commands" # c0wrk-specific commands directory (outranks user-wide)
+    - "~/.agents/commands" # user-wide commands directory
+  # Note: in addition to the directories above, the current project's
+  # `.agents/commands` directory is always scanned automatically (highest priority).
+
+# ---------------------------------------------------------------------------
 # Memory / Persistence
 # ---------------------------------------------------------------------------
 # The SQLite database is always stored at ~/.c0wrk/database.db
@@ -2099,7 +2118,7 @@ notifications:
 # ---------------------------------------------------------------------------
 # Lets the desktop UI be mirrored into a browser window: c0wrk starts an
 # HTTP/WebSocket sidecar that serves the same frontend and bridges its live
-# events into the browser tab it opens (ADR-090). OFF by default — with the
+# events into the browser tab it opens (ADR-098). OFF by default — with the
 # section absent (or enabled: false) no listener is created and the app
 # behaves exactly as before.
 #
@@ -2114,7 +2133,7 @@ notifications:
 # reachable from this machine only. A non-loopback bind exposes the listener
 # to the network; without TLS the traffic — including the login POST body —
 # travels unencrypted, so do not point it at a network you do not fully
-# control (the tls subsection below adds optional HTTPS; ADR-092).
+# control (the tls subsection below adds optional HTTPS; ADR-099).
 #
 #   enabled (default false) — master switch; false starts nothing.
 #
@@ -2158,7 +2177,7 @@ notifications:
 #                            token is a durable credential in this file —
 #                            treat it like a password.
 #
-#   tls (default off)       — optional HTTPS for the sidecar (ADR-092):
+#   tls (default off)       — optional HTTPS for the sidecar (ADR-099):
 #                              serve the same UI over TLS instead of plain
 #                              HTTP, so a non-loopback bind no longer means
 #                              a token over plaintext.
@@ -2179,7 +2198,7 @@ notifications:
 #                               actually serve — either path empty, or the
 #                               pair failing to load (missing file, parse
 #                               error, key/cert mismatch) — is unusable
-#                               (ADR-092): the config load turns the whole
+#                               (ADR-099): the config load turns the whole
 #                               web_access section OFF with a warning
 #                               naming the reason (a requested TLS is never
 #                               downgraded to plain HTTP; fix the pair and

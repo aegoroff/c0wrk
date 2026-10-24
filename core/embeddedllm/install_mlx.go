@@ -1,6 +1,6 @@
 package embeddedllm
 
-// The mtplx engine's provisioning flow (ADR-090). It mirrors the llama
+// The mtplx engine's provisioning flow (ADR-092). It mirrors the llama
 // install's gate order — stop first, probe, resolve (whose gate is the first
 // check), disk guard, port, engine stack, smoke test, weights, manifest,
 // config — with three deliberate deviations the engine's shape dictates:

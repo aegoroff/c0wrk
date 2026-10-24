@@ -953,7 +953,7 @@ func (a *App) buildFrontendAPI(
 	log *slog.Logger,
 	startTime time.Time,
 ) {
-	// Wire the experimental-gate live-follow hook (ADR-090) through the
+	// Wire the experimental-gate live-follow hook (ADR-098) through the
 	// FrontendAPIConfig seam before Init: the backend invokes it after a
 	// successful experimental.enabled persist, so the web-access sidecar
 	// mount follows the master gate mid-session — opening the gate mounts it
@@ -964,7 +964,7 @@ func (a *App) buildFrontendAPI(
 	cfg.OnExperimentalChanged = a.applyExperimentalWebAccess
 	a.frontendAPI().Lifecycle().Init(cfg)
 	// Capture the desktop's own handle on the live config + its path: the
-	// web-access control RPCs (App-owned, ADR-090) flip and persist the
+	// web-access control RPCs (App-owned, ADR-098) flip and persist the
 	// desktop-owned web_access section through it. The same pointer Init
 	// stores, so a toggle is visible to the shared live config immediately.
 	a.setConfigRef(cfg.Config, cfg.ConfigPath)
@@ -1575,10 +1575,10 @@ func (a *App) stopEmbeddedLLM(ctx context.Context) {
 	}
 }
 
-// initWebAccess mounts the browser web-access sidecar (ADR-090) when BOTH
+// initWebAccess mounts the browser web-access sidecar (ADR-098) when BOTH
 // gates are open: the feature's own web_access.enabled switch AND the master
 // experimental gate (experimental.enabled — web access is an experimental
-// feature, ADR-090). This is the feature's startup mount point, by the
+// feature, ADR-098). This is the feature's startup mount point, by the
 // initChatGPTAuth pattern: a cheap phase helper after buildFrontendAPI
 // (the dispatch target must be wired — it is also where the live-follow hook
 // applyExperimentalWebAccess installs through the FrontendAPIConfig seam) and after

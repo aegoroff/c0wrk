@@ -31,7 +31,7 @@ import { useInputModeStore } from '@/stores/inputModeStore'
 /**
  * Subscribe to file drops and stage the dropped files as attachments.
  *
- * Transport split (ADR-090): in the Wails webview the drop is intercepted at
+ * Transport split (ADR-098): in the Wails webview the drop is intercepted at
  * the OS level and arrives as the native `files:dropped` event (absolute
  * paths); a browser tab never sees that event — its HTML5 `drop` event IS the
  * source, and the dropped File objects stage through AttachFileContent. Both

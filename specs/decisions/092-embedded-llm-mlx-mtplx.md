@@ -1,4 +1,4 @@
-# ADR-090: Embedded LLM Inference on MLX via MTPLX (macOS)
+# ADR-092: Embedded LLM Inference on MLX via MTPLX (macOS)
 
 ## Status
 

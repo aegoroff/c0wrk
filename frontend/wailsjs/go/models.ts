@@ -323,6 +323,26 @@ export namespace backend {
 	        this.auth_url = source["auth_url"];
 	    }
 	}
+	export class CommandDescriptorDTO {
+	    name: string;
+	    description: string;
+	    agent: string;
+	    model: string;
+	    template: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CommandDescriptorDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.agent = source["agent"];
+	        this.model = source["model"];
+	        this.template = source["template"];
+	    }
+	}
 	export class CommitSuppression {
 	    hooks?: string[];
 	    signing_repo?: boolean;

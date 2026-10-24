@@ -141,8 +141,14 @@ type mockBuilder struct {
 	// RebuildRouter, in call order (guarded by m.mu).
 	rebuildRouterCfgs []string
 
-	getSkillDescriptorsCalls int
-	getSkillDescriptorsRes   []skills.SkillDescriptor
+	getSkillDescriptorsCalls  int
+	getSkillDescriptorsRes    []skills.SkillDescriptor
+	resolveSkillResourceCalls int
+	// resolveSkillResourceArgs captures the last call's
+	// (projectSkillDir, skillName, relPath) for wiring assertions.
+	resolveSkillResourceArgs [3]string
+	resolveSkillResourceRes  string
+	resolveSkillResourceErr  error
 
 	getAgentDescriptorsCalls int
 	getAgentDescriptorsRes   []agents.AgentDescriptor
@@ -357,6 +363,13 @@ func (m *mockBuilder) GetSkillDescriptors(string) []skills.SkillDescriptor {
 	defer m.mu.Unlock()
 	m.getSkillDescriptorsCalls++
 	return m.getSkillDescriptorsRes
+}
+func (m *mockBuilder) ResolveSkillResourcePath(projectSkillDir, skillName, relPath string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resolveSkillResourceCalls++
+	m.resolveSkillResourceArgs = [3]string{projectSkillDir, skillName, relPath}
+	return m.resolveSkillResourceRes, m.resolveSkillResourceErr
 }
 func (m *mockBuilder) GetBaseAgentDirs() []string {
 	m.mu.Lock()
@@ -3968,7 +3981,7 @@ func TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled(t *testing.
 }
 
 // TestUpdateExperimentalFeatures_InvokesHookAfterPersist verifies the desktop
-// hook contract (ADR-090): the hook carried through the FrontendAPIConfig
+// hook contract (ADR-098): the hook carried through the FrontendAPIConfig
 // seam fires once per toggle, in both directions, and
 // strictly AFTER the persist landed — the sidecar transition it drives must
 // be the visible consequence of the persisted gate, never of an in-memory

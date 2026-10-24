@@ -30,7 +30,7 @@ func newWarningTestAPI(webAccess config.WebAccessConfig, seeded []string) *Front
 	return f
 }
 
-// TestRefreshWebAccessLoadWarnings pins the ADR-092 channel contract: the
+// TestRefreshWebAccessLoadWarnings pins the ADR-099 channel contract: the
 // refresh surgically replaces the web_access entries of configLoadErrors
 // with the warnings the section's CURRENT state draws, preserving every
 // other section's warning — so the Settings banner follows the live control

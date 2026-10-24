@@ -20,7 +20,7 @@ import {
 } from './notifications'
 import { setLogLevel } from '@/lib/logger'
 
-// The web-transport branches (ADR-090) read isWebTransport and report clicks
+// The web-transport branches (ADR-098) read isWebTransport and report clicks
 // through emitLocalEvent; both are hoisted spies so tests can flip the
 // transport and observe the replayed event. Everything else stays the real
 // module (the same 'none' settle as before — the existing desktop tests are
@@ -183,7 +183,7 @@ describe('onNotificationClicked', () => {
   })
 })
 
-// --- Web transport (ADR-090): the browser IS the notification center -------
+// --- Web transport (ADR-098): the browser IS the notification center -------
 describe('web transport notifications', () => {
   function installWeb(): void {
     runtimeMocks.web = true
@@ -288,7 +288,7 @@ describe('web transport notifications', () => {
     FakeNotification.permission = 'denied'
     await expect(checkNotificationAuthorization()).resolves.toBe(false)
     // 'default' (never asked) is NOT a denial — the Test button's click is
-    // the gesture that requests the permission (ADR-090, decision 11), so
+    // the gesture that requests the permission (ADR-098, decision 11), so
     // the probe must leave the button reachable in a fresh browser.
     FakeNotification.permission = 'default'
     await expect(checkNotificationAuthorization()).resolves.toBe(true)
@@ -330,7 +330,7 @@ describe('web transport notifications', () => {
   it('the test banner rejects with outcome default when the prompt is dismissed', async () => {
     installWeb()
     // The prompt was closed without an answer: the permission re-read stays
-    // 'default' — the error must carry THAT, not a denial (ADR-090, decision
+    // 'default' — the error must carry THAT, not a denial (ADR-098, decision
     // 11: the button remains the retry gesture).
     FakeNotification.requestPermission.mockResolvedValue('default')
     const err = await showTestNotification().then(
@@ -372,7 +372,7 @@ describe('web transport notifications', () => {
     // Safari resolves requestPermission with undefined (here: a "granted"
     // lie), and a prompt closed WITHOUT an answer leaves the permission at
     // 'default'. The re-read is the source of truth: the outcome must be
-    // 'default' — NOT a denial (ADR-090, decision 11) — so the Settings
+    // 'default' — NOT a denial (ADR-098, decision 11) — so the Settings
     // section keeps the Test button reachable as the retry gesture.
     FakeNotification.requestPermission.mockImplementation(async () => 'granted')
     await expect(ensureNotificationPermission()).resolves.toBe('default')

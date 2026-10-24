@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/v0lka/c0wrk/core/cli"
 	"github.com/v0lka/sp4rk/pathutil"
 
 	"github.com/v0lka/sp4rk/safeio"
@@ -41,19 +42,6 @@ import (
 // binary lives in a location that is unsafe to update in place (a temporary
 // directory, a Downloads folder, or a read-only path).
 var ErrNonStandardLocation = errors.New("running from a non-standard location; install the app properly before updating")
-
-// SelfUpdateOptions carries the parsed --self-update arguments.
-type SelfUpdateOptions struct {
-	// PID is the process id of the parent (old) app that launched the updater.
-	// ApplySelfUpdate waits for this PID to exit before swapping files.
-	PID int
-	// StageDir is the staging directory that holds the update archive (and the
-	// updater binary itself).
-	StageDir string
-	// TargetDir is the install root to replace (the .app bundle on macOS, or the
-	// binary directory on Linux/Windows).
-	TargetDir string
-}
 
 // StagedUpdaterShutdownWait is how long a launched staging updater waits for
 // the parent process to exit before giving up (and exiting itself). Exported
@@ -220,92 +208,16 @@ func SelfUpdateArgs(pid int, stageDir, targetDir string) []string {
 	}
 }
 
-// ParseSelfUpdateFlags inspects raw args and, if a --self-update flag is
-// present, parses the companion flags into SelfUpdateOptions. The returned bool
-// reports whether this process is a self-update invocation.
-func ParseSelfUpdateFlags(args []string) (SelfUpdateOptions, bool, error) {
-	var opts SelfUpdateOptions
-	hasFlag := false
-	i := 0
-	for i < len(args) {
-		switch args[i] {
-		case "--self-update":
-			hasFlag = true
-		case "--pid":
-			val, ok := nextArg(args, &i)
-			if !ok {
-				return opts, hasFlag, errors.New("--pid requires a value")
-			}
-			p, perr := parseInt(val)
-			if perr != nil || p <= 0 {
-				return opts, hasFlag, fmt.Errorf("invalid --pid %q: %w", val, perr)
-			}
-			opts.PID = p
-		case "--stage":
-			val, ok := nextArg(args, &i)
-			if !ok {
-				return opts, hasFlag, errors.New("--stage requires a value")
-			}
-			opts.StageDir = val
-		case "--target":
-			val, ok := nextArg(args, &i)
-			if !ok {
-				return opts, hasFlag, errors.New("--target requires a value")
-			}
-			opts.TargetDir = val
-		}
-		i++
-	}
-	if !hasFlag {
-		return opts, false, nil
-	}
-	if opts.PID <= 0 {
-		return opts, hasFlag, errors.New("--self-update requires --pid")
-	}
-	if opts.StageDir == "" {
-		return opts, hasFlag, errors.New("--self-update requires --stage")
-	}
-	if opts.TargetDir == "" {
-		return opts, hasFlag, errors.New("--self-update requires --target")
-	}
-	return opts, true, nil
-}
-
-func nextArg(args []string, i *int) (string, bool) {
-	if *i+1 >= len(args) {
-		return "", false
-	}
-	*i++
-	return args[*i], true
-}
-
-func parseInt(s string) (int, error) {
-	if s == "" {
-		return 0, errors.New("not a positive integer")
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, errors.New("not a positive integer")
-		}
-	}
-	// strconv.Atoi rejects values outside the platform int range, closing the
-	// overflow wrap that a hand-rolled accumulation would allow on long input.
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return 0, errors.New("not a positive integer")
-	}
-	return n, nil
-}
-
 // ApplySelfUpdate executes the staged update: wait for the parent PID to exit,
 // extract the staged archive, atomically swap the install tree (keeping a .old
-// backup), relaunch the new app, and clean up staging artifacts. It is intended
+// backup), relaunch the new app, and clean up staging artifacts. The request is
+// the parsed --self-update command line (core/cli); ApplySelfUpdate is intended
 // to run from main.go before the Wails lifecycle starts.
-func ApplySelfUpdate(opts SelfUpdateOptions, log *slog.Logger) error {
+func ApplySelfUpdate(req cli.SelfUpdateRequest, log *slog.Logger) error {
 	if log == nil {
 		log = slog.Default()
 	}
-	log.Info("self-update starting", "pid", opts.PID, "stage", opts.StageDir, "target", opts.TargetDir)
+	log.Info("self-update starting", "pid", req.PID, "stage", req.Stage, "target", req.Target)
 
 	// Reject an obviously invalid target before any destructive step, then
 	// re-run the full standard-location validation. The production caller
@@ -316,28 +228,28 @@ func ApplySelfUpdate(opts SelfUpdateOptions, log *slog.Logger) error {
 	// canonical app binary on Linux/Windows). Together these stop a
 	// `--target $HOME` or `--target ~/projects/acme` from renaming an unrelated
 	// directory and later deleting its .old backup.
-	cleanTarget := filepath.Clean(opts.TargetDir)
+	cleanTarget := filepath.Clean(req.Target)
 	switch filepath.Base(cleanTarget) {
 	case ".", "..", string(filepath.Separator):
 		return errors.New("refusing to update into invalid target directory")
 	}
-	if err := validateStandardLocation(opts.TargetDir); err != nil {
+	if err := validateStandardLocation(req.Target); err != nil {
 		return err
 	}
 
-	if err := waitForProcessExit(opts.PID, shutdownTimeout, log); err != nil {
+	if err := waitForProcessExit(req.PID, shutdownTimeout, log); err != nil {
 		return err
 	}
 
 	// Locate the staged update archive.
-	archivePath, err := findStagedArchive(opts.StageDir)
+	archivePath, err := findStagedArchive(req.Stage)
 	if err != nil {
 		return err
 	}
 
 	// Extract into a sibling extraction directory so the new tree is fully on
 	// disk before any swap occurs.
-	extractDir, err := os.MkdirTemp(opts.StageDir, "c0wrk-extract-*")
+	extractDir, err := os.MkdirTemp(req.Stage, "c0wrk-extract-*")
 	if err != nil {
 		return fmt.Errorf("create extraction dir: %w", err)
 	}
@@ -358,16 +270,16 @@ func ApplySelfUpdate(opts SelfUpdateOptions, log *slog.Logger) error {
 	// the install root. This ordering keeps the previous last-known-good
 	// rollback target intact if the staging copy fails (e.g. out-of-disk on a
 	// cross-filesystem move).
-	oldBackup := opts.TargetDir + ".old"
+	oldBackup := req.Target + ".old"
 
-	if err := swapInstallTrees(opts.TargetDir, newTree, oldBackup); err != nil {
+	if err := swapInstallTrees(req.Target, newTree, oldBackup); err != nil {
 		return fmt.Errorf("swap install trees: %w", err)
 	}
 
 	log.Info("install tree swapped; backing up previous version", "backup", oldBackup)
 
 	// Relaunch the freshly installed app from its new location.
-	if err := relaunchFn(opts.TargetDir, log); err != nil {
+	if err := relaunchFn(req.Target, log); err != nil {
 		// Relaunch failed: keep the .old backup and staging artifacts so the
 		// user (or a retry) can recover. Do not treat relaunch failure as fatal
 		// to the swap itself — the files are correctly in place.
@@ -378,7 +290,7 @@ func ApplySelfUpdate(opts SelfUpdateOptions, log *slog.Logger) error {
 	// On platforms where the running binary cannot self-delete (Windows), the
 	// caller/main is responsible for best-effort cleanup; here we still attempt
 	// it.
-	cleanupStaging(opts.StageDir, log)
+	cleanupStaging(req.Stage, log)
 
 	log.Info("self-update complete")
 	return nil

@@ -349,7 +349,7 @@ func DatabasePath(agentDir string) string {
 
 // WebAccessCertPath returns the fixed location of the web-access sidecar's
 // app-owned self-signed certificate (<agentDir>/web-access.crt). This is the
-// only path the Generate control writes (ADR-092 decision 3): idempotent to
+// only path the Generate control writes (ADR-099 decision 3): idempotent to
 // regenerate and never an operator-authored certificate, which is authored
 // by pointing web_access.tls.cert at any location by hand.
 func WebAccessCertPath(agentDir string) string {
@@ -717,6 +717,13 @@ func ProjectSkillsPath(workspacePath string) string {
 // agents package's AGENT.md discovery.
 func ProjectAgentsPath(workspacePath string) string {
 	return filepath.Join(workspacePath, ".agents", "agents")
+}
+
+// ProjectCommandsPath returns the project-local custom commands directory.
+// This is <workspacePath>/.agents/commands. Mirrors ProjectSkillsPath and
+// ProjectAgentsPath for the command template discovery (ADR-096).
+func ProjectCommandsPath(workspacePath string) string {
+	return filepath.Join(workspacePath, ".agents", "commands")
 }
 
 // ProjectResearchPath returns the project-local research workspace directory.

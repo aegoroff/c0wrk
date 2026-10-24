@@ -136,7 +136,7 @@ type App struct {
 	// the concurrent readers race-free. Set it through setEventTap.
 	eventTap atomic.Pointer[func(name string, args []interface{})]
 
-	// ── Web access sidecar (internal/webaccess, ADR-090) ─────────────────
+	// ── Web access sidecar (internal/webaccess, ADR-098) ─────────────────
 	//
 	// webAccess is the live sidecar; nil while it is not running. Atomic
 	// pointer for the same reason as eventTap: startup mounts it, Shutdown
@@ -893,7 +893,7 @@ func (a *App) resolvePendingMessage(sessionID, role, matchField, matchValue stri
 	return fa.ResolvePendingMessage(sessionID, role, matchField, matchValue, extra)
 }
 
-// ── Web access sidecar: mount, teardown, control RPCs (ADR-090) ──────────
+// ── Web access sidecar: mount, teardown, control RPCs (ADR-098) ──────────
 //
 // Everything the browser sidecar needs from the app lives at THIS seam: the
 // mount builds webaccess.Options from the live FrontendAPI (the reflection
@@ -977,13 +977,13 @@ type WebAccessInfo struct {
 	// logged and never reaches the web dispatch surface.
 	Token string `json:"token"`
 	// TokenPinned reports whether a persistent token is stored in config.yaml.
-	// Since ADR-090's generated-credential default this is true from the first
+	// Since ADR-098's generated-credential default this is true from the first
 	// sidecar start on: an empty config token is minted once and written back
 	// through the same config save every other settings value uses. False
 	// means the section never started with an empty token (the next start
 	// would mint one).
 	TokenPinned bool `json:"token_pinned"`
-	// TLSEnabled mirrors the persisted web_access.tls.enabled switch (ADR-092)
+	// TLSEnabled mirrors the persisted web_access.tls.enabled switch (ADR-099)
 	// — the operator's HTTPS intent, not the runtime transport. The URL field
 	// above carries the running sidecar's actual scheme.
 	TLSEnabled bool `json:"tls_enabled"`
@@ -995,7 +995,7 @@ type WebAccessInfo struct {
 	// subsection is unconfigured).
 	TLSKey string `json:"tls_key"`
 	// CertStatus classifies the configured certificate against the pinned
-	// bind (ADR-092 decision 5), computed whenever tls_cert is non-empty:
+	// bind (ADR-099 decision 5), computed whenever tls_cert is non-empty:
 	// "ok" — the pair loads and the leaf covers the bind's browser-facing
 	// host within its validity window; "mismatch" — the leaf does not cover
 	// that host (the canonical trigger: the bind was changed after the pair
@@ -1016,7 +1016,7 @@ type WebAccessInfo struct {
 // names "every interface", not an address a browser can open, and localhost
 // is the machine-local way in; every specific host (IP literal or name) is
 // reported as-is. Shared by the URL renderer and the certificate status
-// check (ADR-092 decision 5) so both name the SAME browser-facing host the
+// check (ADR-099 decision 5) so both name the SAME browser-facing host the
 // certificate's SANs must cover.
 func webAccessURLHost(host string) string {
 	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
@@ -1027,7 +1027,7 @@ func webAccessURLHost(host string) string {
 
 // webAccessBrowserURL renders the URL a browser opens for the sidecar's
 // resolved listener address: the scheme follows the transport the sidecar is
-// actually serving (https under web_access.tls, ADR-092 decision 1 — what
+// actually serving (https under web_access.tls, ADR-099 decision 1 — what
 // the operator sees is always what the browser must open) plus host:port,
 // with one rewrite — an unspecified wildcard host becomes "localhost"
 // (webAccessURLHost).
@@ -1057,7 +1057,7 @@ func webAccessBrowserURL(addr string, tlsEnabled bool) string {
 // fields are copied once, never walked field-by-field off the live config.
 // The classification and URL rendering stay OUTSIDE the lock on purpose —
 // the same after-the-critical-section rule as refreshWebAccessLoadWarnings
-// (ADR-092): no file I/O rides the transition lock.
+// (ADR-099): no file I/O rides the transition lock.
 func (a *App) GetWebAccessInfo() WebAccessInfo {
 	info := WebAccessInfo{}
 	var sec config.WebAccessConfig
@@ -1095,7 +1095,7 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 	return info
 }
 
-// The warning-channel refresh (ADR-092): every transport-affecting control
+// The warning-channel refresh (ADR-099): every transport-affecting control
 // RPC recomputes the section's config-load-warning contribution AFTER its
 // webAccessMu critical section — outside the lock on purpose, see
 // RefreshWebAccessLoadWarnings for the lock-order rule. The refresh is
@@ -1114,13 +1114,13 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // flip back so a rejected toggle is indistinguishable from a rejected
 // request (the SetModelProfilesEnabled contract).
 //
-// Enabling with the master experimental gate closed (ADR-090 decision 13)
+// Enabling with the master experimental gate closed (ADR-098 decision 13)
 // persists the switch — operator intent — but mounts nothing: availability
 // is the conjunction, enforced at every mount decision through
 // webAccessMountAllowed; opening the gate live-follows the mount through
 // applyExperimentalWebAccess.
 //
-// Enabling onto a configured-but-unusable TLS (ADR-092) is refused before
+// Enabling onto a configured-but-unusable TLS (ADR-099) is refused before
 // anything is mutated or persisted: the pair is loaded exactly like the
 // sidecar would load it (config.ValidateWebAccessTLSPair), so a broken
 // certificate leaves the section OFF with the reason in the toggle's error
@@ -1136,7 +1136,7 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // touches it at runtime), and a concurrent backend config save can only READ
 // the section it persists wholesale — the accepted one-word window of this
 // desktop-owned seam. The warning refresh runs after the unlock, so the
-// never-takes-configMu-under-webAccessMu rule survives (ADR-092).
+// never-takes-configMu-under-webAccessMu rule survives (ADR-099).
 func (a *App) SetWebAccessEnabled(on bool) error {
 	a.webAccessMu.Lock()
 	err := a.setWebAccessEnabledLocked(on)
@@ -1154,7 +1154,7 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 		return nil
 	}
 
-	// ADR-092: a flip onto an unusable TLS is refused up front — the same
+	// ADR-099: a flip onto an unusable TLS is refused up front — the same
 	// usability predicate the load path heals by, fail-closed here because
 	// this is an interactive boundary, not a broken config file.
 	if on && cfg.WebAccess.TLS.Enabled {
@@ -1172,7 +1172,7 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 
 	if on {
 		if !webAccessMountAllowed(cfg, cfg.Experimental.Enabled) {
-			// ADR-090 decision 13: availability is the conjunction of the
+			// ADR-098 decision 13: availability is the conjunction of the
 			// master experimental gate and the section switch, enforced at
 			// EVERY mount decision. With the master gate closed this toggle
 			// still persists (operator intent — the same paper state a
@@ -1202,7 +1202,7 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 
 // applyExperimentalWebAccess is the desktop hook the backend invokes after a
 // successful experimental.enabled persist (UpdateExperimentalFeatures → the
-// OnExperimentalChanged FrontendAPIConfig seam, ADR-090): web access is an
+// OnExperimentalChanged FrontendAPIConfig seam, ADR-098): web access is an
 // experimental feature,
 // so its sidecar must follow the master gate LIVE instead of waiting for the
 // next launch. Opening the gate mounts the sidecar when the section's own
@@ -1281,7 +1281,7 @@ func (a *App) applyExperimentalWebAccess(enabled bool) {
 // explaining both, and the app is never left silently without a sidecar it
 // had before the call. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam);
-// the warning refresh runs after the unlock (ADR-092, the lock-order rule).
+// the warning refresh runs after the unlock (ADR-099, the lock-order rule).
 func (a *App) SetWebAccessConnection(bind string, port int) error {
 	a.webAccessMu.Lock()
 	err := a.setWebAccessConnectionLocked(bind, port)
@@ -1388,7 +1388,7 @@ func (a *App) SetWebAccessToken(token string) error {
 	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "token change")
 }
 
-// Web-access TLS certificate statuses (ADR-092 decision 5): the exact
+// Web-access TLS certificate statuses (ADR-099 decision 5): the exact
 // vocabulary GetWebAccessInfo reports in cert_status. The empty string (the
 // zero value, not a constant) means no cert path is configured — nothing to
 // classify.
@@ -1400,7 +1400,7 @@ const (
 )
 
 // SetWebAccessTLS persists the web_access.tls subsection (the HTTPS switch,
-// ADR-092 decision 1) and applies it live: a running sidecar is hot-restarted
+// ADR-099 decision 1) and applies it live: a running sidecar is hot-restarted
 // onto the new transport. The caller authors both PEM paths explicitly —
 // cert and key — the key path is never derived from the cert path. An
 // enabled subsection with empty paths is refused through
@@ -1415,7 +1415,7 @@ const (
 // ("does not match"), everything else (missing files, unparseable PEM) with
 // the unreadable message. The mount-time FAIL-CLOSED check stays as the
 // backstop for hand-edited configs — a listener configured as encrypted
-// never downgrades to plaintext (ADR-092 decision 2) — but through this RPC
+// never downgrades to plaintext (ADR-099 decision 2) — but through this RPC
 // the operator is stopped at the door. A request matching the current
 // subsection remains a no-op (after the pair has loaded).
 //
@@ -1427,7 +1427,7 @@ const (
 // bind/port pins it persists regardless and takes effect at the next start
 // whose gates are open. Locking discipline: webAccessMu, exactly like
 // SetWebAccessEnabled (see its comment for the desktop-owned config seam);
-// the warning refresh runs after the unlock (ADR-092, the lock-order rule) —
+// the warning refresh runs after the unlock (ADR-099, the lock-order rule) —
 // the HTTPS flip is precisely the transition that must move the
 // config-load-warning banner.
 func (a *App) SetWebAccessTLS(enabled bool, cert, key string) error {
@@ -1479,7 +1479,7 @@ func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 }
 
 // GenerateWebAccessCertificate regenerates the app-owned self-signed pair for
-// the CURRENTLY pinned bind (ADR-092 decision 3) at the fixed locations
+// the CURRENTLY pinned bind (ADR-099 decision 3) at the fixed locations
 // ~/.c0wrk/web-access.crt + .key (the backend/config path API), persists the
 // pair's paths into web_access.tls (minting-is-part-of-configuring, the
 // token precedent), and hot-restarts a running sidecar onto the fresh
@@ -1543,7 +1543,7 @@ func (a *App) generateWebAccessCertificateLocked() error {
 }
 
 // classifyWebAccessCert computes the cert_status/cert_detail pair of
-// GetWebAccessInfo (ADR-092 decision 5): whenever a cert path is configured,
+// GetWebAccessInfo (ADR-099 decision 5): whenever a cert path is configured,
 // the pair is loaded exactly the way the sidecar loads it
 // (tls.LoadX509KeyPair) and the leaf is checked against the pinned bind —
 // SAN coverage of the bind's browser-facing host (webAccessURLHost: the same
@@ -1672,7 +1672,7 @@ func (a *App) restartWebAccessOrRollbackLocked(prev config.WebAccessConfig, cfg 
 		what, err)
 }
 
-// webAccessMountAllowed is the ADR-090 decision-13 availability conjunction —
+// webAccessMountAllowed is the ADR-098 decision-13 availability conjunction —
 // the master experimental gate AND the feature's own web_access switch —
 // evaluated as ONE predicate by every mount decision: the startup mount
 // (initWebAccess), the live-follow hook (applyExperimentalWebAccess) and the
@@ -1697,7 +1697,7 @@ func (a *App) startWebAccessLocked(log *slog.Logger) (*webaccess.Server, error) 
 	}
 	// The persistent credential: an empty config token means "mint one, now"
 	// — generated once and written back through the same immediate config
-	// save every other settings change uses (ADR-090). From the first start
+	// save every other settings change uses (ADR-098). From the first start
 	// on the credential is stable across restarts; the sidecar's own
 	// per-launch fallback stays as defense-in-depth for direct construction.
 	if cfg.WebAccess.Token == "" {
