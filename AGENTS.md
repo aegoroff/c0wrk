@@ -21,6 +21,7 @@ Any code contribution that violates the rules in SECURITY.md will be rejected.
 Detailed system specs live in `specs/`. Before making structural changes, read the relevant spec:
 
 - Start with `specs/INDEX.md` to find the right document for your task.
+- Before writing or editing code, read the comment policy: `specs/architecture/comment-policy.md` (created by ADR-097; surfaced at the top of `specs/INDEX.md`).
 - `specs/META.md` defines spec formats and update rules — read before creating/updating specs.
 - `specs/contracts/` define cross-boundary interface rules.
 - `specs/domains/` explain subsystem behavior and invariants.

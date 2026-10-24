@@ -764,21 +764,10 @@ func (o *Orchestrator) DrainLiveUserMessages() string {
 }
 
 // RequestResumeCompaction arms the one-shot "compact on resume" request with
-// the user-selected strategy name ("sliding_window" | "summarization" |
-// "hierarchical"). The NEXT Resume call consumes it: the resumed Conductor
-// run compacts the merged trajectory (seeded prior steps + the resumed run)
-// with this strategy up front — before the first LLM call — regardless of the
-// context fill thresholds that normally gate compaction. This is the manual
-// compaction entry point for a paused task: the backend arms the flag before
-// re-entering Resume, so the compaction lands exactly once, at the seam where
-// the full prior trajectory is already seeded into the ContextManager.
-//
-// Safe to call from any goroutine (the UI/backend answer arrives on a
-// Wails-RPC goroutine while Resume may run on the request goroutine);
-// mutex-guarded. An empty strategy is a no-op: an empty string is the "not
-// armed" sentinel, so arming with "" would be indistinguishable from "not
-// requested" and is rejected up front. Arming while a request is armed but
-// not yet consumed simply overwrites the pending strategy.
+// the given strategy ("sliding_window" | "summarization" | "hierarchical");
+// the NEXT Resume consumes it. An empty strategy is rejected ("" is the
+// not-armed sentinel); re-arming overwrites the pending strategy. See
+// resumeCompactionStrategy.
 func (o *Orchestrator) RequestResumeCompaction(strategy string) {
 	if strategy == "" {
 		return
@@ -788,26 +777,19 @@ func (o *Orchestrator) RequestResumeCompaction(strategy string) {
 	o.resumeCompactionStrategy = strategy
 }
 
-// ClearResumeCompaction discards any armed one-shot resume-compaction
-// request. The session layer calls it when the session's unfinished task is
-// cancelled or abandoned (user discard, goal-mode takeover, archival): an
-// armed flag belonged to THAT task's future resume and must not survive it —
-// a later, unrelated task resuming on the same orchestrator would otherwise
-// inherit a forced compaction chosen for the cancelled one. Idempotent and
-// race-free with a concurrent Resume/consume (mutex-guarded); a no-op when
-// nothing is armed.
+// ClearResumeCompaction disarms the request. Called via clearResumeRequests
+// when the armed task is cancelled, abandoned, or force-terminated — a stale
+// arm must not force a compaction chosen for a dead task onto an unrelated
+// later one. See resumeCompactionStrategy.
 func (o *Orchestrator) ClearResumeCompaction() {
 	o.resumeCompactionMu.Lock()
 	defer o.resumeCompactionMu.Unlock()
 	o.resumeCompactionStrategy = ""
 }
 
-// consumeResumeCompaction atomically reads and clears the armed
-// resume-compaction strategy. It returns "" when no compaction was requested
-// (or the flag was already consumed) — Resume then keeps its normal behavior.
-// Called exactly once at Resume entry, before either branch (goal loop or
-// plain Conductor) is chosen, so the one-shot semantics hold regardless of
-// which path the resumed task takes.
+// consumeResumeCompaction atomically reads and clears the armed strategy; ""
+// (not armed, or already consumed) keeps Resume's normal threshold-driven
+// behavior. See resumeCompactionStrategy.
 func (o *Orchestrator) consumeResumeCompaction() string {
 	o.resumeCompactionMu.Lock()
 	defer o.resumeCompactionMu.Unlock()
@@ -816,61 +798,31 @@ func (o *Orchestrator) consumeResumeCompaction() string {
 	return strategy
 }
 
-// RequestResumeReroute arms the one-shot "re-route on resume" request. The
-// NEXT Resume call consumes it: instead of defaulting to the "general" domain
-// and skipping the routing stage, the resumed run re-classifies the task's
-// original request and activates the matched skills — exactly as a fresh
-// HandleMessage would.
-//
-// The session layer arms it ONLY for a task that never got past routing on its
-// original run: no routing decision was persisted (routing is written only
-// after the router succeeds) and no execution state exists (empty trajectory,
-// no plan). Such a task is typically a fresh send that failed while the router
-// was calling the LLM (e.g. a network error), leaving a resumable "failed" row
-// with no routing decision; resuming it without re-routing would silently run
-// the Conductor under the wrong domain. A task that WAS routed keeps its
-// persisted decision — a resume never re-classifies a continuation.
-//
-// Safe to call from any goroutine; mutex-guarded. Idempotent: re-arming before
-// consumption is a harmless no-op (the value is a boolean).
+// RequestResumeReroute arms the one-shot "re-route on resume" request for the
+// NEXT Resume (only meaningful for a task that never got past routing — see
+// resumeRerouteRequested). Idempotent re-arm.
 func (o *Orchestrator) RequestResumeReroute() {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
 	o.resumeRerouteRequested = true
 }
 
-// ClearResumeReroute discards any armed one-shot resume-re-route request. The
-// session layer calls it — via clearResumeRequests — on every lifecycle
-// transition where the task the arm was set for can no longer be resumed by a
-// later Resume that would consume it:
-//
-//   - CancelUnfinishedTask — the unfinished task is discarded;
-//   - cancelUnfinishedTask — a Stop-button cancel of the paused task;
-//   - abandonUnfinishedTaskForMode — a goal-mode / E2S mode takeover.
-//
-// Leaving the flag armed across such a transition would let it fire for an
-// unrelated later task on the same orchestrator (the session's registry/clone
-// is reused for the whole session). Idempotent and race-free with a concurrent
-// Resume/consume (mutex-guarded); a no-op when nothing is armed.
-//
-// Clearing here is defense-in-depth, not the sole protection: Resume consumes
-// the flag once at entry and only re-routes when `forceReroute && routing ==
-// nil`, so a task that was actually routed carries a non-nil routing and can
-// never be re-classified by a stale arm. That guard — not this clear — is what
-// bounds a leaked arm to a harmless no-op; keep it if this clear's coverage
-// ever shrinks.
+// ClearResumeReroute drops an armed one-shot resume-re-route request. Called
+// via clearResumeRequests whenever the armed task is cancelled, abandoned, or
+// force-terminated — a stale arm must not re-classify an unrelated later task
+// on the session's long-lived orchestrator (see
+// specs/domains/orchestration/conductor.md, "Never-routed exception").
+// Defense-in-depth only: Resume's `forceReroute && routing == nil` guard, not
+// this clear, bounds a leaked arm — keep the guard if this coverage shrinks.
 func (o *Orchestrator) ClearResumeReroute() {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
 	o.resumeRerouteRequested = false
 }
 
-// consumeResumeReroute atomically reads and clears the armed resume-re-route
-// request. It returns false when none was requested (or it was already
-// consumed) — Resume then keeps its normal reuse-without-routing behavior.
-// Called exactly once at Resume entry, before either branch (goal loop or
-// plain Conductor) is chosen, so the one-shot semantics hold regardless of
-// which path the resumed task takes.
+// consumeResumeReroute atomically reads and clears the armed request; false
+// (not armed, or already consumed) keeps Resume's normal reuse-without-routing
+// behavior. See resumeRerouteRequested.
 func (o *Orchestrator) consumeResumeReroute() bool {
 	o.resumeRerouteMu.Lock()
 	defer o.resumeRerouteMu.Unlock()
