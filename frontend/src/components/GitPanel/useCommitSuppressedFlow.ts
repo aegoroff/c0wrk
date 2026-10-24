@@ -5,14 +5,17 @@ import { trustGitRepo } from '@/api/gitConfigRisk'
 
 /**
  * A commit the backend withheld because the untrusted repository arms
- * commit hooks/signing. The message is captured alongside the suppression
- * payload so the dialog's follow-up actions re-commit EXACTLY what was
- * withheld, even if the draft (or the active project) changed meanwhile.
+ * commit hooks/signing. The message and its branch are captured alongside
+ * the suppression payload so the dialog's follow-up actions re-commit
+ * EXACTLY what was withheld and clear the RIGHT branch's draft, even if the
+ * draft (or the active project/focus) changed meanwhile.
  */
 export interface PendingSuppressedCommit {
   suppression: CommitSuppression
   message: string
   projectId: string
+  /** The focused worktree's branch at click time (ADR-098 draft key). */
+  branchName: string
 }
 
 interface CommitSuppressedFlowOptions {
@@ -21,7 +24,7 @@ interface CommitSuppressedFlowOptions {
    * its draft. A withheld (suppressed) result never reaches here — it is a
    * decision request, not a commit.
    */
-  recordCommit: (projectId: string, result: CommitResult) => Promise<void>
+  recordCommit: (projectId: string, branchName: string, result: CommitResult) => Promise<void>
   /**
    * Record a failed commit (the trust RPC or the commit itself) in the
    * git-operation console.
@@ -99,11 +102,12 @@ export function useCommitSuppressedFlow({
           suppression: result.suppressed,
           message: pending.message,
           projectId: pending.projectId,
+          branchName: pending.branchName,
         })
         return
       }
       setPendingSuppressed(null)
-      await recordCommit(pending.projectId, result)
+      await recordCommit(pending.projectId, pending.branchName, result)
     } catch (err) {
       // Trust RPC or the re-commit failed: close the dialog and record the
       // failure in the console (nothing was committed).
@@ -129,7 +133,7 @@ export function useCommitSuppressedFlow({
       // force=true: the backend commits hardened and never suppresses.
       const result = await commit(pending.message, true)
       setPendingSuppressed(null)
-      await recordCommit(pending.projectId, result)
+      await recordCommit(pending.projectId, pending.branchName, result)
     } catch (err) {
       setPendingSuppressed(null)
       await recordCommitFailure(pending.projectId, err)
