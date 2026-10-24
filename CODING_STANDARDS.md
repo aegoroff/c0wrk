@@ -1,12 +1,16 @@
-# Comment Policy
+# Coding Standards
 
-> **Read this document before writing or editing code.** Created by [ADR-092](../decisions/092-comment-policy.md), which records why the policy exists as a standalone document; the policy text itself lives here and evolves here.
+> **Read this document before writing or editing code.**
 
-## Context
+## Comment Policy
+
+Created by [ADR-092](specs/decisions/092-comment-policy.md), which records why the policy exists as a standalone document; the policy text itself lives here and evolves here.
+
+### Context
 
 Large prose comment blocks accumulated in code files that restate behavior already specified in `specs/`. This duplicates knowledge in two places that drift independently (a spec edit no longer reaches the code comment and vice versa), inflates every agent context window that opens the file, and buries the comments that carry genuinely local information. The reverse case also exists: unique cross-cutting invariants (the FE↔Go `/`-ref grammar parity, the goal/E2S mode-toggle lock asymmetry) survived only as code comments, appearing nowhere in `specs/`.
 
-## The A–D comment classifier
+### The A–D comment classifier
 
 Every multi-line comment block in touched code is classified into one of four classes and handled accordingly:
 
@@ -19,7 +23,7 @@ Every multi-line comment block in touched code is classified into one of four cl
 
 The pilot pass applied the classifier to `frontend/src/lib/chatInputLock.ts`, `frontend/src/lib/parseReferences.ts`, `frontend/src/lib/modelProfilesTools.ts`, `frontend/src/api/fonts.ts`. Class-B outcomes of the pilot: the `/`-ref extraction grammar parity landed in `specs/domains/frontend/README.md` (chat input section), the execution-mode toggle lock in `specs/domains/frontend/rendering.md` ("Per-message selector lock", which also fixed that section's stale claim that all cluster controls unlock on a paused/failed task, and the adjacent input-lock matrix sentence missing `compacting`).
 
-## Rules
+### Rules
 
 - `specs/` is the source of truth for behavior, interfaces, and invariants; code comments carry pointers and local whys, not parallel specifications. The essence may legitimately be empty when the identifier and the body alone carry the contract and the spec names the construct by name — the comment is then just the godoc summary plus the link.
 - A comment is as short as its meaning allows: every sentence must carry information the identifier, the body, the declaration comments of the constructs involved, or the linked spec does not already say.
@@ -44,7 +48,7 @@ The pilot pass applied the classifier to `frontend/src/lib/chatInputLock.ts`, `f
 - Tool directives and linter pragmas (`//go:build`, `//go:generate`, `//nolint`, `//eslint-disable-*` and their kin) are functional source, not prose: the classifier never applies to them, and they are never tightened, de-duplicated, or linked away.
 - Generated code is out of scope: the classifier never applies to files a tool regenerates (`frontend/wailsjs/` and every other machine-generated output) — a comment there is owned by its generator.
 
-### Canonical in-place shape for enum-like constructs
+#### Canonical in-place shape for enum-like constructs
 
 From `frontend/src/api/papers.ts`:
 
@@ -63,7 +67,7 @@ export type PaperLiteratureStatus =
   | 'error' // any other failure (carries the helper's stderr tail)
 ```
 
-## Invariants
+### Invariants
 
 - `specs/` is always the single source of truth for behavior, interfaces, and invariants; code comments carry pointers and local whys.
 - Every cross-cutting invariant lands in a spec first; the comment site keeps a 1–4 line essence plus a relative link.
@@ -74,7 +78,7 @@ export type PaperLiteratureStatus =
 - A de-duplication pass covers every comment block in its scope; the volume reduction follows from full coverage (most bulk in a spec-duplicated file is class A), not from a minimization mandate — genuine class-C mechanics is preserved.
 - Every state protocol is documented once, at the declaration; accessor comments carry deltas only, and caller enumeration stays in tooling.
 
-## Anti-Patterns
+### Anti-Patterns
 
 - **A block comment that enumerates variant descriptions above the construct** — it separates each description from its variant and drifts from the variant list whenever a variant is added, removed, or renamed.
 - **A stretched comment (a multi-line block joined into one long single line)** — it produces a disproportionately long line, defeats the wrapping the block already had, and reads worse in diffs and side-by-side views.
