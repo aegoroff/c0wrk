@@ -23,9 +23,14 @@ import (
 func hitlResolvedEvents(t *testing.T, a *App, rec *emitRecorder) []session.HitlResolvedData {
 	t.Helper()
 	// Deterministic drain: the batcher delivers barrier events (hitl_resolved
-	// included) from its flusher goroutine, so the read flushes the queue
-	// synchronously before taking the recorder snapshot.
-	a.flushEvents()
+	// included) from its flusher goroutine. A plain flushEvents is NOT a
+	// barrier: the flusher can win the queue and land its emit AFTER the
+	// snapshot below (observed as a rare "got 0 hitl_resolved events" on
+	// loaded CI, reproducible under -race). stopEventBatcher joins the
+	// flusher goroutine before returning, so every enqueued event has been
+	// emitted by the time the snapshot is taken; any later enqueue delivers
+	// synchronously through the stopped-batcher path.
+	a.stopEventBatcher()
 	var out []session.HitlResolvedData
 	for _, ev := range flattenEmittedBatches(t, rec.snapshot()) {
 		if ev.Name != "session:sess-1:hitl_resolved" {
