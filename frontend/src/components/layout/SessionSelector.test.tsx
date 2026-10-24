@@ -1504,3 +1504,106 @@ describe('SessionSelector — keyboard reachability of the new controls', () => 
     expect(sessionMocks.selectSession).toHaveBeenCalledWith('s-new', 'proj-1')
   })
 })
+
+describe('SessionSelector — grouped order with an active session', () => {
+  const iso = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString()
+
+  /**
+   * Document order of the given labels across the menu's `[role="menuitem"]`
+   * rows. A label matching a row's full text exactly (section headers) binds
+   * there; otherwise it falls back to a substring match (session rows carry
+   * extra text), first match wins. Missing labels are dropped from the
+   * result — flat-mode assertions use that to prove branch rows are absent.
+   */
+  function itemOrder(menu: HTMLElement, labels: string[]): string[] {
+    const texts = Array.from(menu.querySelectorAll('[role="menuitem"]')).map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    return labels
+      .map((label) => {
+        const exact = texts.findIndex((t) => t === label)
+        return { label, idx: exact >= 0 ? exact : texts.findIndex((t) => t.includes(label)) }
+      })
+      .filter((hit) => hit.idx >= 0)
+      .sort((a, b) => a.idx - b.idx)
+      .map((hit) => hit.label)
+  }
+
+  /**
+   * Store order deliberately contradicts every grouped expectation: the
+   * freshest session sits in the group that must render LAST (fresh-b), the
+   * active session's group (act-b) holds a fresher sibling, and pin-b is the
+   * stalest branch — kept afloat only by its GROUP pin.
+   */
+  const activeBranchFixture = (): SessionRow[] => [
+    makeSession({ id: 'fresh1', name: 'Fresh one', workspace_binding: managedBinding('fresh-b'), last_active_at: iso(1) }),
+    makeSession({ id: 'act', name: 'Active now', workspace_binding: managedBinding('act-b'), last_active_at: iso(30) }),
+    makeSession({ id: 'act2', name: 'Act two', workspace_binding: managedBinding('act-b'), last_active_at: iso(2) }),
+    makeSession({ id: 'p1', name: 'Pinned one', workspace_binding: managedBinding('pin-b'), last_active_at: iso(45) }),
+  ]
+
+  it('the active branch group floats above a fresher unpinned group but below a pinned group', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    usePinnedGroupsStore.setState({ pinsByProject: { 'proj-1': ['pin-b'] } })
+    sessionMocks.sessions = activeBranchFixture()
+    sessionMocks.activeSessionId = 'act'
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // GROUP-pin tier first; then contains-active beats freshness (act-b holds
+    // the 30-min-old active session, fresh-b the freshest one overall).
+    expect(itemOrder(menu, ['pin-b', 'act-b', 'fresh-b'])).toEqual(['pin-b', 'act-b', 'fresh-b'])
+  })
+
+  it('the active session renders first inside its branch group — ahead of a fresher sibling', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = activeBranchFixture()
+    sessionMocks.activeSessionId = 'act'
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // Unpinned groups: contains-active first, then freshness. Inside act-b the
+    // STALE active row leads its 2-min-old sibling; the other groups lead with
+    // their freshest member.
+    expect(
+      itemOrder(menu, ['act-b', 'Active now', 'Act two', 'fresh-b', 'Fresh one', 'pin-b', 'Pinned one']),
+    ).toEqual(['act-b', 'Active now', 'Act two', 'fresh-b', 'Fresh one', 'pin-b', 'Pinned one'])
+  })
+
+  it('an active local row leads Local while the Worktrees section still renders above it', async () => {
+    useUIStore.setState({ sessionListGrouped: true })
+    sessionMocks.sessions = [
+      makeSession({ id: 'm1', name: 'Managed one', workspace_binding: managedBinding('feat-x'), last_active_at: iso(60) }),
+      makeSession({ id: 'l1', name: 'Local fresher', last_active_at: iso(1) }),
+      makeSession({ id: 'lact', name: 'Local active', last_active_at: iso(180) }),
+    ]
+    sessionMocks.activeSessionId = 'lact'
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // The 3-hour-old active local beats its 1-min-old sibling INSIDE Local,
+    // but the section structure is untouched: Worktrees (branch row + member)
+    // still precedes the Local header.
+    expect(
+      itemOrder(menu, ['Worktrees', 'feat-x', 'Managed one', 'Local', 'Local active', 'Local fresher']),
+    ).toEqual(['Worktrees', 'feat-x', 'Managed one', 'Local', 'Local active', 'Local fresher'])
+  })
+
+  it('flat mode ignores the active session — pure store order, no branch chrome', async () => {
+    // sessionListGrouped stays at the beforeEach default (false).
+    sessionMocks.sessions = activeBranchFixture()
+    sessionMocks.activeSessionId = 'act'
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    // The DOM follows the store array verbatim — the active row stays exactly
+    // where the store put it (2nd), and no branch rows exist to match.
+    expect(itemOrder(menu, ['Fresh one', 'Active now', 'Act two', 'Pinned one'])).toEqual([
+      'Fresh one',
+      'Active now',
+      'Act two',
+      'Pinned one',
+    ])
+    expect(itemOrder(menu, ['pin-b', 'act-b', 'fresh-b'])).toEqual([])
+  })
+})
