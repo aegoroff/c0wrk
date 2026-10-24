@@ -9,7 +9,7 @@ resolvers) now implements; the domain and contract specs listed under
 References were updated in the same change. Amended in the same cycle: the
 chat workspace root that relative user-facing paths resolve against follows
 the ACTIVE SESSION (execution workspace; checkout fallback) — Decision 6
-and the Consequences; [ADR-098](098-research-root-follows-active-session.md)
+and the Consequences; [ADR-099](099-research-root-follows-active-session.md)
 records the same session-following rule for the research/papers roots and
 the workspace watcher.
 
@@ -128,7 +128,7 @@ keep old rows readable without a schema migration.
    checkout — the session's `project_id` must equal the active project, so
    a foreign session's tree never leaks into another project's window (the
    same session-following rule the research/papers roots and the CODE
-   watcher follow, [ADR-098](098-research-root-follows-active-session.md)).
+   watcher follow, [ADR-099](099-research-root-follows-active-session.md)).
    With no workspace root available (No-Project / transient window) the
    raw path passes through unchanged. Markdown links and `@file` user-message links
    resolve through `resolveFileRefPath` against the workspace root —
@@ -237,7 +237,7 @@ keep old rows readable without a schema migration.
 - [specs/domains/frontend/rendering.md](../domains/frontend/rendering.md)
   § Markdown Element Handling — link classification, `normalizePath`, and
   the tool-card resolution bases.
-- [specs/decisions/098-research-root-follows-active-session.md](098-research-root-follows-active-session.md)
+- [specs/decisions/099-research-root-follows-active-session.md](099-research-root-follows-active-session.md)
   — the session-following workspace-root rule Decision 6 builds on (the
   research/papers roots and the workspace watcher).
 - [specs/contracts/desktop-frontend.md](../contracts/desktop-frontend.md)

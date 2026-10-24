@@ -499,7 +499,7 @@ workspace regardless of which session is active.
 
 The RESEARCH and papers subsystems resolve their root the same way the
 explorer does — by the ACTIVE SESSION, not the project row (the "research
-root follows the active session" protocol, [ADR-098](../decisions/098-research-root-follows-active-session.md)):
+root follows the active session" protocol, [ADR-099](../decisions/099-research-root-follows-active-session.md)):
 
 - The agent writes research artifacts under `<session-workspace>/.research`
   (`session/Manager.researchProjectInfo` derives the root from the session's
@@ -558,12 +558,12 @@ root follows the active session" protocol, [ADR-098](../decisions/098-research-r
   is invalid.
 - `GitPanelTarget` may name only the owning project's checkout or one of its
   managed trees; it can never change `ExecutionWorkspace`.
-- The research/papers root follows the active session (ADR-098): a
+- The research/papers root follows the active session (ADR-099): a
   panel-side resolver may derive the root only from the requesting project's
   active session workspace or its checkout — never from another project's
   session — and containment uses the workspace the root was derived from.
 - The workspace root for user-facing path resolution follows the active
-  session (ADR-095 Decision 6, ADR-098): chat file references, the file
+  session (ADR-095 Decision 6, ADR-099): chat file references, the file
   viewer, and every panel-side root resolver answer the ACTIVE SESSION's
   execution workspace — the managed tree for a bound session, the project
   checkout otherwise — never another project's workspace.
@@ -692,7 +692,7 @@ CHAT workspaces remain `~/.c0wrk/projects/__no_project__/<id>/workspace`.
 - [session-lifecycle.md](session-lifecycle.md) — creation/restore/fork flows this binds into
 - [ADR-080 Typed Session Workspace Bindings](../decisions/080-session-worktrees.md)
 - [ADR-082 Shared Managed Worktrees](../decisions/082-shared-managed-worktrees.md)
-- [ADR-098 Research/papers root follows the active session](../decisions/098-research-root-follows-active-session.md)
+- [ADR-099 Research/papers root follows the active session](../decisions/099-research-root-follows-active-session.md)
 - [ADR-030 Session Context Restore](../decisions/030-session-context-restore.md)
 - [backend-core.md](../contracts/backend-core.md) — the factory's workspace parameter is the execution workspace
 - [git-auto-fetch.md](git-auto-fetch.md) — remote refresh funnels through the same focus-resolving `resolveGitRepoRoot` (equivalent for fetch: the common dir is shared by every worktree)

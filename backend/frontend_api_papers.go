@@ -403,7 +403,7 @@ func (f *FrontendAPI) comparisonsRootForProject(p *project.ProjectInfo) string {
 // effectiveResearchRoot returns the project's effective research root,
 // following the ACTIVE SESSION.
 //
-// Spec: specs/decisions/098-research-root-follows-active-session.md;
+// Spec: specs/decisions/099-research-root-follows-active-session.md;
 // specs/domains/session-worktrees.md (Research/papers roots).
 //
 // Protocol — "research root follows the active session": the agent writes
