@@ -559,6 +559,14 @@ pause (`agent.ErrPaused`) is a clean checkpoint: the task persists as paused
 (resumable), `session_paused` is emitted, and `Resume` returns a nil error with
 `Status` = `ExecutionStatusPaused`.
 
+#### Task trajectory persistence
+
+`RunConductor` (`core/conductor.go`) wraps the in-memory `trajectoryHolder` in `compositeTrajectoryStore`: the holder serves the reflect tool synchronously, and every `Sync` additionally persists a full-snapshot upsert of the trajectory to the task DB — best-effort and non-blocking (at most one write outstanding; a `Sync` landing while a write is in flight is dropped, the next completed `Sync` carries a fresher snapshot, so the persisted trajectory never goes backwards; a final synchronous `Flush` after the ReAct loop stops persists the last state even when the final `Sync` was dropped).
+
+The holder's sync guard is **length-monotonic**: any sync shorter than what is already held is ignored. Subagent executors get their own holders (`subagentCtx` detaches the parent's — see [delegation.md](orchestration/delegation.md#subagent-context-narrowing)), so under normal wiring only the parent conductor syncs here; the guard is defense in depth against a mis-wired foreign executor (a resumed seed narrower than the held trajectory) erasing the task checkpoint — guarding empty syncs alone would not suffice, since a first non-empty single-step foreign sync would still shrink it.
+
+The per-Sync defensive copy is a shallow copy, safe for the async writer because the executor appends steps but never mutates an already-published step in place (the sp4rk executor's trajectory lock); the shared slice/byte backing arrays are never written after publication. If that executor invariant ever changes, the snapshot must deep-copy the backing arrays.
+
 #### Task-scoped MCP authorization
 
 `prepareTaskMCP` (`core/orchestrator_mcp_prepare.go`) is shared by

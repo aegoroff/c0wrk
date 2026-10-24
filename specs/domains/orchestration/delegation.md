@@ -252,6 +252,24 @@ When `allow_redelegate: true`:
 - Redelegating subagents are launched individually (not through `RunSubAgentsParallel`) because each needs its own per-task context with the child registry.
 - The subagent's `delegate` calls use the same `max_steps` budget as regular delegations (configurable per-task via `max_steps`).
 
+### Subagent Context Narrowing
+
+Every non-redelegating launch path runs under `subagentCtx` (`core/conductor.go`), which clears three classes of Conductor-only context values a delegated subagent must never inherit:
+
+1. **Delegation-machinery handles** (DelegationRegistry/Launcher, PlanPublisher, ReflectionRunner, PlanChecker). `resolveTaskTools` already filters the Conductor-only tools out of the descriptor list, but a descriptor that ever reaches the subagent through an explicit `tools` list must find no live handles behind it — clearing the values keeps those tools inert ("not running inside a Conductor") even then (defense in depth).
+2. **The subagent roster** (available/user agents). Both roster prompt sections are Conductor-only ([ADR-021](../../decisions/021-subagents.md) §4); without clearing, a generic no-profile subagent — whose prompt is built by the normal `buildSystemPrompt` path — would inherit the Conductor's "you MUST delegate" directive while holding no `delegate` tool: a contradictory prompt.
+3. **Goal-loop state and sinks** (`GoalKey`, goal-status/verification sinks). Clearing keeps the normal completion semantics (a subagent must not receive the goal-turn directive naming `declare_goal_status`, a tool it does not hold) and makes it impossible to write verdicts into the loop it serves under; see [conductor-tools.md](../../contracts/conductor-tools.md).
+
+`subagentCtx` also detaches the trajectory store: the parent holder backs the task checkpoint and its sync guard is length-monotonic, so a longer foreign sync would REPLACE the parent trajectory and suppress the parent's later syncs — corrupting the checkpoint. Every subagent executor therefore gets a fresh in-memory holder; subagent steps are transient and never enter the parent task checkpoint (see [session-lifecycle.md](../session-lifecycle.md#task-trajectory-persistence)).
+
+The redelegating path bypasses `subagentCtx` (it must keep the delegation machinery the child needs) and therefore re-clears the roster, the goal state/sinks and the trajectory store explicitly (`redelegTaskCtx`) — re-delegation is the one capability the child keeps.
+
+### Async Delegation Lifetime and the Shared Concurrency Cap
+
+An async delegation is based on the RUN-scoped context (`conductorLauncher.asyncBaseCtx`), not the transient tool-call context it was dispatched under: the executor's per-tool watchdog cancels the tool-call context the moment `delegate` returns, which would tear the just-launched background subagent down before it does any work. The run context outlives the call yet is still cancelled with the task, so the delegation survives the `delegate` call and a cooperative pause, and dies with a task cancel or the run.
+
+Every dispatch path — the plan wave, the blocking fan-out (`runSubAgentsParallel`) and the per-task async launches (`launchAsync`) — acquires a slot from the SAME launcher-wide limiter (`subagentSlots`, capacity `agents.max_parallel_subagents`; unlimited when <= 0), so the cap holds across paths running concurrently, not once per call. No slot-holder can itself delegate (plan waves run under `subagentCtx`; blocking dispatch splits redelegating tasks out to the ungated path), so an active slot never waits on a nested launch for a slot it is itself holding — the shared limiter cannot deadlock on nested delegation.
+
 ### Dependency Context Injection
 
 Before a subagent runs, outputs from its `depends_on` delegations are injected into its task description (`conductorLauncher.buildTaskDescription`):
