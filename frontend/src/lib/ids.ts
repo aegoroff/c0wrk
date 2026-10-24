@@ -3,7 +3,7 @@
  *
  * `crypto.randomUUID` exists only in secure contexts (HTTPS, or loopback
  * http). The same UI is served over plain HTTP on non-loopback addresses by
- * the web-access sidecar (ADR-098), where the method is simply absent — and
+ * the web-access sidecar (ADR-099), where the method is simply absent — and
  * the very first render already needs a fresh id (the initial tab is born in
  * the tabStore initializer), so an unguarded call crashes the app into a gray
  * screen. `generateUUID` uses the native implementation when present and

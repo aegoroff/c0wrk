@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Tests for the web transport in api/runtime.ts — the browser half of the
-// web-access sidecar (ADR-098). The same frontend bundle, served over plain
+// web-access sidecar (ADR-099). The same frontend bundle, served over plain
 // HTTP by internal/webaccess, must reach the identical FrontendAPI surface:
 //   - detection resolves 'wails' | 'web' | 'none' (and 'wails' never asks
 //     the network — the bindings are injected before any bundle code runs);

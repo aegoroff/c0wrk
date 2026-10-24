@@ -295,9 +295,9 @@ func TestLoginFlow(t *testing.T) {
 		}
 		if c.Secure {
 			// Plain HTTP keeps the cookie without Secure — byte-identical to
-			// the pre-ADR-099 behavior; Secure rides TLS only (tls_test.go
+			// the pre-ADR-100 behavior; Secure rides TLS only (tls_test.go
 			// pins the TLS side of the contract).
-			t.Error("Secure flag unexpected on plain HTTP (Secure rides TLS only, ADR-099)")
+			t.Error("Secure flag unexpected on plain HTTP (Secure rides TLS only, ADR-100)")
 		}
 		if c.Value == srv.cfg.Token {
 			t.Error("cookie must carry the per-launch session secret, not the configured token")

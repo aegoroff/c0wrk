@@ -349,7 +349,7 @@ func DatabasePath(agentDir string) string {
 
 // WebAccessCertPath returns the fixed location of the web-access sidecar's
 // app-owned self-signed certificate (<agentDir>/web-access.crt). This is the
-// only path the Generate control writes (ADR-099 decision 3): idempotent to
+// only path the Generate control writes (ADR-100 decision 3): idempotent to
 // regenerate and never an operator-authored certificate, which is authored
 // by pointing web_access.tls.cert at any location by hand.
 func WebAccessCertPath(agentDir string) string {

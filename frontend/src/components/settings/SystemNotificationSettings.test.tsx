@@ -450,7 +450,7 @@ describe('SystemNotificationSettings web transport', () => {
 
   it('keeps the test button reachable in a fresh browser (permission never asked)', async () => {
     // The api layer maps the unasked 'default' permission to "not denied"
-    // (ADR-098 decision 11: the Test button's click is the gesture that
+    // (ADR-099 decision 11: the Test button's click is the gesture that
     // requests it) — the probe resolving true here IS that fresh-browser
     // state. The button must render, not the blocked-site hint.
     mocks.isWebTransport.mockReturnValue(true)
@@ -464,7 +464,7 @@ describe('SystemNotificationSettings web transport', () => {
 
   it('a prompt closed without an answer keeps the neutral state: no hint, Test button visible', async () => {
     // The toggle-on gesture ran, the browser prompt was DISMISSED: the api
-    // layer resolves 'default' — NOT a denial (ADR-098, decision 11). The
+    // layer resolves 'default' — NOT a denial (ADR-099, decision 11). The
     // section must stay neutral: no blocked hint, and the Test button stays
     // visible as the documented retry gesture. No preview either — nothing
     // was granted.

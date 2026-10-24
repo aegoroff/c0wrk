@@ -1,5 +1,5 @@
 // Unit tests for api/webAccess.ts — the web-access sidecar control bridge
-// (ADR-098). Covers boundary parsing (envelope rejection) and the wrapper
+// (ADR-099). Covers boundary parsing (envelope rejection) and the wrapper
 // contracts: the read is fail-open (transport failure → null, never a throw
 // into a render path) while the toggle throws (a rejected write must surface).
 
@@ -133,7 +133,7 @@ describe('parseWebAccessInfo', () => {
     })
   })
 
-  it('maps the snake_case TLS fields (ADR-099)', () => {
+  it('maps the snake_case TLS fields (ADR-100)', () => {
     expect(
       parseWebAccessInfo({
         ...validInfo,

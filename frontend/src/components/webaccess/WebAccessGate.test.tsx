@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Tests for the web-access login gate (ADR-098): the SPA-side half of the
+// Tests for the web-access login gate (ADR-099): the SPA-side half of the
 // sidecar's token↔cookie exchange. Covers the gate's transport rules —
 // children render untouched for a non-web (or authenticated) origin, the
 // token form replaces the app when the bootstrap probe reports no session,

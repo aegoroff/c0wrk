@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// tls_test.go — the TLS stage (ADR-099): certificate generation (the four
+// tls_test.go — the TLS stage (ADR-100): certificate generation (the four
 // SAN bind classes, self-signed leaf properties, the 825-day window, atomic
 // publication with exact modes, regeneration), the fail-closed New gate on
 // an enabled-but-unreadable pair, and a real TLS listener round trip —
@@ -66,7 +66,7 @@ func ipSetsEqual(a, b []net.IP) bool {
 }
 
 // TestCertSANs_BindClasses pins the SAN derivation for every bind class
-// (ADR-099 decision 3): the loopback set {localhost, 127.0.0.1, ::1} is
+// (ADR-100 decision 3): the loopback set {localhost, 127.0.0.1, ::1} is
 // always present; the "localhost" name, a loopback literal and a wildcard
 // bind add nothing; a specific non-loopback IP adds itself (mapped IPv4
 // forms normalize to their 4-byte encoding); anything unparsable is refused.
@@ -275,7 +275,7 @@ func TestGenerateWebAccessCertificate_Refuses(t *testing.T) {
 	}
 }
 
-// TestNew_TLSFailClosed pins ADR-099 decision 2 at the mount: an enabled
+// TestNew_TLSFailClosed pins ADR-100 decision 2 at the mount: an enabled
 // subsection whose pair is unreadable (missing, garbage, or mismatched)
 // refuses New — the listener never silently downgrades to plaintext — while
 // a disabled subsection ignores its paths entirely and a valid pair mounts.
@@ -467,7 +467,7 @@ func TestServer_TLSEndToEnd(t *testing.T) {
 		}
 		c := cookies[0]
 		if !c.Secure {
-			t.Error("cookie must carry Secure under TLS (ADR-099 decision 6)")
+			t.Error("cookie must carry Secure under TLS (ADR-100 decision 6)")
 		}
 		if !c.HttpOnly {
 			t.Error("cookie must stay HttpOnly")

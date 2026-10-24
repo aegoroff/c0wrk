@@ -232,7 +232,7 @@ func mainImpl() int {
 	// fallback, no usable capture, already-safe resolution).
 	app.SetWebviewGpuWatchdog(desktop.NewWebviewGpuWatchdog(agentDir, logDir, stderrObserved, slog.Default()))
 
-	// Hand the web-access sidecar (ADR-098) the same SPA tree the Wails
+	// Hand the web-access sidecar (ADR-099) the same SPA tree the Wails
 	// asset server serves: the dist subtree of the embedded assets, resolved
 	// once here where the embed lives. Best-effort by the same contract as
 	// the watchdog wiring above — fs.Sub cannot fail for a path this embed

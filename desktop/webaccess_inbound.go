@@ -10,7 +10,7 @@ import (
 )
 
 // webWSInboundDispatcher returns the WSInbound handler mounted into the
-// web-access sidecar (ADR-098): the browser-side twin of
+// web-access sidecar (ADR-099): the browser-side twin of
 // wireWailsEventListeners. An authenticated browser tab sends the same
 // {name, args} envelope the outbound tap broadcasts; this handler resolves
 // the narrow frontend→backend event set — the seven HITL response events —

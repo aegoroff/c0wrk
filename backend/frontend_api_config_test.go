@@ -3981,7 +3981,7 @@ func TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled(t *testing.
 }
 
 // TestUpdateExperimentalFeatures_InvokesHookAfterPersist verifies the desktop
-// hook contract (ADR-098): the hook carried through the FrontendAPIConfig
+// hook contract (ADR-099): the hook carried through the FrontendAPIConfig
 // seam fires once per toggle, in both directions, and
 // strictly AFTER the persist landed — the sidecar transition it drives must
 // be the visible consequence of the persisted gate, never of an in-memory

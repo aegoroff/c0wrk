@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_experimental_test.go — the experimental master gate over the
-// browser web-access sidecar (ADR-098): the startup mount requires BOTH the
+// browser web-access sidecar (ADR-099): the startup mount requires BOTH the
 // section's own switch and experimental.enabled; a mid-session gate change
 // live-follows through the backend hook (UpdateExperimentalFeatures → the
 // OnExperimentalChanged FrontendAPIConfig seam → applyExperimentalWebAccess)
@@ -170,7 +170,7 @@ func TestApplyExperimentalWebAccess_SectionOffMountsNothing(t *testing.T) {
 }
 
 // TestSetWebAccessEnabled_ExperimentalGateClosedPersistsButMountsNothing pins
-// the third mount decision (ADR-098 decision 13): the PUBLIC SetWebAccessEnabled
+// the third mount decision (ADR-099 decision 13): the PUBLIC SetWebAccessEnabled
 // binding persists the section switch with the master gate closed, but starts
 // no sidecar — a closed gate cannot be bypassed by a programmatic caller, a
 // config-restore path or a webview-console invocation. The skip is quiet
@@ -260,7 +260,7 @@ func TestSetWebAccessEnabled_ExperimentalGateClosedPersistsButMountsNothing(t *t
 }
 
 // TestUpdateExperimentalFeatures_HookStartsSidecarMidSession is the full
-// cross-seam contract (ADR-098): a REAL FrontendAPI (Init'd, like production)
+// cross-seam contract (ADR-099): a REAL FrontendAPI (Init'd, like production)
 // carries the desktop hook, so UpdateExperimentalFeatures(true) persists the
 // gate AND mounts the skipped sidecar in the same call, and
 // UpdateExperimentalFeatures(false) stops it — no restart anywhere.

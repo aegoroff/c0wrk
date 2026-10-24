@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Package webaccess is the core of the browser web-access sidecar
-// (specs/decisions/098-browser-web-access.md): an HTTP + WebSocket server
+// (specs/decisions/099-browser-web-access.md): an HTTP + WebSocket server
 // that mirrors the desktop UI into a browser tab by dispatching the same RPC
 // surface the Wails webview uses. It binds loopback by default; since stage 2
 // a non-loopback (LAN-exposed) bind is allowed and draws a startup warning.
@@ -30,7 +30,7 @@
 //	GET  /ws                → RFC6455 upgrade — cookie auth + same-origin Origin
 //	GET  /                  → static SPA through the injected CSP — no auth
 //
-// Security posture (stage 2, ADR-098):
+// Security posture (stage 2, ADR-099):
 //   - Bind = any valid IP literal or "localhost" (config.IsValidWebAccessBind).
 //     Loopback stays the safe default; a NON-loopback bind makes the listener
 //     reachable beyond this machine over plain HTTP unless web_access.tls is
@@ -59,15 +59,15 @@
 //     (dispatch.go). A browser tab holds full control of the app by design;
 //     the denylist only removes methods that are web-transport hazards.
 //
-// KNOWN LIMITATION (resolved by ADR-099): on plain HTTP the cookie is still
-// issued without the Secure flag — byte-identical to the pre-ADR-099
+// KNOWN LIMITATION (resolved by ADR-100): on plain HTTP the cookie is still
+// issued without the Secure flag — byte-identical to the pre-ADR-100
 // behavior. With web_access.tls enabled the sidecar terminates TLS (New
 // fails closed on an enabled-but-unreadable pair, so a listener configured
 // as encrypted never silently downgrades to plaintext; MinVersion is pinned
 // to TLS 1.2) and the cookie carries Secure. HttpOnly/SameSite=Strict, the
 // per-launch session secret and the token gate remain the compensations on
 // every transport; the non-loopback exposure warning stands with or without
-// TLS, naming the effective transport (ADR-099 decision 6). Websocket origin
+// TLS, naming the effective transport (ADR-100 decision 6). Websocket origin
 // checks compare Origin against r.Host, which stays correct on any interface.
 package webaccess
 
@@ -140,7 +140,7 @@ type Options struct {
 	// disabled section (ErrDisabled) and an invalid bind
 	// (config.IsValidWebAccessBind); a valid non-loopback bind is accepted
 	// with a startup warning (network exposure — the warning names the
-	// effective transport, ADR-099 decision 6). A TLS-enabled section must
+	// effective transport, ADR-100 decision 6). A TLS-enabled section must
 	// carry a readable cert/key pair; New fails closed otherwise.
 	Config config.WebAccessConfig
 	// Dispatch is the RPC target: at runtime a *backend.FrontendAPI. Only its
@@ -228,7 +228,7 @@ func New(opts Options) (*Server, error) {
 	if opts.Config.Port < 0 || opts.Config.Port > 65535 {
 		return nil, fmt.Errorf("webaccess: port %d out of range (0 = auto)", opts.Config.Port)
 	}
-	// TLS termination (ADR-099): an enabled subsection MUST yield a readable,
+	// TLS termination (ADR-100): an enabled subsection MUST yield a readable,
 	// parseable, matching pair. New refuses to construct the sidecar here —
 	// a listener the operator configured as encrypted never silently
 	// downgrades to plaintext (fail-closed at mount; the persisted switch
@@ -247,7 +247,7 @@ func New(opts Options) (*Server, error) {
 		}
 		tlsCfg = &tls.Config{
 			// The sidecar's clients are mainstream browsers on the machine's
-			// own network segment; 1.2 is the agreed floor (ADR-099
+			// own network segment; 1.2 is the agreed floor (ADR-100
 			// decision 6).
 			MinVersion:   tls.VersionTLS12,
 			Certificates: []tls.Certificate{pair},
@@ -275,8 +275,8 @@ func New(opts Options) (*Server, error) {
 	// Stage-2 posture: a valid non-loopback bind puts the listener on the
 	// network. Allowed (the operator owns the exposure decision) but loudly
 	// surfaced — the warning names the effective transport so it stays
-	// truthful under web_access.tls (ADR-099); the exposure classification
-	// itself is about reachability, never encryption, and ADR-098 decision
+	// truthful under web_access.tls (ADR-100); the exposure classification
+	// itself is about reachability, never encryption, and ADR-099 decision
 	// 12's warn-only model stands.
 	if !config.IsLoopbackBind(opts.Config.Bind) {
 		if tlsCfg != nil {
@@ -395,7 +395,7 @@ func (s *Server) Handler() http.Handler { return s.handler }
 func (s *Server) AuthToken() string { return s.authToken }
 
 // TLSEnabled reports whether this server terminates TLS on its listener
-// (ADR-099): the desktop surface renders the browser-facing URL's scheme
+// (ADR-100): the desktop surface renders the browser-facing URL's scheme
 // from it. The value is fixed at New — the pair is loaded there, so no
 // synchronization is needed beyond the constructor's happens-before edge.
 func (s *Server) TLSEnabled() bool { return s.tls != nil }
@@ -405,7 +405,7 @@ func (s *Server) TLSEnabled() bool { return s.tls != nil }
 // mints. The desktop layer calls it when the persisted token is empty (first
 // enable, or a hand-edited config): the credential is created once and then
 // persisted through the same config-save path every other settings write
-// uses (ADR-098) — it is never silently re-minted per launch again.
+// uses (ADR-099) — it is never silently re-minted per launch again.
 func GenerateToken() (string, error) {
 	return randomHex(tokenBytes)
 }
@@ -423,7 +423,7 @@ func (s *Server) Addr() (string, bool) {
 
 // Start binds the configured interface (resolving port 0 to a free port) and
 // serves until Stop or ctx cancellation. When the config section enables TLS
-// (ADR-099) the same listener terminates TLS with the pair loaded in New
+// (ADR-100) the same listener terminates TLS with the pair loaded in New
 // (MinVersion 1.2); otherwise it serves plain HTTP exactly as before. It
 // returns after the listener is bound; serve errors after that are logged,
 // not returned. Start is single-use: a second Start (or Start after Stop)
@@ -453,7 +453,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// pin is removed.
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true)     // the zero (empty) set denies every protocol
-	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-099), floor 1.2 pinned in New; timeouts set below
+	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-100), floor 1.2 pinned in New; timeouts set below
 		Handler:           s.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
@@ -476,7 +476,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		var serr error
 		if s.tls != nil {
-			// TLS termination on the same listener (ADR-099): the pair is
+			// TLS termination on the same listener (ADR-100): the pair is
 			// preloaded into TLSConfig.Certificates in New, so the file
 			// arguments stay empty and the key material is never re-read
 			// from disk on the serve path.

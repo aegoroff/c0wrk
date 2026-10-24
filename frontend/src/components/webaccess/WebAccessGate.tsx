@@ -1,4 +1,4 @@
-// Web-access login gate (ADR-098) — the SPA-side half of the sidecar's
+// Web-access login gate (ADR-099) — the SPA-side half of the sidecar's
 // token↔cookie exchange. A fresh browser tab holds no session cookie, so
 // every RPC would 401 and the events websocket would refuse the upgrade;
 // instead of booting into that silent failure, the gate takes over the

@@ -3,7 +3,7 @@
 // useStageAttachments — the same pipeline used by drag-and-drop and
 // paste-file. This hook stays a thin wrapper: pick → stage.
 //
-// Transport split (ADR-098): the Wails webview opens the NATIVE OS dialog
+// Transport split (ADR-099): the Wails webview opens the NATIVE OS dialog
 // (PickAttachmentFiles → absolute paths → stageAttachmentPaths); a browser
 // tab has no native dialog, so it opens an ephemeral <input type="file"> and
 // stages the File CONTENT through AttachFileContent (stageAttachmentFiles).

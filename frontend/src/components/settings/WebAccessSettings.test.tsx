@@ -380,7 +380,7 @@ describe('WebAccessSettings non-loopback bind warnings', () => {
   })
 })
 
-describe('WebAccessSettings TLS block (ADR-099) integration', () => {
+describe('WebAccessSettings TLS block (ADR-100) integration', () => {
   /** The section renders two switches now: the section toggle first, the
    *  TLS toggle last. */
   function tlsSwitch(): HTMLInputElement {
@@ -719,7 +719,7 @@ describe('WebAccessSettings token regenerate', () => {
   })
 })
 
-describe('WebAccessSettings config warning banner refresh (ADR-099)', () => {
+describe('WebAccessSettings config warning banner refresh (ADR-100)', () => {
   it('fires onConfigChanged after a successful enable toggle', async () => {
     const onConfigChanged = vi.fn()
     mocks.getWebAccessInfo.mockResolvedValueOnce(offInfo).mockResolvedValueOnce(runningInfo)

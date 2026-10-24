@@ -4,7 +4,7 @@
 
 Events are the real-time communication channel from backend to frontend during task execution. They enable live UI updates without polling.
 
-Two transports deliver the same stream: Wails IPC (the desktop webview, always on) and — opt-in, `web_access.enabled` — the web-access sidecar's WebSocket for a browser tab ([ADR-098](../decisions/098-browser-web-access.md); see [Web Transport](#web-transport-web-access-sidecar) below).
+Two transports deliver the same stream: Wails IPC (the desktop webview, always on) and — opt-in, `web_access.enabled` — the web-access sidecar's WebSocket for a browser tab ([ADR-099](../decisions/099-browser-web-access.md); see [Web Transport](#web-transport-web-access-sidecar) below).
 
 ## Global Events
 
@@ -261,7 +261,7 @@ exactly once per event.
 
 ## Web Transport (web-access sidecar)
 
-When the web-access sidecar is enabled ([ADR-098](../decisions/098-browser-web-access.md),
+When the web-access sidecar is enabled ([ADR-099](../decisions/099-browser-web-access.md),
 [../domains/web-access.md](../domains/web-access.md)), a browser tab receives the
 same event stream over the sidecar's `/ws` WebSocket instead of Wails
 `EventsEmit`. The `eventTap` seam in `(*App).emit` hands every dispatch to the

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // web_access.go — the `web_access` config section: the operator switch for the
-// browser web-access sidecar (specs/decisions/098-browser-web-access.md), an
+// browser web-access sidecar (specs/decisions/099-browser-web-access.md), an
 // HTTP/WebSocket server that mirrors the desktop UI into a browser window.
 //
-// Design contract (ADR-098, stage 2):
+// Design contract (ADR-099, stage 2):
 //   - The section is pure data: it knows nothing about the webaccess sidecar
 //     package (backend/config never imports application layers). The sidecar
 //     reads the resolved section at start.
@@ -22,7 +22,7 @@
 //     rule survives as a WARNING classification (IsLoopbackBind), not as
 //     validity: a valid non-loopback bind is a deliberate LAN-exposed
 //     listener that persists as-is. The LOAD warning is reserved for the
-//     plain-HTTP combination (ADR-099) — a TLS-encrypted non-loopback bind
+//     plain-HTTP combination (ADR-100) — a TLS-encrypted non-loopback bind
 //     loads warning-free, its exposure staying surfaced by the Settings
 //     section banner and the sidecar start log.
 //   - Load-time VALIDITY problems are FAIL-SOFT (the shell_exec precedent):
@@ -41,14 +41,14 @@
 //     start. An empty token means GENERATED: the desktop layer mints a fresh
 //     crypto/rand token at the first start and persists it back here through
 //     the same config save every other setting uses — the credential is
-//     stable across restarts from then on (ADR-098, decision 10).
-//   - TLS (ADR-099): the `web_access.tls` subsection is the
+//     stable across restarts from then on (ADR-099, decision 10).
+//   - TLS (ADR-100): the `web_access.tls` subsection is the
 //     explicit HTTPS switch — the protocol is never parsed out of the
 //     address field. A TLS subsection the sidecar cannot actually serve —
 //     structurally incomplete (enabled with an empty cert or key path) or
 //     a certificate pair that fails to load from disk — is FAIL-SOFT at
 //     load by turning the WHOLE section off with a visible warning
-//     (ADR-099): a requested TLS is never downgraded to plain HTTP, so no
+//     (ADR-100): a requested TLS is never downgraded to plain HTTP, so no
 //     listener is the only safe state. The same usability predicate
 //     (structure + LoadX509KeyPair) FAIL-CLOSED at the interactive
 //     boundaries — the TLS commit RPC and the enable flip — and the
@@ -93,28 +93,28 @@ type WebAccessConfig struct {
 	// Token is the credential the sidecar authenticates browser requests
 	// with. Empty (the default) = GENERATED: the first start mints a fresh
 	// crypto/rand token and persists it back into config.yaml, so the
-	// credential is stable across restarts (ADR-098, decision 10). A
+	// credential is stable across restarts (ADR-099, decision 10). A
 	// hand-edited static value is honored and warned when shorter than 16
 	// characters; the Settings surface writes it through desktop's
 	// SetWebAccessToken (an operator-typed value, bounds-checked by
 	// ValidateWebAccessToken) and rotates it through
 	// RegenerateWebAccessToken — both serialize on desktop's webAccessMu.
 	Token string `yaml:"token"`
-	// TLS is the `tls:` subsection (ADR-099): the HTTPS transport switch for
+	// TLS is the `tls:` subsection (ADR-100): the HTTPS transport switch for
 	// the sidecar. Validated only while the sidecar itself is enabled — a
 	// disabled web_access section is inert, subsection included (the same
 	// doctrine as the bind/port fields). See WebAccessTLSConfig.
 	TLS WebAccessTLSConfig `yaml:"tls"`
 }
 
-// WebAccessTLSConfig is the `web_access.tls:` subsection (ADR-099): the
+// WebAccessTLSConfig is the `web_access.tls:` subsection (ADR-100): the
 // operator switch for serving the sidecar over HTTPS with a PEM
 // certificate/key pair instead of plaintext HTTP.
 type WebAccessTLSConfig struct {
 	// Enabled serves the sidecar over HTTPS. Default false: plain HTTP,
-	// byte-identical to pre-ADR-099 behavior (the session cookie keeps its
+	// byte-identical to pre-ADR-100 behavior (the session cookie keeps its
 	// plain-HTTP shape; TLS turns `Secure` on and nothing else). Usability
-	// is checked as a whole (ADR-099): enabled with an EMPTY cert or key
+	// is checked as a whole (ADR-100): enabled with an EMPTY cert or key
 	// path — or with a pair that fails to load from disk — makes the
 	// subsection UNUSABLE: the load path turns the whole web_access section
 	// off with a warning (a requested TLS is never downgraded to plain
@@ -138,7 +138,7 @@ type WebAccessTLSConfig struct {
 	// persisted config always carries both paths, so an enabled subsection
 	// with an empty key is structurally invalid exactly like an empty cert;
 	// a subsection pointing at files that cannot be loaded is unusable the
-	// same way (ADR-099): both shapes turn the section off at load with a
+	// same way (ADR-100): both shapes turn the section off at load with a
 	// warning instead of serving plain HTTP.
 	Key string `yaml:"key"`
 }
@@ -158,7 +158,7 @@ func IsLoopbackBind(bind string) bool {
 }
 
 // IsValidWebAccessBind reports whether bind is a valid listener address for
-// the sidecar (ADR-098, stage 2): any IP literal — loopback, the unspecified
+// the sidecar (ADR-099, stage 2): any IP literal — loopback, the unspecified
 // "0.0.0.0"/"::", or a specific IPv4/IPv6 address, including IPv4-mapped
 // forms such as "::ffff:192.168.1.10" — or the exact "localhost" name.
 // Empty, other hostnames and unparseable values are false. Loopback
@@ -214,7 +214,7 @@ func ValidateWebAccessBind(bind string) error {
 }
 
 // validateWebAccessTLS checks the STRUCTURAL validity of the TLS subsection
-// (ADR-099, decision 2): an enabled subsection requires both PEM paths to be
+// (ADR-100, decision 2): an enabled subsection requires both PEM paths to be
 // configured. A disabled subsection is inert and accepts anything — the same
 // doctrine as the whole section when web_access.enabled is off. An empty path
 // on an enabled subsection is fail-soft at load and fail-closed at save; a
@@ -246,7 +246,7 @@ func ValidateWebAccessTLS(tlsCfg WebAccessTLSConfig) error {
 // webAccessTLSProbeTimeout bounds the certificate-pair probe (CS #47): the
 // probe reads both PEM files on EVERY config load, so a path on a hanging
 // mount (or a FIFO) would otherwise stall startup unboundedly. The
-// deliberate fail-closed stance (ADR-099) is preserved — a pair that cannot
+// deliberate fail-closed stance (ADR-100) is preserved — a pair that cannot
 // be verified within the budget is reported unusable (the load path then
 // keeps the whole section off), never downgraded to plain HTTP. The
 // goroutine left blocked on a wedged file past the budget is bounded by the
@@ -255,12 +255,12 @@ func ValidateWebAccessTLS(tlsCfg WebAccessTLSConfig) error {
 const webAccessTLSProbeTimeout = 5 * time.Second
 
 // webAccessTLSPairError is the usability predicate of a tls subsection
-// (ADR-099): structural completeness first (validateWebAccessTLS), then —
+// (ADR-100): structural completeness first (validateWebAccessTLS), then —
 // for an enabled subsection — the pair itself: the config layer READS the
-// certificate files here, the deliberate ADR-099 reversal of the
+// certificate files here, the deliberate ADR-100 reversal of the
 // never-reads-the-files doctrine. A subsection that fails either check is
 // UNUSABLE: the sidecar it configures cannot honor the requested TLS, and
-// ADR-099 forbids downgrading a requested TLS to plain HTTP. A disabled
+// ADR-100 forbids downgrading a requested TLS to plain HTTP. A disabled
 // subsection is usable by definition — inert, exactly like the whole
 // section when web_access.enabled is off.
 func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
@@ -296,7 +296,7 @@ func webAccessTLSPairError(tlsCfg WebAccessTLSConfig) error {
 }
 
 // ValidateWebAccessTLSPair is the exported form of the subsection's
-// usability rule (ADR-099) for callers outside the package that turn the
+// usability rule (ADR-100) for callers outside the package that turn the
 // sidecar on at runtime (desktop's SetWebAccessEnabled): an enabled
 // subsection must be structurally complete AND its certificate pair must
 // load — a flip onto an unusable TLS is refused before anything persists,
@@ -305,7 +305,7 @@ func ValidateWebAccessTLSPair(tlsCfg WebAccessTLSConfig) error {
 	return webAccessTLSPairError(tlsCfg)
 }
 
-// Web access token input bounds (ADR-098): the interactive entry points —
+// Web access token input bounds (ADR-099): the interactive entry points —
 // desktop's SetWebAccessToken and the Settings field that feeds it — refuse a
 // credential outside this range. The floor keeps a typed token from being
 // trivially guessable; the ceiling is an overflow guard, not a tuning
@@ -339,16 +339,16 @@ func ValidateWebAccessToken(token string) error {
 // served over PLAIN HTTP: the listener becomes reachable beyond the machine
 // while the traffic stays unencrypted — the token-over-plaintext combination
 // is the one exposure shape that belongs in the UI's config_errors banner.
-// A TLS-encrypted non-loopback bind (ADR-099) deliberately does NOT draw this
+// A TLS-encrypted non-loopback bind (ADR-100) deliberately does NOT draw this
 // warning: it loads warning-free, its exposure staying surfaced by the
-// Settings → Web Access section banner and the sidecar start log (ADR-099).
+// Settings → Web Access section banner and the sidecar start log (ADR-100).
 // The classification is a warned operator decision either way — never a gate.
 func webAccessLoopbackWarning(bind string) string {
 	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS", bind)
 }
 
 // WebAccessLoadWarnings is the pure, state-only counterpart of the
-// normalizeWebAccess warning tail (ADR-099), for callers that mutate the
+// normalizeWebAccess warning tail (ADR-100), for callers that mutate the
 // section at runtime (desktop's control RPCs) and must keep the UI's
 // config-load-warning channel — GetConfig().config_errors → the Settings
 // "Configuration warning" banner — in step with the live section instead of
@@ -364,7 +364,7 @@ func webAccessLoopbackWarning(bind string) string {
 // banner and the sidecar mount's fail-closed backstop, not by this function.
 // Semantics mirror the load pipeline exactly: a disabled section warns
 // nothing (no listener, nothing to expose); an enabled non-loopback bind
-// warns only while the effective transport is plain HTTP (ADR-099) — a
+// warns only while the effective transport is plain HTTP (ADR-100) — a
 // TLS-encrypted exposure stays a section-banner + start-log matter.
 func WebAccessLoadWarnings(section WebAccessConfig) []string {
 	if !section.Enabled {
@@ -405,12 +405,12 @@ func defaultWebAccessState() WebAccessConfig {
 // section stays enabled and — while the effective transport is plain HTTP
 // AND the experimental master gate is open (only then can the sidecar
 // actually mount, CS #65) — draws the network-exposure warning (a stage-2
-// LAN listener; IsLoopbackBind classifies it, ADR-099 scopes the warning to
+// LAN listener; IsLoopbackBind classifies it, ADR-100 scopes the warning to
 // TLS-off). A disabled section
 // is inert and accepts anything, exactly like an inactive shell_exec
 // override.
 //
-// The tls subsection (ADR-099) is validated one level down: a
+// The tls subsection (ADR-100) is validated one level down: a
 // subsection the sidecar cannot serve — structurally incomplete, or a pair
 // that fails to load from disk — turns the whole section OFF with a visible
 // warning, the subsection itself preserved as authored (the operator's
@@ -434,7 +434,7 @@ func normalizeWebAccess(cfg *Config) []string {
 	if len(reasons) > 0 {
 		warning := "web_access ignored (the sidecar stays disabled; fix bind/port and re-enable): " +
 			strings.Join(reasons, "; ")
-		// The reset mirrors the sibling ADR-099 branch below: only the
+		// The reset mirrors the sibling ADR-100 branch below: only the
 		// connection/credential fields return to the default state and the
 		// authored tls subsection survives (only Enabled/Bind/Port/Token are
 		// reset). A disabled section is inert — the persisted shape stays
@@ -447,7 +447,7 @@ func normalizeWebAccess(cfg *Config) []string {
 		cfg.WebAccess.TLS = authored.TLS
 		warnings = append(warnings, warning)
 	}
-	// ADR-099: a tls subsection the sidecar cannot serve — structurally
+	// ADR-100: a tls subsection the sidecar cannot serve — structurally
 	// incomplete, or a pair that fails to load from disk — turns the whole
 	// section off: a requested TLS is never downgraded to plain HTTP, so no
 	// listener is the only safe state. The subsection is preserved as
@@ -464,7 +464,7 @@ func normalizeWebAccess(cfg *Config) []string {
 	}
 	// Fires only for a SURVIVING enabled section — the resets above leave
 	// either the loopback default or a disabled master switch. The tail
-	// delegates to WebAccessLoadWarnings (ADR-099) so the load pipeline and
+	// delegates to WebAccessLoadWarnings (ADR-100) so the load pipeline and
 	// the runtime recompute can never drift apart in text or condition: an
 	// unusable TLS never reaches this gate (its section is disabled above,
 	// so there is no listener left to expose), and only the PLAIN-HTTP
@@ -488,7 +488,7 @@ func normalizeWebAccess(cfg *Config) []string {
 // validateWebAccessForSave is the save-time counterpart of the fail-soft load
 // normalization: an INVALID enabled section (unparseable bind, out-of-range
 // port) must never be persisted, and the same gate now covers a structurally
-// invalid tls subsection (enabled with an empty cert or key path, ADR-099) —
+// invalid tls subsection (enabled with an empty cert or key path, ADR-100) —
 // one half-typed toggle must not reach config.yaml either. A valid
 // non-loopback bind is saved as-is — a deliberate stage-2 LAN listener, not a
 // validity problem. The load path resets invalid states before they can be
@@ -496,7 +496,7 @@ func normalizeWebAccess(cfg *Config) []string {
 // write keeps config.yaml from ever becoming the source of a broken listener.
 //
 // The certificate pair's on-disk usability is deliberately NOT a save gate
-// (ADR-099): filesystem state must never brick an unrelated settings save.
+// (ADR-100): filesystem state must never brick an unrelated settings save.
 // The pair is checked fail-soft at load (the section turns off with a
 // warning), fail-closed at the interactive boundaries (the TLS commit and
 // the enable flip), and fail-closed again at sidecar mount.

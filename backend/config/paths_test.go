@@ -28,7 +28,7 @@ func TestDatabasePath(t *testing.T) {
 }
 
 func TestWebAccessCertAndKeyPath(t *testing.T) {
-	// ADR-099: the app-owned TLS pair is ONE fixed location — the generate
+	// ADR-100: the app-owned TLS pair is ONE fixed location — the generate
 	// action writes here and persists the paths into web_access.tls.
 	if got, want := WebAccessCertPath(testAgentDir), filepath.Join(testAgentDir, "web-access.crt"); got != want {
 		t.Errorf("WebAccessCertPath: got %q, want %q", got, want)
