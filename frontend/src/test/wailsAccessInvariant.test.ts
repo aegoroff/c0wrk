@@ -23,7 +23,7 @@
 import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 // The real TS parser is used to identify comments (see the zoom-scan
 // invariant for the full rationale: a hand-rolled scanner cannot tell a
 // comment from the same characters inside a string, regex or JSX text).
@@ -96,7 +96,9 @@ describe('Wails window-access invariant', () => {
   it('window.go / window.runtime are touched only inside api/runtime.ts', () => {
     const violations: string[] = []
     for (const file of collectSources(SRC_DIR)) {
-      const rel = relative(SRC_DIR, file)
+      // `relative()` emits platform separators (backslashes on Windows);
+      // normalize to posix so the ALLOWED set matches on every OS.
+      const rel = relative(SRC_DIR, file).split(sep).join('/')
       if (ALLOWED.has(rel)) continue
       const source = readFileSync(file, 'utf8')
       const masked = maskComments(source, commentRanges(source, file))
