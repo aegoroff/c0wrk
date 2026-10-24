@@ -529,11 +529,23 @@ func (s *Server) stopWith(ctx context.Context) (err error) {
 		close(s.stopped)
 		s.mu.Lock()
 		srv := s.httpSrv
+		ln := s.ln
 		s.mu.Unlock()
 		if srv != nil {
 			if serr := srv.Shutdown(ctx); serr != nil {
 				err = errors.Join(serr, srv.Close())
 			}
+		}
+		if ln != nil {
+			// Shutdown closes only the listeners Serve has tracked, and the
+			// tracking happens inside the serve goroutine: a stop that wins
+			// the race against Serve's first instruction finds nothing
+			// tracked, Shutdown returns nil, the error-only Close never ran
+			// — and the raw listener (the bound port) outlived the stop.
+			// Closing it here is the port-freeing close in that window; once
+			// the http.Server owns the close it is an idempotent no-op whose
+			// error carries no information.
+			_ = ln.Close()
 		}
 		s.closeAllWS()
 		s.log.Info("webaccess: stopped")

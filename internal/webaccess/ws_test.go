@@ -477,6 +477,37 @@ func TestStopWithExpiredDeadlineForceCloses(t *testing.T) {
 	}
 }
 
+// TestStopClosesTheRawListener pins the port-freeing half of the bounded-stop
+// contract: http.Server.Shutdown closes only the listeners Serve has tracked,
+// and the tracking happens inside the serve goroutine — a stop that wins the
+// race against Serve's first instruction finds nothing tracked, Shutdown
+// returns nil, and the error-only Close never ran, leaving the raw listener
+// (the bound port) alive after Stop returned. That window is what the loaded
+// CI runner exposed as the TestStopWebAccess_BoundedEvenWithExpiredDeadline
+// flake. In every interleaving, once Stop returns the raw listener must read
+// as closed — that close is what frees the port for the hot restart.
+func TestStopClosesTheRawListener(t *testing.T) {
+	srv := mustNew(t, newTestOptions(stubDispatch{}, nil))
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	srv.mu.Lock()
+	ln := srv.ln
+	srv.mu.Unlock()
+	if ln == nil {
+		t.Fatal("Start left no listener")
+	}
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := srv.Stop(expired); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("raw listener still open after Stop: accept err = %v", err)
+	}
+}
+
 // TestControlFrameOver125BytesIsProtocolViolation pins the RFC6455 §5.5
 // ceiling: a control frame carrying more than 125 payload bytes fails the
 // frame read with the protocol error instead of being answered (the lenient
