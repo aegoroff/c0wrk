@@ -526,7 +526,7 @@ export interface E2SStateData {
 // --- Prompt suggestions payloads (ADR-088) ---
 
 /** One proactive prompt-suggestion row. Mirrors the backend
- *  session.PromptSuggestion struct (snake_case JSON keys) — both the
+ *  core.PromptSuggestion struct (snake_case JSON keys) — both the
  *  `prompt_suggestions` session event and the GetPromptSuggestions RPC
  *  carry it. `kind` is `next_task` (follow-up prompts after a completed
  *  task) or `goal_advance` (prompts for advancing an active goal); `status`

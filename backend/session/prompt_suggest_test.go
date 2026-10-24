@@ -31,9 +31,9 @@ type suggestionTestStore struct {
 	mu        sync.Mutex
 	history   map[string][]ChatMessage
 	byProject map[string][]SessionInfo
-	saves     [][]PromptSuggestion
-	saveErr   error              // when set, SavePromptSuggestions fails
-	active    []PromptSuggestion // what ListPromptSuggestions reports
+	saves     [][]core.PromptSuggestion
+	saveErr   error                   // when set, SavePromptSuggestions fails
+	active    []core.PromptSuggestion // what ListPromptSuggestions reports
 }
 
 func newSuggestionTestStore() *suggestionTestStore {
@@ -56,7 +56,7 @@ func (s *suggestionTestStore) ListSessionsByProject(_ context.Context, projectID
 	return s.byProject[projectID], nil
 }
 
-func (s *suggestionTestStore) SavePromptSuggestions(_ context.Context, rows []PromptSuggestion) ([]PromptSuggestion, error) {
+func (s *suggestionTestStore) SavePromptSuggestions(_ context.Context, rows []core.PromptSuggestion) ([]core.PromptSuggestion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.saveErr != nil {
@@ -66,7 +66,7 @@ func (s *suggestionTestStore) SavePromptSuggestions(_ context.Context, rows []Pr
 	return rows, nil
 }
 
-func (s *suggestionTestStore) ListPromptSuggestions(_ context.Context, _ string) ([]PromptSuggestion, error) {
+func (s *suggestionTestStore) ListPromptSuggestions(_ context.Context, _ string) ([]core.PromptSuggestion, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.active, nil
@@ -444,9 +444,9 @@ func TestPromptSuggestionsProjectWindowCapsAtTen(t *testing.T) {
 // active set as read back from the store.
 func TestPromptSuggestionsEventEmitted(t *testing.T) {
 	store := newSuggestionTestStore()
-	store.active = []PromptSuggestion{
-		{ID: "row-1", SessionID: "sess-1", Kind: SuggestionKindGoalAdvance, Text: "a suggested prompt", Status: SuggestionStatusActive},
-		{ID: "row-2", SessionID: "sess-1", Kind: SuggestionKindGoalAdvance, Text: "another suggested prompt", Status: SuggestionStatusActive},
+	store.active = []core.PromptSuggestion{
+		{ID: "row-1", SessionID: "sess-1", Kind: core.SuggestionKindGoalAdvance, Text: "a suggested prompt", Status: SuggestionStatusActive},
+		{ID: "row-2", SessionID: "sess-1", Kind: core.SuggestionKindGoalAdvance, Text: "another suggested prompt", Status: SuggestionStatusActive},
 	}
 	caller := newRecordingSuggestCaller()
 	mgr, rec := newPromptSuggestManager(t, store, caller)

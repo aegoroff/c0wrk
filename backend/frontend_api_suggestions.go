@@ -7,6 +7,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/session"
+	"github.com/v0lka/c0wrk/core"
 )
 
 // This file owns the RPC surface of the prompt-suggestions bridge (ADR-088):
@@ -59,7 +60,7 @@ type PromptSuggestionsResponse struct {
 	Source string `json:"source"`
 	// Suggestions is the active set as persisted (never nil; empty when
 	// nothing is active in the consulted context).
-	Suggestions []session.PromptSuggestion `json:"suggestions"`
+	Suggestions []core.PromptSuggestion `json:"suggestions"`
 }
 
 // GetPromptSuggestions returns the active prompt-suggestion set the chat
@@ -82,7 +83,7 @@ func (f *FrontendAPI) GetPromptSuggestions(sessionID, projectID string) PromptSu
 		SessionID:   sessionID,
 		ProjectID:   projectID,
 		Source:      promptSuggestionsSourceNone,
-		Suggestions: []session.PromptSuggestion{},
+		Suggestions: []core.PromptSuggestion{},
 	}
 	if f.store == nil {
 		return resp
@@ -108,7 +109,7 @@ func (f *FrontendAPI) GetPromptSuggestions(sessionID, projectID string) PromptSu
 				// The continuation context serves goal_advance rows only;
 				// next_task rows of the same session belong to the
 				// new-session surface and are not mixed in.
-				resp.Suggestions = promptSuggestionsOfKind(rows, session.SuggestionKindGoalAdvance)
+				resp.Suggestions = promptSuggestionsOfKind(rows, core.SuggestionKindGoalAdvance)
 			}
 			return resp
 		}
@@ -143,7 +144,7 @@ func (f *FrontendAPI) GetPromptSuggestions(sessionID, projectID string) PromptSu
 		}
 		// Newest session with an active next_task set wins; its rows are
 		// returned as persisted (the origin session_id rides along).
-		if next := promptSuggestionsOfKind(rows, session.SuggestionKindNextTask); len(next) > 0 {
+		if next := promptSuggestionsOfKind(rows, core.SuggestionKindNextTask); len(next) > 0 {
 			resp.Source = promptSuggestionsSourceNewSession
 			resp.Suggestions = next
 			return resp
@@ -158,8 +159,8 @@ func (f *FrontendAPI) GetPromptSuggestions(sessionID, projectID string) PromptSu
 // promptSuggestionsOfKind filters persisted active rows down to one kind,
 // preserving ListPromptSuggestions' order (newest generation first,
 // insertion order within a generation). Always returns a non-nil slice.
-func promptSuggestionsOfKind(rows []session.PromptSuggestion, kind string) []session.PromptSuggestion {
-	out := make([]session.PromptSuggestion, 0, len(rows))
+func promptSuggestionsOfKind(rows []core.PromptSuggestion, kind core.SuggestionKind) []core.PromptSuggestion {
+	out := make([]core.PromptSuggestion, 0, len(rows))
 	for _, row := range rows {
 		if row.Kind == kind {
 			out = append(out, row)

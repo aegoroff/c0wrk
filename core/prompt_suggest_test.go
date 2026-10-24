@@ -94,14 +94,14 @@ func TestParsePromptSuggestions(t *testing.T) {
 			want: []string{"Fix the flaky auth test", "Add retry tests"},
 		},
 		{
-			name: "over-long line truncated to 200 runes",
+			name: "over-long line kept whole",
 			body: strings.Repeat("a", 300),
-			want: []string{strings.Repeat("a", promptSuggestMaxSuggestionChars)},
+			want: []string{strings.Repeat("a", 300)},
 		},
 		{
-			name: "multibyte line truncated on a rune boundary",
+			name: "multibyte line kept whole",
 			body: strings.Repeat("ж", 300),
-			want: []string{strings.Repeat("ж", promptSuggestMaxSuggestionChars)},
+			want: []string{strings.Repeat("ж", 300)},
 		},
 		{
 			name: "empty response is a parse error",

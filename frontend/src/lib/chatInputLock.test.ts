@@ -7,6 +7,7 @@ import {
   modeToggleLockReason,
   buildSuggestionPlaceholderNode,
   isSuggestionPlaceholderActive,
+  suggestionPositionLabel,
   suggestionPreviewText,
   isChatSessionIdle,
 } from '@/lib/chatInputLock'
@@ -121,6 +122,9 @@ describe('suggestion placeholder surface', () => {
     const preview = node.querySelector('.cm-suggestion-preview')
     const hints = node.querySelector<HTMLElement>('.cm-suggestion-hints')
     expect(preview?.textContent).toBe('Follow up on the failing test')
+    // No position marker without one (ADR-088 D8's chip degrades to the
+    // bare text; the controller always passes one today).
+    expect(node.querySelector('.cm-suggestion-position')).toBeNull()
     // The separator is an explicit EMPTY line: two <br> elements. Under the
     // wrap's white-space: pre-line a '\n\n' text run would collapse to a
     // single break, so text alone cannot render the blank line.
@@ -130,6 +134,18 @@ describe('suggestion placeholder surface', () => {
     // itself is not (no inline style — it inherits the wrap's normal).
     expect(hints?.style.fontStyle).toBe('italic')
     expect((preview as HTMLElement).style.fontStyle).toBe('')
+  })
+
+  it('appends the position marker to the preview line (D8: text + position)', () => {
+    const node = buildSuggestionPlaceholderNode('Follow up on the failing test', '2/3')
+    const marker = node.querySelector<HTMLElement>('.cm-suggestion-position')
+    expect(marker?.textContent).toBe('2/3')
+    // The marker rides the preview row (before the blank-line separator) as
+    // a muted suffix — the same visual line, dimmed via opacity.
+    expect(marker?.style.opacity).toBe('0.6')
+    expect(node.querySelectorAll('br')).toHaveLength(2)
+    // The preview text itself stays untouched.
+    expect(node.querySelector('.cm-suggestion-preview')?.textContent).toBe('Follow up on the failing test')
   })
 
   it('empty preview text renders the hints alone, without a leading blank line', () => {
@@ -156,6 +172,25 @@ describe('suggestionPreviewText', () => {
   it('clamps an out-of-range index instead of previewing nothing', () => {
     expect(suggestionPreviewText(list, 99)).toBe('second')
     expect(suggestionPreviewText(list, -7)).toBe('first')
+  })
+})
+
+describe('suggestionPositionLabel', () => {
+  it('names the previewed row: the top row at -1 (the resting selection), 1-based', () => {
+    expect(suggestionPositionLabel(-1, 3)).toBe('1/3')
+    expect(suggestionPositionLabel(0, 3)).toBe('1/3')
+    expect(suggestionPositionLabel(1, 3)).toBe('2/3')
+    expect(suggestionPositionLabel(2, 3)).toBe('3/3')
+  })
+
+  it('applies the same clamp as suggestionPreviewText, so label and preview name one row', () => {
+    expect(suggestionPositionLabel(99, 2)).toBe('2/2')
+    expect(suggestionPositionLabel(-7, 2)).toBe('1/2')
+  })
+
+  it('an empty set has no position', () => {
+    expect(suggestionPositionLabel(0, 0)).toBe('')
+    expect(suggestionPositionLabel(-1, 0)).toBe('')
   })
 })
 
