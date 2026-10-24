@@ -373,7 +373,7 @@ func mlxLaunchTestServer(t *testing.T) (*Server, Layout, string) {
 }
 
 // TestLaunchSpecMLXLiveReplan keeps `context.mode: exact` alive under the
-// mtplx engine (ADR-090 D5): the launch re-plans with the LIVE operator
+// mtplx engine (ADR-092 D5): the launch re-plans with the LIVE operator
 // tuning from the recorded topology snapshot, refuses a window the machine
 // cannot hold with the gate's own error, and falls back to the recorded plan
 // when no pricing is possible.

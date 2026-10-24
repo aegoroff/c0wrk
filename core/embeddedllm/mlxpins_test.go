@@ -77,7 +77,7 @@ func TestValidateMLXPins(t *testing.T) {
 
 // TestMLXPinsMatchUpstream locks the three large pack files to the Hugging
 // Face LFS metadata of MLXPackRevision. The LFS OID *is* the SHA256, so these
-// are the supply-chain anchor for ~8.7 GiB of weights (ADR-090).
+// are the supply-chain anchor for ~8.7 GiB of weights (ADR-092).
 func TestMLXPinsMatchUpstream(t *testing.T) {
 	cases := []struct {
 		file string

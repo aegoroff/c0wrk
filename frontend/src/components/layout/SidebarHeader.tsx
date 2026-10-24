@@ -1,7 +1,6 @@
 import { useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { useSettingsStore } from '@/stores/settingsStore'
-import { useUIStore } from '@/stores/uiStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import { cn } from '@/lib/utils'
@@ -15,10 +14,6 @@ interface SidebarHeaderProps {
 
 export function SidebarHeader({ onToggleCollapse, collapsed }: SidebarHeaderProps) {
   const openSettings = useSettingsStore((s) => s.openSettings)
-  // When the workspace tab bar is on, it carries the Settings affordance
-  // (opening on the same default tab as this header's gear always did) and
-  // the header drops its own gear — one settings entry point, no duplicate.
-  const tabsEnabled = useUIStore((s) => s.tabsEnabled)
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const lastRealProjectId = useProjectStore((s) => s.lastRealProjectId)
@@ -92,11 +87,9 @@ export function SidebarHeader({ onToggleCollapse, collapsed }: SidebarHeaderProp
         </div>
       )}
       <div className="flex-1" />
-      {!tabsEnabled && (
-        <Button variant="ghost" size="icon-sm" onClick={() => openSettings()} aria-label="Settings" title="Settings">
-          <Settings className="size-4" />
-        </Button>
-      )}
+      <Button variant="ghost" size="icon-sm" onClick={() => openSettings()} aria-label="Settings" title="Settings">
+        <Settings className="size-4" />
+      </Button>
     </div>
   )
 }

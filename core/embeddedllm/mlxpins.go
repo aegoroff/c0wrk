@@ -1,6 +1,6 @@
 package embeddedllm
 
-// MLX engine pins (ADR-090): the second embedded-LLM runtime family for
+// MLX engine pins (ADR-092): the second embedded-LLM runtime family for
 // darwin/arm64. Where the llama family provisions the PrismML-Eng llama.cpp
 // fork with the GGUF weights, the mtplx family provisions the pinned MTPLX
 // release — a Python/MLX stack that runs Ternary-Bonsai-2-27B natively on MLX
@@ -385,7 +385,7 @@ var mtplxWheelPins = []WheelAsset{
 // the three LFS files are the Hugging Face LFS OIDs of MLXPackRevision; every
 // other value is the content hash captured from that revision. The pack is a
 // plain directory of these files — the engine is pointed at it with
-// `--model <dir>`, and nothing is ever fetched through `mtplx pull` (ADR-090
+// `--model <dir>`, and nothing is ever fetched through `mtplx pull` (ADR-092
 // keeps the supply chain in this registry).
 var mlxPackPins = []Asset{
 	{Component: ComponentMLXPack, URL: mlxPackResolveBase + "model.safetensors",
