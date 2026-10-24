@@ -5,6 +5,7 @@ import { getSessionWorkspace } from '@/api/workspace'
 import { useFileTreeStore } from '@/stores/fileTreeStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { resolveManagedBinding } from '@/lib/sessionWorkspaceBinding'
 
 /**
  * Resolves the workspace root for relative file links rendered in the chat.
@@ -33,15 +34,17 @@ export async function resolveChatWorkspaceRoot(): Promise<string | null> {
     ? (projects?.find((p) => p.id === session.project_id) ?? null)
     : null
 
-  // A managed-worktree session of the active project resolves against its own
-  // tree; foreign/absent active projects fall through (no cross-project leak).
-  const binding = session?.workspace_binding
-  if (
-    session && activeSessionId && activeProject && !activeProject.is_no_project &&
-    session.project_id === projectState.activeProjectId &&
-    binding?.kind === 'managed_worktree'
-  ) {
-    if (binding.workspace_path) return binding.workspace_path
+  // A managed-worktree session of the active project resolves against its
+  // own tree — the shared binding-first rule (see resolveManagedBinding);
+  // foreign/absent active projects fall through (no cross-project leak).
+  const binding = resolveManagedBinding({
+    activeProject,
+    activeProjectId: projectState.activeProjectId,
+    activeSessionId,
+    sessions: sessionState.sessions,
+  })
+  if (binding.isManaged && activeSessionId) {
+    if (binding.bindingPath) return binding.bindingPath
     try {
       return await getSessionWorkspace(activeSessionId)
     } catch {

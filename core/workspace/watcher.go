@@ -99,12 +99,30 @@ func NewWatcher(root string, onChange ChangeHandler, loggers ...*slog.Logger) (*
 	}
 	w.watched[absRoot] = true
 
-	// Also watch the .git directory so that index changes (staging/unstaging)
+	// Also watch the .git entry so that index changes (staging/unstaging)
 	// trigger the same onChange callback used by the file tree. The vector
 	// indexer ignores .git, so the consumer (backend) filters .git paths before
 	// triggering re-indexing — keeping this watch for file-tree refresh only.
-	gitDir := filepath.Join(absRoot, ".git")
-	if stat, err := os.Stat(gitDir); err == nil && stat.IsDir() {
+	//
+	// For a LINKED worktree <root>/.git is a regular "gitdir:" pointer file,
+	// not a directory, and the tree's own git metadata — the index (staging)
+	// and HEAD (commits, ref updates) — lives in the per-worktree git
+	// directory the pointer names (<common>/worktrees/<name>), which sits
+	// OUTSIDE the watched root whenever the root follows the session (a
+	// managed worktree in the agent-dir container). Watch the resolved
+	// directory instead: without it, agent-side git operations in a managed
+	// tree produced no events at all and the tree's git badges / Git-panel
+	// state went stale until an unrelated working-tree event (see
+	// specs/domains/workspace.md, Filesystem Watcher). Only the per-worktree
+	// directory is watched — the same single-level shape a checkout-rooted
+	// watcher had on its own <checkout>/.git (index/HEAD churn surfaces at
+	// that level; refs/ and logs/ subdirectories were never watched either).
+	// Best-effort: a resolve or fsnotify failure is logged and skipped — the
+	// working-tree watch above still covers content churn.
+	gitDir, err := resolveGitDirAt(absRoot)
+	if err != nil {
+		w.log().Debug("failed to resolve .git entry for watching", "root", absRoot, "error", err)
+	} else if gitDir != "" {
 		if err := fsw.Add(gitDir); err != nil {
 			w.log().Warn("failed to watch .git directory", "error", err)
 		}
