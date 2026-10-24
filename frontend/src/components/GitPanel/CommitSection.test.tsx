@@ -93,6 +93,9 @@ beforeEach(() => {
   // A real project is active by default, mirroring CODE mode with a project
   // selected. Per-project tests override this explicitly.
   useProjectStore.setState({ activeProjectId: 'proj-a' })
+  // A resolved branch, mirroring the post-status-refresh panel state: the
+  // draft key is (project, branch) and every test below drafts on 'main'.
+  useGitPanelStore.getState().setBranch({ name: 'main', upstream: '', ahead: 0, behind: 0 })
   configMocks.defaultModel = 'anthropic/claude-sonnet'
   useEmbeddedLLMStore.getState().reset()
   container = document.createElement('div')
@@ -203,9 +206,9 @@ describe('CommitSection — AI generate button', () => {
     expect(workspaceMocks.getFileDiff).not.toHaveBeenCalled()
     expect(gitMocks.generateCommitMessage).toHaveBeenCalledTimes(1)
     expect(gitMocks.generateCommitMessage).toHaveBeenCalledWith()
-    // The result was written into the active project's slice (and thus the
-    // textarea).
-    expect(useGitPanelStore.getState().commitByProject['proj-a']!.message).toBe(
+    // The result was written into the active project's branch-scoped draft
+    // (and thus the textarea).
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']!.main).toBe(
       'feat: add files',
     )
     expect(textarea().value).toBe('feat: add files')
@@ -277,6 +280,35 @@ describe('CommitSection — per-project commit state', () => {
     expect(textarea().value).toBe('fix: draft for B')
   })
 
+  it('REGRESSION: the draft follows the focused branch when the session (worktree) changes', () => {
+    useGitPanelStore.setState({
+      entries: [makeEntry({ path: 'a.ts', staged: true })],
+      commitMessageByBranch: { 'proj-a': { main: 'feat: for main', dev: 'fix: for dev' } },
+    })
+    render()
+    expect(textarea().value).toBe('feat: for main')
+
+    // A session switch moves the Git-panel focus to another worktree; the
+    // backend's status refresh updates the store's branch — the box must
+    // swap to THAT branch's draft, not keep the previous one.
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'dev', upstream: '', ahead: 0, behind: 0 })
+    })
+    expect(textarea().value).toBe('fix: for dev')
+
+    // Switching back restores the original branch's draft…
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'main', upstream: '', ahead: 0, behind: 0 })
+    })
+    expect(textarea().value).toBe('feat: for main')
+
+    // …and an unknown branch (no draft yet) shows an empty box.
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'fresh', upstream: '', ahead: 0, behind: 0 })
+    })
+    expect(textarea().value).toBe('')
+  })
+
   it('survives GitPanel unmount (CHAT mode) in memory', () => {
     render()
     typeDraft('feat: keep me')
@@ -319,12 +351,12 @@ describe('CommitSection — per-project commit state', () => {
     })
     await flush()
 
-    // The result landed in A's slice; B's slice is untouched and the box
+    // The result landed in A's 'main' draft; B is untouched and the box
     // (now showing B) stays empty.
-    const byProject = useGitPanelStore.getState().commitByProject
-    expect(byProject['proj-a']!.message).toBe('feat: generated for A')
-    expect(byProject['proj-a']!.isGenerating).toBe(false)
-    expect(byProject['proj-b']).toBeUndefined()
+    const byBranch = useGitPanelStore.getState().commitMessageByBranch
+    expect(byBranch['proj-a']!.main).toBe('feat: generated for A')
+    expect(byBranch['proj-b']).toBeUndefined()
+    expect(useGitPanelStore.getState().commitByProject['proj-a']!.isGenerating).toBe(false)
     expect(textarea().value).toBe('')
     expect(container.textContent).not.toContain('feat: generated for A')
   })
@@ -364,14 +396,7 @@ describe('CommitSection — per-project commit state', () => {
   it('commits the active project draft, records it in the console and clears the draft', async () => {
     useGitPanelStore.setState({
       entries: [makeEntry({ path: 'a.ts', staged: true })],
-      commitByProject: {
-        'proj-a': {
-          message: 'feat: a',
-          isGenerating: false,
-          isCommitting: false,
-          error: null,
-        },
-      },
+      commitMessageByBranch: { 'proj-a': { main: 'feat: a' } },
     })
     gitMocks.commit.mockResolvedValue({ sha: 'full-sha-abcdef123456' })
 
@@ -382,9 +407,8 @@ describe('CommitSection — per-project commit state', () => {
     await flush()
 
     expect(gitMocks.commit).toHaveBeenCalledWith('feat: a', false)
-    // The successful commit consumes the draft…
-    const slice = useGitPanelStore.getState().commitByProject['proj-a']!
-    expect(slice.message).toBe('')
+    // The successful commit consumes the branch's draft (the key is gone)…
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']).toBeUndefined()
     // …and its outcome lands in the git-operation console (short SHA label).
     const rec = useGitPanelStore.getState().operationByProject['proj-a']!
     expect(rec.kind).toBe('commit')
@@ -396,17 +420,38 @@ describe('CommitSection — per-project commit state', () => {
     expect(container.textContent).not.toContain('full-sh')
   })
 
+  it('REGRESSION: a commit clears the branch captured at click time, not the focused one', async () => {
+    useGitPanelStore.setState({
+      entries: [makeEntry({ path: 'a.ts', staged: true })],
+      commitMessageByBranch: { 'proj-a': { main: 'feat: a', dev: 'wip on dev' } },
+    })
+    const pending = deferred<unknown>()
+    gitMocks.commit.mockReturnValueOnce(pending.promise as Promise<never>)
+
+    render()
+    await act(async () => {
+      commitBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    // The focused branch moves mid-commit (a session switch onto another
+    // worktree): the capture-at-click-time contract pins the clear target.
+    act(() => {
+      useGitPanelStore.getState().setBranch({ name: 'dev', upstream: '', ahead: 0, behind: 0 })
+    })
+    await act(async () => {
+      pending.resolve({ sha: 'mid-sha-1234567890' })
+    })
+    await flush()
+
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']).toEqual({
+      dev: 'wip on dev',
+    })
+  })
+
   it('keeps the commit-in-flight flag in the store across a GitPanel unmount', async () => {
     useGitPanelStore.setState({
       entries: [makeEntry({ path: 'a.ts', staged: true })],
-      commitByProject: {
-        'proj-a': {
-          message: 'feat: a',
-          isGenerating: false,
-          isCommitting: false,
-          error: null,
-        },
-      },
+      commitMessageByBranch: { 'proj-a': { main: 'feat: a' } },
     })
     const { promise, reject } = deferred<string>()
     gitMocks.commit.mockReturnValueOnce(promise)
@@ -456,18 +501,11 @@ describe('CommitSection — suppressed commit dialog', () => {
     signing_global: true,
   }
 
-  /** Stage one file and type a draft so Commit is enabled. */
+  /** Stage one file and seed a draft so Commit is enabled. */
   function stageAndDraft(message = 'feat: a') {
     useGitPanelStore.setState({
       entries: [makeEntry({ path: 'a.ts', staged: true })],
-      commitByProject: {
-        'proj-a': {
-          message,
-          isGenerating: false,
-          isCommitting: false,
-          error: null,
-        },
-      },
+      commitMessageByBranch: { 'proj-a': { main: message } },
     })
   }
 
@@ -504,7 +542,7 @@ describe('CommitSection — suppressed commit dialog', () => {
     expect(text).toContain('commit-msg')
     expect(text).toContain('commit.gpgsign (global config)')
     // Nothing was committed and the draft survives for the decision.
-    expect(useGitPanelStore.getState().commitByProject['proj-a']!.message).toBe('feat: a')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']!.main).toBe('feat: a')
     // A withheld commit is a decision request, not a commit: it must not land
     // in the console.
     expect(useGitPanelStore.getState().operationByProject['proj-a']).toBeUndefined()
@@ -531,7 +569,7 @@ describe('CommitSection — suppressed commit dialog', () => {
 
     expect(dialogVisible()).toBe(false)
     expect(gitMocks.commit).toHaveBeenCalledTimes(1)
-    expect(useGitPanelStore.getState().commitByProject['proj-a']!.message).toBe('feat: a')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']!.main).toBe('feat: a')
     expect(useGitPanelStore.getState().operationByProject['proj-a']).toBeUndefined()
   })
 
@@ -576,7 +614,7 @@ describe('CommitSection — suppressed commit dialog', () => {
     expect(rec.label).toBe('Committed trusted')
     expect(rec.output).toBe('hook: prettier ran\n[main trusted-s] feat: a')
     // The successful (trusted) commit consumes the draft.
-    expect(useGitPanelStore.getState().commitByProject['proj-a']!.message).toBe('')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-a']).toBeUndefined()
   })
 
   it('Force path: sends force=true and persists the skip flag when checked', async () => {
@@ -723,18 +761,11 @@ describe('CommitSection — suppressed commit dialog', () => {
 })
 
 describe('CommitSection — commit result goes to the console', () => {
-  /** Stage one file and type a draft so Commit is enabled. */
+  /** Stage one file and seed a draft so Commit is enabled. */
   function stageAndDraft(message = 'feat: a') {
     useGitPanelStore.setState({
       entries: [makeEntry({ path: 'a.ts', staged: true })],
-      commitByProject: {
-        'proj-a': {
-          message,
-          isGenerating: false,
-          isCommitting: false,
-          error: null,
-        },
-      },
+      commitMessageByBranch: { 'proj-a': { main: message } },
     })
   }
 

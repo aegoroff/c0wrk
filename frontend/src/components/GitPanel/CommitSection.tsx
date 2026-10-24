@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback } from "react";
 import { GitCommitHorizontal, Loader2, Sparkles } from "lucide-react";
-import { useGitPanelStore, EMPTY_COMMIT_DRAFT, selectSkipCommitSuppress } from "@/stores/gitPanelStore";
+import { useGitPanelStore, EMPTY_COMMIT_DRAFT, selectCommitMessage, selectSkipCommitSuppress } from "@/stores/gitPanelStore";
 import { useProjectStore } from "@/stores/projectStore";
 import { commit, generateCommitMessage, type CommitResult } from "@/api/git";
 import { runGitOperation } from "@/lib/gitOperation";
@@ -16,12 +16,12 @@ function commitLabel(sha?: string): string {
 
 /**
  * Record a commit that actually ran in the git-operation console and clear
- * the committed project's draft. A withheld (suppressed) result never reaches
+ * the committed branch's draft. A withheld (suppressed) result never reaches
  * here — it is a decision request, not a commit, so it must not land in the
  * console. The commit already ran, so the recorder thunk replays its result
  * and the shared wrapper owns the console write (and the error logging).
  */
-async function recordCommit(projectId: string, result: CommitResult): Promise<void> {
+async function recordCommit(projectId: string, branch: string, result: CommitResult): Promise<void> {
   await runGitOperation({
     projectId,
     kind: "commit",
@@ -29,7 +29,7 @@ async function recordCommit(projectId: string, result: CommitResult): Promise<vo
     fn: async () => result,
     extractOutput: (r) => r.output ?? "",
   });
-  useGitPanelStore.getState().setCommitMessage(projectId, "");
+  useGitPanelStore.getState().setCommitMessage(projectId, branch, "");
 }
 
 /**
@@ -52,6 +52,9 @@ async function recordCommitFailure(projectId: string, err: unknown): Promise<voi
 export function CommitSection() {
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
   const entries = useGitPanelStore((s) => s.entries);
+  // The focused worktree's branch — the second half of the draft key
+  // (ADR-098). A primitive selector return, so the stable-selector rule holds.
+  const branchName = useGitPanelStore((s) => s.branch.name);
   const setCommitMessage = useGitPanelStore((s) => s.setCommitMessage);
   const setGenerating = useGitPanelStore((s) => s.setGeneratingCommit);
   const setCommitting = useGitPanelStore((s) => s.setCommitting);
@@ -69,16 +72,19 @@ export function CommitSection() {
     setSkipCommitSuppress,
   });
 
-  // Per-project commit-box slice. The selector returns the stored slice (a
-  // stable reference) or undefined when the project has no state yet — never
-  // a fresh object — so the stable-selector rule holds. Defaults come from a
-  // module constant, keeping the draft/generating/committing/error state alive
-  // across project switches and GitPanel unmounts (CHAT mode).
+  // The draft MESSAGE is branch-scoped and persisted (selectCommitMessage is
+  // a pure primitive-returning selector); the TRANSIENT flags stay in the
+  // per-project slice (a stable reference or undefined — never a fresh
+  // object), keeping that state alive across project switches and GitPanel
+  // unmounts (CHAT mode).
   const storedDraft = useGitPanelStore((s) =>
     activeProjectId === null ? undefined : s.commitByProject[activeProjectId],
   );
+  const commitMessage = useGitPanelStore((s) =>
+    selectCommitMessage(s, activeProjectId, branchName),
+  );
   const draft = storedDraft ?? EMPTY_COMMIT_DRAFT;
-  const { message: commitMessage, isGenerating, isCommitting, error } = draft;
+  const { isGenerating, isCommitting, error } = draft;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const stagedCount = entries.filter((e) => e.staged).length;
@@ -104,10 +110,12 @@ export function CommitSection() {
   }, [commitMessage, adjustHeight]);
 
   const handleCommit = async () => {
-    // Capture the project at click time: every write below (console record,
-    // draft clear) must land in the project whose draft is being committed,
-    // even if the user switches projects mid-flight.
+    // Capture the project AND branch at click time: every write below
+    // (console record, draft clear) must land in the project/branch whose
+    // draft is being committed, even if the user switches sessions (and so
+    // branches) mid-flight.
     const projectId = activeProjectId;
+    const branch = branchName;
     if (projectId === null || isDisabled) return;
     const message = commitMessage;
     setCommitting(projectId, true);
@@ -123,11 +131,16 @@ export function CommitSection() {
       // ran is recorded (success or failure).
       const result = await commit(message, force);
       if (result.suppressed) {
-        suppressedFlow.setSuppressed({ suppression: result.suppressed, message, projectId });
+        suppressedFlow.setSuppressed({
+          suppression: result.suppressed,
+          message,
+          projectId,
+          branchName: branch,
+        });
         return;
       }
       // Records the result in the git-operation console and clears the draft.
-      await recordCommit(projectId, result);
+      await recordCommit(projectId, branch, result);
       // Status refresh is handled by the git:status_changed event emitted
       // by the backend after a successful commit (picked up by useGitStatusEvents)
     } catch (err) {
@@ -138,10 +151,11 @@ export function CommitSection() {
   };
 
   const handleGenerate = async () => {
-    // Capture the project at click time so the result (or error) is written
-    // into the project that requested generation — never into whichever
-    // project happens to be active when the promise settles.
+    // Capture the project AND branch at click time so the result (or error)
+    // is written into the branch that requested generation — never into
+    // whichever branch happens to be focused when the promise settles.
     const projectId = activeProjectId;
+    const branch = branchName;
     if (projectId === null) return;
     const stagedEntries = entries.filter((e) => e.staged);
     if (stagedEntries.length === 0 || isGenerating) return;
@@ -154,7 +168,7 @@ export function CommitSection() {
       // An empty staged diff (e.g. stale entries) is reported by the
       // backend as an error and surfaced below.
       const message = await generateCommitMessage();
-      setCommitMessage(projectId, message);
+      setCommitMessage(projectId, branch, message);
     } catch (err) {
       setCommitError(projectId, err instanceof Error ? err.message : "Failed to generate commit message");
     } finally {
@@ -177,7 +191,7 @@ export function CommitSection() {
         value={commitMessage}
         onChange={(e) => {
           if (activeProjectId === null) return;
-          setCommitMessage(activeProjectId, e.target.value);
+          setCommitMessage(activeProjectId, branchName, e.target.value);
           if (error) setCommitError(activeProjectId, null);
           suppressedFlow.setSuppressed(null);
         }}
