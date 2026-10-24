@@ -2577,11 +2577,11 @@ func (m *mockSessionStoreForRestore) DeleteBookmark(_ context.Context, _, _ stri
 func (m *mockSessionStoreForRestore) RenameBookmark(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (m *mockSessionStoreForRestore) SavePromptSuggestions(_ context.Context, _ []PromptSuggestion) ([]PromptSuggestion, error) {
-	return []PromptSuggestion{}, nil
+func (m *mockSessionStoreForRestore) SavePromptSuggestions(_ context.Context, _ []core.PromptSuggestion) ([]core.PromptSuggestion, error) {
+	return []core.PromptSuggestion{}, nil
 }
-func (m *mockSessionStoreForRestore) ListPromptSuggestions(_ context.Context, _ string) ([]PromptSuggestion, error) {
-	return []PromptSuggestion{}, nil
+func (m *mockSessionStoreForRestore) ListPromptSuggestions(_ context.Context, _ string) ([]core.PromptSuggestion, error) {
+	return []core.PromptSuggestion{}, nil
 }
 func (m *mockSessionStoreForRestore) SetPromptSuggestionStatus(_ context.Context, _, _ string) error {
 	return nil

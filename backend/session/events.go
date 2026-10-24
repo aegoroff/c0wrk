@@ -99,8 +99,8 @@ type TaskCancelledData struct {
 // "prompt_suggestions" event (ADR-088): the session's FULL active suggestion
 // set (both kinds) as persisted — the frontend replaces its set outright.
 type PromptSuggestionsData struct {
-	SessionID   string             `json:"session_id"`
-	Suggestions []PromptSuggestion `json:"suggestions"`
+	SessionID   string                  `json:"session_id"`
+	Suggestions []core.PromptSuggestion `json:"suggestions"`
 }
 
 // TaskFailedResumableData is the payload for "task_failed_resumable" events.

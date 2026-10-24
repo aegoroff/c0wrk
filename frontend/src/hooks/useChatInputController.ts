@@ -22,6 +22,7 @@ import {
   computeChatPlaceholder,
   isChatSessionIdle,
   isSuggestionPlaceholderActive,
+  suggestionPositionLabel,
   suggestionPreviewText,
 } from '@/lib/chatInputLock'
 import { usePromptSuggestions, usePromptSelectedIndex, usePromptSuggestionsStore } from '@/stores/promptSuggestionsStore'
@@ -208,20 +209,23 @@ export function useChatInputController(): ChatInputController {
 
   // The placeholder: the plain state matrix, or — in the idle state with a
   // non-empty suggestion set — the prompt-suggestion hint surface as a DOM
-  // node (previewed row, a blank-line separator, the italic usage hints). The
-  // CM placeholder compartment reconfigures on options.placeholder IDENTITY
-  // (string value / node identity), so the node is memoized on the PRIMITIVE
-  // inputs below — a fresh node every render would dispatch a reconfigure on
-  // every render.
+  // node (previewed row with its position marker, a blank-line separator,
+  // the italic usage hints). The CM placeholder compartment reconfigures on
+  // options.placeholder IDENTITY (string value / node identity), so the node
+  // is memoized on the PRIMITIVE inputs below — a fresh node every render
+  // would dispatch a reconfigure on every render.
   const suggestionPreview = isSuggestionPlaceholderActive(lockInput, suggestions)
     ? (suggestionPreviewText(suggestions, selectedIndex) ?? '')
     : null
+  const suggestionPosition = suggestionPreview !== null
+    ? suggestionPositionLabel(selectedIndex, suggestions.length)
+    : ''
   const placeholder = useMemo(
     () =>
       suggestionPreview !== null
-        ? buildSuggestionPlaceholderNode(suggestionPreview)
+        ? buildSuggestionPlaceholderNode(suggestionPreview, suggestionPosition)
         : computeChatPlaceholder({ taskActive, paused, pausing, isNoProject, compacting }),
-    [suggestionPreview, taskActive, paused, pausing, isNoProject, compacting],
+    [suggestionPreview, suggestionPosition, taskActive, paused, pausing, isNoProject, compacting],
   )
 
   // The editor needs a stable onSend reference, but handleSend captures the
