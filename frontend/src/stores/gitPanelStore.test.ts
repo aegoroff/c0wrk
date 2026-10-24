@@ -8,7 +8,7 @@
 // panelPersistence.test.ts, which opts into jsdom for the same reason).
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useGitPanelStore, EMPTY_MERGE_REBASE_STATE, EMPTY_COMMIT_DRAFT, EMPTY_GIT_OPERATION, partializeGitPanel, mergeGitPanel, selectGitPanelTab, selectSkipCommitSuppress, selectLastOperation, type GitPanelEntry, type GitOperationRecord } from '@/stores/gitPanelStore'
+import { useGitPanelStore, EMPTY_MERGE_REBASE_STATE, EMPTY_COMMIT_DRAFT, EMPTY_GIT_OPERATION, partializeGitPanel, mergeGitPanel, selectGitPanelTab, selectSkipCommitSuppress, selectLastOperation, selectCommitMessage, type GitPanelEntry, type GitOperationRecord } from '@/stores/gitPanelStore'
 
 /** Reset the store to initial state before each test */
 function resetStore() {
@@ -42,6 +42,7 @@ describe('gitPanelStore', () => {
     expect(s.groupBy).toBe('none')
     expect(s.entries).toEqual([])
     expect(s.commitByProject).toEqual({})
+    expect(s.commitMessageByBranch).toEqual({})
     expect(s.branch).toEqual({ name: '', upstream: '', ahead: 0, behind: 0 })
     expect(s.branches).toEqual([])
     expect(s.expandedDirs).toEqual(new Set())
@@ -64,33 +65,56 @@ describe('gitPanelStore', () => {
     expect(useGitPanelStore.getState().viewMode).toBe('flat')
   })
 
-  // ── setCommitMessage (per-project) ──
+  // ── setCommitMessage (per project, per branch — ADR-098) ──
 
-  it('setCommitMessage updates the message of the given project', () => {
+  it('setCommitMessage stores the draft under the given project and branch', () => {
     const { setCommitMessage } = useGitPanelStore.getState()
-    setCommitMessage('proj-1', 'fix: update config')
-    expect(useGitPanelStore.getState().commitByProject['proj-1']).toEqual({
-      message: 'fix: update config',
-      isGenerating: false,
-      isCommitting: false,
-      error: null,
+    setCommitMessage('proj-1', 'main', 'fix: update config')
+    expect(useGitPanelStore.getState().commitMessageByBranch).toEqual({
+      'proj-1': { main: 'fix: update config' },
     })
   })
 
-  it('setCommitMessage allows empty string', () => {
+  it('setCommitMessage is scoped per branch of the same project', () => {
     const { setCommitMessage } = useGitPanelStore.getState()
-    setCommitMessage('proj-1', 'initial')
-    setCommitMessage('proj-1', '')
-    expect(useGitPanelStore.getState().commitByProject['proj-1']!.message).toBe('')
+    setCommitMessage('proj-1', 'main', 'feat: a')
+    setCommitMessage('proj-1', 'feature/login', 'fix: b')
+    const map = useGitPanelStore.getState().commitMessageByBranch
+    expect(map['proj-1']!.main).toBe('feat: a')
+    expect(map['proj-1']!['feature/login']).toBe('fix: b')
   })
 
-  it('setCommitMessage is scoped per project', () => {
+  it('setCommitMessage is scoped per project for equal branch names', () => {
     const { setCommitMessage } = useGitPanelStore.getState()
-    setCommitMessage('proj-a', 'feat: a')
-    setCommitMessage('proj-b', 'fix: b')
-    const s = useGitPanelStore.getState().commitByProject
-    expect(s['proj-a']!.message).toBe('feat: a')
-    expect(s['proj-b']!.message).toBe('fix: b')
+    setCommitMessage('proj-a', 'main', 'feat: a')
+    setCommitMessage('proj-b', 'main', 'fix: b')
+    const map = useGitPanelStore.getState().commitMessageByBranch
+    expect(map['proj-a']!.main).toBe('feat: a')
+    expect(map['proj-b']!.main).toBe('fix: b')
+  })
+
+  it('setCommitMessage("") deletes the branch key, and the project shell with its last branch', () => {
+    const { setCommitMessage } = useGitPanelStore.getState()
+    setCommitMessage('proj-1', 'main', 'initial')
+    setCommitMessage('proj-1', 'main', '')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-1']).toBeUndefined()
+
+    // A multi-branch project keeps its shell until the LAST draft goes.
+    setCommitMessage('proj-2', 'main', 'one')
+    setCommitMessage('proj-2', 'dev', 'two')
+    setCommitMessage('proj-2', 'main', '')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-2']).toEqual({ dev: 'two' })
+    setCommitMessage('proj-2', 'dev', '')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-2']).toBeUndefined()
+  })
+
+  it('setCommitMessage keeps distinct slots for detached HEAD and the unresolved branch', () => {
+    const { setCommitMessage } = useGitPanelStore.getState()
+    setCommitMessage('proj-1', 'HEAD', 'wip on detached head')
+    setCommitMessage('proj-1', '', 'typed before the branch resolved')
+    const map = useGitPanelStore.getState().commitMessageByBranch
+    expect(map['proj-1']!.HEAD).toBe('wip on detached head')
+    expect(map['proj-1']!['']).toBe('typed before the branch resolved')
   })
 
   // ── setLoading ──
@@ -311,13 +335,14 @@ describe('gitPanelStore', () => {
     expect(useGitPanelStore.getState().commitByProject['proj-1']!.isGenerating).toBe(false)
   })
 
-  it('setGeneratingCommit preserves other fields of the slice', () => {
+  it('setGeneratingCommit keeps flags in commitByProject while the message stays in the branch map', () => {
     const { setCommitMessage, setGeneratingCommit } = useGitPanelStore.getState()
-    setCommitMessage('proj-1', 'draft')
+    setCommitMessage('proj-1', 'main', 'draft')
     setGeneratingCommit('proj-1', true)
-    const slice = useGitPanelStore.getState().commitByProject['proj-1']!
-    expect(slice.message).toBe('draft')
-    expect(slice.isGenerating).toBe(true)
+    // The message lives ONLY in commitMessageByBranch; the flag slice carries
+    // no message field at all.
+    expect(selectCommitMessage(useGitPanelStore.getState(), 'proj-1', 'main')).toBe('draft')
+    expect(useGitPanelStore.getState().commitByProject['proj-1']!.isGenerating).toBe(true)
   })
 
   // ── setRemoteOperationInProgress ──
@@ -382,7 +407,7 @@ describe('gitPanelStore', () => {
     const store = useGitPanelStore.getState()
     store.setViewMode('tree')
     store.loadEntries([makeEntry({ path: 'a.ts' })])
-    store.setCommitMessage('proj-1', 'fix: bug')
+    store.setCommitMessage('proj-1', 'main', 'fix: bug')
     store.setGeneratingCommit('proj-1', true)
     store.setCommitError('proj-1', 'boom')
     store.setBranch({ name: 'feature/x', upstream: '', ahead: 0, behind: 0 })
@@ -400,6 +425,7 @@ describe('gitPanelStore', () => {
     expect(s.viewMode).toBe('flat')
     expect(s.entries).toEqual([])
     expect(s.commitByProject).toEqual({})
+    expect(s.commitMessageByBranch).toEqual({})
     expect(s.branch).toEqual({ name: '', upstream: '', ahead: 0, behind: 0 })
     expect(s.branches).toEqual([])
     expect(s.expandedDirs).toEqual(new Set())
@@ -434,7 +460,7 @@ describe('gitPanelStore', () => {
     expect(useGitPanelStore.getState().entries.find(e => e.path === 'src/app.ts')!.staged).toBe(true)
 
     // Set commit message
-    store.setCommitMessage('proj-1', 'feat: add app module')
+    store.setCommitMessage('proj-1', 'main', 'feat: add app module')
 
     // Simulate loading during commit
     store.setLoading(true)
@@ -442,9 +468,9 @@ describe('gitPanelStore', () => {
 
     // Commit succeeds — reload
     store.loadEntries([])
-    store.setCommitMessage('proj-1', '')
+    store.setCommitMessage('proj-1', 'main', '')
     expect(useGitPanelStore.getState().entries).toEqual([])
-    expect(useGitPanelStore.getState().commitByProject['proj-1']!.message).toBe('')
+    expect(useGitPanelStore.getState().commitMessageByBranch['proj-1']).toBeUndefined()
   })
 
   it('handles error during refresh', () => {
@@ -616,7 +642,6 @@ describe('gitPanelStore — per-project commit state', () => {
 
   it('exposes EMPTY_COMMIT_DRAFT matching the default slice', () => {
     expect(EMPTY_COMMIT_DRAFT).toEqual({
-      message: '',
       isGenerating: false,
       isCommitting: false,
       error: null,
@@ -634,7 +659,7 @@ describe('gitPanelStore — per-project commit state', () => {
 
   it('a no-op commit-slice patch keeps the state reference stable', () => {
     const { setCommitMessage, setCommitting } = useGitPanelStore.getState()
-    setCommitMessage('proj-1', 'draft')
+    setCommitMessage('proj-1', 'main', 'draft')
     const before = useGitPanelStore.getState()
     // Same value on an existing slice, and false on an absent slice.
     setCommitting('proj-1', false)
@@ -650,47 +675,166 @@ describe('gitPanelStore — per-project commit state', () => {
     expect(useGitPanelStore.getState().commitByProject['proj-1']!.error).toBeNull()
   })
 
-  it('dropProjectCommitState removes only the given project', () => {
+  it('dropProjectCommitState removes only the given project (flags AND branch drafts)', () => {
     const { setCommitMessage, dropProjectCommitState } = useGitPanelStore.getState()
-    setCommitMessage('proj-a', 'draft a')
-    setCommitMessage('proj-b', 'draft b')
+    setCommitMessage('proj-a', 'main', 'draft a')
+    setCommitMessage('proj-b', 'main', 'draft b')
     dropProjectCommitState('proj-a')
-    const s = useGitPanelStore.getState().commitByProject
-    expect(s['proj-a']).toBeUndefined()
-    expect(s['proj-b']!.message).toBe('draft b')
+    const s = useGitPanelStore.getState()
+    expect(s.commitByProject['proj-a']).toBeUndefined()
+    expect(s.commitMessageByBranch['proj-a']).toBeUndefined()
+    expect(selectCommitMessage(s, 'proj-b', 'main')).toBe('draft b')
   })
 
   it('dropProjectCommitState is a no-op for an unknown project', () => {
     const { setCommitMessage, dropProjectCommitState } = useGitPanelStore.getState()
-    setCommitMessage('proj-a', 'draft a')
+    setCommitMessage('proj-a', 'main', 'draft a')
     expect(() => dropProjectCommitState('never-seen')).not.toThrow()
-    expect(useGitPanelStore.getState().commitByProject['proj-a']!.message).toBe('draft a')
+    expect(selectCommitMessage(useGitPanelStore.getState(), 'proj-a', 'main')).toBe('draft a')
   })
 
   it('commit state survives an A→B→A project switch (in-memory)', () => {
     const { setCommitMessage, setCommitError, setGeneratingCommit } = useGitPanelStore.getState()
-    setCommitMessage('proj-a', 'feat: a')
+    setCommitMessage('proj-a', 'main', 'feat: a')
     setGeneratingCommit('proj-a', true)
     setCommitError('proj-a', 'err')
-    setCommitMessage('proj-b', 'fix: b')
+    setCommitMessage('proj-b', 'main', 'fix: b')
 
     // Switch away to B and back to A — A's values are restored untouched.
-    const s = useGitPanelStore.getState().commitByProject
-    expect(s['proj-a']).toEqual({
-      message: 'feat: a',
+    const s = useGitPanelStore.getState()
+    expect(selectCommitMessage(s, 'proj-a', 'main')).toBe('feat: a')
+    expect(s.commitByProject['proj-a']).toEqual({
       isGenerating: true,
       isCommitting: false,
       error: 'err',
     })
-    expect(s['proj-b']!.message).toBe('fix: b')
-    expect(s['proj-b']!.isGenerating).toBe(false)
+    expect(selectCommitMessage(s, 'proj-b', 'main')).toBe('fix: b')
+    // A message-only write never materializes a flag slice for the project.
+    expect(s.commitByProject['proj-b']).toBeUndefined()
   })
 
   it('commitByProject is transient: excluded from the persisted partial', () => {
-    const { setCommitMessage } = useGitPanelStore.getState()
-    setCommitMessage('proj-1', 'draft')
+    const { setCommitMessage, setGeneratingCommit } = useGitPanelStore.getState()
+    setCommitMessage('proj-1', 'main', 'draft')
+    setGeneratingCommit('proj-1', true)
     const partial = partializeGitPanel(useGitPanelStore.getState())
     expect(partial).not.toHaveProperty('commitByProject')
+  })
+
+  it('commitMessageByBranch persists drafts per project per branch (partialize → merge)', () => {
+    const { setCommitMessage } = useGitPanelStore.getState()
+    setCommitMessage('proj-a', 'main', 'feat: a')
+    setCommitMessage('proj-a', 'dev', 'wip')
+    setCommitMessage('proj-b', 'main', 'fix: b')
+
+    const partial = partializeGitPanel(useGitPanelStore.getState())
+    expect(partial.commitMessageByBranch).toEqual({
+      'proj-a': { main: 'feat: a', dev: 'wip' },
+      'proj-b': { main: 'fix: b' },
+    })
+
+    // Simulate the JSON round-trip localStorage performs.
+    const rehydrated = JSON.parse(JSON.stringify(partial)) as unknown
+    const merged = mergeGitPanel(rehydrated, useGitPanelStore.getState())
+    expect(selectCommitMessage(merged, 'proj-a', 'main')).toBe('feat: a')
+    expect(selectCommitMessage(merged, 'proj-a', 'dev')).toBe('wip')
+    expect(selectCommitMessage(merged, 'proj-b', 'main')).toBe('fix: b')
+  })
+
+  it('merge rejects non-string drafts, empty records and a non-object map', () => {
+    const current = useGitPanelStore.getState()
+    const merged = mergeGitPanel(
+      {
+        commitMessageByBranch: {
+          p1: { main: 'keep', dev: 42, feat: null },
+          p2: { main: '   ' }, // whitespace is still a string — kept
+          p3: 'not-an-object',
+        },
+      },
+      current,
+    )
+    expect(merged.commitMessageByBranch).toEqual({
+      p1: { main: 'keep' },
+      p2: { main: '   ' },
+    })
+
+    const bogus = mergeGitPanel({ commitMessageByBranch: null }, current)
+    expect(bogus.commitMessageByBranch).toEqual({})
+  })
+
+  it('merge drops a branch literally named __proto__ (prototype setter — fail-closed)', () => {
+    const current = useGitPanelStore.getState()
+    // JSON.parse creates `__proto__` as an OWN enumerable property — the
+    // exact shape a real localStorage payload for a (legal) git branch of
+    // that name produces; an object literal in source would instead invoke
+    // the prototype setter and never carry the key at all.
+    const persisted = JSON.parse(
+      '{"commitMessageByBranch":{"p1":{"main":"keep","__proto__":"sneaky"}}}',
+    ) as unknown
+    const merged = mergeGitPanel(persisted, current)
+    // The branch's draft is dropped rather than silently lost to the
+    // prototype setter; the legitimate branch survives.
+    expect(merged.commitMessageByBranch).toEqual({ p1: { main: 'keep' } })
+  })
+
+  it('merge defaults commitMessageByBranch to {} for legacy state without it', () => {
+    const current = useGitPanelStore.getState()
+    const merged = mergeGitPanel({ viewMode: 'tree', expandedDirs: ['src'] }, current)
+    expect(merged.commitMessageByBranch).toEqual({})
+  })
+
+  it('selectCommitMessage defaults to an empty string for unknown pairs', () => {
+    const { setCommitMessage } = useGitPanelStore.getState()
+    setCommitMessage('proj-a', 'main', 'feat: a')
+    const s = useGitPanelStore.getState()
+    expect(selectCommitMessage(s, 'proj-a', 'main')).toBe('feat: a')
+    expect(selectCommitMessage(s, 'proj-a', 'unknown-branch')).toBe('')
+    expect(selectCommitMessage(s, 'unknown-project', 'main')).toBe('')
+    expect(selectCommitMessage(s, null, 'main')).toBe('')
+    expect(selectCommitMessage(s, undefined, 'main')).toBe('')
+    expect(selectCommitMessage(s, 'proj-a', null)).toBe('')
+    expect(selectCommitMessage(s, 'proj-a', undefined)).toBe('')
+  })
+
+  it('an identical draft write is a reference-stable no-op', () => {
+    const { setCommitMessage } = useGitPanelStore.getState()
+    setCommitMessage('proj-a', 'main', 'same')
+    const before = useGitPanelStore.getState()
+    setCommitMessage('proj-a', 'main', 'same')
+    // Clearing an absent key is a no-op too.
+    setCommitMessage('proj-a', 'dev', '')
+    expect(useGitPanelStore.getState()).toBe(before)
+  })
+
+  it('rehydrates commitMessageByBranch from a real localStorage payload', async () => {
+    localStorage.setItem(
+      'git-panel-settings',
+      JSON.stringify({
+        state: {
+          viewMode: 'flat',
+          expandedDirs: [],
+          commitMessageByBranch: { p1: { main: 'feat: from storage' } },
+        },
+        version: 0,
+      }),
+    )
+
+    await useGitPanelStore.persist.rehydrate()
+
+    expect(selectCommitMessage(useGitPanelStore.getState(), 'p1', 'main')).toBe(
+      'feat: from storage',
+    )
+  })
+
+  it('rehydrates a legacy localStorage entry (no draft map) to an empty map', async () => {
+    localStorage.setItem(
+      'git-panel-settings',
+      JSON.stringify({ state: { viewMode: 'flat', expandedDirs: [] }, version: 0 }),
+    )
+
+    await useGitPanelStore.persist.rehydrate()
+
+    expect(useGitPanelStore.getState().commitMessageByBranch).toEqual({})
   })
 
 })
@@ -785,12 +929,13 @@ describe('gitPanelStore — commit suppression skip flag', () => {
     const { setSkipCommitSuppress, setCommitMessage, dropProjectCommitState } = useGitPanelStore.getState()
     setSkipCommitSuppress('proj-a', true)
     setSkipCommitSuppress('proj-b', true)
-    setCommitMessage('proj-a', 'draft a')
+    setCommitMessage('proj-a', 'main', 'draft a')
     dropProjectCommitState('proj-a')
     const s = useGitPanelStore.getState()
     expect(s.skipCommitSuppressByProject['proj-a']).toBeUndefined()
     expect(s.skipCommitSuppressByProject['proj-b']).toBe(true)
     expect(s.commitByProject['proj-a']).toBeUndefined()
+    expect(s.commitMessageByBranch['proj-a']).toBeUndefined()
   })
 
   it('reset clears the flag map', () => {
