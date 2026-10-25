@@ -835,7 +835,8 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		}
 		kept = append(kept, w)
 	}
-	f.configLoadErrors = append(kept, fresh...)
+	kept = append(kept, fresh...)
+	f.configLoadErrors = kept
 
 	return nil
 }
