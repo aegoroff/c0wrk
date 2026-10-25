@@ -102,9 +102,13 @@ export function EmbeddedLLMSettings() {
   // backend refuses the scope with ErrNoProjectionOnMLX, but only AFTER it has
   // stopped the model and cleared the install record — so the menu entry
   // self-disables instead of leading the operator into that path (ADR-092 D7),
-  // and the refusal text explains why.
+  // and the refusal text explains why. The LEADING SPACE matters: the string
+  // is interpolated into `Remove vision projector only{…}` in
+  // EmbeddedLLMActions, and JSX strips the whitespace between a text child and
+  // an expression — without it the menu entry renders
+  // "…onlynot removable under the MTPLX engine".
   const projectionRefusal =
-    status?.engine === 'mtplx' ? 'not removable under the MTPLX engine' : undefined
+    status?.engine === 'mtplx' ? ' not removable under the MTPLX engine' : undefined
   const leftovers = {
     runtime: installed || (status?.leftover_runtime ?? false),
     weights: installed || (status?.leftover_weights ?? false),

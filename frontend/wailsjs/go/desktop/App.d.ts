@@ -7,6 +7,7 @@ import {workspace} from '../models';
 import {config} from '../models';
 import {desktop} from '../models';
 import {review} from '../models';
+import {fs} from '../models';
 
 export function AbortMerge():Promise<void>;
 
@@ -25,6 +26,8 @@ export function AppendToGitignore(arg1:string):Promise<void>;
 export function ApplyUpdate():Promise<void>;
 
 export function ArchiveSession(arg1:string):Promise<void>;
+
+export function AttachFileContent(arg1:string,arg2:string,arg3:string,arg4:Array<number>):Promise<Array<session.AttachmentInfo>>;
 
 export function AttachFiles(arg1:string,arg2:Array<string>):Promise<Array<session.AttachmentInfo>>;
 
@@ -119,6 +122,8 @@ export function FetchPaperOriginal(arg1:string,arg2:string):Promise<backend.Pape
 export function ForkSession(arg1:string):Promise<session.SessionInfo>;
 
 export function GenerateCommitMessage():Promise<string>;
+
+export function GenerateWebAccessCertificate():Promise<void>;
 
 export function GetAttachments(arg1:string):Promise<Array<session.AttachmentInfo>>;
 
@@ -242,6 +247,8 @@ export function GetUpdateSettings():Promise<backend.UpdateSettings>;
 
 export function GetVectorIndexStatus():Promise<backend.VectorIndexStatus>;
 
+export function GetWebAccessInfo():Promise<desktop.WebAccessInfo>;
+
 export function GetWebviewGpuPolicy():Promise<backend.WebviewGpuPolicyInfo>;
 
 export function HardenGitRepo(arg1:string):Promise<void>;
@@ -332,6 +339,8 @@ export function RefreshAgents():Promise<Array<backend.AgentDescriptorDTO>>;
 
 export function RefreshSkills():Promise<Array<backend.SkillDescriptorDTO>>;
 
+export function RegenerateWebAccessToken():Promise<void>;
+
 export function ReindexVectorIndex():Promise<void>;
 
 export function RemoveAttachment(arg1:string,arg2:string):Promise<void>;
@@ -386,7 +395,7 @@ export function SearchVectorStore(arg1:backend.SearchRequest):Promise<Array<back
 
 export function SelectModelProfile(arg1:string):Promise<void>;
 
-export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:Array<string>,arg6:string,arg7:string,arg8:boolean,arg9:string,arg10:boolean,arg11:boolean,arg12:backend.SessionWorkspaceChoice):Promise<void>;
+export function SendMessage(arg1:string,arg2:string,arg3:Array<string>,arg4:Array<string>,arg5:Array<string>,arg6:string,arg7:string,arg8:boolean,arg9:string,arg10:boolean,arg11:boolean,arg12:string,arg13:backend.SessionWorkspaceChoice):Promise<void>;
 
 export function SendSystemNotification(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
 
@@ -419,6 +428,16 @@ export function SetReviewStatus(arg1:string,arg2:string):Promise<void>;
 export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
+
+export function SetWebAccessConnection(arg1:string,arg2:number):Promise<void>;
+
+export function SetWebAccessEnabled(arg1:boolean):Promise<void>;
+
+export function SetWebAccessStaticFS(arg1:fs.FS):Promise<void>;
+
+export function SetWebAccessTLS(arg1:boolean,arg2:string,arg3:string):Promise<void>;
+
+export function SetWebAccessToken(arg1:string):Promise<void>;
 
 export function SetWebviewGpuPolicy(arg1:string):Promise<backend.WebviewGpuPolicyInfo>;
 

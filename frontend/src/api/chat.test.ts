@@ -19,7 +19,8 @@ vi.mock('@/lib/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
-import { getPendingActions, sendMessage, resumeTask } from '@/api/chat'
+import { logger } from '@/lib/logger'
+import { getPendingActions, sendMessage, resumeTask, getSessionRuntimeStatus } from '@/api/chat'
 
 describe('getPendingActions null-array normalization', () => {
   beforeEach(() => {
@@ -132,7 +133,7 @@ describe('sendMessage forwards MCP server mentions', () => {
     expect(args[4]).toEqual(['context7'])
     // modelOverride stays in position 6 right after the mention lists.
     expect(args[5]).toBe('')
-    expect(args).toHaveLength(12)
+    expect(args).toHaveLength(13)
   })
 
   it('defaults activeMCPServers to an empty array when omitted', async () => {
@@ -146,15 +147,15 @@ describe('sendMessage forwards MCP server mentions', () => {
 
     const args = calls[0]!
     expect(args[4]).toEqual([])
-    expect(args).toHaveLength(12)
+    expect(args).toHaveLength(13)
   })
 })
 
 // e2s must land in the EXACT Go-binding argument position (after goalBudget,
 // before reviewMode): (id, text, skills, agents, mcpServers, modelOverride,
-// reasoning, goal, goalBudget, e2s, reviewMode). A positional drift silently
-// reroutes mode flags — e.g. a review submit's reviewMode=true would arm E2S
-// instead.
+// reasoning, goal, goalBudget, e2s, reviewMode, clientSendId). A positional
+// drift silently reroutes mode flags — e.g. a review submit's reviewMode=true
+// would arm E2S instead.
 describe('sendMessage forwards the e2s flag positionally', () => {
   beforeEach(() => {
     delete mockApp.SendMessage
@@ -175,8 +176,9 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     expect(args[8]).toBe('{"max_turns":5}') // goalBudget
     expect(args[9]).toBe(true) // e2s — the wiring under test
     expect(args[10]).toBe(true) // reviewMode
-    expect(args[11]).toBeNull() // workspace — null on an ordinary send
-    expect(args).toHaveLength(12)
+    expect(args[11]).toBe('') // clientSendId — the echo-dedup id
+    expect(args[12]).toBeNull() // workspace — null on an ordinary send
+    expect(args).toHaveLength(13)
   })
 
   it('defaults e2s to false (and reviewMode stays false) when omitted', async () => {
@@ -191,7 +193,50 @@ describe('sendMessage forwards the e2s flag positionally', () => {
     const args = calls[0]!
     expect(args[9]).toBe(false)
     expect(args[10]).toBe(false)
-    expect(args).toHaveLength(12)
+    expect(args[11]).toBe('')
+    expect(args[12]).toBeNull() // workspace defaults to null too
+    expect(args).toHaveLength(13)
+  })
+})
+
+// clientSendId must land in the EXACT Go-binding argument position 12 (after
+// reviewMode): the message_received echo carries it back and the sending
+// surface dedups the echo by this id. A drift here silently disables the
+// id-based echo dedup — or shifts reviewMode/workspace.
+describe('sendMessage forwards the client send id positionally', () => {
+  beforeEach(() => {
+    delete mockApp.SendMessage
+  })
+
+  it('passes clientSendId in position 12 (after reviewMode)', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'hello', [], [], [], '', '', false, '', false, false, 'opt-1')
+
+    const args = calls[0]!
+    expect(args[10]).toBe(false) // reviewMode stays put
+    expect(args[11]).toBe('opt-1')
+    expect(args[12]).toBeNull() // workspace still closes the list
+    expect(args).toHaveLength(13)
+  })
+
+  it('defaults clientSendId to an empty string when omitted', async () => {
+    const calls: unknown[][] = []
+    mockApp.SendMessage = vi.fn((...args: unknown[]) => {
+      calls.push(args)
+      return Promise.resolve()
+    })
+
+    await sendMessage('sess-1', 'plain message')
+
+    const args = calls[0]!
+    expect(args[11]).toBe('')
+    expect(args[12]).toBeNull() // workspace defaults to null too
+    expect(args).toHaveLength(13)
   })
 })
 
@@ -228,5 +273,97 @@ describe('resumeTask forwards model/reasoning overrides', () => {
     const args = calls[0]!
     expect(args[1]).toBe('')
     expect(args[2]).toBe('')
+  })
+})
+
+// GetSessionRuntimeStatus drives the session-load runtime reconcile: a shape
+// rejection turns into "unknown" and skips the reconcile entirely. Go's
+// encoding/json used to marshal the nil CompactionAvailability slice to JSON
+// null, so a session without an in-memory orchestrator sent
+// "compaction_availability":null and failed the whole poll — the exact
+// nil-slice story as getPendingActions above. The backend now omits the field
+// (omitempty), and the validator tolerates a legacy null in addition to
+// absent/undefined/array.
+describe('getSessionRuntimeStatus compaction_availability tolerance', () => {
+  // Paused mirrors the Go struct's non-omitempty `paused` — always on the wire.
+  const validBase = { active: false, has_unfinished_task: false, paused: false }
+
+  beforeEach(() => {
+    delete mockApp.GetSessionRuntimeStatus
+    vi.mocked(logger.error).mockClear()
+  })
+
+  it('accepts compaction_availability: null (the legacy wire shape)', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() =>
+      Promise.resolve({ ...validBase, compaction_availability: null }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toBeNull()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('accepts an absent compaction_availability (the current wire shape)', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve({ ...validBase }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toBeUndefined()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('accepts a well-formed compaction_availability array', async () => {
+    mockApp.GetSessionRuntimeStatus = vi.fn(() =>
+      Promise.resolve({
+        ...validBase,
+        compaction_availability: [
+          { strategy: 'sliding_window', available: true, reclaim_tokens: 1200, exact: true },
+          { strategy: 'llm_summary', available: false, reclaim_tokens: 0, exact: false },
+        ],
+      }))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).not.toBeNull()
+    expect(result!.compaction_availability).toHaveLength(2)
+    expect(result!.compaction_availability![0]!.strategy).toBe('sliding_window')
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it('rejects a broken compaction_availability element and reports the shape error', async () => {
+    const payload = {
+      ...validBase,
+      // Missing available/reclaim_tokens/exact — isCompactionAvailability fails.
+      compaction_availability: [{ strategy: 'sliding_window' }],
+    }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(logger.error).toHaveBeenCalledWith('getSessionRuntimeStatus: unexpected response shape', payload)
+  })
+
+  it('rejects a payload without the required paused flag (CS #51) and reports the shape error', async () => {
+    const payload = { active: false, has_unfinished_task: false }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a non-boolean paused flag (CS #51)', async () => {
+    const payload = { ...validBase, paused: 'yes' }
+    mockApp.GetSessionRuntimeStatus = vi.fn(() => Promise.resolve(payload))
+
+    const result = await getSessionRuntimeStatus('sess-1')
+
+    expect(result).toBeNull()
+    expect(logger.error).toHaveBeenCalledTimes(1)
   })
 })

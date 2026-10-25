@@ -6,7 +6,8 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useAttachmentsStore, EMPTY_ATTACHMENTS } from '@/stores/attachmentsStore'
 import { useE2SStore } from '@/stores/e2sStore'
 import { buildUserMessageMeta } from '@/lib/userMessageMeta'
-import { generateMessageId } from '@/lib/ids'
+import { generateMessageId, generateUUID } from '@/lib/ids'
+import { emit } from '@/api/runtime'
 import * as reviewApi from '@/api/review'
 import * as gitApi from '@/api/git'
 import * as chatApi from '@/api/chat'
@@ -38,6 +39,14 @@ export function useReviewActions(sessionId: string) {
       exitReviewLoop(sessionId)
     } catch (err) {
       logger.error('Approve flow failed:', err)
+      // The Approve is the terminal action of the review loop: a transient
+      // failure (SQLite busy, backend restart) must not be silent while
+      // every sibling review surface toasts — say the approve failed so the
+      // user knows to retry it.
+      emit('runtime_error', {
+        id: generateUUID(),
+        message: 'Failed to approve review',
+      })
     } finally {
       setIsStaging(false)
     }
@@ -91,15 +100,16 @@ export function useReviewActions(sessionId: string) {
       const commentsText = parts.join('\n\n')
 
       // Present the feedback as a user message optimistically. The chat
-      // renders user messages from its own optimistic copy only — the
-      // message_received event the backend emits is intentionally ignored by
-      // the UI (normal sends add the card in useMessageSender before the
-      // RPC). A review submit bypasses the chat input, so it must add the
-      // card itself; without this the feedback the agent is already working
-      // on stays invisible until a session reload brings in the persisted
-      // row. Mirrors useMessageSender: task-state handling for the three
-      // dispatch paths (fresh / nudge-resume / live interjection) and a full
-      // rollback when the send is rejected.
+      // renders user messages from its own optimistic copy — the
+      // message_received event the backend emits after persisting the
+      // message is deduped against that copy (useChatEvents: tail
+      // user-message content + time window), so this card is what keeps the
+      // feedback from rendering twice HERE. A review submit bypasses the
+      // chat input and its card must exist before the send for that dedup
+      // to match; surfaces not watching the send render the card from the
+      // event itself. Mirrors useMessageSender: task-state handling for the
+      // three dispatch paths (fresh / nudge-resume / live interjection) and
+      // a full rollback when the send is rejected.
       const wasPaused = useChatStore.getState().paused[sessionId] ?? false
       const isRunning = useChatStore.getState().taskActive[sessionId] ?? false
       const wasActivity = useChatStore.getState().activityStatus[sessionId] ?? null
@@ -147,9 +157,10 @@ export function useReviewActions(sessionId: string) {
       enterReviewLoop(sessionId)
       try {
         // Positional args: (…, skills, agents, mcpServers, goal, goalBudget,
-        // e2s, reviewMode) — e2s must be explicitly false so reviewMode
-        // stays in its binding slot.
-        await chatApi.sendMessage(sessionId, commentsText, [], [], [], '', '', false, '', false, true)
+        // e2s, reviewMode, clientSendId) — e2s must be explicitly false so
+        // reviewMode stays in its binding slot; the optimistic card's id lets
+        // this surface dedup the delivery echo by identity.
+        await chatApi.sendMessage(sessionId, commentsText, [], [], [], '', '', false, '', false, true, optimisticId)
         // Confirmed fresh, non-E2S review task (e2s=false in the binding): drop
         // any stale E2S snapshot so the Execution State panel does not shadow
         // the plan view for the review task. Cleared AFTER the send succeeds so
@@ -207,6 +218,14 @@ export function useReviewActions(sessionId: string) {
       // (rollback via exitReviewLoop).
     } catch (err) {
       logger.error('Submit flow failed:', err)
+      // The send failed after the optimistic rollback: the review buffer
+      // survives for retry, but nothing else says the submit did not land —
+      // surface it like every sibling review surface does (the comment-save
+      // paths toast; this hook was log-only).
+      emit('runtime_error', {
+        id: generateUUID(),
+        message: 'Failed to submit review — your comments are kept',
+      })
     } finally {
       setIsSubmitting(false)
     }

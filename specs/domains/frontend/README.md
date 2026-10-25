@@ -2,7 +2,7 @@
 
 ## Purpose
 
-React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with Go backend exclusively via Wails IPC.
+React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with the Go backend through the `src/api/runtime.ts` transport seam: Wails IPC in the desktop webview; in a browser tab served by the web-access sidecar, `POST /api/rpc` + a WebSocket carrying the same event stream ([ADR-101](../../decisions/101-browser-web-access.md)) — identical behavior in both transports (see [loading-states.md](loading-states.md)).
 
 ## Key Files
 
@@ -203,17 +203,20 @@ Dark color-scheme. Focus outlines globally suppressed. Custom scrollbar (8px, se
 ## Communication Pattern
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Frontend                               │
-│                                                          │
-│  src/api/*.ts  ──RPC──→  window.go.desktop.App.*        │
-│       ↑                        │                        │
-│  src/stores/*  ←──Events──  window.runtime.EventsOn()   │
-│       ↑                        │                        │
-│  src/hooks/*   ←──handlers──   │                        │
-│       ↑                                                 │
-│  src/components/* ←── React renders ←── store selectors │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      Frontend                                │
+│                                                              │
+│  src/api/*.ts ──RPC──→ src/api/runtime.ts  (transport seam)  │
+│       ↑                        │                             │
+│  src/stores/* ←──Events──      ├─ desktop webview (Wails):   │
+│       ↑                        │    window.go.desktop.App.*  │
+│  src/hooks/* ←──handlers──     │    window.runtime.EventsOn()│
+│       ↑                        └─ browser tab (ADR-101):     │
+│  src/components/* ←── React renders ←── store selectors      │
+│       (the seam picks the transport per environment:         │
+│        POST /api/rpc/<Method> + /ws via the web-access       │
+│        sidecar, or the Wails bridge in the webview)          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Project switching is orchestrated by `useProjectSwitchState`: it saves source-project UI state through project RPC wrappers (`saveProjectSwitchState`), calls `switchProject`, restores destination tabs/files from `getProjectSwitchState`, and then applies session fallback (saved session → latest session → create session). The saved-session pointer is PROJECT-scoped (one value per project; the No Project pseudo-project is one bucket for all CHAT sessions) — when the switch is driven by the workspace tab engine, the engine re-selects the activating tab's own remembered session on top of whatever the pointer landed on (see [tabs.md](tabs.md) § Activation sequence).
@@ -278,6 +281,7 @@ Frontend configuration is derived from backend (no separate frontend config file
 - [fonts.md](fonts.md) — user font selection: UI/mono family pickers (free text + detected + installed options) plus per-scope select-only smoothing pickers over the persisted `fontStore`, once-per-launch dual system-font detection, and the inline `--font-sans`/`--font-mono` `@theme`-token + `--font-smoothing-*` delivery on `<html>` ([ADR-078](../../decisions/078-user-font-selection.md), [ADR-079](../../decisions/079-font-smoothing-selection.md))
 - [button-tooltips.md](button-tooltips.md) — the button tooltip convention: a `title=`, a Radix `TooltipTrigger` wrapper, or a statically visible label on every button — exactly one, the channels never combine (both AST guards flag a `title` under a `TooltipTrigger`); buttons that may hide their label always carry a `title`, always-labeled buttons never carry an echo, picker triggers follow the heading rule
 - [stores.md](stores.md) — Zustand store catalog
+- [loading-states.md](loading-states.md) — the three loading states (pre-React boot loader in `index.html`, chat-history spinner over `chatStore.historyLoaded`, session-list skeleton/loading row over the `sessions === null` sentinel), their markers and single-writer rules, and the cross-cutting invariants: CSP legality (no inline scripts, inline `<style>` allowed), zoom-safe overlay sizing, honest `null`-vs-`[]`/cancelled semantics, identical behavior in both transports (wails webview + web-access sidecar)
 - [tabs.md](tabs.md) — the workspace tab layer: always-live model, `tabsEnabled` flag scope, single activation engine, snapshot slices ([ADR-085](../../decisions/085-workspace-tabs-single-engine.md))
 - [git-operation-console.md](git-operation-console.md) — the footer log of the last git mutation result (button tint, anchored popover, per-project scope, acknowledge semantics)
 - [git-changes-list.md](git-changes-list.md) — the Changes tab file list: porcelain-axis sections, flat name-first rows, tree basename rows, full-path tooltips

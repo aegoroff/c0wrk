@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { WebAccessGate } from './components/webaccess/WebAccessGate'
 import { registerLanguages } from './lib/hljsLanguages'
 import '@xterm/xterm/css/xterm.css'
 import './index.css'
@@ -13,6 +14,13 @@ import {
   removeOrphanSystemFontKey,
 } from './stores/fontStore'
 import { installFloatingUiZoomCompensation } from './lib/floatingUiZoom'
+import { initRuntimeProbe } from './api/runtime'
+
+// Start the web-transport probe before anything renders. Earliest legal
+// point: the probe used to run as api/runtime's import side effect, which
+// broke the no-module-side-effects rule; starting it here still beats the
+// first render (and the splash gate that awaits the transport).
+initRuntimeProbe()
 
 // Apply the persisted theme before first paint to avoid a flash of the
 // default (dark) theme. Accessing getState() rehydrates from localStorage
@@ -89,7 +97,23 @@ if (!root) throw new Error('Root element not found')
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <WebAccessGate>
+        <App />
+      </WebAccessGate>
     </ErrorBoundary>
   </React.StrictMode>,
 )
+
+// Boot-loader handoff. index.html ships a static, CSS-only spinner inside
+// #root so the very first HTML paint — before the JS bundle executes —
+// already shows a centered loader styled like the app's own splash. Because
+// the loader (and its inline <style>) live inside the React container, the
+// first render clears them as React takes over, so the handoff to App's
+// splash produces no blank frame. The removal below is an idempotent
+// backstop scheduled on the first animation frame: by then the element is
+// already gone in the normal path and the null-safe lookup is a no-op, but
+// it still guarantees the static loader never outlives the mounted app (and
+// it keeps the spinner on screen if the bundle fails before mounting).
+requestAnimationFrame(() => {
+  document.getElementById('boot-loader')?.remove()
+})

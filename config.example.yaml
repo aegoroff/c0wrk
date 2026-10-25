@@ -1781,6 +1781,12 @@ orchestration:
 #   - the embedded local model's frontend surfaces (the Settings → LLM block
 #     and its entries in both model pickers; a frontend-only gate — the
 #     backend keeps serving the subsystem's RPCs regardless)
+#   - the browser web-access sidecar (web_access.*) — a COMPOUND gate: the
+#     sidecar mounts only while this switch AND web_access.enabled are both
+#     on, and flipping either one mid-session mounts or stops the sidecar
+#     live, without an app restart. Upgrade note: a config that turned
+#     web_access on before this gate existed keeps its section, but the
+#     sidecar no longer mounts until experimental.enabled is turned on too.
 #
 # experimental:
 #   # Master switch. Default: false (gated features off).
@@ -2105,3 +2111,121 @@ notifications:
   # notification centers own banner lifetime themselves and ignore it.
   # Editable from Settings → General → System notifications.
   banner_timeout_seconds: -1
+
+
+# ---------------------------------------------------------------------------
+# Web Access (browser sidecar)
+# ---------------------------------------------------------------------------
+# Lets the desktop UI be mirrored into a browser window: c0wrk starts an
+# HTTP/WebSocket sidecar that serves the same frontend and bridges its live
+# events into the browser tab it opens (ADR-101). OFF by default — with the
+# section absent (or enabled: false) no listener is created and the app
+# behaves exactly as before.
+#
+# The section is additionally gated by the experimental master switch
+# (experimental.enabled): the sidecar runs only while BOTH switches are on —
+# web_access.enabled alone is not enough. Flipping either switch mid-session
+# mounts or stops the sidecar live, without an app restart.
+#
+# Enabling this explicitly accepts full control of the running app from that
+# browser tab: the tab IS the desktop UI — anything the desktop app can do,
+# the tab can do. The default bind is loopback-only, so the listener stays
+# reachable from this machine only. A non-loopback bind exposes the listener
+# to the network; without TLS the traffic — including the login POST body —
+# travels unencrypted, so do not point it at a network you do not fully
+# control (the tls subsection below adds optional HTTPS; ADR-102).
+#
+#   enabled (default false) — master switch; false starts nothing.
+#
+#   bind (default "127.0.0.1") — the interface the sidecar listens on. Any
+#                            valid IP literal is accepted: loopback
+#                            ("127.0.0.1", "127.x.y.z", "::1"), the
+#                            unspecified "0.0.0.0"/"::", or a specific
+#                            LAN/public IPv4/IPv6 address — plus the
+#                            "localhost" name. A non-loopback bind is a
+#                            LAN-exposed listener: over plain HTTP it loads
+#                            with a warning ("web_access: bind … is not
+#                            loopback — the listener is network-accessible,
+#                            traffic is plain HTTP without TLS"); with the
+#                            tls subsection enabled it loads warning-free —
+#                            the exposure is surfaced by the Settings → Web
+#                            Access banner and the sidecar start log
+#                            instead. Either way the value is saved as-is.
+#                            Invalid
+#                            values (unparseable; empty while enabled) are
+#                            fail-soft at load: a warning is surfaced and
+#                            the section is reset to the safe default
+#                            (sidecar off); saving such a state is refused
+#                            with an error.
+#
+#   port (default 0)        — TCP port to listen on. 0 = auto: a free port
+#                            is picked at every start.
+#
+#   token (default empty)   — the credential the sidecar authenticates
+#                            browser requests with. Empty = minted once at
+#                            the first start and written back here through
+#                            the same config save every other setting uses —
+#                            the credential is stable across restarts from
+#                            then on, so browser logins survive app
+#                            restarts. Set a value by hand to pin your own
+#                            static secret (a short one, < 16 chars, draws
+#                            a warning when the sidecar starts); from the
+#                            app, Settings → Web Access writes it two ways:
+#                            type your own into the token field (8-256
+#                            characters, committed on Enter or focus loss)
+#                            or hit Regenerate to mint a fresh one. The
+#                            token is a durable credential in this file —
+#                            treat it like a password.
+#
+#   tls (default off)       — optional HTTPS for the sidecar (ADR-102):
+#                              serve the same UI over TLS instead of plain
+#                              HTTP, so a non-loopback bind no longer means
+#                              a token over plaintext.
+#
+#     tls.enabled (default false) — the protocol is its own switch, never
+#                               parsed out of the address field (the URL
+#                               field keeps its host:port grammar: an
+#                               explicit http:// or https:// scheme typed
+#                               there is display-only — accepted and
+#                               stripped, any other scheme is refused —
+#                               which transport actually serves the sidecar
+#                               is this toggle alone). A TLS 1.2 floor
+#                               is pinned; with TLS off the behavior is
+#                               byte-identical to pre-TLS builds.
+#
+#     tls.cert / tls.key      — paths to the PEM certificate and the PEM
+#                               private key. An enabled TLS that cannot
+#                               actually serve — either path empty, or the
+#                               pair failing to load (missing file, parse
+#                               error, key/cert mismatch) — is unusable
+#                               (ADR-102): the config load turns the whole
+#                               web_access section OFF with a warning
+#                               naming the reason (a requested TLS is never
+#                               downgraded to plain HTTP; fix the pair and
+#                               enable web_access again), and enabling the
+#                               sidecar from Settings is refused with the
+#                               same failure. The save gate stays
+#                               structure-only, and the sidecar start keeps
+#                               its fail-closed backstop — the listener is
+#                               never silently downgraded to plaintext.
+#                               The standard pair is app-owned
+#                               and fixed: ~/.c0wrk/web-access.crt +
+#                               web-access.key, written by the Generate
+#                               action in Settings → Web Access (a
+#                               self-signed ECDSA P-256 certificate for
+#                               the pinned bind — browsers show their
+#                               one-time warning screen for self-signed
+#                               certs). To use your own certificate, point
+#                               these paths at your PEM files (e.g.
+#                               certbot's fullchain.pem + privkey.pem) by
+#                               editing this file directly.
+#
+# web_access:
+#   enabled: false
+#   bind: "127.0.0.1"
+#   port: 0
+#   token: ""
+#   tls:
+#     enabled: false
+#     cert: ""
+#     key: ""

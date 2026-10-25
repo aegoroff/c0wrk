@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { createProject, pickDirectory } from '@/api/projects'
+import { isWebTransport } from '@/api/runtime'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
@@ -23,6 +24,13 @@ interface CreateProjectDialogProps {
 }
 
 export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogProps) {
+  // Project creation is a desktop-only capability: a browser session has no
+  // directory access to point a project at, and the backend's createProject
+  // expects a path the web transport has no honest way to obtain. The dialog
+  // stays reachable (naming a future project is harmless), but the Create
+  // action is disabled with the reason on it instead of pretending the form
+  // can be completed.
+  const web = isWebTransport()
   const [name, setName] = useState('')
   const [externalPath, setExternalPath] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -77,13 +85,26 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
         <div className="min-w-0 space-y-4">
           <div className="space-y-2">
             <label className="text-sm font-medium text-foreground">Directory</label>
-            <Button variant="outline" size="sm" className="gap-1.5 w-full justify-start" onClick={handlePickDir}>
-              <FolderOpen className="size-4" />
-              {externalPath ? 'Change directory' : 'Choose directory'}
-            </Button>
+            {!isWebTransport() && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 w-full justify-start"
+                onClick={handlePickDir}
+              >
+                <FolderOpen className="size-4" />
+                {externalPath ? 'Change directory' : 'Choose directory'}
+              </Button>
+            )}
             {externalPath && (
               <p className="truncate font-mono text-xs text-muted-foreground" title={externalPath}>
                 {externalPath}
+              </p>
+            )}
+            {web && (
+              <p className="text-xs text-muted-foreground">
+                Creating projects requires the desktop app — a browser session
+                has no directory access to point a project at.
               </p>
             )}
           </div>
@@ -106,7 +127,10 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!name.trim() || !externalPath || submitting}
+            disabled={!name.trim() || !externalPath || submitting || web}
+            title={
+              web ? 'Creating projects is only available in the desktop app.' : undefined
+            }
           >
             {submitting ? 'Creating...' : 'Create'}
           </Button>

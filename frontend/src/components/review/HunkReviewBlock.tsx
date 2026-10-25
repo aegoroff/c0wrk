@@ -9,6 +9,7 @@ import { detectHljsLanguage, highlightCodeLine } from './hunkCodeHighlight'
 import { parseHunkRaw } from './diffParsing'
 import { UnifiedDiffTable } from './UnifiedDiffTable'
 import { SplitDiffTable } from './SplitDiffTable'
+import { generateUUID } from '@/lib/ids'
 
 interface HunkReviewBlockProps {
   sessionId: string
@@ -66,7 +67,7 @@ export function HunkReviewBlock({ sessionId, filePath, hunk, hunkIndex, readOnly
       // Roll back the optimistic update so the UI matches the DB state.
       setHunkComment(sessionId, filePath, hunkId, previous)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to save hunk comment',
       })
     }

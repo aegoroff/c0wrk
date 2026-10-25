@@ -77,7 +77,7 @@ type SessionRow = {
 
 const { sessionMocks } = vi.hoisted(() => ({
   sessionMocks: {
-    sessions: [] as unknown[],
+    sessions: [] as unknown[] | null,
     activeSessionId: null as string | null,
     selectSession: vi.fn(),
     addSession: vi.fn(),
@@ -295,6 +295,31 @@ describe('SessionSelector — flat mode (default)', () => {
     const toggle = menu.querySelector<HTMLElement>('[role="menuitem"][title="Group sessions by branch"]')
     expect(toggle).not.toBeNull()
     expect(useUIStore.getState().sessionListGrouped).toBe(false)
+    void container
+  })
+
+  it('shows a loading row instead of an empty menu body while sessions are not loaded (null sentinel)', async () => {
+    // `sessions === null` is the store's "not yet loaded" signal (initial
+    // value + resetForProjectSwitch) — the same one the sidebar's SessionList
+    // reads. The menu shows a loading row; it must not read as an empty list.
+    sessionMocks.sessions = null
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    const status = menu.querySelector('[role="status"]')
+    expect(status).not.toBeNull()
+    expect(status?.getAttribute('aria-label')).toBe('Loading sessions')
+    expect(status?.textContent).toContain('Loading sessions')
+    expect(menuText(menu)).not.toContain('No sessions')
+    void container
+  })
+
+  it('does not show the loading row for a genuinely empty loaded list', async () => {
+    sessionMocks.sessions = []
+    const container = await render(<SessionSelector />)
+    const menu = await openMenu(container)
+
+    expect(menu.querySelector('[role="status"]')).toBeNull()
     void container
   })
 })

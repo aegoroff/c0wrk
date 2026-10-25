@@ -9,7 +9,7 @@ import { useCallback, useState } from 'react'
 import { ChevronDown, Palette, Plus } from 'lucide-react'
 
 import { deleteTheme, pickAndImportThemes } from '@/api/themes'
-import { emit } from '@/api/runtime'
+import { emit, isWebTransport } from '@/api/runtime'
 import { ThemeMenuItem, ThemeTypeIcon, type ThemeRow } from './ThemeMenuItem'
 import {
   DropdownMenu,
@@ -24,10 +24,11 @@ import {
   themeTypeOf,
   useThemeStore,
 } from '@/stores/themeStore'
+import { generateUUID } from '@/lib/ids'
 
 /** Surfaces a failure via the app-wide runtime_error toast. */
 function toastError(message: string): void {
-  emit('runtime_error', { id: crypto.randomUUID(), message })
+  emit('runtime_error', { id: generateUUID(), message })
 }
 
 export function ThemeSelector() {
@@ -154,9 +155,14 @@ export function ThemeSelector() {
         <button
           type="button"
           aria-label="Import theme"
-          title="Import theme"
-          className="rounded p-1.5 hover:bg-muted/50 active:bg-muted/30"
+          title={
+            isWebTransport()
+              ? 'Theme import needs the desktop app (native file dialog)'
+              : 'Import theme'
+          }
+          className="rounded p-1.5 hover:bg-muted/50 active:bg-muted/30 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={() => void handleImport()}
+          disabled={isWebTransport()}
         >
           <Plus className="size-4" />
         </button>

@@ -38,6 +38,10 @@ export function ArchiveSession(arg1) {
   return window['go']['desktop']['App']['ArchiveSession'](arg1);
 }
 
+export function AttachFileContent(arg1, arg2, arg3, arg4) {
+  return window['go']['desktop']['App']['AttachFileContent'](arg1, arg2, arg3, arg4);
+}
+
 export function AttachFiles(arg1, arg2) {
   return window['go']['desktop']['App']['AttachFiles'](arg1, arg2);
 }
@@ -224,6 +228,10 @@ export function ForkSession(arg1) {
 
 export function GenerateCommitMessage() {
   return window['go']['desktop']['App']['GenerateCommitMessage']();
+}
+
+export function GenerateWebAccessCertificate() {
+  return window['go']['desktop']['App']['GenerateWebAccessCertificate']();
 }
 
 export function GetAttachments(arg1) {
@@ -470,6 +478,10 @@ export function GetVectorIndexStatus() {
   return window['go']['desktop']['App']['GetVectorIndexStatus']();
 }
 
+export function GetWebAccessInfo() {
+  return window['go']['desktop']['App']['GetWebAccessInfo']();
+}
+
 export function GetWebviewGpuPolicy() {
   return window['go']['desktop']['App']['GetWebviewGpuPolicy']();
 }
@@ -650,6 +662,10 @@ export function RefreshSkills() {
   return window['go']['desktop']['App']['RefreshSkills']();
 }
 
+export function RegenerateWebAccessToken() {
+  return window['go']['desktop']['App']['RegenerateWebAccessToken']();
+}
+
 export function ReindexVectorIndex() {
   return window['go']['desktop']['App']['ReindexVectorIndex']();
 }
@@ -758,8 +774,8 @@ export function SelectModelProfile(arg1) {
   return window['go']['desktop']['App']['SelectModelProfile'](arg1);
 }
 
-export function SendMessage(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12) {
-  return window['go']['desktop']['App']['SendMessage'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12);
+export function SendMessage(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13) {
+  return window['go']['desktop']['App']['SendMessage'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13);
 }
 
 export function SendSystemNotification(arg1, arg2, arg3) {
@@ -824,6 +840,26 @@ export function SetUpdateSettings(arg1) {
 
 export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
+}
+
+export function SetWebAccessConnection(arg1, arg2) {
+  return window['go']['desktop']['App']['SetWebAccessConnection'](arg1, arg2);
+}
+
+export function SetWebAccessEnabled(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessEnabled'](arg1);
+}
+
+export function SetWebAccessStaticFS(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessStaticFS'](arg1);
+}
+
+export function SetWebAccessTLS(arg1, arg2, arg3) {
+  return window['go']['desktop']['App']['SetWebAccessTLS'](arg1, arg2, arg3);
+}
+
+export function SetWebAccessToken(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessToken'](arg1);
 }
 
 export function SetWebviewGpuPolicy(arg1) {

@@ -253,6 +253,9 @@ describe('useBackgroundSessionWatcher', () => {
     expect(subscriptions.has('bg-1:tool_confirm')).toBe(true)
     expect(subscriptions.has('bg-1:step_limit')).toBe(true)
     expect(subscriptions.has('bg-1:plan_review_ready')).toBe(true)
+    // Multi-surface convergence: a background prompt settled elsewhere must
+    // retire this surface's card without waiting for a resync.
+    expect(subscriptions.has('bg-1:hitl_resolved')).toBe(true)
     expect(subscriptions.has('bg-1:goal_proposal')).toBe(true)
     expect(subscriptions.has('bg-1:goal_status')).toBe(true)
     expect(subscriptions.has('bg-1:goal_progress')).toBe(true)
@@ -298,6 +301,7 @@ describe('useBackgroundSessionWatcher', () => {
     expect(subscriptions.has('active-1:tool_confirm')).toBe(false)
     expect(subscriptions.has('active-1:step_limit')).toBe(false)
     expect(subscriptions.has('active-1:plan_review_ready')).toBe(false)
+    expect(subscriptions.has('active-1:hitl_resolved')).toBe(false)
     expect(subscriptions.has('active-1:ask_user')).toBe(false)
     expect(subscriptions.has('active-1:goal_proposal')).toBe(false)
     // Goal status/progress parity: the ACTIVE session's goal events are owned
@@ -324,8 +328,9 @@ describe('useBackgroundSessionWatcher', () => {
 
     expect(subscriptions.has('bg-1:task_complete')).toBe(true)
     expect(subscriptions.has('bg-2:task_complete')).toBe(true)
-    // 13 events × 2 sessions = 26 subscriptions
-    expect(subscriptions.size).toBe(28)
+    // 15 events per session × 2 sessions = 30 subscriptions (14 per session
+    // before the hitl_resolved convergence subscription joined the set).
+    expect(subscriptions.size).toBe(30)
   })
 
   it('resets taskActive to false on task_complete without touching the active session state', () => {
@@ -441,7 +446,7 @@ describe('useBackgroundSessionWatcher', () => {
     sessionStoreState.activeSessionId = 'active-1'
 
     useRenderWatcher()
-    expect(subscriptions.size).toBe(14)
+    expect(subscriptions.size).toBe(15)
 
     // Session completes via another path.
     chatStoreState.setTaskActive('bg-1', false)
@@ -561,8 +566,8 @@ describe('useBackgroundSessionWatcher', () => {
 
     useRenderWatcher()
 
-    // 13 events × 2 unique sessions = 26 — the shadowed bg-1 is not counted twice.
-    expect(subscriptions.size).toBe(28)
+    // 15 events × 2 unique sessions = 30 — the shadowed bg-1 is not counted twice.
+    expect(subscriptions.size).toBe(30)
   })
 
   // --- Sound parity: a background session gets the same audible cues the

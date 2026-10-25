@@ -15,17 +15,27 @@
 // actual staging comes from the Wails `files:dropped` event, which is the only
 // source that yields absolute paths.
 //
-// The hook is a no-op in terminal mode: dropping files into the terminal would
-// be surprising, and the terminal panel is the active surface there.
+// The staging (and the drop-zone highlight it feeds) is active in chat mode
+// only: dropping files into the terminal would be surprising. The dragover/
+// drop preventDefault (navigation suppression) is NOT mode-gated — in a
+// browser tab it is the only thing keeping an accidental drop anywhere over
+// the window from navigating the tab to the file's content, discarding the
+// whole SPA state.
 
 import { useEffect, useRef, useState } from 'react'
-import { onGlobalEvent } from '@/api/runtime'
+import { isWebTransport, onGlobalEvent } from '@/api/runtime'
 import { isFilesDroppedData } from '@/types/events'
 import { useStageAttachments } from '@/hooks/useStageAttachments'
 import { useInputModeStore } from '@/stores/inputModeStore'
 
 /**
- * Subscribe to native OS file drop and stage the dropped paths as attachments.
+ * Subscribe to file drops and stage the dropped files as attachments.
+ *
+ * Transport split (ADR-101): in the Wails webview the drop is intercepted at
+ * the OS level and arrives as the native `files:dropped` event (absolute
+ * paths); a browser tab never sees that event — its HTML5 `drop` event IS the
+ * source, and the dropped File objects stage through AttachFileContent. Both
+ * transports share the drag-overlay highlighting and the staging pipeline.
  *
  * @param activeSessionId active chat session id (null = the staging pipeline
  *   creates one on demand).
@@ -37,7 +47,7 @@ export function useFileDrop(activeSessionId: string | null): {
   dragActive: boolean
 } {
   const mode = useInputModeStore((s) => s.mode)
-  const { stageAttachmentPaths } = useStageAttachments()
+  const { stageAttachmentPaths, stageAttachmentFiles } = useStageAttachments()
   const [dragActive, setDragActive] = useState(false)
   // The HTML5 drag sequence fires many dragenter/dragleave events as the cursor
   // moves between child elements. We ref-count them (per hook instance) so the
@@ -46,41 +56,33 @@ export function useFileDrop(activeSessionId: string | null): {
   const dragEnterCount = useRef(0)
 
   useEffect(() => {
-    if (mode !== 'chat') {
-      // Reset state so a leftover highlight doesn't persist across a mode switch.
-      dragEnterCount.current = 0
-      setDragActive(false)
-      return
-    }
+    // Navigation suppression is NOT mode-gated: preventDefault on dragover/
+    // drop is the only thing stopping a browser tab from navigating away to
+    // the dropped file's content (the Wails webview has the OS-level
+    // OnFileDrop intercept; a browser tab has nothing else). Only the
+    // STAGING (and the highlight overlay it feeds) is chat-only — dropping
+    // files into the terminal would be surprising.
+    const stagingActive = mode === 'chat'
 
     const resetDrag = () => {
       dragEnterCount.current = 0
       setDragActive(false)
     }
-
-    // --- Stage dropped files from the Wails native drop event. ---
-    // Wails' native `OnFileDrop` intercepts the drop at the OS level, so the
-    // webview never fires the HTML5 `drop`/`dragleave` events that would
-    // otherwise hide the overlay. The `files:dropped` event is therefore also
-    // the authoritative signal that the drop completed — reset the highlight
-    // here so it can't stick after the files are staged.
-    const unsub = onGlobalEvent('files:dropped', (data) => {
-      if (!isFilesDroppedData(data)) return
-      resetDrag()
-      if (data.paths.length === 0) return
-      void stageAttachmentPaths(activeSessionId, [...data.paths])
-    })
+    // A mode switch re-runs this effect: clear any overlay a drag that was
+    // in flight at the switch left behind.
+    resetDrag()
 
     // --- Drive the highlight overlay via document-level HTML5 drag events. ---
     // preventDefault on dragover is REQUIRED for the browser to fire `drop` and
-    // to suppress its default "open/navigate to the file" behavior. We never
-    // read the HTML5 dataTransfer here — paths come from the Wails event — so
-    // this is purely visual + navigation-suppression.
+    // to suppress its default "open/navigate to the file" behavior. In the
+    // Wails webview the dataTransfer is never read (paths come from the Wails
+    // event); in a browser tab the drop handler below reads the files from it.
 
     const onDragEnter = (e: DragEvent) => {
       // Only react to drags carrying files.
       if (!hasFiles(e)) return
       e.preventDefault()
+      if (!stagingActive) return
       dragEnterCount.current++
       setDragActive(true)
     }
@@ -88,6 +90,7 @@ export function useFileDrop(activeSessionId: string | null): {
     const onDragOver = (e: DragEvent) => {
       if (!hasFiles(e)) return
       e.preventDefault()
+      if (!stagingActive) return
       // Keep the highlight steady while moving over the window. setState with
       // the same value is a no-op, so this is cheap and avoids a stale-closure
       // read of dragActive.
@@ -95,6 +98,7 @@ export function useFileDrop(activeSessionId: string | null): {
     }
 
     const onDragLeave = () => {
+      if (!stagingActive) return
       // dataTransfer may be null/empty on dragleave (notably when leaving the
       // window), so decrement unconditionally to avoid a stuck overlay. The
       // counter is only ever incremented for file drags (onDragEnter), so a
@@ -103,29 +107,73 @@ export function useFileDrop(activeSessionId: string | null): {
       if (dragEnterCount.current === 0) setDragActive(false)
     }
 
-    const onDrop = (e: DragEvent) => {
-      // Suppress the webview's native "open file" navigation; the Wails
-      // files:dropped event delivers the paths.
+    // Suppress the default "open file" navigation on every transport and in
+    // every input mode; where the files come from differs per transport
+    // (below).
+    const suppressNavigation = (e: DragEvent) => {
       e.preventDefault()
       resetDrag()
     }
 
+    if (isWebTransport()) {
+      // --- Web transport: the HTML5 drop IS the file source. ---
+      // There is no Wails OnFileDrop listener in a browser tab and the
+      // `files:dropped` event can never fire; the dropped File objects stage
+      // through AttachFileContent directly.
+      const onDrop = (e: DragEvent) => {
+        suppressNavigation(e)
+        if (!stagingActive) return
+        const files = Array.from(e.dataTransfer?.files ?? [])
+        if (files.length === 0) return
+        void stageAttachmentFiles(activeSessionId, files)
+      }
+
+      document.addEventListener('dragenter', onDragEnter)
+      document.addEventListener('dragover', onDragOver)
+      document.addEventListener('dragleave', onDragLeave)
+      document.addEventListener('drop', onDrop)
+
+      return () => {
+        document.removeEventListener('dragenter', onDragEnter)
+        document.removeEventListener('dragover', onDragOver)
+        document.removeEventListener('dragleave', onDragLeave)
+        document.removeEventListener('drop', onDrop)
+        // Reset the ref counter so a re-mount (e.g. mode switch back to chat)
+        // starts from a clean state.
+        dragEnterCount.current = 0
+      }
+    }
+
+    // --- Wails transport: stage dropped files from the native drop event. ---
+    // Wails' native `OnFileDrop` intercepts the drop at the OS level, so the
+    // webview never fires the HTML5 `drop`/`dragleave` events that would
+    // otherwise hide the overlay. The `files:dropped` event is therefore also
+    // the authoritative signal that the drop completed — reset the highlight
+    // here so it can't stick after the files are staged.
+    const unsub = onGlobalEvent('files:dropped', (data) => {
+      if (!stagingActive) return
+      if (!isFilesDroppedData(data)) return
+      resetDrag()
+      if (data.paths.length === 0) return
+      void stageAttachmentPaths(activeSessionId, [...data.paths])
+    })
+
     document.addEventListener('dragenter', onDragEnter)
     document.addEventListener('dragover', onDragOver)
     document.addEventListener('dragleave', onDragLeave)
-    document.addEventListener('drop', onDrop)
+    document.addEventListener('drop', suppressNavigation)
 
     return () => {
       unsub()
       document.removeEventListener('dragenter', onDragEnter)
       document.removeEventListener('dragover', onDragOver)
       document.removeEventListener('dragleave', onDragLeave)
-      document.removeEventListener('drop', onDrop)
+      document.removeEventListener('drop', suppressNavigation)
       // Reset the ref counter so a re-mount (e.g. mode switch back to chat)
       // starts from a clean state.
       dragEnterCount.current = 0
     }
-  }, [mode, activeSessionId, stageAttachmentPaths])
+  }, [mode, activeSessionId, stageAttachmentPaths, stageAttachmentFiles])
 
   return { dragActive }
 }

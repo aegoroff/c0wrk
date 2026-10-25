@@ -1,9 +1,12 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -3974,6 +3977,94 @@ func TestUpdateExperimentalFeatures_DoesNotClearModelProfilesEnabled(t *testing.
 	}
 	if !persisted.ModelProfiles.Enabled {
 		t.Error("persisted ModelProfiles.Enabled = false after re-enabling experimental features, want true")
+	}
+}
+
+// TestUpdateExperimentalFeatures_InvokesHookAfterPersist verifies the desktop
+// hook contract (ADR-101): the hook carried through the FrontendAPIConfig
+// seam fires once per toggle, in both directions, and
+// strictly AFTER the persist landed — the sidecar transition it drives must
+// be the visible consequence of the persisted gate, never of an in-memory
+// flip that failed to reach disk.
+func TestUpdateExperimentalFeatures_InvokesHookAfterPersist(t *testing.T) {
+	f, _, cfgPath := newTestAPI(t)
+
+	var calls []bool
+	f.onExperimentalChanged = func(enabled bool) {
+		persisted, err := config.Load(cfgPath)
+		if err != nil {
+			t.Errorf("config.Load inside the hook: %v", err)
+			return
+		}
+		if persisted.Experimental.Enabled != enabled {
+			t.Errorf("hook fired before the persist landed: persisted experimental.enabled = %v, want %v",
+				persisted.Experimental.Enabled, enabled)
+		}
+		calls = append(calls, enabled)
+	}
+
+	if err := f.UpdateExperimentalFeatures(true); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
+	}
+	if err := f.UpdateExperimentalFeatures(false); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
+	}
+	if len(calls) != 2 || calls[0] != true || calls[1] != false {
+		t.Fatalf("hook calls = %v, want [true false] in order", calls)
+	}
+}
+
+// TestUpdateExperimentalFeatures_PersistFailureSkipsHook pins the negative
+// half of the hook contract: a rejected disk write must not fire the desktop
+// hook (the sidecar lifecycle follows PERSISTED operator intent), and the
+// in-memory gate is rolled back so the applied gate never diverges from the
+// persisted state — the failure surfaces as a returned error. The Warn is
+// intercepted at its source (severity, message, payload) instead of leaking
+// to the test output.
+func TestUpdateExperimentalFeatures_PersistFailureSkipsHook(t *testing.T) {
+	f, _, _ := newTestAPI(t)
+
+	var logBuf bytes.Buffer
+	f.logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	hookRan := false
+	f.onExperimentalChanged = func(bool) { hookRan = true }
+
+	// Point the config at an unwritable path: the parent directory does not
+	// exist, so the atomic write fails and the persist is rejected.
+	f.configMu.Lock()
+	f.configPath = filepath.Join(f.configPath, "missing-dir", "config.yaml")
+	f.configMu.Unlock()
+
+	err := f.UpdateExperimentalFeatures(true)
+	if err == nil {
+		t.Fatal("a failed persist must be returned as an error, not swallowed")
+	}
+	if !strings.Contains(err.Error(), "persisting experimental features toggle") {
+		t.Errorf("error = %v, want it to name the failed persist", err)
+	}
+	// The missing-parent cause is classified structurally (fs.ErrNotExist
+	// through the wrap chain), never by matching the logged strerror: OS-
+	// localized messages ("no such file or directory" vs Windows' "The
+	// system cannot find the file specified.") would fail the windows-latest
+	// CI leg deterministically.
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error = %v, want it to wrap fs.ErrNotExist", err)
+	}
+	if hookRan {
+		t.Error("the desktop hook fired despite the failed persist — it must follow persisted intent only")
+	}
+	if f.experimentalFeaturesEnabled() {
+		t.Error("in-memory gate must be rolled back on a failed persist (no divergence from the persisted state)")
+	}
+
+	// Exactly one intercepted WARN names the failed persist.
+	logs := logBuf.String()
+	if n := strings.Count(logs, "level=WARN"); n != 1 {
+		t.Fatalf("got %d WARN records, want exactly 1:\n%s", n, logs)
+	}
+	if !strings.Contains(logs, "failed to persist experimental features toggle") {
+		t.Errorf("the WARN record must name the failed persist, got:\n%s", logs)
 	}
 }
 

@@ -3,7 +3,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
-import { shouldAddTaskCompleteOutput, shouldTriggerReview, useChatEvents } from '@/hooks/events/useChatEvents'
+import {
+  shouldAddTaskCompleteOutput,
+  shouldTriggerReview,
+  shouldAddReceivedUserMessage,
+  MESSAGE_RECEIVED_ECHO_WINDOW_MS,
+  MESSAGE_RECEIVED_SCAN_DEPTH,
+  useChatEvents,
+} from '@/hooks/events/useChatEvents'
 import { useSubagentEvents } from '@/hooks/events/useSubagentEvents'
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { reportDroppedEvent } from '@/api/runtime'
@@ -147,6 +154,104 @@ describe('shouldTriggerReview', () => {
 
   it('returns false in CODE mode when there are no git changes', () => {
     expect(shouldTriggerReview(false, false)).toBe(false)
+  })
+})
+
+describe('shouldAddReceivedUserMessage', () => {
+  const NOW = 50_000
+  const WINDOW = MESSAGE_RECEIVED_ECHO_WINDOW_MS
+
+  it('returns false for empty text', () => {
+    expect(shouldAddReceivedUserMessage([], '', NOW)).toBe(false)
+  })
+
+  it('returns true when the session holds no user messages (receiving surface)', () => {
+    expect(shouldAddReceivedUserMessage([], 'hello', NOW)).toBe(true)
+  })
+
+  it('drops the echo when the tail user message matches within the window (sending surface)', () => {
+    // The optimistic copy was added right before the send RPC; its delivery
+    // echo arrives within milliseconds and must NOT add a duplicate.
+    const msgs = [makeUI({ type: 'user', content: 'hello', timestamp: NOW - 50 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(false)
+  })
+
+  it('keeps the event when the only content match is older than the window', () => {
+    // A previous task's identical message is not this send's optimistic copy
+    // (same phrase re-sent much later) — the event must add its own card.
+    const msgs = [makeUI({ type: 'user', content: 'hello', timestamp: NOW - WINDOW - 1 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(true)
+  })
+
+  it('keeps the event when the tail user message holds different content', () => {
+    const msgs = [makeUI({ type: 'user', content: 'other', timestamp: NOW - 50 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(true)
+  })
+
+  it('scans past an interleaved received card to find the optimistic copy', () => {
+    // Race: another surface's message_received rendered between this send's
+    // optimistic card and its echo — the optimistic copy sits one card
+    // deeper in the tail, the scan must still find it.
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', timestamp: NOW - 100 }),
+      makeUI({ type: 'user', content: 'interjection', metadata: { received: true }, timestamp: NOW - 50 }),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(false)
+  })
+
+  it('never targets a card this handler rendered from a previous event', () => {
+    // metadata.received marks a card synthesized from an earlier
+    // message_received — the only content match must NOT swallow the event,
+    // otherwise repeated identical messages would glue into one card.
+    const msgs = [makeUI({ type: 'user', content: 'hello', metadata: { received: true }, timestamp: NOW - 50 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(true)
+  })
+
+  it('ignores non-user messages while scanning the tail', () => {
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', timestamp: NOW - 50 }),
+      makeUI({ type: 'assistant', content: 'hello', timestamp: NOW - 40 }),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(false)
+  })
+
+  it('stops scanning at the bounded tail depth', () => {
+    // The content match sits below the scan depth: no unbounded history walk,
+    // and no false dedup against deep history.
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', timestamp: NOW - 100 }),
+      ...Array.from({ length: MESSAGE_RECEIVED_SCAN_DEPTH + 2 }, (_, i) =>
+        makeUI({ type: 'user', content: `filler ${i}`, timestamp: NOW - 90 + i })),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW)).toBe(true)
+  })
+
+  it('drops the echo by optimistic-card id even past an interleaved received card', () => {
+    // Id-based dedup: the twin is identified by id, not content — the scan
+    // must find it at the bounded tail depth like the content fallback.
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 100 }),
+      makeUI({ type: 'user', content: 'interjection', metadata: { received: true }, timestamp: NOW - 50 }),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-1')).toBe(false)
+  })
+
+  it('renders the event when the id has no twin (another surface sent identical text)', () => {
+    // Surface A's optimistic card holds id opt-1; surface B sends the SAME
+    // text — its echo carries a different id and must ADD a card. The
+    // content+window fallback swallowed exactly this message (multi-surface
+    // dedup bug); the id must not.
+    const msgs = [makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 50 })]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-2')).toBe(true)
+  })
+
+  it('stops the id scan at the bounded tail depth', () => {
+    const msgs = [
+      makeUI({ type: 'user', content: 'hello', id: 'opt-1', timestamp: NOW - 100 }),
+      ...Array.from({ length: MESSAGE_RECEIVED_SCAN_DEPTH + 2 }, (_, i) =>
+        makeUI({ type: 'user', content: `filler ${i}`, timestamp: NOW - 90 + i })),
+    ]
+    expect(shouldAddReceivedUserMessage(msgs, 'hello', NOW, 'opt-1')).toBe(true)
   })
 })
 
@@ -474,5 +579,134 @@ describe('useChatEvents memory_read', () => {
 
     expect(messages()).toHaveLength(0)
     expect(vi.mocked(reportDroppedEvent)).toHaveBeenCalledWith('memory_read', { step_num: 0 })
+  })
+})
+
+describe('useChatEvents message_received', () => {
+  const SESSION = 'sess-1'
+
+  function emit(event: string, data?: unknown): void {
+    act(() => {
+      for (const cb of runtimeHandlers.get(event) ?? []) cb(data)
+    })
+  }
+
+  let container: HTMLDivElement
+  let root: Root
+
+  function Harness(): null {
+    useChatEvents(SESSION)
+    return null
+  }
+
+  beforeEach(() => {
+    useChatStore.setState({
+      messages: {},
+      messageOrder: {},
+      streamingText: {},
+      activityStatus: {},
+      taskActive: {},
+      paused: {},
+      pausing: {},
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    act(() => {
+      root.render(createElement(Harness))
+    })
+  })
+
+  afterEach(() => {
+    act(() => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  const messages = () => selectSessionMessages(useChatStore.getState(), SESSION)
+
+  function seedOptimisticSend(id: string, text: string): void {
+    // Mirror useMessageSender / useReviewActions: the sending surface renders
+    // the user card BEFORE the send RPC (no metadata.received marker).
+    act(() => {
+      useChatStore.getState().addMessage(SESSION, {
+        id,
+        sessionId: SESSION,
+        type: 'user',
+        content: text,
+        timestamp: Date.now(),
+      })
+    })
+  }
+
+  it('renders the user card on a surface without an optimistic copy (cross-surface visibility)', () => {
+    emit('message_received', { session_id: SESSION, text: 'hello from A' })
+
+    const msgs = messages()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]).toMatchObject({ type: 'user', content: 'hello from A' })
+    // A fresh send carries no nudge flag — the card is stamped received-only
+    // so the echo dedup never targets it.
+    expect(msgs[0]!.metadata).toEqual({ received: true })
+  })
+
+  it('stamps is_nudge on the card so the Nudge badge renders on this surface too', () => {
+    // A live interjection / nudge-resume echoes the flag the persisted row is
+    // stamped by; the cross-surface card must show the badge immediately, not
+    // after a history reload.
+    emit('message_received', { session_id: SESSION, text: 'keep going', is_nudge: true })
+
+    const msgs = messages()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]!.metadata).toEqual({ received: true, is_nudge: true })
+  })
+
+  it('drops an event whose is_nudge is not a boolean (strictly typed additive field)', () => {
+    emit('message_received', { session_id: SESSION, text: 'hello', is_nudge: 'yes' })
+
+    expect(messages()).toHaveLength(0)
+    expect(vi.mocked(reportDroppedEvent)).toHaveBeenCalledWith('message_received', { session_id: SESSION, text: 'hello', is_nudge: 'yes' })
+  })
+
+  it('drops the delivery echo when this surface already rendered the optimistic copy', () => {
+    seedOptimisticSend('optimistic-1', 'hello')
+
+    emit('message_received', { session_id: SESSION, text: 'hello' })
+
+    const msgs = messages()
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0]!.id).toBe('optimistic-1')
+  })
+
+  it('renders two distinct cards when the same phrase arrives twice in a row', () => {
+    // The card rendered from the first event carries metadata.received, so
+    // the second identical event is a NEW message — never glued to the first.
+    emit('message_received', { session_id: SESSION, text: 'again' })
+    emit('message_received', { session_id: SESSION, text: 'again' })
+
+    const msgs = messages()
+    expect(msgs).toHaveLength(2)
+    expect(msgs[0]).toMatchObject({ type: 'user', content: 'again' })
+    expect(msgs[1]).toMatchObject({ type: 'user', content: 'again' })
+    expect(msgs[0]!.id).not.toBe(msgs[1]!.id)
+  })
+
+  it('keeps both optimistic copies when the same phrase is sent twice from this surface', () => {
+    seedOptimisticSend('opt-1', 'repeat')
+    emit('message_received', { session_id: SESSION, text: 'repeat' })
+    seedOptimisticSend('opt-2', 'repeat')
+    emit('message_received', { session_id: SESSION, text: 'repeat' })
+
+    // Each echo is dropped against its own optimistic copy; neither send's
+    // card may swallow the other's.
+    expect(messages().map(m => m.id)).toEqual(['opt-1', 'opt-2'])
+  })
+
+  it('drops a malformed message_received payload without adding a message', () => {
+    emit('message_received', { session_id: SESSION }) // missing text — guard must reject
+
+    expect(messages()).toHaveLength(0)
+    expect(vi.mocked(reportDroppedEvent)).toHaveBeenCalledWith('message_received', { session_id: SESSION })
   })
 })

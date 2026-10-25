@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -517,6 +518,103 @@ func TestEmit_NoOpWhenCtxNilAndNoFake(t *testing.T) {
 	a.emit("ev:test", "p1") // must not panic
 }
 
+func TestEmit_EventTapReceivesEveryDispatchAlongsideWails(t *testing.T) {
+	a := &App{}
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+
+	type tapCall struct {
+		name string
+		args []interface{}
+	}
+	var (
+		mu   sync.Mutex
+		taps []tapCall
+	)
+	a.setEventTap(func(name string, args []interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		taps = append(taps, tapCall{name: name, args: args})
+	})
+
+	a.emit("ev:test", "p1", 2)
+	a.emit("ev:bare")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(taps) != 2 {
+		t.Fatalf("expected 2 tap calls, got %d", len(taps))
+	}
+	if taps[0].name != "ev:test" {
+		t.Errorf("tap[0] name = %q, want ev:test", taps[0].name)
+	}
+	if !reflect.DeepEqual(taps[0].args, []interface{}{"p1", 2}) {
+		t.Errorf("tap[0] args = %#v, want [p1 2]", taps[0].args)
+	}
+	if taps[1].name != "ev:bare" || taps[1].args != nil {
+		t.Errorf("tap[1] = (%q, %#v), want the bare no-args event", taps[1].name, taps[1].args)
+	}
+	// The tap is an observer only: the Wails dispatch is untouched.
+	if events := rec.snapshot(); len(events) != 2 {
+		t.Fatalf("wails dispatch count = %d, want 2", len(events))
+	}
+}
+
+// TestEmit_PanickingEventTapIsIsolated (CS #32): the tap contract — "must
+// never block, alter, or fail the emit" — is enforced by panic isolation in
+// invokeEventTap, not by convention. A panicking tap must neither kill the
+// caller's goroutine nor suppress the Wails dispatch; the panic surfaces as
+// one expected Warn diagnostic.
+func TestEmit_PanickingEventTapIsIsolated(t *testing.T) {
+	a := &App{}
+	injectExpectedDiagnostics(t, a, diagnosticExpectation{
+		level: slog.LevelWarn, message: "event tap panicked; emit continues",
+		attrs: map[string]string{"event": "ev:boom", "panic": "tap bug"},
+	})
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+	taps := 0
+	a.setEventTap(func(name string, args []interface{}) {
+		taps++
+		if name == "ev:boom" {
+			panic("tap bug")
+		}
+	})
+
+	a.emit("ev:boom", "x")
+	a.emit("ev:after")
+
+	if taps != 2 {
+		t.Fatalf("tap calls = %d, want 2 (the panicking tap must stay installed)", taps)
+	}
+	// The Wails dispatch continues after the recovered panic.
+	if events := rec.snapshot(); len(events) != 2 {
+		t.Fatalf("wails dispatch count = %d, want 2", len(events))
+	}
+}
+
+func TestEmit_EventTapFiresWhenWailsDispatchIsDropped(t *testing.T) {
+	// The tap rides alongside the dispatch: it observes the emit call even
+	// when the Wails side drops it (nil runtime), and the drop diagnostic
+	// is unchanged.
+	a := &App{}
+	injectExpectedDiagnostics(t, a, diagnosticExpectation{
+		level: slog.LevelWarn, message: "emit called with nil ctx, event dropped",
+		attrs: map[string]string{"event": "ev:dropped"},
+	})
+	var taps atomic.Int32
+	a.setEventTap(func(name string, args []interface{}) {
+		if name != "ev:dropped" || len(args) != 1 || args[0] != "x" {
+			t.Errorf("unexpected tap payload: %q %#v", name, args)
+		}
+		taps.Add(1)
+	})
+	a.emit("ev:dropped", "x") // must not panic
+	if taps.Load() != 1 {
+		t.Fatalf("tap calls = %d, want 1", taps.Load())
+	}
+}
+
 func TestBuildUIEmitFunc_SessionRenamedEmitsGlobal(t *testing.T) {
 	a := &App{}
 	rec := &emitRecorder{}
@@ -576,6 +674,73 @@ func TestBuildUIEmitFunc_NonRenameEmitsOnlyScoped(t *testing.T) {
 	events := flattenEmittedBatches(t, rec.snapshot())
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d: %+v", len(events), events)
+	}
+	if events[0].Name != "session:s1:finishing" {
+		t.Errorf("event name = %q, want session:s1:finishing", events[0].Name)
+	}
+}
+
+// TestBuildUIEmitFunc_TaskLifecycleEmitsSessionsChanged pins the task
+// lifecycle → sessions:changed mirror: every lifecycle transition (start,
+// terminal states, pause/resume) must emit its session-scoped event EXACTLY
+// ONCE (the scoped stream is not doubled) plus exactly ONE global
+// sessions:changed push, so every surface's session list refreshes behind
+// its existing debounced re-read instead of the 30s safety poll. Combined
+// with the manager-level TestSendMessage_TaskStartedEmittedOncePerTask
+// (one task_started per real activation, one terminal event per natural
+// termination) this yields exactly one sessions:changed per real lifecycle
+// transition.
+func TestBuildUIEmitFunc_TaskLifecycleEmitsSessionsChanged(t *testing.T) {
+	lifecycleTypes := []string{
+		"task_started", "task_complete", "task_cancelled", "error",
+		"task_failed_resumable", "session_paused", "session_resumed",
+	}
+	for _, eventType := range lifecycleTypes {
+		t.Run(eventType, func(t *testing.T) {
+			a := &App{}
+			rec := &emitRecorder{}
+			a.wailsEmit = rec.emit
+			emit := a.buildUIEmitFunc()
+
+			emit(session.Event{SessionID: "s1", Type: eventType})
+			a.flushEvents()
+
+			events := flattenEmittedBatches(t, rec.snapshot())
+			if len(events) != 2 {
+				t.Fatalf("expected 2 events (session-scoped + one sessions:changed), got %d: %+v", len(events), events)
+			}
+			// First: the session-scoped event, delivered exactly once.
+			if events[0].Name != "session:s1:"+eventType {
+				t.Errorf("events[0] name = %q, want session:s1:%s", events[0].Name, eventType)
+			}
+			// Second: exactly one global sessions:changed, no payload —
+			// consumers re-read the authoritative list.
+			if events[1].Name != backend.EventSessionsChanged {
+				t.Errorf("events[1] name = %q, want %q", events[1].Name, backend.EventSessionsChanged)
+			}
+			if len(events[1].Data) != 0 {
+				t.Errorf("sessions:changed payload = %+v, want none", events[1].Data)
+			}
+		})
+	}
+}
+
+// TestBuildUIEmitFunc_NonLifecycleEmitsNoSessionsChanged is the control for
+// the mirror: an event that carries no session-list-visible state must not
+// push sessions:changed, or every streaming tick would trigger a list
+// re-read on every surface.
+func TestBuildUIEmitFunc_NonLifecycleEmitsNoSessionsChanged(t *testing.T) {
+	a := &App{}
+	rec := &emitRecorder{}
+	a.wailsEmit = rec.emit
+	emit := a.buildUIEmitFunc()
+
+	emit(session.Event{SessionID: "s1", Type: "finishing"})
+	a.flushEvents()
+
+	events := flattenEmittedBatches(t, rec.snapshot())
+	if len(events) != 1 {
+		t.Fatalf("expected only the session-scoped event, got %d: %+v", len(events), events)
 	}
 	if events[0].Name != "session:s1:finishing" {
 		t.Errorf("event name = %q, want session:s1:finishing", events[0].Name)

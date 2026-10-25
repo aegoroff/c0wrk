@@ -63,7 +63,13 @@ func TestSendMessageMCP_AuthorizationFailureNeverFallsBackFresh(t *testing.T) {
 				done := sess.done
 				sess.mu.RUnlock()
 				if done == nil {
-					t.Fatal("SendMessage did not publish done channel")
+					// deactivateSessionTask nulls done under the session lock
+					// when the request's epilogue deactivates the session —
+					// the whole send lifecycle (worker included) has already
+					// finished. On a loaded runner the in-memory failure path
+					// below outraces this read (seen once on arm64 CI), so
+					// nil here means "already settled", not "never launched".
+					return
 				}
 				select {
 				case <-done:

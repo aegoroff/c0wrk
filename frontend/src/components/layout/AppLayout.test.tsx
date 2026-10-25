@@ -28,10 +28,15 @@ const uiMock = vi.hoisted(() => ({
     sidebarWidth: 280,
     setSidebarWidth: () => {},
     tabsEnabled: false,
+    webTransport: false,
   },
 }))
 vi.mock('@/stores/uiStore', () => ({
   useUIStore: (select: (s: Record<string, unknown>) => unknown) => select(uiMock.state),
+  // Mirrors the real selector's contract: the web transport reads as off
+  // without touching the durable tabsEnabled preference.
+  selectEffectiveTabsEnabled: (s: { tabsEnabled?: boolean; webTransport?: boolean }) =>
+    s.webTransport !== true && s.tabsEnabled === true,
   SIDEBAR_MIN: 180,
   SIDEBAR_MAX: 500,
   // lib/tabSnapshot (via tabStore) builds its default snapshots from these.
@@ -73,6 +78,7 @@ vi.mock('./floatingViewerOutside', () => ({
 vi.mock('@/api/runtime', () => ({
   getApp: () => ({ PersistWindowBounds: () => Promise.resolve() }),
   isWailsReady: () => false,
+  hasWailsRuntime: () => false,
   subscribe: () => () => {},
 }))
 vi.mock('@/lib/logger', () => ({ logger: { warn: () => {} } }))

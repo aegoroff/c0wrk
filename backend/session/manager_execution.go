@@ -69,7 +69,7 @@ func (m *Manager) finishLiveLeftover(_ context.Context, id string, session *Sess
 	}
 	joined := strings.Join(leftover, "\n\n")
 	m.log().Info("launching follow-up task for undelivered live messages", "session_id", id, "count", len(leftover))
-	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, nil, nil, nil, "", "", false, "", false, false, true); err != nil {
+	if _, err := m.sendMessage(ContextWithSessionID(context.Background(), id), id, joined, joined, "", nil, nil, nil, "", "", false, "", false, false, true); err != nil {
 		if errors.Is(err, ErrSessionCompacting) && m.requeueLiveMessages(session, joined) {
 			m.log().Info("follow-up deferred by manual compaction: live messages re-queued", "session_id", id)
 			m.emitFunc(Event{
@@ -587,9 +587,10 @@ func (m *Manager) InvalidateIgnoreCache(changedPaths []string) {
 // manager rejects both set; the frontend store enforces the same rule).
 //
 // This is the single-return convenience form of SendMessageClassified for
-// callers that do not need the authoritative send classification.
-func (m *Manager) SendMessage(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool) error {
-	_, err := m.SendMessageClassified(ctx, id, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
+// callers that do not need the authoritative send classification. Options are
+// forwarded unchanged (see SendOption).
+func (m *Manager) SendMessage(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool, opts ...SendOption) error {
+	_, err := m.SendMessageClassified(ctx, id, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, opts...)
 	return err
 }
 
@@ -613,12 +614,74 @@ const (
 	SendLive
 )
 
+// SendOption customizes one SendMessage/SendMessageClassified dispatch without
+// touching the positional parameter list shared by every caller (the internal
+// re-entries and the whole test corpus call the positional form).
+type SendOption func(*sendOptions)
+
+// sendOptions carries the resolved option values for one dispatch.
+type sendOptions struct {
+	echoText string
+	// clientSendID is the sending surface's optimistic-card id, when the
+	// send originates from a surface that rendered one. The message_received
+	// echo carries it back so the sender dedups by identity instead of
+	// content+time-window: two surfaces sending identical text inside the
+	// echo window then stay two distinct cards instead of one echo being
+	// swallowed (frontend useChatEvents).
+	clientSendID string
+}
+
+// WithEchoText overrides the user-facing text carried by the message_received
+// event. The event is the UI's delivery notification: every surface watching
+// the session renders the user card from it, and the sending surface dedupes
+// it against its optimistic card by send id when one was attached
+// (WithClientMessageID), falling back to exact content otherwise. The manager's text
+// parameter is the POST-preprocessing form (/-mention refs stripped, @file
+// refs resolved) built for the orchestrator, while the persisted message row
+// and the sending surface's optimistic card hold the RAW user input. Callers
+// that pre-process text before dispatch must therefore pass the raw input
+// here, so the echo stays byte-identical to both: whenever preprocessing
+// actually changed the text (a leading "/skill" mention, an @file ref), a
+// processed echo would fail the dedup and render a second, ref-less card on
+// the sending surface. Without this option the echo carries text — the
+// historical behavior every internal caller and existing test relies on.
+func WithEchoText(raw string) SendOption {
+	return func(o *sendOptions) { o.echoText = raw }
+}
+
+// WithClientMessageID attaches the sending surface's optimistic-card id to
+// the message_received echo. The sender's echo dedup matches this id exactly,
+// so another surface sending the same text inside the echo window renders its
+// own card instead of being dropped as the sender's echo. Internal callers
+// without an optimistic card (resume drain, follow-up relaunch) omit it and
+// the echo carries no id.
+func WithClientMessageID(id string) SendOption {
+	return func(o *sendOptions) { o.clientSendID = id }
+}
+
+// resolveSendOptions applies opts over the defaults and falls an empty echo
+// back to text (an unset option and an explicit empty override are the same
+// thing: there is no meaningful empty user-facing message).
+func resolveSendOptions(text string, opts []SendOption) sendOptions {
+	o := sendOptions{echoText: text}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	if o.echoText == "" {
+		o.echoText = text
+	}
+	return o
+}
+
 // SendMessageClassified runs a user message and returns the authoritative send
 // classification (fresh / nudge-resume / live) so the caller can persist the
 // correct is_nudge metadata after the decision is made under the session lock.
 // The task itself runs in a goroutine and reports via events.
-func (m *Manager) SendMessageClassified(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool) (SendClassification, error) {
-	return m.sendMessage(ctx, id, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, false)
+func (m *Manager) SendMessageClassified(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode bool, opts ...SendOption) (SendClassification, error) {
+	o := resolveSendOptions(text, opts)
+	return m.sendMessage(ctx, id, text, o.echoText, o.clientSendID, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, false)
 }
 
 // liveAction tells the request epilogue what to do with live user messages
@@ -708,8 +771,14 @@ func (m *Manager) refreshAutonomyPosture(session *Session) {
 // sendMessage is the implementation behind SendMessage. presented marks a
 // relaunch of an already-rendered message (the live-send follow-up): it skips
 // the message_received emission and title generation because the UI and the
-// message store already hold the message from the original send.
-func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode, presented bool) (SendClassification, error) {
+// message store already hold the message from the original send. text is the
+// post-preprocessing form routed to the orchestrator; echoText is the raw
+// user-facing form the message_received event carries (WithEchoText) — the
+// two differ whenever preprocessing changed the input, and the UI dedup
+// (frontend useChatEvents) matches the echo against the raw optimistic card.
+// clientSendID is that card's id (WithClientMessageID); empty when the caller
+// rendered no optimistic card.
+func (m *Manager) sendMessage(ctx context.Context, id, text, echoText, clientSendID string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal bool, goalBudget string, e2s, reviewMode, presented bool) (SendClassification, error) {
 	// No task may be launched once Shutdown has begun (see ResumeTask).
 	if m.shuttingDown.Load() {
 		return SendFresh, errors.New("session manager is shutting down")
@@ -756,13 +825,18 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 		session.mu.Unlock()
 		// Emit message_received so non-optimistic listeners see the user
 		// message (mirrors the normal path; the frontend renders its own
-		// optimistic copy and ignores this event).
+		// optimistic copy and ignores this event). Carries the echo form.
+		// IsNudge matches the classification the caller will persist
+		// (SendLive → mergeIsNudgeMetadata): other surfaces render their card
+		// from this event and show the Nudge badge immediately.
 		m.emitFunc(Event{
 			SessionID: id,
 			Type:      "message_received",
 			Data: MessageReceivedData{
-				SessionID: id,
-				Text:      text,
+				SessionID:    id,
+				Text:         echoText,
+				ClientSendID: clientSendID,
+				IsNudge:      true,
 			},
 		})
 		return SendLive, nil
@@ -786,17 +860,28 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 	// cleanup). Detected here before activation so ResumeTask's own activation
 	// path is not tripped by a spurious "already processing" check.
 	if !goal && !e2s && m.hasPausedUnfinishedTask(id) {
-		// Emit message_received so the UI shows the user message (mirrors the
-		// normal SendMessage path's emission that the goroutine skips).
-		m.emitFunc(Event{
-			SessionID: id,
-			Type:      "message_received",
-			Data: MessageReceivedData{
+		resumeErr := m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
+		if resumeErr == nil {
+			// Emit message_received only AFTER the resume commits (CS #66):
+			// this echo drives the card on non-optimistic surfaces, and a
+			// failed resume makes the caller skip the SaveMessage — a
+			// pre-dispatch emission let a card that no persisted row backs
+			// vanish on reload. IsNudge matches the classification this
+			// branch returns (SendNudgeResume → mergeIsNudgeMetadata): other
+			// surfaces render their card from this event and show the Nudge
+			// badge immediately.
+			m.emitFunc(Event{
 				SessionID: id,
-				Text:      text,
-			},
-		})
-		return SendNudgeResume, m.ResumeSession(ctx, id, modelOverride, reasoningEffort, text)
+				Type:      "message_received",
+				Data: MessageReceivedData{
+					SessionID:    id,
+					Text:         echoText,
+					ClientSendID: clientSendID,
+					IsNudge:      true,
+				},
+			})
+		}
+		return SendNudgeResume, resumeErr
 	}
 
 	// Determine RESEARCH mode from the session's own research root (the
@@ -845,6 +930,17 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 	session.cancel = cancel
 	session.mu.Unlock()
 
+	// Activation is committed: announce the task start. This single
+	// activation point covers the fresh, goal, E2S, and continue-interrupted
+	// dispatches below, so one emission announces every way a task can
+	// start. The desktop layer mirrors it into the global sessions:changed
+	// push (start-side lifecycle hook, EventTaskStarted) so every surface's
+	// session list shows the session running immediately. The resume path
+	// announces itself via task_resumed + session_resumed instead — do not
+	// emit task_started there too, or one resume would push the list-change
+	// signal twice.
+	m.emitFunc(Event{SessionID: id, Type: EventTaskStarted})
+
 	// Task-launch boundary: pin the autonomy posture this task will run under
 	// from the current Settings (covers the fresh, goal, E2S, and
 	// continue-interrupted dispatches below — they all run in this task's
@@ -873,14 +969,17 @@ func (m *Manager) sendMessage(ctx context.Context, id, text string, activeSkills
 	// Emit message received event. Skipped for a presented relaunch (the
 	// live-send follow-up): the message was already emitted when it was
 	// queued into the running task, and the frontend renders its own
-	// optimistic copy.
+	// optimistic copy. IsNudge stays absent: a fresh launch persists no
+	// is_nudge stamp (mergeIsNudgeMetadata fires only on non-fresh
+	// classifications), and the event flag must agree with the DB row.
 	if !presented {
 		m.emitFunc(Event{
 			SessionID: id,
 			Type:      "message_received",
 			Data: MessageReceivedData{
-				SessionID: id,
-				Text:      text,
+				SessionID:    id,
+				Text:         echoText,
+				ClientSendID: clientSendID,
 			},
 		})
 	}
@@ -1915,8 +2014,11 @@ type SessionRuntimeStatus struct {
 	// a reason) the strategies that would not shrink the dialogue. Fail-open:
 	// empty whenever the session or its orchestrator is not in memory — a status
 	// poll must never guess "disabled"; a pointless click simply reports the
-	// existing nothing_compacted outcome.
-	CompactionAvailability []core.CompactionAvailability `json:"compaction_availability"`
+	// existing nothing_compacted outcome. omitempty keeps the nil slice OFF the
+	// wire (no "compaction_availability":null): a null the frontend validator
+	// would have to tolerate is indistinguishable from "no prediction" anyway,
+	// so the absent field is the canonical fail-open shape.
+	CompactionAvailability []core.CompactionAvailability `json:"compaction_availability,omitempty"`
 	// Activity is the session's last user-facing activity label
 	// ("Thinking...", "Routing request...", "Generating response...", ...)
 	// tracked by the emitter. It lets the frontend replace the frozen

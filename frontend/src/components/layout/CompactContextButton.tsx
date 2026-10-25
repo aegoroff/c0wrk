@@ -15,6 +15,7 @@ import { cancelSessionCompaction, compactSessionContext } from '@/api/chat'
 import { emit } from '@/api/runtime'
 import { COMPACTION_STRATEGIES } from './compactionStrategies'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /**
  * Status-bar control for manual context compaction, rendered immediately left
@@ -51,7 +52,7 @@ export function CompactContextButton() {
         // Surface the dead-end: the dropdown closed and nothing else reacts
         // to the rejection — without a toast the failure is invisible.
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to start context compaction',
         })
       }
@@ -64,7 +65,7 @@ export function CompactContextButton() {
     cancelSessionCompaction(activeSessionId).catch((err) => {
       logger.error('Cancel compaction failed:', err)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to cancel compaction',
       })
     })

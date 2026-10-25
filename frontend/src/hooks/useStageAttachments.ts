@@ -23,7 +23,8 @@
 
 import { useCallback } from 'react'
 import { emit } from '@/api/runtime'
-import { attachFiles, attachmentBaseName, isImagePath } from '@/api/attachments'
+import { attachFileContent, attachFiles, attachmentBaseName, isImagePath, MAX_ATTACHMENT_UPLOAD_BYTES } from '@/api/attachments'
+import type { AttachmentInfoUI } from '@/types/models'
 import {
   beginAttachmentUploadsFresh,
   completeAttachmentUploads,
@@ -31,27 +32,46 @@ import {
 } from '@/lib/attachmentUploads'
 import { ensureActiveSession } from '@/lib/ensureActiveSession'
 import { useAttachmentsStore } from '@/stores/attachmentsStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { NULL_SESSION_KEY } from '@/stores/chatInputStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { useConfigData } from '@/hooks/useConfigData'
 import { resolveModelContext, visionRejectionMessage } from '@/lib/vision'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
+
+/** One file to stage, transport-shaped: native entry points keep their
+ *  absolute path; web content uploads carry the name only (path='') — the
+ *  same shape attachmentUploads already uses for name-only placeholders. */
+interface StageEntry {
+  path: string
+  fileName: string
+  isImage: boolean
+}
+
+/** The transport-specific staging RPC: given the (possibly just-created)
+ *  session and the stageable entries, returns the FULL current pending list
+ *  (already mapped to UI records) — the contract both attachFiles and a
+ *  completed AttachFileContent loop honor. */
+type StageRpc = (sessionId: string, entries: StageEntry[]) => Promise<AttachmentInfoUI[]>
 
 /**
  * Reusable attachment-staging hook.
  *
  * @returns stageAttachmentPaths() bound to the effective model's vision
- *   capability. The callback takes the active session id (null = create one)
- *   and the file paths to stage.
+ *   capability (native entry points: absolute paths) and
+ *   stageAttachmentFiles() (web entry points: in-memory File objects staged
+ *   through AttachFileContent). Both share one pipeline.
  */
 export function useStageAttachments(): {
   stageAttachmentPaths: (activeSessionId: string | null, paths: string[]) => Promise<void>
+  stageAttachmentFiles: (activeSessionId: string | null, files: readonly File[]) => Promise<void>
 } {
   const selectedModel = useInputModeStore((s) => s.selectedModel)
   const { allModels, defaultModel } = useConfigData()
 
-  const stageAttachmentPaths = useCallback(
-    async (activeSessionId: string | null, paths: string[]): Promise<void> => {
+  const stageEntries = useCallback(
+    async (activeSessionId: string | null, entries: StageEntry[], rpc: StageRpc): Promise<void> => {
       try {
         // Resolve the effective model's vision capability. selectedModel is a
         // per-message override (composite "provider/name" or null = global
@@ -59,21 +79,13 @@ export function useStageAttachments(): {
         const { effectiveModel, modelInfo } = resolveModelContext(allModels, selectedModel, defaultModel)
         const supportsVision = modelInfo?.vision ?? false
 
-        // Partition selected paths into images and documents. When the model
-        // lacks vision, images are rejected (banner shown) and only documents
-        // are staged.
-        const imagePaths: string[] = []
-        const docPaths: string[] = []
-        for (const p of paths) {
-          if (isImagePath(p)) {
-            imagePaths.push(p)
-          } else {
-            docPaths.push(p)
-          }
-        }
+        // When the model lacks vision, images are rejected (banner shown) and
+        // only documents are staged.
+        const imageEntries = entries.filter((e) => e.isImage)
+        const docEntries = entries.filter((e) => !e.isImage)
 
-        const visionRejected = imagePaths.length > 0 && !supportsVision
-        if (visionRejected && docPaths.length === 0) {
+        const visionRejected = imageEntries.length > 0 && !supportsVision
+        if (visionRejected && docEntries.length === 0) {
           // Nothing stageable: surface the rejection without creating a
           // session. With no active session the banner is keyed under the
           // NULL_SESSION_KEY sentinel so it still renders in the input.
@@ -107,26 +119,28 @@ export function useStageAttachments(): {
           useAttachmentsStore.getState().setImageError(sessionId, null)
         }
 
-        const toAttach = supportsVision ? paths : docPaths
+        const toAttach = supportsVision ? entries : docEntries
 
         // Optimistic upload placeholders: spinner chips appear and drain as
         // the backend's incremental `attachments:changed` events land
-        // matching attachments (or when this RPC settles). Uploads cancelled
+        // matching attachments (or when the RPC settles). Uploads cancelled
         // via their chip's X are stripped here and removed from the backend.
         // The fresh-baseline variant unions the backend's authoritative
         // pending list into the claim window first so a stale store slice
         // cannot shrink it.
         const uploads = await beginAttachmentUploadsFresh(
           sessionId,
-          toAttach.map((p) => ({
-            path: p,
-            fileName: attachmentBaseName(p),
-            isImage: isImagePath(p),
+          toAttach.map((e) => ({
+            path: e.path,
+            fileName: e.fileName,
+            isImage: e.isImage,
           })),
         )
         try {
-          // attachFiles returns the FULL current pending list (already mapped).
-          const list = await attachFiles(sessionId, toAttach)
+          // The staging RPC returns the FULL current pending list (already
+          // mapped) — one shot for the native path, the final result of the
+          // per-file loop for web content.
+          const list = await rpc(sessionId, toAttach)
           const kept = completeAttachmentUploads(sessionId, uploads, list)
           useAttachmentsStore.getState().setAttachments(sessionId, kept)
         } catch (err) {
@@ -136,7 +150,7 @@ export function useStageAttachments(): {
       } catch (err) {
         logger.error('Failed to attach files:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to attach files',
         })
       }
@@ -144,5 +158,86 @@ export function useStageAttachments(): {
     [selectedModel, allModels, defaultModel],
   )
 
-  return { stageAttachmentPaths }
+  const stageAttachmentPaths = useCallback(
+    async (activeSessionId: string | null, paths: string[]): Promise<void> => {
+      await stageEntries(
+        activeSessionId,
+        paths.map((p) => ({ path: p, fileName: attachmentBaseName(p), isImage: isImagePath(p) })),
+        (sessionId, entries) => attachFiles(sessionId, entries.map((e) => e.path)),
+      )
+    },
+    [stageEntries],
+  )
+
+  const stageAttachmentFiles = useCallback(
+    async (activeSessionId: string | null, files: readonly File[]): Promise<void> => {
+      if (files.length === 0) return
+      // Size-cap BEFORE any byte read (CS #34): attachFileContent's identical
+      // check only runs after the file is already materialized as bytes, so a
+      // multi-GB drop used to cost a gigabyte-scale tab allocation (possible
+      // OOM) before the clean rejection. `file.size` is free metadata —
+      // oversize files are rejected here through the same attachment-error
+      // banner the vision gate uses, and only within-cap files are staged.
+      const oversize = files.filter((f) => f.size > MAX_ATTACHMENT_UPLOAD_BYTES)
+      const oversizeMessage =
+        oversize.length === 0
+          ? null
+          : oversize.length === 1
+            ? `${oversize[0]!.name} is above the ${MAX_ATTACHMENT_UPLOAD_BYTES} byte attachment limit`
+            : `${oversize.length} files are above the ${MAX_ATTACHMENT_UPLOAD_BYTES} byte attachment limit: ${oversize.map((f) => f.name).join(', ')}`
+      const stageable =
+        oversizeMessage === null ? files : files.filter((f) => f.size <= MAX_ATTACHMENT_UPLOAD_BYTES)
+      if (oversizeMessage !== null && stageable.length === 0) {
+        // Nothing stageable: reject without creating a session — the same
+        // banner path the vision gate uses for a nothing-stageable drop.
+        useAttachmentsStore.getState().setImageError(activeSessionId ?? NULL_SESSION_KEY, oversizeMessage)
+        return
+      }
+      // Zip by identity, not by name: a web drop may carry two files with the
+      // same basename (multi-select across folders), and a name-keyed map
+      // would stage one file's BYTES under the other's name. The entry
+      // objects flow through stageEntries by reference, so the closure
+      // resolves each entry back to its own File; the name is display-only
+      // metadata.
+      const staged = stageable.map((file) => ({
+        entry: { path: '', fileName: file.name, isImage: isImagePath(file.name) },
+        file,
+      }))
+      await stageEntries(
+        activeSessionId,
+        staged.map((s) => s.entry),
+        async (sessionId, entries) => {
+          // Web content has no path: each file is uploaded through
+          // AttachFileContent. Every call returns the FULL current pending
+          // list, so the last successful result is the authoritative store
+          // value; a mid-loop failure drains the placeholders exactly like a
+          // failed attachFiles call (already-staged files stay staged).
+          const fileByEntry = new Map<StageEntry, File>(staged.map((s) => [s.entry, s.file] as const))
+          let list: AttachmentInfoUI[] = []
+          for (const e of entries) {
+            const file = fileByEntry.get(e)
+            if (!file) continue
+            list = await attachFileContent(sessionId, {
+              name: file.name,
+              type: file.type,
+              bytes: new Uint8Array(await file.arrayBuffer()),
+            })
+          }
+          return list
+        },
+      )
+      if (oversizeMessage !== null) {
+        // stageEntries' non-rejected path clears the banner on success;
+        // re-assert the oversize notice under the key staging landed in —
+        // the caller's session, or the on-demand created session (which
+        // ensureActiveSession left active and visible).
+        const bannerKey =
+          activeSessionId ?? useSessionStore.getState().activeSessionId ?? NULL_SESSION_KEY
+        useAttachmentsStore.getState().setImageError(bannerKey, oversizeMessage)
+      }
+    },
+    [stageEntries],
+  )
+
+  return { stageAttachmentPaths, stageAttachmentFiles }
 }

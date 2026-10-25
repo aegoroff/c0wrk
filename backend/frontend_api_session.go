@@ -23,6 +23,13 @@ import (
 // retryable error instead of an indefinitely parked RPC.
 const sessionStoreOpTimeout = 15 * time.Second
 
+// sessionForkTimeout bounds the transactional fork (session + tasks +
+// blackboard + review deep copy). The fork is one transaction over an
+// unbounded row set, so it carries its own budget — wider than
+// sessionStoreOpTimeout, still finite, still derived from f.ctx() so app
+// shutdown cancels it.
+const sessionForkTimeout = 60 * time.Second
+
 // storeOpCtx returns the request context (f.ctx(), cancelled at app shutdown)
 // bounded by sessionStoreOpTimeout, for one store round-trip. Every direct
 // f.store/f.projStore/f.reviewStore call on an RPC path must go through it —
@@ -41,6 +48,20 @@ func (f *FrontendAPI) storeOpCtx() (context.Context, context.CancelFunc) {
 // deadline of its own.
 func (f *FrontendAPI) switchStoreOpCtx(switchCtx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(switchCtx, sessionStoreOpTimeout)
+}
+
+// emitSessionsChanged emits the global sessions:changed event so the
+// frontend refreshes its session list after a list-affecting mutation
+// (create, fork, delete, archive, pin, promotion, project deletion). No
+// payload — consumers re-read via ListSessions/ListAllSessions. No-op when
+// the Wails emitter has not been wired yet (e.g. very early in startup) —
+// mirrors how other global events are dispatched through the injected
+// emitEvent callback.
+func (f *FrontendAPI) emitSessionsChanged() {
+	f.seedAcquire()
+	if f.emitEvent != nil {
+		f.emitEvent(EventSessionsChanged)
+	}
 }
 
 // CreateSession creates a new agent session within the active project.
@@ -71,6 +92,13 @@ func (f *FrontendAPI) CreateSession() (*session.SessionInfo, error) {
 		}
 		cancel()
 	}
+	// Announce AFTER the persist attempt (CS #33, matching
+	// ForkSession/Delete/Archive/Pin/promote): the event's debounced re-read
+	// must see the persisted row — an emission before SaveSession let a slow
+	// (contended pool) save strand the new session out of the sidebar/radar
+	// until the safety poll. A failed save stays log-only best-effort; the
+	// announcement order is what the other emission sites already guarantee.
+	f.emitSessionsChanged()
 	return info, nil
 }
 
@@ -88,11 +116,16 @@ func (f *FrontendAPI) ForkSession(sessionID string) (*session.SessionInfo, error
 		return nil, errors.New("session store not initialized")
 	}
 
-	ctx := context.Background()
+	// Guard reads go through the file's storeOpCtx bound (pool wait + shutdown
+	// cancellation); the transactional fork below gets its own explicit,
+	// wider budget (sessionForkTimeout) because it copies an unbounded row
+	// set inside one transaction.
+	guardCtx, cancelGuard := f.storeOpCtx()
 
 	// Guard: a session with an unfinished task cannot be forked — forking would
 	// duplicate a half-completed execution state.
-	unfinished, err := f.store.GetUnfinishedTask(ctx, sessionID)
+	unfinished, err := f.store.GetUnfinishedTask(guardCtx, sessionID)
+	cancelGuard()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check session tasks: %w", err)
 	}
@@ -111,22 +144,28 @@ func (f *FrontendAPI) ForkSession(sessionID string) (*session.SessionInfo, error
 	// Managed sources fork into their OWN tree on a derived branch created at
 	// the source's committed HEAD (see forkManagedSession); local and CHAT
 	// sources keep the plain deep-copy path with the binding they have.
-	src, err := f.store.LoadSession(ctx, sessionID)
+	srcCtx, cancelSrc := f.storeOpCtx()
+	src, err := f.store.LoadSession(srcCtx, sessionID)
+	cancelSrc()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load source session: %w", err)
 	}
 	if src == nil {
 		return nil, fmt.Errorf("source session %q not found", sessionID)
 	}
+
+	forkCtx, cancelFork := context.WithTimeout(f.ctx(), sessionForkTimeout)
+	defer cancelFork()
 	if src.WorkspaceBinding != nil && src.WorkspaceBinding.Kind == session.WorkspaceManagedWorktree {
-		return f.forkManagedSession(ctx, src, reviewCloner)
+		return f.forkManagedSession(forkCtx, src, reviewCloner)
 	}
 
-	info, err := f.store.ForkSession(ctx, sessionID, reviewCloner)
+	info, err := f.store.ForkSession(forkCtx, sessionID, reviewCloner)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fork session: %w", err)
 	}
 
+	f.emitSessionsChanged()
 	return info, nil
 }
 
@@ -218,6 +257,7 @@ func (f *FrontendAPI) DeleteSessionWithOptions(id string, opts SessionDeleteOpti
 			f.log().Warn("failed to remove session directory", "session_id", id, "dir", sessionDir, "error", err)
 		}
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -304,6 +344,7 @@ func (f *FrontendAPI) ArchiveSession(id string) error {
 		}
 		cancel()
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -332,6 +373,7 @@ func (f *FrontendAPI) PinSession(id string) error {
 		}
 		cancel()
 	}
+	f.emitSessionsChanged()
 	return nil
 }
 
@@ -352,6 +394,11 @@ func (f *FrontendAPI) PinSession(id string) error {
 // reviewMode, when true, marks the message as carrying code review feedback the
 // agent must address (review status == "submitted"); the system prompt gains a
 // Code Review section directing the agent to edit code.
+// clientSendID, when non-empty, is the sending surface's optimistic-card id;
+// the message_received echo carries it back so the sender dedups the echo by
+// identity instead of content+time-window (two surfaces sending the same text
+// inside the dedup window stay two cards). Internal sends without an
+// optimistic card pass "".
 // workspace, when non-nil, carries the send-time workspace choice of the
 // draft-free creation flow: the FIRST message of a fresh session (no
 // transcript, no task) may ask for a managed worktree on the chosen branch.
@@ -359,7 +406,7 @@ func (f *FrontendAPI) PinSession(id string) error {
 // this send's own session access restore an orchestrator built for the new
 // workspace; a provisioning failure rejects the send before any state is
 // touched. A nil choice (every ordinary send, every continuation) is a no-op.
-func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool, workspace *SessionWorkspaceChoice) error {
+func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, activeMCPServers []string, modelOverride, reasoningEffort string, goal /* goal */ bool, goalBudget string, e2s /* e2s */, reviewMode /* reviewMode */ bool, clientSendID string, workspace *SessionWorkspaceChoice) error {
 	// E2S and goal are alternative task modes with incompatible loop
 	// semantics; the frontend store enforces exclusivity, this is the
 	// server-side defense so a hand-crafted call cannot arm both. Checked
@@ -494,7 +541,16 @@ func (f *FrontendAPI) SendMessage(id, text string, activeSkills, activeAgents, a
 	// session-scoped auxiliary working directories (best-effort: never blocks).
 	f.autoAddPromptWorkDirs(id, text)
 
-	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode)
+	// The manager's task dispatch consumes the PREPROCESSED text (mention
+	// refs stripped, @file refs resolved — what the orchestrator and the LLM
+	// must see), but the message_received echo it emits must carry the RAW
+	// input: the user row persisted below stores Content: text and the
+	// sending surface's optimistic card renders the raw form, so the
+	// useChatEvents dedup compares the echo against the raw text. Without
+	// this, any message whose preprocessing actually changed the text (a
+	// leading "/skill" mention, an @file ref) renders twice on the sending
+	// surface: the optimistic card plus a ref-less duplicate from the echo.
+	classification, err := f.app.Manager().SendMessageClassified(f.ctx(), id, processedText, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningEffort, goal, goalBudget, e2s, reviewMode, session.WithEchoText(text), session.WithClientMessageID(clientSendID))
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

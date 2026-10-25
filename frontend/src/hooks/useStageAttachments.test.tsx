@@ -26,6 +26,9 @@ import type { SessionInfo, AttachmentInfoUI, AttachmentUploadUI, ModelInfo } fro
 // and re-asserted/reset in test bodies.
 const spies = vi.hoisted(() => ({
   attachFiles: vi.fn<(sessionId: string, paths: string[]) => Promise<AttachmentInfoUI[]>>(),
+  attachFileContent: vi.fn<
+    (sessionId: string, file: { name: string; type: string; bytes: Uint8Array }) => Promise<AttachmentInfoUI[]>
+  >(),
   removeAttachment: vi.fn<(sessionId: string, attachmentId: string) => Promise<void>>(),
   createSession: vi.fn<() => Promise<SessionInfo>>(),
   emit: vi.fn<(event: string, data: unknown) => void>(),
@@ -37,6 +40,7 @@ vi.mock('@/api/attachments', async (importOriginal) => {
   return {
     ...actual,
     attachFiles: spies.attachFiles,
+    attachFileContent: spies.attachFileContent,
     removeAttachment: spies.removeAttachment,
   }
 })
@@ -47,6 +51,7 @@ vi.mock('@/api/sessions', () => ({
 
 vi.mock('@/api/runtime', () => ({
   emit: spies.emit,
+  isWebTransport: () => false,
 }))
 
 // Mock useConfigData with one vision + one non-vision model; the effective
@@ -90,11 +95,14 @@ const makeAttachment = (id: string): AttachmentInfoUI => ({
   sizeBytes: 1,
 })
 
-// Harness: capture the latest stageAttachmentPaths so the test can invoke it.
+// Harness: capture the latest stageAttachmentPaths/stageAttachmentFiles so
+// the tests can invoke them.
 let captured: ((sessionId: string | null, paths: string[]) => Promise<void>) | null = null
+let capturedFiles: ((sessionId: string | null, files: readonly File[]) => Promise<void>) | null = null
 function Harness() {
-  const { stageAttachmentPaths } = useStageAttachments()
+  const { stageAttachmentPaths, stageAttachmentFiles } = useStageAttachments()
   captured = stageAttachmentPaths
+  capturedFiles = stageAttachmentFiles
   return null
 }
 
@@ -102,6 +110,12 @@ function Harness() {
 async function stage(sessionId: string | null, paths: string[]): Promise<void> {
   if (!captured) throw new Error('harness did not capture stageAttachmentPaths')
   await captured(sessionId, paths)
+}
+
+/** Invoke the captured stageAttachmentFiles, failing loudly if the harness never ran. */
+async function stageFiles(sessionId: string | null, files: readonly File[]): Promise<void> {
+  if (!capturedFiles) throw new Error('harness did not capture stageAttachmentFiles')
+  await capturedFiles(sessionId, files)
 }
 
 let container: HTMLDivElement
@@ -120,6 +134,7 @@ beforeEach(() => {
   })
 
   spies.attachFiles.mockReset()
+  spies.attachFileContent.mockReset()
   spies.removeAttachment.mockReset().mockResolvedValue(undefined)
   spies.createSession.mockReset()
   spies.emit.mockReset()
@@ -392,5 +407,98 @@ describe('useStageAttachments optimistic upload placeholders', () => {
       'runtime_error',
       expect.objectContaining({ message: 'Failed to attach files' }),
     )
+  })
+})
+
+describe('useStageAttachments.stageAttachmentFiles (web content upload)', () => {
+  it('stages same-named files by identity: each upload carries its OWN bytes', async () => {
+    // A web drop may carry two files with an identical basename (multi-select
+    // across folders). Resolving entries back to their File by name would
+    // stage one file's bytes under both entries — the second upload must
+    // carry the second file's content, not a re-upload of the first.
+    const a = new File([new TextEncoder().encode('content-A')], 'shot.png', { type: 'image/png' })
+    const b = new File([new TextEncoder().encode('content-B-different')], 'shot.png', { type: 'image/png' })
+    spies.attachFileContent.mockResolvedValue([makeAttachment('u1')])
+    act(() => { useInputModeStore.setState({ selectedModel: 'vision-m' }) })
+    rerender()
+
+    await act(async () => { await stageFiles('sess-1', [a, b]) })
+
+    expect(spies.attachFileContent).toHaveBeenCalledTimes(2)
+    const [firstArgs, secondArgs] = spies.attachFileContent.mock.calls
+    if (!firstArgs || !secondArgs) throw new Error('expected two upload calls')
+    const first = firstArgs[1]
+    const second = secondArgs[1]
+    // Both uploads announce the shared display name…
+    expect(first.name).toBe('shot.png')
+    expect(second.name).toBe('shot.png')
+    // …but each carries its own file's bytes.
+    expect(new TextDecoder().decode(first.bytes)).toBe('content-A')
+    expect(new TextDecoder().decode(second.bytes)).toBe('content-B-different')
+  })
+
+  it('uploads distinct-name files with name and type from the File', async () => {
+    const doc = new File([new TextEncoder().encode('hello')], 'notes.txt', { type: 'text/plain' })
+    spies.attachFileContent.mockResolvedValue([makeAttachment('u1')])
+    act(() => { useInputModeStore.setState({ selectedModel: 'vision-m' }) })
+    rerender()
+
+    await act(async () => { await stageFiles('sess-1', [doc]) })
+
+    expect(spies.attachFileContent).toHaveBeenCalledOnce()
+    const [onlyArgs] = spies.attachFileContent.mock.calls
+    if (!onlyArgs) throw new Error('expected one upload call')
+    const call = onlyArgs[1]
+    expect(call.name).toBe('notes.txt')
+    expect(call.type).toBe('text/plain')
+    expect(new TextDecoder().decode(call.bytes)).toBe('hello')
+    expect(useAttachmentsStore.getState().attachmentsBySession['sess-1']).toEqual([makeAttachment('u1')])
+  })
+
+  it('keeps the last successful full list when a mid-loop upload fails, and drains placeholders', async () => {
+    const doc = new File([new TextEncoder().encode('hello')], 'notes.txt', { type: 'text/plain' })
+    spies.attachFileContent.mockRejectedValue(new Error('upload refused'))
+    act(() => { useInputModeStore.setState({ selectedModel: 'vision-m' }) })
+    rerender()
+
+    await act(async () => { await stageFiles('sess-1', [doc]) })
+
+    expect(useAttachmentsStore.getState().uploadsBySession['sess-1']).toBeUndefined()
+    expect(spies.emit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to attach files' }),
+    )
+  })
+
+  it('rejects an oversize file BEFORE reading its bytes (CS #34) and stages the rest', async () => {
+    const big = new File([new TextEncoder().encode('x')], 'huge.bin', { type: 'application/octet-stream' })
+    // Shadow the derived size with an above-cap value — the multi-GB drop.
+    Object.defineProperty(big, 'size', { value: 33 * 1024 * 1024 })
+    const bigRead = vi.fn(async () => new ArrayBuffer(0))
+    big.arrayBuffer = bigRead as unknown as typeof big.arrayBuffer
+    const small = new File([new TextEncoder().encode('tiny')], 'tiny.txt', { type: 'text/plain' })
+    spies.attachFileContent.mockResolvedValue([makeAttachment('u1')])
+
+    await act(async () => { await stageFiles('sess-1', [big, small]) })
+
+    // The oversize file never has its bytes read…
+    expect(bigRead).not.toHaveBeenCalled()
+    // …while the within-cap sibling stages.
+    expect(spies.attachFileContent).toHaveBeenCalledOnce()
+    const [onlyArgs] = spies.attachFileContent.mock.calls
+    if (!onlyArgs) throw new Error('expected one upload call')
+    expect(onlyArgs[1].name).toBe('tiny.txt')
+    // …and the rejection surfaces on the attachment banner.
+    expect(useAttachmentsStore.getState().imageErrorBySession['sess-1']).toContain('huge.bin')
+  })
+
+  it('rejects an oversize-only drop without creating a session (CS #34)', async () => {
+    const big = new File([new TextEncoder().encode('x')], 'huge.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(big, 'size', { value: 33 * 1024 * 1024 })
+
+    await act(async () => { await stageFiles(null, [big]) })
+
+    expect(spies.createSession).not.toHaveBeenCalled()
+    expect(useAttachmentsStore.getState().imageErrorBySession[NULL_SESSION_KEY]).toContain('byte attachment limit')
   })
 })

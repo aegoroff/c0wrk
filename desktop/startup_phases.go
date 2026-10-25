@@ -73,7 +73,10 @@ func (a *App) maybeReinitLogger(level string, sessionLogger *logger.SessionLogge
 	}
 	if sessionLogger != nil {
 		if cerr := sessionLogger.Close(); cerr != nil {
-			current.Error("failed to close session logger", "error", cerr)
+			// Log through the NEW logger (CS #46): `current` wraps the sink
+			// that was just closed, so a diagnostic routed there is silently
+			// dropped by the closed file handle.
+			newLogger.Logger().Warn("failed to close previous session logger", "error", cerr)
 		}
 	}
 	log := newLogger.Logger()
@@ -492,6 +495,23 @@ func (a *App) preloadProjectsAndSessions(projectMgr *project.Manager, sessStore 
 	return projects
 }
 
+// isTaskLifecycleEvent reports whether a session event marks a task
+// lifecycle transition that is session-list-visible state: activation
+// (task_started), a terminal state (task_complete, task_cancelled, error,
+// task_failed_resumable), or a cooperative pause/resume (session_paused,
+// session_resumed). Each one is mirrored into the global sessions:changed
+// push so every surface's session list refreshes behind its existing
+// debounced re-read instead of waiting for the 30s safety poll.
+func isTaskLifecycleEvent(eventType string) bool {
+	switch eventType {
+	case "task_started", "task_complete", "task_cancelled", "error",
+		"task_failed_resumable", "session_paused", "session_resumed":
+		return true
+	default:
+		return false
+	}
+}
+
 // buildUIEmitFunc returns the session-event emitter used by the orchestrator
 // and tool callbacks. It logs at debug level and forwards the typed
 // session.Event to the Wails frontend via a.emit so tests can substitute the
@@ -505,6 +525,17 @@ func (a *App) buildUIEmitFunc() func(session.Event) {
 		// event. Settlement/HITL events force an immediate flush.
 		a.emitBatchedEvent(eventName, []any{evt.Data},
 			sessionEventCoalesceKey(evt.SessionID, evt.Type, evt.Data), isImmediateFlushEvent(evt.Type), 0)
+		// Task lifecycle transitions move a session between running / paused /
+		// finished in every session list (sidebar, live-sessions radar), so
+		// mirror each one into the global sessions:changed push. Enqueued in
+		// the batcher's immediate-flush (barrier) class: the lifecycle event
+		// and the list-change push land together, in queue order, without
+		// waiting for the ~16ms tick. No payload, mirroring
+		// emitSessionsChanged: consumers re-read the authoritative list via
+		// ListSessions/ListAllSessions behind their debounces.
+		if isTaskLifecycleEvent(evt.Type) {
+			a.emitBatchedEvent(backend.EventSessionsChanged, nil, "", true, 0)
+		}
 		// session_renamed is a session-list metadata change (it mirrors the
 		// global project:renamed event). Re-emit it globally so the sidebar
 		// updates the title even when the renamed session is NOT the active
@@ -988,7 +1019,21 @@ func (a *App) buildFrontendAPI(
 	log *slog.Logger,
 	startTime time.Time,
 ) {
+	// Wire the experimental-gate live-follow hook (ADR-101) through the
+	// FrontendAPIConfig seam before Init: the backend invokes it after a
+	// successful experimental.enabled persist, so the web-access sidecar
+	// mount follows the master gate mid-session — opening the gate mounts it
+	// (when the section's own switch is on), closing it stops a running
+	// sidecar — instead of waiting for the next launch. Init consumes the
+	// hook together with the other seed fields, so the install is ordered
+	// before the seed flag and can never race a toggle RPC.
+	cfg.OnExperimentalChanged = a.applyExperimentalWebAccess
 	a.frontendAPI().Lifecycle().Init(cfg)
+	// Capture the desktop's own handle on the live config + its path: the
+	// web-access control RPCs (App-owned, ADR-101) flip and persist the
+	// desktop-owned web_access section through it. The same pointer Init
+	// stores, so a toggle is visible to the shared live config immediately.
+	a.setConfigRef(cfg.Config, cfg.ConfigPath)
 	log.Info("startup phase complete", "phase", "frontend_api", "elapsed_ms", time.Since(startTime).Milliseconds())
 
 	a.frontendAPI().Lifecycle().SetConfigLoadState(configLoadErrors)
@@ -1593,5 +1638,74 @@ func (a *App) stopEmbeddedLLM(ctx context.Context) {
 	}
 	if err := stop(ctx); err != nil {
 		a.log().Error("failed to stop the embedded LLM server during shutdown", "error", err)
+	}
+}
+
+// initWebAccess mounts the browser web-access sidecar (ADR-101) when BOTH
+// gates are open: the feature's own web_access.enabled switch AND the master
+// experimental gate (experimental.enabled — web access is an experimental
+// feature, ADR-101). This is the feature's startup mount point, by the
+// initChatGPTAuth pattern: a cheap phase helper after buildFrontendAPI
+// (the dispatch target must be wired — it is also where the live-follow hook
+// applyExperimentalWebAccess installs through the FrontendAPIConfig seam) and after
+// emitBackendReady (the mount must not delay or reorder the readiness
+// contract). Everything concrete is assembled HERE — the live FrontendAPI as
+// the reflection dispatch target, the SPA tree main.go handed over, the CSP
+// middleware, the resolved config section — and handed to internal/webaccess,
+// which knows nothing about Wails or the desktop layer.
+//
+// A closed gate is a QUIET skip (Debug): an intentionally-off feature is not
+// a failure, and flagging every default-config launch at Error would be
+// noise; the live-follow of a mid-session gate change rides the desktop hook
+// instead of a restart.
+//
+// Failure is fail-soft and LOUD: a sidecar that cannot start (config drift a
+// reload normalized away, a squatted explicit port) logs at Error and leaves
+// the app fully usable desktop-side — the web feature degrades, the desktop
+// app must not. The section stays enabled, so the next launch retries.
+func (a *App) initWebAccess(cfg *config.Config, log *slog.Logger) {
+	if a.frontendAPI() == nil || cfg == nil {
+		return
+	}
+	if !webAccessMountAllowed(cfg, cfg.Experimental.Enabled) {
+		log.Debug("web access sidecar not mounted: gate closed",
+			"experimental_enabled", cfg.Experimental.Enabled,
+			"web_access_enabled", cfg.WebAccess.Enabled)
+		return
+	}
+	startTime := time.Now()
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+	srv, err := a.startWebAccessLocked(log)
+	if err != nil {
+		log.Error("web access sidecar failed to start; continuing without it", "error", err)
+		return
+	}
+	logWebAccessReady(log, srv)
+	log.Info("startup phase complete", "phase", "web_access",
+		"elapsed_ms", time.Since(startTime).Milliseconds())
+}
+
+// stopWebAccess stops the sidecar during Shutdown, releasing the loopback
+// listener and every browser WebSocket before the heavier teardown steps run
+// (the judge drain and the store closes), so a connected tab sees its event
+// stream end while the app is still winding down — not mid-flight against a
+// half-closed backend. It runs behind webAccessMu so it cannot interleave
+// with a concurrent SetWebAccessEnabled transition.
+//
+// The stop is bounded by webAccessStopBudget (~3s) rather than the caller's
+// context alone: a quit must never hang on a sidecar, and the budget is what
+// converts a wedged graceful Shutdown into Server.Stop's force close (the
+// same contract as stopEmbeddedLLM, sized for a stateless listener instead
+// of gigabytes of weights). A failure is logged, never fatal — quitting must
+// not be blocked by a listener that refuses to die, and Server.Stop still
+// force-closes what the graceful phase could not finish.
+func (a *App) stopWebAccess(ctx context.Context) {
+	a.webAccessMu.Lock()
+	defer a.webAccessMu.Unlock()
+	sctx, cancel := context.WithTimeout(ctx, webAccessStopBudget)
+	defer cancel()
+	if err := a.stopWebAccessLocked(sctx); err != nil {
+		a.log().Error("failed to stop the web access sidecar during shutdown", "error", err)
 	}
 }

@@ -109,10 +109,11 @@ type Config struct {
 	E2S E2SConfig `yaml:"e2s"`
 
 	// Experimental gates features that are still under active development
-	// (currently the E2S execution mode) behind a single master switch. Model
-	// Profiles is NOT gated by this switch — it carries its own manual master
-	// toggle (model_profiles.enabled). When disabled, every gated feature is
-	// treated as off. Default: off.
+	// (currently the E2S execution mode, the embedded local model's frontend
+	// surfaces, and the browser web-access sidecar) behind a single master
+	// switch. Model Profiles is NOT gated by this switch — it carries its own
+	// manual master toggle (model_profiles.enabled). When disabled, every
+	// gated feature is treated as off. Default: off.
 	Experimental ExperimentalConfig `yaml:"experimental"`
 
 	// Updates configures the automatic "check for updates" subsystem that runs
@@ -120,6 +121,17 @@ type Config struct {
 	// timestamp of the last check) is persisted to update_state.json, not to
 	// this file; see core/updater/state.go and config.UpdateStatePath.
 	Updates UpdatesConfig `yaml:"updates"`
+
+	// WebAccess configures the browser web-access sidecar (ADR-101): an
+	// HTTP/WebSocket server that mirrors the desktop UI into a browser
+	// window. Default off — an absent section (or enabled: false) starts
+	// nothing and the app behaves exactly as before the section existed. The
+	// struct is pure data: it knows nothing about the webaccess package.
+	// Load-time validity problems are fail-soft (warning + reset to the safe
+	// default state, see web_access.go); Save refuses to persist an invalid
+	// enabled state, while a valid non-loopback bind is a warned-about LAN
+	// listener. See specs/decisions/101-browser-web-access.md.
+	WebAccess WebAccessConfig `yaml:"web_access"`
 }
 
 // UpdatesConfig controls the self-update subsystem. Both toggles are
@@ -2559,15 +2571,20 @@ var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 // behind a single master switch. It is all-or-nothing by design: there is no
 // per-feature toggle, so enabling it exposes every gated feature and
 // disabling it treats each as off. Currently gated: the E2S execution mode
-// (e2s.*) and the embedded local model's FRONTEND surfaces — the Settings
+// (e2s.*); the embedded local model's FRONTEND surfaces — the Settings
 // block and its entries in both model pickers are hidden while the switch is
-// off, while the backend keeps serving the subsystem's RPCs (ADR-068).
+// off, while the backend keeps serving the subsystem's RPCs (ADR-068); and
+// the browser web-access sidecar (web_access.*) — a COMPOUND gate, where the
+// sidecar mounts only while this switch AND web_access.enabled are both on,
+// and a mid-session flip of either switch is followed live (the sidecar is
+// mounted or stopped without an app restart).
 // Model Profiles (model_profiles.*) is NOT gated — it carries its own
 // manual master toggle.
 type ExperimentalConfig struct {
 	// Enabled is the master switch for the gated experimental features (the
-	// E2S execution mode and the embedded model's frontend surfaces). When
-	// false, every gated feature is treated as off regardless of its own
+	// E2S execution mode, the embedded model's frontend surfaces, and the
+	// web-access sidecar — the latter additionally requires web_access.enabled).
+	// When false, every gated feature is treated as off regardless of its own
 	// toggles. Default: false.
 	Enabled bool `yaml:"enabled"`
 }
@@ -3186,6 +3203,14 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	// always valid.
 	shellExecWarnings := normalizeShellExec(&cfg)
 
+	// Validate the web_access section in place (fail-soft: an enabled section
+	// with an invalid bind or an out-of-range port is warned about and reset
+	// to the safe default state — the sidecar stays off; a valid non-loopback
+	// bind stays enabled with a network-exposure warning). Must run after
+	// ApplyDefaults (which seeds the default bind) and before validate, so
+	// the persisted shape is always valid. See web_access.go / ADR-101.
+	webAccessWarnings := normalizeWebAccess(&cfg)
+
 	// Validate the MCP per-server timeout durations (fail-soft: invalid entries
 	// are warned about and left untouched — the config→builder adapter resolves
 	// them to the engine default at build time). Must run after ApplyDefaults
@@ -3213,6 +3238,7 @@ func LoadWithResult(path string) (*LoadResult, error) {
 	// Warnings collected before validation, in a deterministic order.
 	warnings := autonomyWarnings
 	warnings = append(warnings, shellExecWarnings...)
+	warnings = append(warnings, webAccessWarnings...)
 	warnings = append(warnings, mcpWarnings...)
 	warnings = append(warnings, mcpModeWarnings...)
 	warnings = append(warnings, capWarnings...)
@@ -3230,6 +3256,15 @@ func LoadWithResult(path string) (*LoadResult, error) {
 
 // Save writes the configuration to a YAML file atomically.
 func Save(cfg *Config, path string) error {
+	// Fail-closed web_access gate: refuse to persist an enabled section with
+	// an invalid bind or an out-of-range port (a valid non-loopback bind is
+	// a stage-2 LAN listener and saves as-is). The load path heals an
+	// invalid state (normalizeWebAccess resets it), so hitting this means an
+	// in-memory mutation tried to persist a section the sidecar must never
+	// run with. See web_access.go / ADR-101.
+	if err := validateWebAccessForSave(cfg); err != nil {
+		return fmt.Errorf("refusing to save config: %w", err)
+	}
 	// Marshal the config as-is: the execute blocklist is empty by default
 	// and purely user-authored, so there is no derived view to maintain —
 	// what is stored is what is written.

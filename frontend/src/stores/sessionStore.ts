@@ -20,7 +20,7 @@ function sortByActivity(sessions: SessionInfo[]): SessionInfo[] {
 //
 // The backend resolves the "active session" for the research/papers roots and
 // the workspace watcher from the PERSISTED selection
-// (project_ui_state.saved_session_id, ADR-099), and WatchDirectory skips a
+// (project_ui_state.saved_session_id, ADR-101), and WatchDirectory skips a
 // re-scope whose root no longer matches that authority. The persist in
 // selectSession is fire-and-forget, so a WatchDirectory sent immediately after
 // a session switch could otherwise reach the backend BEFORE the selection it

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { CopyButton } from './CopyButton'
-import { clipboardSetText, emit } from '@/api/runtime'
+import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
 
 // Copy must go through the native Wails runtime, NOT navigator.clipboard
@@ -14,6 +14,7 @@ import { saveMessageAsMarkdown } from '@/api/files'
 vi.mock('@/api/runtime', () => ({
   clipboardSetText: vi.fn().mockResolvedValue(true),
   emit: vi.fn(),
+  isWebTransport: vi.fn(() => false),
 }))
 
 vi.mock('@/api/files', () => ({
@@ -43,6 +44,9 @@ describe('CopyButton', () => {
 
   beforeEach(() => {
     vi.useFakeTimers()
+    // Pin the success verdict explicitly: the failure tests below override it,
+    // and this per-test setup keeps that override from leaking across tests.
+    vi.mocked(clipboardSetText).mockResolvedValue(true)
     // Set the Web Clipboard API to undefined to prove the native path is taken.
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -103,6 +107,44 @@ describe('CopyButton', () => {
     })
     expect(container.textContent).toContain('Copy')
     expect(container.textContent).not.toContain('Copied')
+  })
+
+  it('flashes "Failed" with a destructive icon instead of "Copied" when the clipboard write reports false', async () => {
+    vi.mocked(clipboardSetText).mockResolvedValue(false)
+    render({ text: 'answer text' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(clipboardSetText).toHaveBeenCalledTimes(1)
+    expect(clipboardSetText).toHaveBeenCalledWith('answer text')
+    // A false verdict must never render the success state...
+    expect(container.textContent).not.toContain('Copied')
+    // ...the failure signal is the "Failed" label plus the red X icon.
+    expect(container.textContent).toContain('Failed')
+    expect(button.getAttribute('aria-label')).toBe('Failed')
+    const icon = button.querySelector('svg')
+    expect(icon?.getAttribute('class')).toContain('text-destructive')
+    expect(icon?.getAttribute('class')).not.toContain('text-success')
+    // The failure flash is bounded like the success flash: back to idle after 2s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000)
+    })
+    expect(container.textContent).not.toContain('Failed')
+    expect(container.textContent).toContain('Copy')
+  })
+
+  it('flashes "Failed" when the clipboard write rejects (the defensive catch path)', async () => {
+    vi.mocked(clipboardSetText).mockRejectedValue(new Error('transport exploded'))
+    render({ text: 'answer text' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(container.textContent).not.toContain('Copied')
+    expect(container.textContent).toContain('Failed')
   })
 
   it('morphs into "Save" while Shift is held and back on release', () => {
@@ -177,5 +219,98 @@ describe('CopyButton', () => {
       expect.objectContaining({ message: 'Failed to save message to file' }),
     )
     expect(container.textContent).not.toContain('Saved')
+  })
+})
+
+describe('CopyButton in web transport (no native save dialog)', () => {
+  let container: HTMLElement
+  let root: Root
+  // The anchor-download test's spy, restored in afterEach: clearAllMocks
+  // does NOT restore spies, so a leaked no-op click would silently break
+  // real anchor clicks in later tests.
+  let anchorClickSpy: MockInstance | null = null
+  const createObjectURL = vi.fn<(obj: Blob) => string>(() => 'blob:mock-url')
+  const revokeObjectURL = vi.fn<(url: string) => void>(() => {})
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // jsdom implements neither object-URL primitive; stub both so the anchor
+    // download path runs end-to-end.
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    vi.mocked(isWebTransport).mockReturnValue(true)
+
+    container = document.createElement('div')
+    document.body.replaceChildren(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    releaseShift()
+    act(() => {
+      window.dispatchEvent(new Event('blur'))
+    })
+    act(() => root.unmount())
+    anchorClickSpy?.mockRestore()
+    anchorClickSpy = null
+    vi.mocked(isWebTransport).mockReturnValue(false)
+    vi.clearAllMocks()
+    vi.useRealTimers()
+  })
+
+  const render = (props: React.ComponentProps<typeof CopyButton>) =>
+    act(() => {
+      root.render(<CopyButton {...props} />)
+    })
+
+  it('Shift+click hands the browser an anchor download and never calls the save RPC', async () => {
+    render({ text: 'markdown body' })
+    pressShift()
+
+    anchorClickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(saveMessageAsMarkdown).not.toHaveBeenCalled()
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    const blob = createObjectURL.mock.calls[0]?.[0]
+    expect(await blob?.text()).toBe('markdown body')
+    expect(anchorClickSpy).toHaveBeenCalledTimes(1)
+    // The anchor download cannot report failure — the feedback claims only
+    // that it started, never "Saved".
+    expect(container.textContent).toContain('Download started')
+    expect(container.textContent).not.toContain('Saved')
+    // The object-URL revocation is DEFERRED, not same-tick: WebKit/Safari
+    // race a synchronous revokeObjectURL against the in-flight download
+    // handoff and can cancel it entirely (no file arrives while the button
+    // already claimed "Download started"). Nothing is revoked at click time…
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+    // …and the detached 10 s revoke reclaims the URL once the handoff has
+    // certainly settled — including after unmount. Release Shift BEFORE
+    // that unmount: this is the only test here that unmounts early, and a
+    // keyup after unmount never reaches the store's detached listeners (a
+    // held Shift would leak into the next test — see the afterEach note).
+    releaseShift()
+    act(() => {
+      root.unmount()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000)
+    })
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+  })
+
+  it('the plain click still copies through the shared transport clipboard', async () => {
+    render({ text: 'copy me' })
+    const button = container.querySelector('button')!
+    await act(async () => {
+      button.click()
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(clipboardSetText).toHaveBeenCalledWith('copy me')
   })
 })

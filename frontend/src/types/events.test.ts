@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isAgentMetricsData, normalizeAgentMetricsData, isTaskCompleteData, isCompactionFinishedData, isPlanStepCompleteData, isPlanStepPausedData, isSubAgentPausedData, isSubAgentCompleteData, isGitConfigRiskData, isE2SStateData, isE2SSigma, isTaskFailedResumableData, isEmbeddedLLMInstallProgressData, isEmbeddedLLMStateData, isSessionTokensData } from './events'
+import { isAgentMetricsData, normalizeAgentMetricsData, isTaskCompleteData, isCompactionFinishedData, isPlanStepCompleteData, isPlanStepPausedData, isSubAgentPausedData, isSubAgentCompleteData, isGitConfigRiskData, isE2SStateData, isE2SSigma, isTaskFailedResumableData, isEmbeddedLLMInstallProgressData, isEmbeddedLLMStateData, isSessionTokensData, isMessageReceivedData } from './events'
 
 describe('isTaskFailedResumableData', () => {
     it('accepts a payload without auto_retry_at (timer not armed)', () => {
@@ -26,13 +26,41 @@ describe('isTaskFailedResumableData', () => {
 })
 
 
+describe('isMessageReceivedData', () => {
+    const valid = { session_id: 'sess-1', text: 'hello' }
+
+    it('accepts the minimal payload (fresh task — optional fields absent)', () => {
+        expect(isMessageReceivedData(valid)).toBe(true)
+    })
+
+    it('accepts the optional echo id and nudge flag in any combination', () => {
+        expect(isMessageReceivedData({ ...valid, client_send_id: 'opt-1' })).toBe(true)
+        expect(isMessageReceivedData({ ...valid, is_nudge: true })).toBe(true)
+        expect(isMessageReceivedData({ ...valid, is_nudge: false })).toBe(true)
+        expect(isMessageReceivedData({ ...valid, client_send_id: 'opt-1', is_nudge: true })).toBe(true)
+    })
+
+    it('rejects wrong-typed or missing required fields', () => {
+        expect(isMessageReceivedData({ text: 'hello' })).toBe(false)
+        expect(isMessageReceivedData({ session_id: 'sess-1' })).toBe(false)
+        expect(isMessageReceivedData({ session_id: 1, text: 'hello' })).toBe(false)
+        expect(isMessageReceivedData(null)).toBe(false)
+        expect(isMessageReceivedData(undefined)).toBe(false)
+    })
+
+    it('rejects a malformed optional field (additive fields stay strictly typed)', () => {
+        expect(isMessageReceivedData({ ...valid, client_send_id: 1 })).toBe(false)
+        expect(isMessageReceivedData({ ...valid, is_nudge: 'yes' })).toBe(false)
+    })
+})
+
 describe('isTaskCompleteData', () => {
     it('accepts valid data with string output', () => {
         expect(isTaskCompleteData({ output: 'done' })).toBe(true)
     })
 
-    it('accepts valid data with attempt_count', () => {
-        expect(isTaskCompleteData({ attempt_count: 3 })).toBe(true)
+    it('accepts valid data with success flag', () => {
+        expect(isTaskCompleteData({ success: true })).toBe(true)
     })
 
     it('accepts valid data with routing_decision object', () => {
@@ -40,7 +68,7 @@ describe('isTaskCompleteData', () => {
     })
 
     it('accepts data with multiple valid fields', () => {
-        expect(isTaskCompleteData({ output: 'ok', attempt_count: 1, routing_decision: {} })).toBe(true)
+        expect(isTaskCompleteData({ output: 'ok', success: true, routing_decision: {} })).toBe(true)
     })
 
     it('rejects data with undefined output (field present but undefined)', () => {
@@ -51,8 +79,10 @@ describe('isTaskCompleteData', () => {
         expect(isTaskCompleteData({ output: 123 })).toBe(false)
     })
 
-    it('rejects attempt_count with wrong type (string)', () => {
-        expect(isTaskCompleteData({ attempt_count: '3' })).toBe(false)
+    it('rejects a payload whose only field is not part of the contract', () => {
+        // attempt_count was removed from the wire contract (the backend never
+        // sent it) — a payload carrying only unknown fields is not evidence.
+        expect(isTaskCompleteData({ attempt_count: 3 })).toBe(false)
     })
 
     it('rejects routing_decision with wrong type (string)', () => {

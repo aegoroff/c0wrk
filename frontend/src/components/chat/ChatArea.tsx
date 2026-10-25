@@ -1,16 +1,13 @@
 import { useEffect, useRef, useMemo } from 'react'
-import { useChatStore, useSessionMessages, useSessionWorkUnits } from '@/stores/chatStore'
+import { useChatStore, useSessionMessages, useSessionWorkUnits, useSessionHistoryLoaded } from '@/stores/chatStore'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
-import { groupMessages, stabilizeDisplayItems, chatMessageToUI, isPersistableHistoryMessage, isLegacyReviewPromptRow, lastAgentMetricsFromHistory, isAgentMetricsRow, isRoutingRequestRow } from '@/lib/chatUtils'
-import { restorePlanAndGoalFromHistory } from '@/lib/sessionStoreRestore'
+import { groupMessages, stabilizeDisplayItems } from '@/lib/chatUtils'
+import { reloadSessionHistory, reportHistoryLoadFailure } from '@/lib/sessionHistoryReload'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useInputModeStore } from '@/stores/inputModeStore'
 import { usePlanStore } from '@/stores/planStore'
-import { getSessionHistory, getSessionRuntimeStatus, getPendingActions, resolveStalePrompt } from '@/api/chat'
 import { useTaskFlagRestore } from '@/hooks/useTaskFlagRestore'
-import { reconcileRuntimeStatus, reconcilePendingActions, reconcileWorkUnits, stalePromptMatchField } from '@/lib/sessionRuntime'
-import { generateMessageId } from '@/lib/ids'
-import type { ChatMessageUI, DisplayItem } from '@/types/messages'
+import type { DisplayItem } from '@/types/messages'
 import { AssistantMessage } from './AssistantMessage'
 import { ActivityIndicator } from './ActivityIndicator'
 import { ChatScrollManager } from './ChatScrollManager'
@@ -21,9 +18,9 @@ import { BlackboardPanel } from './BlackboardPanel'
 import { BookmarksPanel } from './BookmarksPanel'
 import { ChatInput } from './ChatInput'
 import { ArchivedBanner } from './ArchivedBanner'
+import { ChatAreaPlaceholder } from './ChatAreaPlaceholder'
 import { ScrollProvider } from './ScrollContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { MessageCircle } from 'lucide-react'
 import { logger } from '@/lib/logger'
 
 export function ChatArea() {
@@ -51,6 +48,11 @@ export function ChatArea() {
   // completed/interrupted). Boolean coercion keeps the selector referentially
   // stable (undefined -> false).
   const isTaskActive = useChatStore(s => activeSessionId ? (s.taskActive[activeSessionId] ?? false) : false)
+  // Whether the active session's persisted-history load has settled (the
+  // shared loader marks it in a finally — success and failure alike).
+  // Primitive selector, referentially stable. Lets the empty-session branch
+  // tell "still loading" (spinner) from "genuinely empty" (placeholder icon).
+  const historyLoaded = useSessionHistoryLoaded(activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
   // Baseline for transcript stabilization (see the displayItems memo below):
   // the previous committed item tree, reused for identity-stable items.
@@ -75,12 +77,17 @@ export function ChatArea() {
   // Load persisted history on session change, then reconcile the chat store
   // against the backend runtime status and pending-action set AFTER the merge.
   //
-  // Reconciliation runs after mergeHistoryMessages (not in a separate effect)
-  // so it always sees a populated store. Previously the status/pending RPCs
-  // resolved faster than the history RPC and reconciled an empty store, then
-  // history loaded with unresolved prompts and nothing re-triggered
-  // reconciliation — so stale plan_review / task_failed_resumable banners
-  // reappeared in completed sessions.
+  // The load itself lives in lib/sessionHistoryReload (shared with the app-root
+  // shallow-resync triggers, which re-run it on WS re-connect / window focus
+  // without a session switch). The merge into chatStore is merge-dedup, so a
+  // re-run can neither duplicate nor drop messages.
+  //
+  // Reconciliation runs inside the loader after mergeHistoryMessages (not in a
+  // separate effect) so it always sees a populated store. Previously the
+  // status/pending RPCs resolved faster than the history RPC and reconciled an
+  // empty store, then history loaded with unresolved prompts and nothing
+  // re-triggered reconciliation — so stale plan_review / task_failed_resumable
+  // banners reappeared in completed sessions.
   //
   // A `cancelled` flag guards the whole async chain: if the user switches
   // sessions before it settles, the result is discarded (the new session's
@@ -97,137 +104,15 @@ export function ChatArea() {
       return
     }
     usePlanStore.getState().clearPlan()
-    const loadStartedAt = Date.now()
     let cancelled = false
-
-    ;(async () => {
-      let history: Awaited<ReturnType<typeof getSessionHistory>>
-      try {
-        // Load the whole session history in one request: the returned array is
-        // the full row set for the session.
-        history = await getSessionHistory(activeSessionId)
-      } catch (err) {
-        if (cancelled) return
-        logger.error('Failed to load session history:', err)
-        useChatStore.getState().addMessage(activeSessionId, {
-          id: generateMessageId(),
-          sessionId: activeSessionId,
-          type: 'error',
-          content: 'Failed to load session history. Please try switching sessions.',
-          // Distinguishes this card from the send-path's failure cards in
-          // the workspace selector's freshness predicate: a load failure
-          // can be the only visible entry of a session WITH persisted rows,
-          // so it must never read as a "confirmed empty" transcript (see
-          // SessionWorkspaceSelector.isFresh).
-          metadata: { historyLoadFailed: true },
-          timestamp: Date.now(),
-        })
-        return
-      }
+    reloadSessionHistory(activeSessionId, { isCancelled: () => cancelled }).catch((err) => {
       if (cancelled) return
-
-      // The merged chat rows, materialized for the EMPTY history too (see the
-      // unconditional merge below).
-      let chatMessages: ChatMessageUI[] = []
-      if (history.length > 0) {
-        // Filter out rows that must never surface in the chat:
-        //  - "event_unknown" — transient UI events (attachments:changed,
-        //    session_pinned, etc.) that leaked into the DB before they were
-        //    marked transient in the persister. Their content is the raw JSON
-        //    metadata payload, which would render as garbage text.
-        //  - "review_prompt" — the removed post-task code-review prompt card
-        //    (ADR-060). Legacy databases still carry one per completed task;
-        //    without this they render as a stale "Uncommitted changes detected
-        //    in this repository." status line at the end of the chat.
-        const filteredHistory = history.filter(
-          (msg) => isPersistableHistoryMessage(msg) && !isLegacyReviewPromptRow(msg),
-        )
-        const droppedCount = history.length - filteredHistory.length
-        if (droppedCount > 0) {
-          logger.debug(`Filtered ${droppedCount} non-displayable row(s) from session history`)
-        }
-        const uiMessages = filteredHistory.map((msg) => chatMessageToUI(msg))
-        // agent_metrics rows are session store-state, not chat content (the
-        // live handler writes them to planStore, never to the chat): restore
-        // the newest report into the ExecutionPanels stats row and keep the
-        // rows out of the message list so no raw-JSON card renders.
-        const agentMetrics = lastAgentMetricsFromHistory(uiMessages)
-        if (agentMetrics) {
-          usePlanStore.getState().setSessionStats(activeSessionId, { lastAgentMetrics: agentMetrics })
-        }
-        // Drop store-state rows (agent_metrics) and the legacy per-task
-        // "Routing request..." activity boilerplate so the chat shows only the
-        // routing decision itself.
-        chatMessages = uiMessages.filter((m) => !isAgentMetricsRow(m) && !isRoutingRequestRow(m))
-        // Rebuild the plan panel and goal badge from the loaded history: the
-        // whole row set is present, so the plan declaration and the goal
-        // snapshots are always available.
-        restorePlanAndGoalFromHistory(activeSessionId, chatMessages)
-      }
-      // Merge (not replace) so live events delivered while the RPC was in
-      // flight — e.g. a terminal `error` — are not clobbered; the merge
-      // protects them through loadStartedAt. An EMPTY history must NOT go
-      // through the merge: its loadStartedAt guard would drop every stored
-      // row older than this load — on a fresh session that is exactly the
-      // frontend-only transcript (a rejected send's error card, an in-flight
-      // optimistic message) — so the empty case only MATERIALIZES the
-      // confirmed-empty index the workspace selector's freshness contract
-      // needs (an absent index reads as "history not loaded yet" and would
-      // keep the workspace picker locked forever; ADR-091's send-time binding
-      // is unreachable without it). With an index already present,
-      // ensureEmptyTranscript keeps every live row untouched — it only reaps
-      // superseded history-load-failure cards, which this successful load
-      // proves stale (a stale card would otherwise keep the fresh predicate
-      // locked on a provably fresh session forever).
-      if (history.length === 0) {
-        useChatStore.getState().ensureEmptyTranscript(activeSessionId)
-      } else {
-        useChatStore.getState().mergeHistoryMessages(activeSessionId, chatMessages, loadStartedAt)
-      }
-
-      // Reconcile AFTER the merge so the store is populated. Fetch the
-      // authoritative runtime status and pending-action set in parallel.
-      // statusReadAt predates the snapshot: live events that mutate the
-      // activity label / streaming text after this point are fresher than the
-      // snapshot's phase, and reconcileRuntimeStatus skips overwriting them.
-      const statusReadAt = Date.now()
-      const [status, pending] = await Promise.all([
-        getSessionRuntimeStatus(activeSessionId),
-        getPendingActions(activeSessionId),
-      ])
-      if (cancelled) return
-
-      // Collect messages resolved as stale so their resolution can be
-      // persisted (otherwise they reappear on the next reload).
-      const staleResolved: ChatMessageUI[] = []
-      if (status) {
-        for (const msg of reconcileRuntimeStatus(activeSessionId, status, statusReadAt, loadStartedAt)) staleResolved.push(msg)
-        // Align paused/interrupted delegate & plan-step blocks with the durable
-        // work-unit snapshot (rendered via groupMessages). Runs AFTER the
-        // history merge so the blocks exist to be corrected. statusReadAt
-        // guards against a live settlement that landed after this snapshot was
-        // read, and the same overlay repairs the execution plan panel — rebuilt
-        // from the replayed history, it would otherwise keep spinning a step the
-        // ledger settled as interrupted.
-        const workUnitOverlay = reconcileWorkUnits(activeSessionId, status.work_units, statusReadAt)
-        usePlanStore.getState().applyWorkUnitStatuses(workUnitOverlay)
-      }
-      if (pending) {
-        for (const msg of reconcilePendingActions(activeSessionId, pending)) staleResolved.push(msg)
-      }
-
-      // Persist stale resolutions to the backend (best-effort, idempotent).
-      // Once persisted, the message reloads with resolved:true and is never
-      // reprocessed.
-      for (const msg of staleResolved) {
-        const field = stalePromptMatchField(msg.type)
-        if (!field) continue
-        const value = msg.metadata?.[field]
-        if (typeof value === 'string') {
-          void resolveStalePrompt(activeSessionId, msg.type, field, value, { resolved: true, stale: true })
-        }
-      }
-    })()
+      logger.error('Failed to load session history:', err)
+      // Shared card emission (same helper as the load-phase catch): the
+      // deterministic id upserts, and a reconcile failure beneath an already
+      // rendered transcript logs instead of appending a false failure card.
+      reportHistoryLoadFailure(activeSessionId, 'reconcile phase')
+    })
 
     return () => { cancelled = true }
   }, [activeSessionId])
@@ -259,47 +144,26 @@ export function ChatArea() {
   }, [displayItems])
 
   if (!activeSessionId) {
-    return (
-      <div className="flex flex-1 flex-col">
-        <div className="flex-1 flex items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-3">
-            <MessageCircle className="h-12 w-12 opacity-20" />
-          </div>
-        </div>
-        <ChatInput />
-      </div>
-    )
+    return <ChatAreaPlaceholder sessionId={null} historyInFlight={false} inputMode={inputMode} isArchived={false} />
   }
 
   const hasContent = messages.length > 0 || !!streamingText
 
-  // Archived sessions are read-only: swap the input shell for an "Archived"
-  // banner. Hoisted into a single const so the archived gate lives in one
-  // place (used by both render branches below). activeSessionId is guaranteed
-  // non-null past the early return above, so no extra null check is needed.
-  const inputShell = isArchived ? <ArchivedBanner sessionId={activeSessionId} /> : <ChatInput />
-
   if (!hasContent) {
     return (
-      <div className="flex flex-1 flex-col">
-        <div className="flex-1 flex items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-3">
-            <MessageCircle className="h-12 w-12 opacity-20" />
-          </div>
-        </div>
-        <ErrorBoundary fallback={<div className="text-xs text-destructive p-2">Panel error</div>}>
-          <ExecutionPanels />
-          <BlackboardPanel />
-        </ErrorBoundary>
-        <ErrorBoundary
-          resetKeys={[activeSessionId, inputMode, isArchived]}
-          fallback={<div className="text-xs text-destructive p-2">Input error</div>}
-        >
-          {inputShell}
-        </ErrorBoundary>
-      </div>
+      <ChatAreaPlaceholder
+        sessionId={activeSessionId}
+        historyInFlight={!historyLoaded}
+        inputMode={inputMode}
+        isArchived={isArchived}
+      />
     )
   }
+
+  // Archived sessions are read-only: swap the input shell for an "Archived"
+  // banner. activeSessionId is guaranteed non-null past the early return
+  // above, so no extra null check is needed.
+  const inputShell = isArchived ? <ArchivedBanner sessionId={activeSessionId} /> : <ChatInput />
 
   return (
     <ScrollProvider>

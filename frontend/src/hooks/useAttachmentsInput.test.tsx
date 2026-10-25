@@ -45,6 +45,7 @@ vi.mock('@/api/sessions', () => ({
 
 vi.mock('@/api/runtime', () => ({
   emit: spies.emit,
+  isWebTransport: () => false,
 }))
 
 // Mock useConfigData with one vision + one non-vision model; the effective

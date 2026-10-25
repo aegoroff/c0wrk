@@ -18,6 +18,11 @@ import { PromoteSessionDialog } from "./PromoteSessionDialog";
  *   3. Search box (appears once total sessions ≥ 5).
  *   4. Scrollable region: active sessions, then the collapsible Archived group.
  *
+ * While `sessions === null` (the store's "not yet loaded" sentinel — initial
+ * value and `resetForProjectSwitch`) the region renders skeleton rows instead
+ * of the empty-state text, so the list never flashes "No sessions yet" before
+ * the real list arrives.
+ *
  * Rename is rendered inline: the row swaps to an input for the session being
  * renamed. The outer scroll region keeps the list within the half-height slot
  * allocated by the sidebar's vertical split.
@@ -152,7 +157,19 @@ export function SessionList() {
 
       {/* Scrollable list */}
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-1 py-1">
-        {visibleActive.length > 0 ? (
+        {sessions === null ? (
+          // Loading transient (initial load / project switch): the store's
+          // null sentinel — `sessions === null` is the canonical "not yet
+          // loaded" signal (initial value + resetForProjectSwitch). Skeleton
+          // rows instead of the empty-state text, so a cold start or a
+          // project switch never flashes "No sessions yet" before the list
+          // arrives; a genuinely empty list (`[]`) keeps the old text below.
+          <div role="status" aria-label="Loading sessions" className="space-y-1 px-1 py-1">
+            <div className="h-7 w-[85%] animate-pulse rounded-sm bg-muted/60" />
+            <div className="h-7 w-[70%] animate-pulse rounded-sm bg-muted/60" />
+            <div className="h-7 w-[55%] animate-pulse rounded-sm bg-muted/60" />
+          </div>
+        ) : visibleActive.length > 0 ? (
           visibleActive.map(renderItem)
         ) : (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground/70">

@@ -9,6 +9,7 @@ import { revealInWorkspace } from '@/lib/revealInWorkspace'
 import { relativePath } from '@/lib/localFileLink'
 import { logger } from '@/lib/logger'
 import { cn } from '@/lib/utils'
+import { generateUUID } from '@/lib/ids'
 
 interface FileViewerTabContextMenuProps {
   /** The file path of the tab the menu was opened on. */
@@ -69,12 +70,13 @@ export function FileViewerTabContextMenu({ path, position, onClose }: FileViewer
 
   // --- Copy Path (absolute) ---
   const handleCopyPath = useCallback(async () => {
-    try {
-      await clipboardSetText(path)
-    } catch (err) {
-      logger.error('Failed to copy path:', err)
+    // `clipboardSetText` reports the verdict as a boolean — `false` (or a
+    // rejection, folded in defensively) is a failed copy: log it and toast it.
+    const ok = await clipboardSetText(path).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy path to clipboard')
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy path to clipboard',
       })
     }
@@ -84,12 +86,11 @@ export function FileViewerTabContextMenu({ path, position, onClose }: FileViewer
   // --- Copy Relative Path ---
   const handleCopyRelativePath = useCallback(async () => {
     const rel = rootPath ? relativePath(rootPath, path) : path
-    try {
-      await clipboardSetText(rel)
-    } catch (err) {
-      logger.error('Failed to copy relative path:', err)
+    const ok = await clipboardSetText(rel).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy relative path to clipboard')
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy relative path to clipboard',
       })
     }

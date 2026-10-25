@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -405,6 +406,16 @@ type FrontendAPI struct {
 	// quitApp triggers a graceful Wails quit (wailsRuntime.Quit). Used by
 	// ApplyUpdate after launching the self-update re-exec. Nil in tests.
 	quitApp func()
+	// onExperimentalChanged is the desktop hook invoked by
+	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate
+	// persist: the web-access sidecar mount follows the gate live instead of
+	// waiting for the next launch (ADR-101). Installed through the
+	// FrontendAPIConfig seam inside Init — alongside the other seed fields
+	// and before the seedPublished flag — so seedAcquire gives every toggle
+	// RPC the happens-before edge and no install can race a toggle already
+	// in flight. Nil (tests, backend-only builds) makes the toggle a pure
+	// config+router operation.
+	onExperimentalChanged func(enabled bool)
 
 	// builderOverride, when non-nil, replaces f.app.Builder() in the builder()
 	// accessor. Used by tests to substitute a fake appBuilder so config/MCP
@@ -474,6 +485,16 @@ type FrontendAPIConfig struct {
 	// so the updater process — which waits for the parent PID to die — can
 	// proceed while Wails Shutdown hooks still run. Nil in tests (no-op).
 	QuitApp func()
+	// OnExperimentalChanged is the desktop hook invoked by
+	// UpdateExperimentalFeatures after a SUCCESSFUL experimental-gate persist
+	// (ADR-101): the web-access sidecar mount follows the master gate live
+	// instead of waiting for the next launch. It rides the same construction
+	// seam as AppCtx/QuitApp — wired by desktop inside buildFrontendAPI and
+	// consumed by Init together with the other seed fields, so the write is
+	// ordered before the seedPublished flag and every toggle RPC's
+	// seedAcquire sees it. Nil (tests, backend-only builds) keeps the toggle
+	// a pure config+router operation.
+	OnExperimentalChanged func(enabled bool)
 	// WebviewGpuStderrObserved mirrors what main.go resolved at launch: the
 	// crash capture installed successfully (and was not opted out of), so the
 	// DMABUF watchdog can see this run's stderr. The launch-policy formula
@@ -580,7 +601,7 @@ func (f *FrontendAPI) seedAcquire() {
 // lives on FrontendAPILifecycle — NOT directly on FrontendAPI — because every
 // exported FrontendAPI method is promoted onto desktop.App and bound as a
 // frontend-callable Wails RPC; Init is a startup-only infrastructure operation
-// (it republishes all 16 seed fields of the LIVE app instance) and must never
+// (it republishes every seed field of the LIVE app instance) and must never
 // be callable from the renderer — the same charter as SetConfigLoadState (see
 // the FrontendAPILifecycle doc). The desktop App embeds a *FrontendAPI seed
 // (allocated once in NewApp) whose pointer the Wails binding dispatch re-reads
@@ -656,6 +677,7 @@ func (l *FrontendAPILifecycle) Init(cfg FrontendAPIConfig) *FrontendAPI {
 	f.emitEvent = cfg.EmitEvent
 	f.appCtx = cfg.AppCtx
 	f.quitApp = cfg.QuitApp
+	f.onExperimentalChanged = cfg.OnExperimentalChanged
 	// Wire the session-orchestrator factory's config source (the factory was
 	// closed over inside NewApplication, before this FrontendAPI existed) to a
 	// lock-respecting conversion. The factory runs on Wails call goroutines,
@@ -787,6 +809,56 @@ func (l *FrontendAPILifecycle) SetConfigLoadState(errors []string) {
 	l.f.configMu.Lock()
 	l.f.configLoadErrors = errors
 	l.f.configMu.Unlock()
+}
+
+// webAccessLoadWarningPrefix is the shared prefix of every warning the
+// web_access section produces — the load pipeline ("web_access: bind …",
+// "web_access ignored (…)", "web_access.tls unusable (…)") and the runtime
+// recompute (config.WebAccessLoadWarnings, the same text source) alike. No
+// other section's warning carries it, which makes it the exact cut the
+// refresh below replaces on.
+const webAccessLoadWarningPrefix = "web_access"
+
+// RefreshWebAccessLoadWarnings recomputes the web_access section's
+// contribution to the config-load-warning channel (GetConfig().config_errors
+// → the Settings "Configuration warning" banner, ADR-102): every entry with
+// the webAccessLoadWarningPrefix is dropped and the warnings the CURRENT
+// state draws (config.WebAccessLoadWarnings, gate conjunction included) are
+// appended, so an HTTP→HTTPS flip, a re-bind, or the enable toggle moves the
+// banner with the live section instead of freezing it on the launch-time
+// snapshot. Warnings from every other load-pipeline section (autonomy
+// migration, MCP timeouts, …) are preserved untouched — this is a surgical
+// replacement of one section's slice, never a clear-all (unlike the settings
+// writers that nil the whole channel once their own section validated).
+//
+// The method lives on the Lifecycle (not the FrontendAPI surface) by the
+// SetConfigLoadState precedent: a Wails-bindable method would widen the RPC
+// surface for no reason. Callers (desktop's web-access control RPCs) MUST
+// invoke it OUTSIDE webAccessMu — it takes configMu, and
+// UpdateExperimentalFeatures already holds configMu while taking webAccessMu,
+// so acquiring configMu under webAccessMu would close an ABBA cycle. The
+// desktop-owned section mutation itself stays unguarded by configMu — see
+// the whole-file window documented at SetWebAccessEnabled: a concurrent
+// GetConfig between the mutation and this refresh can observe the new
+// section beside the old warning — the pre-existing staleness this method
+// exists to bound, narrowed to one RPC-gap.
+func (l *FrontendAPILifecycle) RefreshWebAccessLoadWarnings() {
+	l.f.configMu.Lock()
+	defer l.f.configMu.Unlock()
+
+	if l.f.config == nil {
+		return
+	}
+	fresh := config.WebAccessLoadWarnings(l.f.config.WebAccess, l.f.config.Experimental.Enabled)
+	kept := make([]string, 0, len(l.f.configLoadErrors)+len(fresh))
+	for _, w := range l.f.configLoadErrors {
+		if strings.HasPrefix(w, webAccessLoadWarningPrefix) {
+			continue
+		}
+		kept = append(kept, w)
+	}
+	kept = append(kept, fresh...)
+	l.f.configLoadErrors = kept
 }
 
 // ctx returns the application context, falling back to context.Background()

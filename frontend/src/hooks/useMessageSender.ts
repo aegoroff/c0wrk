@@ -214,15 +214,8 @@ export function useMessageSender(): UseMessageSenderResult {
       const modelOverride = useInputModeStore.getState().selectedModel || options?.commandModel || ''
       const reasoningOverride = useInputModeStore.getState().selectedReasoning ?? ''
       const goalBudget = useInputModeStore.getState().goalBudget
-      // The consumption window is already held — taken before the
-      // optimistic writes (the backstop above the try) — and the toolbar's
-      // workspace selector shows the "Preparing worktree…" hint while the
-      // choice is on the wire (backend provisioning can take a while — a
-      // full checkout). Always settled, success or failure: by the inner
-      // finally around the RPC itself, and structurally by the outer
-      // finally no matter where this try throws.
       try {
-        await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled, false, workspace)
+        await sendMessage(sessionId, messageText, activeSkills ?? [], activeAgents ?? [], activeMCPServers ?? [], modelOverride, reasoningOverride, goalEnabled, goalBudget, e2sEnabled, false, optimisticId, workspace)
       } finally {
         if (workspace !== null) {
           useSessionWorkspaceStore.getState().endConsumption()

@@ -85,6 +85,12 @@ export interface McpAPI {
 export interface AttachmentAPI {
   pickAttachmentFiles(): Promise<string[]>
   attachFiles(sessionId: string, paths: string[]): Promise<AttachmentInfoUI[]>
+  /** Stage an in-memory file (the web-transport upload path: a browser file
+   *  pick or HTML5 drag-drop has no absolute path) as a pending attachment.
+   *  `data` travels base64-encoded over both bridges (Go []byte). The backend
+   *  runs the full AttachFiles pipeline, so the returned AttachmentInfo list
+   *  is identical to attachFiles' for the same content. */
+  attachFileContent(sessionId: string, fileName: string, mimeType: string, data: string): Promise<AttachmentInfoUI[]>
   removeAttachment(sessionId: string, attachmentId: string): Promise<void>
   getAttachments(sessionId: string): Promise<AttachmentInfoUI[]>
   /** Probe the system clipboard (image → files → text) and stage the

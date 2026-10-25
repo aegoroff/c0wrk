@@ -9,6 +9,7 @@ import * as reviewApi from '@/api/review'
 import { emit } from '@/api/runtime'
 import { useReviewActions } from './useReviewActions'
 import { HunkComboBox, type HunkEntry } from './HunkComboBox'
+import { generateUUID } from '@/lib/ids'
 
 interface ReviewHeaderProps {
   sessionId: string
@@ -104,7 +105,7 @@ export function ReviewHeader({
       // Roll back the optimistic update so the UI matches the DB state.
       setGeneralComment(sessionId, previous)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to save general comment',
       })
     }

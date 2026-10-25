@@ -19,6 +19,7 @@
 
 import { useEffect, useRef } from 'react'
 import { create } from 'zustand'
+import { subscribe } from '@/api/runtime'
 import { listAllSessions } from '@/api/sessions'
 import { getPendingActions, type PendingActionsResponse } from '@/api/chat'
 import { logger } from '@/lib/logger'
@@ -60,8 +61,11 @@ interface ActiveSessionsState {
    *  deletes the key (a "no pending" answer never overrides a live-derived
    *  HITL signal — the merge in lib/activeSessions is OR-only). */
   setPendingOverride: (sessionId: string, pending: boolean) => void
-  /** Convenience: apply a raw GetPendingActions response (or null on RPC
-   *  failure) as the pending override for one session. */
+  /** Convenience: apply a raw GetPendingActions response as the pending
+   *  override for one session. Null (an RPC failure) is NOT an authoritative
+   *  answer — production callers filter it out before calling (the sweep and
+   *  the hitl_resolved re-query both keep the bit on null); if one still
+   *  arrives it maps to no-pending as before. */
   applyPendingActions: (sessionId: string, response: PendingActionsResponse | null) => void
   /** Drop one session's DB-derived unfinished-task status from the snapshot in
    *  place, so the live-sessions radar stops surfacing it without waiting for
@@ -191,13 +195,22 @@ export function cancelPendingRefresh(): void {
 
 /**
  * Ask GetPendingActions for every live session whose pending-HITL state is
- * not already known locally (neither chatStore's messages nor the override
- * report it — status !== 'pending' covers both) and apply each answer as the
- * pending override. This is the restart path: chatStore starts empty, the DB
- * still says in_progress, and only the backend knows the task is actually
- * blocked on a prompt — the answer upgrades the row (and the badge dot) from
- * green to yellow. Best effort: a failed call yields null, which clears
- * nothing.
+ * not already confirmed by chatStore's live scan, and apply each answer as
+ * the pending override. Rows whose 'pending' status comes from chatStore's
+ * message cards are skipped — their prompts settle through hitl_resolved, not
+ * this sweep. Rows that show pending ONLY through the override bit are
+ * re-polled, so the backend answer stays authoritative and a stale bit (the
+ * prompt was answered while the frontend was down) heals on the next sweep
+ * instead of excluding the row from every future sweep. This is the restart
+ * path: chatStore starts empty, the DB still says in_progress, and only the
+ * backend knows the task is actually blocked on a prompt — the answer
+ * upgrades the row (and the badge dot) from green to yellow. Best effort: a
+ * failed call resolves null — null is not an answer, and the sweep applies
+ * only definitive ones. Feeding a null through hasPendingActions would clear
+ * a genuinely-blocked session's override bit (the radar dot flips green while
+ * the prompt is still pending) and the signal may not heal until the next
+ * sweep or dropdown open, so a failed poll leaves the bit exactly as it was;
+ * the next sweep retries.
  *
  * Reads the CURRENT snapshot (and chatStore state) directly — it does not
  * fetch; the caller is responsible for loading/freshness (the mount path
@@ -207,20 +220,34 @@ export function cancelPendingRefresh(): void {
 export async function sweepPendingActions(): Promise<void> {
   const store = useActiveSessionsStore.getState()
   const chat = useChatStore.getState()
-  const live = mergePendingOverride(
-    deriveLiveSessionFlags({
-      taskActive: chat.taskActive,
-      paused: chat.paused,
-      messageOrder: chat.messageOrder,
-      messages: chat.messages,
-      unfinishedTaskStatus: chat.unfinishedTaskStatus,
-    }),
-    store.pendingOverride,
-  )
-  const targets = sortedLiveRows(store.sessions, live).filter((row) => row.status !== 'pending')
+  // Live-scan flags WITHOUT the override: telling an override-only pending
+  // from a chatStore-confirmed one (below) needs the pre-merge view.
+  const liveOnly = deriveLiveSessionFlags({
+    taskActive: chat.taskActive,
+    paused: chat.paused,
+    messageOrder: chat.messageOrder,
+    messages: chat.messages,
+    unfinishedTaskStatus: chat.unfinishedTaskStatus,
+  })
+  const live = mergePendingOverride(liveOnly, store.pendingOverride)
+  const targets = sortedLiveRows(store.sessions, live).filter((row) => {
+    if (row.status !== 'pending') return true
+    // 'pending' rows are polled only when the override bit is the sole
+    // signal (no live-scan confirmation). A chatStore-confirmed pending row
+    // settles through hitl_resolved, so polling it is redundant work; an
+    // override-only row must re-ask, or its own stale bit would lock it out
+    // of every future sweep.
+    return (
+      store.pendingOverride[row.session.id] === true &&
+      liveOnly[row.session.id]?.hasPendingHITL !== true
+    )
+  })
   await Promise.all(
     targets.map(async (row) => {
-      store.applyPendingActions(row.session.id, await getPendingActions(row.session.id))
+      // Apply only DEFINITIVE answers: a failed poll resolves null, and null
+      // is not authoritative — the override bit is left exactly as it was.
+      const resp = await getPendingActions(row.session.id)
+      if (resp !== null) store.applyPendingActions(row.session.id, resp)
     }),
   )
 }
@@ -242,7 +269,10 @@ const SNAPSHOT_POLL_INTERVAL_MS = 30_000
  * changes — i.e. on task transitions (start / complete / error / cancel /
  * pause / resume / resumable failure), when the DB snapshot has just become
  * stale. Streaming chunks and message appends do not change the set and do
- * not trigger anything.
+ * not trigger anything. The global `sessions:changed` push (any list-affecting
+ * session mutation from any surface) funnels through the same debounced
+ * refresh, keeping the cross-project snapshot current without waiting for the
+ * safety poll.
  *
  * Switch-time refresh: EVERY project/session switch (the CHAT↔CODE toggle
  * included) also triggers a refresh. The live-set trigger is derived from the
@@ -287,6 +317,19 @@ export function useActiveSessionsRefresh(): void {
       useActiveSessionsStore.getState().refresh()
     }, SNAPSHOT_POLL_INTERVAL_MS)
     return () => clearInterval(id)
+  }, [])
+  // Push-driven snapshot refresh: any list-affecting session mutation (create,
+  // fork, delete, archive, pin, CHAT→project promotion, project delete
+  // cascade, managed-worktree commit) emits the global `sessions:changed`
+  // (backend `emitSessionsChanged`). It rides the same 500ms debounce funnel
+  // as the triggers above, so a burst of mutations collapses into a single
+  // ListAllSessions RPC, and an event colliding with a poll/switch refresh
+  // coalesces with it. Failure-safe: fetchSnapshot keeps the previous
+  // snapshot on error.
+  useEffect(() => {
+    return subscribe('sessions:changed', () => {
+      useActiveSessionsStore.getState().refresh()
+    })
   }, [])
   // One-time pending-HITL sweep once the snapshot first loads (the restart
   // path): a task blocked on a prompt is yellow at first render instead of

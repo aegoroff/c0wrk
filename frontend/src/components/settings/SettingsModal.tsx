@@ -11,6 +11,7 @@ import { ConfigWarningBanner } from './ConfigWarningBanner'
 import { LogLevelSelector } from './LogLevelSelector'
 import { ThemeSelector } from './ThemeSelector'
 import { TabsSettings } from './TabsSettings'
+import { isWebTransport } from '@/api/runtime'
 import { UIScaleSelector } from './UIScaleSelector'
 import { FontSettings } from './FontSettings'
 import { ProxySettings } from './ProxySettings'
@@ -18,6 +19,7 @@ import { SoundSettings } from './SoundSettings'
 import { SystemNotificationSettings } from './SystemNotificationSettings'
 import { PromptSuggestionsSettings } from './PromptSuggestionsSettings'
 import { SessionStatsSettings } from './SessionStatsSettings'
+import { WebAccessSettings } from './WebAccessSettings'
 import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 import { LLMSettings } from './LLMSettings'
 import { ModelProfilesSettings } from './ModelProfilesSettings'
@@ -89,11 +91,16 @@ export function SettingsModal() {
   const activeTab = useSettingsStore((s) => s.activeTab)
   const closeSettings = useSettingsStore((s) => s.closeSettings)
   const setActiveTab = useSettingsStore((s) => s.setActiveTab)
-  // The master experimental switch — the Session Statistics block on the
-  // General tab is part of its gate scope (read reactively, so flipping the
-  // switch in ExperimentalSettings hides/reveals the block without a reload).
+  // The master experimental switch — the Session Statistics and Web Access
+  // blocks on the General tab are part of its gate scope (read reactively, so
+  // flipping the switch in ExperimentalSettings hides/reveals the blocks
+  // without a reload).
   const experimentalEnabled = useExperimentalStore((s) => s.enabled)
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
+  // One banner refresher shared by every writer that can move the
+  // config-load-warning channel: the LLM saves (handleSettingsSaved) and the
+  // Web Access control RPCs (ADR-102 — the banner follows the live section).
+  const refreshBanner = useCallback(() => setBannerRefreshKey((k) => k + 1), [])
   const [closeBlocked, setCloseBlocked] = useState(false)
   const [checkingClose, setCheckingClose] = useState(false)
   const [currentDefaultModel, setCurrentDefaultModel] = useState('')
@@ -102,7 +109,7 @@ export function SettingsModal() {
 
   useEffect(() => {
     if (open && !prevOpenRef.current) {
-      setBannerRefreshKey((k) => k + 1)
+      refreshBanner()
       setCloseBlocked(false)
       // Pessimistically reset the cached default so the close fast-path can't
       // fire on a stale value left over from a previous open. LLMSettings
@@ -111,7 +118,7 @@ export function SettingsModal() {
       setCurrentDefaultModel('')
     }
     prevOpenRef.current = open
-  }, [open])
+  }, [open, refreshBanner])
 
   const handleDefaultModelChange = useCallback((model: string) => {
     setCurrentDefaultModel(model)
@@ -121,7 +128,7 @@ export function SettingsModal() {
   }, [])
 
   const handleSettingsSaved = useCallback(() => {
-    setBannerRefreshKey((k) => k + 1)
+    refreshBanner()
     // A save can REMOVE the default (provider/model deletion), so we cannot
     // blindly clear closeBlocked. But a save that PRESERVES a valid default
     // should not leave a stale "default not configured" banner on screen: if
@@ -133,7 +140,7 @@ export function SettingsModal() {
     if (currentDefaultModel) {
       setCloseBlocked(false)
     }
-  }, [currentDefaultModel])
+  }, [currentDefaultModel, refreshBanner])
 
   const handleOpenChange = useCallback(async (isOpen: boolean) => {
     if (!isOpen) {
@@ -284,6 +291,21 @@ export function SettingsModal() {
                 </h3>
                 <ProxySettings />
               </div>
+              {/* Web Access is an experimental surface, gated on the master
+                  switch like Session Statistics — and a DESKTOP-window control:
+                  in the web transport the control RPCs are unreachable from a
+                  tab (ADR-101 isolation), so the section would only ever
+                  render its "Status unavailable" state. Gated here (not inside
+                  the component) so the border wrapper disappears with the
+                  block. */}
+              {experimentalEnabled && !isWebTransport() && (
+                <div className="border-t border-border pt-4">
+                  {/* ADR-102: every successful transport-affecting Web Access
+                      write recomputes the section's config-load warnings, so
+                      the banner above must re-read them. */}
+                  <WebAccessSettings onConfigChanged={refreshBanner} />
+                </div>
+              )}
               <div className="border-t border-border pt-4">
                 <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
                   <Database className="h-4 w-4 text-muted-foreground" />
@@ -307,10 +329,15 @@ export function SettingsModal() {
               </div>
               {/* Tabs sits last on the tab: a master switch that reshapes the
                   whole workspace reads best after the pure appearance knobs
-                  (theme / scale / fonts) above it. */}
-              <div className="border-t border-border pt-4">
-                <TabsSettings />
-              </div>
+                  (theme / scale / fonts) above it. Hidden in the web
+                  transport: the browser owns the tabs there, and the gate
+                  forces tabsEnabled off — a switch the user could only fight
+                  has no place in the settings. */}
+              {!isWebTransport() && (
+                <div className="border-t border-border pt-4">
+                  <TabsSettings />
+                </div>
+              )}
             </div>
           </TabsContent>
 

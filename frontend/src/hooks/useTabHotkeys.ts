@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import type { TabController } from '@/hooks/useTabController'
 import { isMacHost } from '@/lib/platform'
 import { useTabStore } from '@/stores/tabStore'
-import { useUIStore } from '@/stores/uiStore'
+import { useUIStore, selectEffectiveTabsEnabled } from '@/stores/uiStore'
 
 // System-standard shortcuts for cycling workspace tabs/documents — the pair
 // the HOST PLATFORM's native apps use, not one web-only combo hardcoded for
@@ -148,9 +148,10 @@ export function useTabHotkeys(controller: TabController): void {
       // webview default, so returning before preventDefault keeps the
       // repeat keydown untouched.
       if (event.repeat) return
-      // The shortcuts belong to the visible tab bar: flag off → untouched
-      // passthrough, exactly the pre-tab keyboard behavior.
-      if (!useUIStore.getState().tabsEnabled) return
+      // The shortcuts belong to the visible tab bar: effective flag off →
+      // untouched passthrough, exactly the pre-tab keyboard behavior (the
+      // web transport reads as off without writing the persisted preference).
+      if (!selectEffectiveTabsEnabled(useUIStore.getState())) return
       const targetId = selectNeighborTabId(useTabStore.getState(), delta)
       if (targetId === null) return // fewer than two tabs: nothing to cycle
       event.preventDefault()

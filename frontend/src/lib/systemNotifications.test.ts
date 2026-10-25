@@ -59,11 +59,16 @@ vi.mock('@/api/notifications', () => ({
 }))
 
 // isWailsReady gates the transport (absent bindings → silent no-op, exactly
-// like the old window.runtime detection). Default true; tests opt out.
-const { isWailsReadyMock } = vi.hoisted(() => ({ isWailsReadyMock: vi.fn((): boolean => true) }))
+// like the old window.runtime detection). Default true; tests opt out. The
+// web-transport flag stays false by default so the no-op expectations above
+// hold; the web-path test flips it on.
+const { isWailsReadyMock, isWebTransportMock } = vi.hoisted(() => ({
+  isWailsReadyMock: vi.fn((): boolean => true),
+  isWebTransportMock: vi.fn((): boolean => false),
+}))
 vi.mock('@/api/runtime', async (importOriginal) => {
   const original = await importOriginal<typeof import('@/api/runtime')>()
-  return { ...original, isWailsReady: isWailsReadyMock }
+  return { ...original, isWailsReady: isWailsReadyMock, isWebTransport: isWebTransportMock }
 })
 
 import {
@@ -94,6 +99,8 @@ beforeEach(() => {
   sendGoMock.mockResolvedValue(undefined)
   isWailsReadyMock.mockClear()
   isWailsReadyMock.mockReturnValue(true)
+  isWebTransportMock.mockClear()
+  isWebTransportMock.mockReturnValue(false)
 })
 
 afterEach(() => {
@@ -234,6 +241,16 @@ describe('sendSystemNotification', () => {
       sendSystemNotification({ kind: 'attention', title: 'T', body: 'B' }, { sessionId: 's1' }),
     ).resolves.toBeUndefined()
     expect(sendGoMock).not.toHaveBeenCalled()
+  })
+
+  it('reaches the api layer over the web transport (no Go bindings needed)', async () => {
+    // The web tab has no window.go at all: the availability guard must accept
+    // the browser transport and let @/api/notifications branch to it.
+    isWailsReadyMock.mockReturnValue(false)
+    isWebTransportMock.mockReturnValue(true)
+    await sendSystemNotification({ kind: 'success', title: 'T', body: 'B' }, { sessionId: 's1' })
+    expect(sendGoMock).toHaveBeenCalledTimes(1)
+    expect(sendGoMock).toHaveBeenCalledWith('T', 'B', { sessionId: 's1' })
   })
 
   it('sends the content and the session routing context through the Go bridge', async () => {

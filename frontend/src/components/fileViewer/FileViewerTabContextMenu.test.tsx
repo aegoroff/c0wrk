@@ -3,6 +3,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
+// The false-verdict clipboard tests below deliberately drive the menu's
+// failure path; mock the logger so the expected errors don't pollute the
+// vitest output.
+vi.mock('@/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
+}))
+
+import { logger } from '@/lib/logger'
+
 /**
  * A store mock that supports BOTH calling styles the component uses:
  *   - hook form:   `useStore((s) => s.foo)`          → applies selector
@@ -208,6 +217,38 @@ describe('FileViewerTabContextMenu', () => {
       await Promise.resolve()
     })
     expect(clipboardSetText).toHaveBeenCalledWith('src/foo.ts')
+  })
+
+  it('Copy Path surfaces a runtime_error toast and logs when the clipboard write reports false', async () => {
+    clipboardSetText.mockResolvedValue(false)
+    renderMenu('/ws/src/foo.ts')
+    await act(async () => {
+      menuItem('Copy Path').click()
+      await Promise.resolve()
+    })
+    expect(clipboardSetText).toHaveBeenCalledWith('/ws/src/foo.ts')
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy path to clipboard' }),
+    )
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Failed to copy path to clipboard')
+  })
+
+  it('Copy Relative Path surfaces a runtime_error toast and logs when the clipboard write reports false', async () => {
+    clipboardSetText.mockResolvedValue(false)
+    renderMenu('/ws/src/foo.ts')
+    await act(async () => {
+      menuItem('Copy Relative Path').click()
+      await Promise.resolve()
+    })
+    expect(clipboardSetText).toHaveBeenCalledWith('src/foo.ts')
+    expect(eventsEmit).toHaveBeenCalledWith(
+      'runtime_error',
+      expect.objectContaining({ message: 'Failed to copy relative path to clipboard' }),
+    )
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith(
+      'Failed to copy relative path to clipboard',
+    )
   })
 
   it('Reveal In Workspace delegates to revealInWorkspace', async () => {

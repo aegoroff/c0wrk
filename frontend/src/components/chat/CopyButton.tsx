@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Copy, Check, Save } from 'lucide-react'
+import { Copy, Check, Save, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { clipboardSetText, emit } from '@/api/runtime'
+import { clipboardSetText, emit, isWebTransport } from '@/api/runtime'
 import { saveMessageAsMarkdown } from '@/api/files'
 import { useShiftHeld } from '@/hooks/useShiftHeld'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 interface CopyButtonProps {
   /** Text copied to the clipboard on click (or saved to a file on Shift+click). */
@@ -15,7 +16,7 @@ interface CopyButtonProps {
 }
 
 /** Which success state the button is flashing, if any. */
-type Feedback = 'copied' | 'saved' | null
+type Feedback = 'copied' | 'saved' | 'download-started' | 'failed' | null
 
 /**
  * CopyButton — small, low-contrast copy-to-clipboard control.
@@ -54,14 +55,43 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
     // rules) — that was the root cause of the message copy buttons needing
     // several clicks to register. See `clipboardSetText` in @/api/runtime.
     clipboardSetText(text)
-      .then(() => flashFeedback('copied'))
+      .then((ok) => {
+        // `false` is a failed copy (see `clipboardSetText`) — it must never
+        // render the success state.
+        flashFeedback(ok ? 'copied' : 'failed')
+      })
       .catch(() => {
-        // Clipboard write can fail (permissions / unsupported environment);
-        // fail silently rather than disrupting the chat UX.
+        // `clipboardSetText` resolves instead of throwing; this is a safety
+        // net — fail with the same visible signal rather than silently.
+        flashFeedback('failed')
       })
   }, [text, flashFeedback])
 
   const handleSave = useCallback(() => {
+    if (isWebTransport()) {
+      // Web transport: there is no native save dialog — hand the browser a
+      // plain anchor download instead (the trivially-replaceable native
+      // dialog from the roadmap).
+      const blob = new Blob([text], { type: 'text/markdown' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = 'message.md'
+      anchor.click()
+      // Defer the revocation — a same-tick revokeObjectURL is NOT safe here:
+      // WebKit/Safari have historically raced it against the in-flight
+      // download handoff, so the click cancels, no file arrives, and the
+      // button still claims "Download started" (Chromium/Firefox tolerate
+      // the same-tick revoke; the web transport targets every browser).
+      // The 10 s revoke is the FileSaver.js approach. The timer is
+      // deliberately detached: its callback touches no state, so firing
+      // after unmount is exactly how the URL still gets reclaimed.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      // The anchor click cannot report failure (a popup blocker can eat it
+      // silently) — claim only that the download was handed to the browser.
+      flashFeedback('download-started')
+      return
+    }
     saveMessageAsMarkdown(text)
       .then((path) => {
         // An empty path means the user cancelled the native dialog — no
@@ -73,15 +103,26 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
         // path) is invisible without a toast — surface it.
         logger.error('Failed to save message to file:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to save message to file',
         })
       })
   }, [text, flashFeedback])
 
   const currentLabel =
-    feedback === 'copied' ? 'Copied' : feedback === 'saved' ? 'Saved' : shiftHeld ? 'Save' : label
-  const Icon = feedback !== null ? Check : shiftHeld ? Save : Copy
+    feedback === 'copied'
+      ? 'Copied'
+      : feedback === 'saved'
+        ? 'Saved'
+        : feedback === 'download-started'
+          ? 'Download started'
+          : feedback === 'failed'
+            ? 'Failed'
+            : shiftHeld
+              ? 'Save'
+              : label
+  const Icon =
+    feedback === 'failed' ? X : feedback !== null ? Check : shiftHeld ? Save : Copy
 
   return (
     <button
@@ -94,7 +135,12 @@ export function CopyButton({ text, label = 'Copy', className }: CopyButtonProps)
       title={currentLabel}
       aria-label={currentLabel}
     >
-      <Icon className={cn('h-3.5 w-3.5', feedback !== null && 'text-success')} />
+      <Icon
+        className={cn(
+          'h-3.5 w-3.5',
+          feedback === 'failed' ? 'text-destructive' : feedback !== null && 'text-success',
+        )}
+      />
       <span>{currentLabel}</span>
     </button>
   )

@@ -29,7 +29,13 @@ export interface ToolResultData {
 
 export interface ThoughtData { step_num: number; content: string; reasoning?: string; plan_step_id?: string }
 export interface StepData { step_num: number }
-export interface ErrorData { error: string }
+/** Payload of the session-scoped `error` event (backend ErrorData,
+ *  backend/session/events.go): `error` is always present on the wire (no
+ *  omitempty); `session_id` is declared optional because its guard stays
+ *  tolerant of absence (Wails serialization edge cases) — a consumer reading
+ *  it does so behind a presence check (CS #31: the type must not promise
+ *  more than the guard enforces). */
+export interface ErrorData { error: string; session_id?: string }
 
 export interface PlanStepData { id?: string; description: string; summary?: string; status: string; depends_on?: string[] }
 
@@ -44,6 +50,32 @@ export interface PlanStepCompleteData { step_id: string; success: boolean; durat
  *  `success` field — a pause is a recoverable state, NOT a completion
  *  (completed_count is untouched; a Resume re-enters the step). */
 export interface PlanStepPausedData { step_id: string; duration: number; error?: string; progress?: number; current_step_index?: number; completed_count?: number; total_count?: number }
+
+/** Which kind of HITL prompt a hitl_resolved event settles. Values mirror the
+ *  frontend message types so the handler can locate the exact card. */
+export type HitlResolvedKind =
+  | 'tool_confirm'
+  | 'ask_user'
+  | 'step_limit'
+  | 'plan_review'
+  | 'goal_proposal'
+  | 'goal_suggestion'
+
+/** Payload of the `hitl_resolved` session event: broadcast to EVERY surface
+ *  (desktop webview plus all web-access tabs) when a pending HITL prompt is
+ *  consumed by the first responder. A surface that did not perform the
+ *  resolution retires its card on this event instead of waiting for the next
+ *  session-switch / focus-resync reconcile, and a surface that raced the
+ *  resolution converges on the EFFECTIVE decision (the first responder's
+ *  answer) rather than its own local guess. `id` is the confirm_id
+ *  (tool_confirm) or request_id (every other kind). `decision` is the wire
+ *  decision string; empty/absent when the prompt was consumed without a user
+ *  answer. Transient (not persisted). */
+export interface HitlResolvedData {
+  kind: HitlResolvedKind
+  id: string
+  decision?: string
+}
 
 export interface ToolConfirmData {
   confirm_id: string
@@ -207,14 +239,18 @@ export interface AssistantChunkData { content: string; accumulated_content?: str
  *  than the Conductor's own turn — the frontend must nest it in that block,
  *  never in the root Conductor chat. */
 export interface AssistantDoneData { content: string; input_tokens: number; output_tokens: number; plan_step_id?: string }
+/** Payload of the terminal `task_cancelled` event (backend TaskCancelledData).
+ *  The backend serializes `session_id` without omitempty, but no boundary
+ *  guard validates the payload (the transport even permits payload-less
+ *  delivery), so the type stays optional to match the unchecked reality —
+ *  do not read it without a presence check (CS #21). */
+export interface TaskCancelledData { session_id?: string }
 export interface TaskCompleteData {
-  session_id?: string; output?: string; attempt_count?: number; routing_decision?: Record<string, unknown>
+  session_id?: string; output?: string; routing_decision?: Record<string, unknown>
   /** Typed success contract: false for partial/failed/aborted executions delivered as task_complete. */
   success?: boolean
   /** Refines the outcome: 'full' | 'partial' | 'failed' | 'aborted'. */
   completion?: string
-  /** Number of plan steps that finished with an error in the final attempt. */
-  failed_steps?: number
 }
 export interface SubAgentLaunchData { step_id: string; description: string; plan_step_id?: string }
 export interface SubAgentCompleteData { step_id: string; success: boolean; duration: number; error?: string; plan_step_id?: string }
@@ -232,6 +268,14 @@ export interface ServiceData { content: string; phase?: string }
 export interface SessionRenamedData { new_name: string; old_name?: string; id?: string }
 export interface TaskFailedResumableData {
   message?: string
+  /** ID of the persisted resumable task (backend TaskFailedResumableData,
+   *  omitempty — absent for failures with no persisted task row). Lets the
+   *  banner be matched and resolved on resume/cancel
+   *  (stalePromptMatchField('task_failed_resumable') → 'task_id'). */
+  task_id?: string
+  /** Concise contextual cause (execution error or completion outcome) so the
+   *  banner explains WHY the task is resumable instead of a generic message. */
+  reason?: string
   /** Unix timestamp (seconds) at which the UI auto-resend countdown reaches
    *  zero. Present only when the backend classified the terminal failure as
    *  a rate-limit/overload error from a provider with a configured retry
@@ -454,6 +498,38 @@ export interface MemoryReadData {
 }
 
 /**
+ * A user message was persisted for this session (normal send, nudge-resume,
+ * live interjection). Emitted as a dedicated `message_received` session
+ * event. `text` is the RAW user input (pre-preprocessing) — byte-identical to
+ * the sending surface's optimistic card and to the persisted DB row, both of
+ * which hold the unprocessed form; the orchestrator-facing dispatch text may
+ * be the processed form (mention refs stripped, @file refs resolved). The
+ * surface that sent the message already rendered its optimistic card and
+ * dedupes this echo (useChatEvents); every other surface watching the session
+ * has no optimistic copy and renders the card from this event.
+ */
+export interface MessageReceivedData {
+  readonly session_id: string
+  readonly text: string
+  /**
+   * Id of the sending surface's optimistic card, echoed back when the send
+   * rendered one. The sending surface dedups this echo by it (exact
+   * identity); every other surface has no matching card and renders its own.
+   * Absent on sends that rendered no optimistic card.
+   */
+  readonly client_send_id?: string
+  /**
+   * Mirrors the persisted row's is_nudge metadata stamp: true when the send
+   * was classified as a live interjection or a nudge-resume, absent on fresh
+   * tasks. Surfaces without an optimistic copy render their card from this
+   * event, so the flag lets them show the Nudge badge immediately instead of
+   * waiting for a history reload. The event flag and the DB stamp agree —
+   * both derive from the same session-locked send classification.
+   */
+  readonly is_nudge?: boolean
+}
+
+/**
  * Mid-loop goal progress telemetry. Emitted as its OWN dedicated
  * `goal_progress` session event after a non-terminal turn.
  */
@@ -585,6 +661,9 @@ export interface SessionEventMap {
   readonly tool_confirm: ToolConfirmData
   readonly ask_user: AskUserData
   readonly step_limit: StepLimitData
+  /** Settlement of a pending HITL prompt (any kind), broadcast to every
+   *  surface — multi-surface convergence; see HitlResolvedData. */
+  readonly hitl_resolved: HitlResolvedData
   /** Automatic (no-human) security decision taken under an automatic autonomy
    *  posture (assisted or silent) — recorded so the run's trajectory stays
    *  auditable (OWASP ASI10). Non-blocking: the UI renders it as a dedicated
@@ -600,7 +679,7 @@ export interface SessionEventMap {
   readonly assistant_done: AssistantDoneData
   readonly error: ErrorData
   readonly task_complete: TaskCompleteData
-  readonly task_cancelled: void
+  readonly task_cancelled: TaskCancelledData
   readonly retry: RetryData
   readonly step_retry: StepRetryData
   readonly service: ServiceData
@@ -646,6 +725,11 @@ export interface SessionEventMap {
   readonly step_todo_update: StepTodoUpdateData
   readonly plan_review_ready: PlanReviewReadyData
   readonly memory_read: MemoryReadData
+  /** A user message was persisted for this session (normal send,
+   *  nudge-resume, live interjection). The sending surface dedupes this echo
+   *  against its optimistic card; other surfaces watching the session render
+   *  the card from this event (see useChatEvents). */
+  readonly message_received: MessageReceivedData
   /** Goal lifecycle events, each its OWN dedicated session event:
    *  goal_proposal (a pending proposal awaiting approval), goal_status (the
    *  full goal state snapshot, emitted on every turn transition), and
@@ -883,6 +967,12 @@ export interface GlobalEventMap {
   readonly 'backend:ready': void
   readonly 'projects:loaded': void
   readonly 'sessions:loaded': void
+  /** A list-affecting session mutation landed anywhere in the app (create,
+   *  fork, delete, archive, pin, CHAT→project promotion, project delete
+   *  cascade, managed-worktree commit). No payload — consumers re-read via
+   *  ListSessions / ListAllSessions (backend/frontend_api_session.go
+   *  `emitSessionsChanged`). */
+  readonly 'sessions:changed': void
   /** A config mutation was persisted via an Update* RPC (trusted git repos,
    *  the experimental toggle, LLM/search/proxy settings, …). No payload —
    *  consumers re-read via GetConfig (backend/frontend_api_config.go
@@ -909,6 +999,12 @@ export interface GlobalEventMap {
    *  any active R-NNN, unlike `research:file_changed`: the library is a global
    *  subdirectory of the canonical research root for every real project. */
   readonly 'papers:changed': { readonly project_id: string; readonly paths: string }
+  /** A non-workspace Agent Profile directory changed (user `~/.agents/agents`,
+   *  c0wrk global `~/.c0wrk/.agents/agents` — the seeded research packs).
+   *  Workspace-local agent changes surface via `workspace:tree_changed`
+   *  instead. Mirrors `skills:changed` for AGENT.md discovery. No payload —
+   *  consumers re-read the catalog (backend/events.go `EventAgentsChanged`). */
+  readonly 'agents:changed': void
   readonly 'skills:changed': void
   readonly 'git:status_changed': string
   readonly 'vector_index:status': VectorIndexStatus
@@ -924,6 +1020,11 @@ export interface GlobalEventMap {
   readonly 'tool_manager:start': ToolManagerStartData
   readonly 'tool_manager:progress': ToolManagerProgressData
   readonly 'tool_manager:done': ToolManagerDoneData
+  /** MCP gateway finished starting: per-server tool lists are queryable.
+   *  Emitted once by the desktop layer (startMCPReadyNotifier, waiting on the
+   *  builder's WaitMCPStartup) so the settings dialog can refresh its
+   *  transient "Starting…" placeholder without polling. No payload. */
+  readonly 'mcp:ready': void
   /** Embedded local-model install progress: one component's one stage
    *  (runtime, cudart, model, mmproj × downloading, verifying, extracting,
    *  signing, done). Emitted by the background install run started by
@@ -1024,6 +1125,14 @@ export function isToolResultData(d: unknown): d is ToolResultData {
 }
 export function isToolConfirmData(d: unknown): d is ToolConfirmData {
   return isObj(d) && typeof d.confirm_id === 'string' && typeof d.tool === 'string' && typeof d.args === 'string'
+}
+const HITL_RESOLVED_KINDS: readonly string[] = ['tool_confirm', 'ask_user', 'step_limit', 'plan_review', 'goal_proposal', 'goal_suggestion']
+export function isHitlResolvedData(d: unknown): d is HitlResolvedData {
+  if (!isObj(d)) return false
+  if (typeof d.id !== 'string' || d.id === '') return false
+  if (typeof d.kind !== 'string' || !HITL_RESOLVED_KINDS.includes(d.kind)) return false
+  if (d.decision !== undefined && typeof d.decision !== 'string') return false
+  return true
 }
 /** Element guard for one ask_user question: id/question are rendered, options
  *  are mapped into the answer form (label/value as keys + children). */
@@ -1154,20 +1263,23 @@ export function isAssistantDoneData(d: unknown): d is AssistantDoneData {
 export function isErrorData(d: unknown): d is ErrorData {
   // `error` becomes the rendered error-message content — a truthy non-string
   // would reach a React child slot.
-  return isObj(d) && typeof d.error === 'string'
+  if (!isObj(d) || typeof d.error !== 'string') return false
+  // session_id is always on the wire (ErrorData, no omitempty), but the guard
+  // stays tolerant of its absence (Wails serialization edge cases) while
+  // rejecting a present non-string, mirroring isTaskCompleteData.
+  if ('session_id' in d && d.session_id !== undefined && typeof d.session_id !== 'string') return false
+  return true
 }
 export function isTaskCompleteData(d: unknown): d is TaskCompleteData {
   if (!isObjLocal(d)) return false
   const hasValidOutput = typeof d.output === 'string'
-  const hasValidAttempt = typeof d.attempt_count === 'number'
   const hasValidRouting = isObj(d.routing_decision)
   const hasValidSuccess = typeof d.success === 'boolean'
   // Accept any valid field as sufficient evidence of a task_complete event;
   // a missing output field (e.g. Wails serialization edge case) is tolerable
   // as long as another field validates.
-  if (!(hasValidOutput || hasValidAttempt || hasValidRouting || hasValidSuccess)) return false
+  if (!(hasValidOutput || hasValidRouting || hasValidSuccess)) return false
   if ('completion' in d && d.completion !== undefined && typeof d.completion !== 'string') return false
-  if ('failed_steps' in d && d.failed_steps !== undefined && typeof d.failed_steps !== 'number') return false
   if ('session_id' in d && d.session_id !== undefined && typeof d.session_id !== 'string') return false
   // Allow missing output when other validators pass (defensive fallback).
   if ('output' in d && d.output !== undefined && typeof d.output !== 'string') return false
@@ -1209,9 +1321,14 @@ export function isSubAgentPausedData(d: unknown): d is SubAgentPausedData {
   return true
 }
 export function isWorkUnitSettledData(d: unknown): d is WorkUnitSettledData {
-  return isObj(d) && has(d, 'step_id', 'status')
-    && typeof (d as Record<string, unknown>).step_id === 'string'
-    && typeof (d as Record<string, unknown>).status === 'string'
+  if (!isObj(d) || !has(d, 'step_id', 'status')) return false
+  if (typeof (d as Record<string, unknown>).step_id !== 'string') return false
+  if (typeof (d as Record<string, unknown>).status !== 'string') return false
+  // The declared-optional `reason` is pinned like every neighboring new
+  // guard: a present non-string must not slip through typed (CS #49).
+  if ((d as Record<string, unknown>).reason !== undefined
+      && typeof (d as Record<string, unknown>).reason !== 'string') return false
+  return true
 }
 export function isContextFillData(d: unknown): d is ContextFillData { return isObj(d) && has(d, 'fill_percent', 'status') }
 export function isContextCompactionData(d: unknown): d is ContextCompactionData { return isObj(d) && has(d, 'before_percent', 'after_percent') }
@@ -1541,6 +1658,17 @@ export function isGoalProgressData(d: unknown): d is GoalProgressData {
 export function isMemoryReadData(d: unknown): d is MemoryReadData {
   if (!isObj(d)) return false
   return typeof d.step_num === 'number' && typeof d.content === 'string'
+}
+
+/**
+ * Guard for a message_received payload — a user message persisted for the
+ * session (normal send, nudge-resume, live interjection).
+ */
+export function isMessageReceivedData(d: unknown): d is MessageReceivedData {
+  if (!isObj(d)) return false
+  return typeof d.session_id === 'string' && typeof d.text === 'string' &&
+    (d.client_send_id === undefined || typeof d.client_send_id === 'string') &&
+    (d.is_nudge === undefined || typeof d.is_nudge === 'boolean')
 }
 
 // --- E2S event type guards ---

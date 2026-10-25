@@ -53,6 +53,15 @@ function render(): HTMLElement {
   act(() => { root!.render(<ChatArea />) })
   return c
 }
+// Let the history-load effect (the real loader over the mocked async RPCs)
+// settle inside act: its finally-block store write (markHistoryLoaded) must
+// land wrapped, not after the synchronous test body.
+async function flushEffects(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
 function countText(t: string): number {
   // Count across the WHOLE document (portals included) so a duplicated
   // indicator instance anywhere would be caught.
@@ -89,8 +98,9 @@ describe('ChatArea activity indicator overlap', () => {
   })
   afterEach(() => { act(() => { root?.unmount() }); root = null })
 
-  it('renders a single indicator whose label flips atomically once a status lands', () => {
+  it('renders a single indicator whose label flips atomically once a status lands', async () => {
     render()
+    await flushEffects()
     // While the task runs with no concrete status yet, exactly one indicator
     // instance holds the trailing slot — the blinking dot with NO label text
     // (the idle gap renders no placeholder label; see ActivityIndicator) —

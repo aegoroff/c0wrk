@@ -36,6 +36,7 @@ import {
 import { clipboardSetText, emit } from '@/api/runtime'
 import { runGitOperation } from '@/lib/gitOperation'
 import { logger } from '@/lib/logger'
+import { generateUUID } from '@/lib/ids'
 
 /** Reset modes offered by the "Reset <branch> to This Commit" submenu. */
 const RESET_MODES = [
@@ -237,12 +238,13 @@ export function GitHistoryContextMenu({
   // ── Copy SHA ───────────────────────────────────────────────────────
   const handleCopySha = useCallback(async () => {
     onClose()
-    try {
-      await clipboardSetText(sha)
-    } catch (err) {
-      logger.error('Failed to copy commit SHA:', err)
+    // `clipboardSetText` reports the verdict as a boolean — `false` (or a
+    // rejection, folded in defensively) is a failed copy: log it and toast it.
+    const ok = await clipboardSetText(sha).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy commit SHA')
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy commit SHA',
       })
     }
@@ -393,12 +395,11 @@ export function GitHistoryContextMenu({
   const handleCopyTagName = useCallback(
     async (tagName: string) => {
       onClose()
-      try {
-        await clipboardSetText(tagName)
-      } catch (err) {
-        logger.error('Failed to copy tag name:', err)
+      const ok = await clipboardSetText(tagName).catch(() => false)
+      if (!ok) {
+        logger.error('Failed to copy tag name')
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to copy tag name',
         })
       }

@@ -618,7 +618,7 @@ func TestSendMessage_BindRefusalTouchesNoState(t *testing.T) {
 	external := filepath.Join(t.TempDir(), "external-tree")
 	wtGit(t, h.repoRoot, "worktree", "add", external, "feature/ext")
 
-	err = h.api.SendMessage(fresh.ID, "hello", nil, nil, nil, "", "", false, "", false, false, &SessionWorkspaceChoice{Branch: "feature/ext"})
+	err = h.api.SendMessage(fresh.ID, "hello", nil, nil, nil, "", "", false, "", false, false, "", &SessionWorkspaceChoice{Branch: "feature/ext"})
 	if !errors.Is(err, workspace.ErrBranchBusy) {
 		t.Fatalf("send must be refused with the typed branch-busy error, got: %v", err)
 	}
@@ -661,7 +661,7 @@ func TestSendMessage_BindOkDispatchFailedKeepsBinding(t *testing.T) {
 	fresh := newFreshLocalSession(t, h)
 
 	breakRestore.Store(true)
-	err := h.api.SendMessage(fresh.ID, "hello", nil, nil, nil, "", "", false, "", false, false, &SessionWorkspaceChoice{Branch: "feature/late", CreateBranch: true})
+	err := h.api.SendMessage(fresh.ID, "hello", nil, nil, nil, "", "", false, "", false, false, "", &SessionWorkspaceChoice{Branch: "feature/late", CreateBranch: true})
 	if err == nil {
 		t.Fatal("the send must fail when the post-bind restore cannot rebuild the orchestrator")
 	}

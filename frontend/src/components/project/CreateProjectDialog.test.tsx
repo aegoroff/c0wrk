@@ -9,14 +9,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
-const { pickDirectoryMock, createProjectMock } = vi.hoisted(() => ({
+const { pickDirectoryMock, createProjectMock, isWebTransportMock } = vi.hoisted(() => ({
   pickDirectoryMock: vi.fn<() => Promise<string>>(),
   createProjectMock: vi.fn<(name: string, path: string) => Promise<{ id: string }>>(),
+  isWebTransportMock: vi.fn(() => false),
 }))
 
 vi.mock('@/api/projects', () => ({
   pickDirectory: pickDirectoryMock,
   createProject: createProjectMock,
+}))
+
+vi.mock('@/api/runtime', () => ({
+  isWebTransport: isWebTransportMock,
 }))
 
 vi.mock('@/hooks/useProjectSwitchState', () => ({
@@ -43,6 +48,7 @@ describe('CreateProjectDialog', () => {
   beforeEach(() => {
     pickDirectoryMock.mockReset()
     createProjectMock.mockReset()
+    isWebTransportMock.mockReturnValue(false)
     container = document.createElement('div')
     document.body.replaceChildren(container)
     root = createRoot(container)
@@ -112,5 +118,43 @@ describe('CreateProjectDialog', () => {
     })
 
     expect(dialogEl()?.querySelector('p.truncate')).not.toBeNull()
+  })
+
+  it('shows the native directory browser in the wails transport', async () => {
+    isWebTransportMock.mockReturnValue(false)
+    await renderOpen()
+
+    expect(findButton('Choose directory')).not.toBeUndefined()
+    expect(dialogEl()?.textContent).not.toContain('Type the workspace directory path')
+  })
+
+  it('web transport cannot create projects: Create is disabled with the reason', async () => {
+    isWebTransportMock.mockReturnValue(true)
+    await renderOpen()
+
+    expect(findButton('Choose directory')).toBeUndefined()
+    // Creation is a desktop-only capability. The hint states it, and the
+    // disabled Create button carries the reason as its tooltip — the old
+    // "type the workspace directory path" hint pointed at a path input the
+    // dialog does not have, making Create permanently (and silently) dead.
+    expect(dialogEl()?.textContent).toContain('requires the desktop app')
+    const create = findButton('Create')
+    expect(create).toBeInstanceOf(HTMLButtonElement)
+    expect((create as HTMLButtonElement).disabled).toBe(true)
+    expect((create as HTMLButtonElement).getAttribute('title')).toContain('desktop app')
+    expect(pickDirectoryMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps Create enabled (path-gated) in the wails transport', async () => {
+    isWebTransportMock.mockReturnValue(false)
+    await renderOpen()
+
+    const create = findButton('Create')
+    expect(create).toBeInstanceOf(HTMLButtonElement)
+    // Still disabled until a directory is picked — but not transport-gated,
+    // and without a web-only tooltip.
+    expect((create as HTMLButtonElement).disabled).toBe(true)
+    expect((create as HTMLButtonElement).getAttribute('title')).toBeNull()
+    expect(dialogEl()?.textContent).not.toContain('requires the desktop app')
   })
 })

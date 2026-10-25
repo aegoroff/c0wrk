@@ -1,8 +1,8 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import { AlertTriangle, Check, X, Loader2, Info } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { emit } from '@/api/runtime'
-import { useChatStore } from '@/stores/chatStore'
+import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
 import { useToolJudgeEvents } from '@/hooks/events/useToolJudgeEvents'
 import type { DisplayItem } from '@/types/messages'
 import { getToolConfirmResolution, toolConfirmResolved } from '@/types/messages'
@@ -72,6 +72,18 @@ export function ToolConfirmation({ item }: ToolConfirmationProps) {
   const disableJudge = metadata?.disable_judge === true
   const judgeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // CS #52: a pending 30s judge timeout must not fire into an unmounted
+  // component — resolving/dismissing (or the card leaving the list) can tear
+  // the component down while an "Ask Agent" evaluation is still in flight.
+  useEffect(() => {
+    return () => {
+      if (judgeTimeoutRef.current) {
+        clearTimeout(judgeTimeoutRef.current)
+        judgeTimeoutRef.current = null
+      }
+    }
+  }, [])
+
   useToolJudgeEvents(sessionId, confirmId, {
     onResponse: (reasoning, error) => {
       if (judgeTimeoutRef.current) { clearTimeout(judgeTimeoutRef.current); judgeTimeoutRef.current = null }
@@ -82,6 +94,14 @@ export function ToolConfirmation({ item }: ToolConfirmationProps) {
   })
 
   const handleResponse = useCallback((decision: 'allow_once' | 'deny') => {
+    // Stale-click guard: the card may have been settled milliseconds ago by a
+    // hitl_resolved broadcast (another surface won first-responder-wins while
+    // this card was still rendering active buttons). Re-read the CURRENT
+    // metadata from the store — the `metadata` prop closure can be stale —
+    // and let the effective decision stand: no re-answer, no overwrite.
+    const current = selectSessionMessages(useChatStore.getState(), sessionId)
+      .find(m => m.id === item.message.id)
+    if (!current || current.metadata?.resolved === true) return
     const isConfirm = decision === 'allow_once'
     emit('tool_confirm_response', { confirm_id: confirmId, decision })
     if (toolMsgId) {

@@ -728,12 +728,52 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 	return nil
 }
 
+// runExperimentalChangedHook invokes the installed desktop hook. The hook
+// is written once, inside Init's seed critical section (the
+// FrontendAPIConfig seam, ADR-101) and before the seedPublished flag, so
+// every caller here has passed seedAcquire first and the plain read is
+// ordered after the install — no lock is needed. The hook itself runs
+// SYNCHRONOUSLY on the caller's goroutine — the same contract
+// SetWebAccessEnabled has on the desktop side — so the toggle RPC returns
+// only after the sidecar transition it caused landed (start errors are
+// already logged fail-soft by the hook, never fatal). There is no
+// lock-order cycle: UpdateExperimentalFeatures holds configMu while the
+// hook takes the desktop's webAccessMu, and no desktop path takes configMu
+// back (the web_access section is desktop-owned).
+func (f *FrontendAPI) runExperimentalChangedHook(enabled bool) {
+	if hook := f.onExperimentalChanged; hook != nil {
+		hook(enabled)
+	}
+}
+
 // UpdateExperimentalFeatures toggles the master experimental-features switch
 // at runtime. It persists the change and rebuilds the LLM router so the
 // gated features (the E2S execution mode — the embedded-model gate is
 // frontend-only and needs no rebuild) take effect for new sessions without
 // an app restart. Model Profiles is not gated by this switch, so this method
 // never touches its persisted master toggle (model_profiles.enabled).
+//
+// The desktop hook (OnExperimentalChanged) fires only on a SUCCESSFUL
+// persist: the sidecar's lifecycle follows persisted operator intent. A
+// rejected disk write is returned as an error with the in-memory gate rolled
+// back, so the applied gate (what GetConfig serves) and the persisted state
+// never diverge.
+//
+// Recorded trade-off: the configMu critical section spans the synchronous
+// desktop sidecar transition (runExperimentalChangedHook →
+// applyExperimentalWebAccess). The hook must stay inside the critical
+// section that flipped the in-memory gate so no configMu reader can observe
+// the gate already flipped while the sidecar still serves the old state;
+// the transition itself is bounded — the sidecar stop budget on the
+// gate-OFF direction, a fast mount on gate-ON — so the worst-case convoy
+// for other configMu contenders (settings setters, embeddedConfig() readers
+// on the LLM request path) is one stop budget, and only when the gate is
+// switched off while the sidecar's graceful stop is slow. The one-way lock
+// order configMu → webAccessMu (desktop code never takes configMu) keeps
+// the nesting deadlock-free. Splitting the flip from the transition (async
+// mount/stop with completion via a state event) would close even that
+// convoy window but is a contract change needing an ADR amendment —
+// deliberately not taken.
 func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	f.seedAcquire()
 	f.configMu.Lock()
@@ -743,10 +783,14 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 		return errors.New("config not initialized")
 	}
 
+	prev := f.config.Experimental.Enabled
 	f.config.Experimental.Enabled = enabled
-
 	if err := f.persistConfig(); err != nil {
+		// Roll back: an error return must not leave the in-memory gate
+		// diverged from the persisted one (and the hook unrun).
+		f.config.Experimental.Enabled = prev
 		f.log().Warn("failed to persist experimental features toggle", "error", err)
+		return fmt.Errorf("persisting experimental features toggle: %w", err)
 	}
 
 	// Rebuild the LLM router so the E2S execution mode is applied or removed
@@ -768,6 +812,31 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 			mgr.SetE2SSettings(builderCfg.E2S)
 		}
 	}
+
+	// The desktop hook fires LAST, after the persist landed: the
+	// sidecar transition it drives is the visible consequence of the
+	// persisted gate (a failed persist returned above).
+	f.runExperimentalChangedHook(enabled)
+
+	// The gate flip moves the section's exposure-warning state: the plain-
+	// HTTP warning is suppressed while the gate is closed and restored when
+	// it opens (the conjunction now lives INSIDE config.WebAccessLoadWarnings,
+	// so load and every recompute share one condition). The sidecar
+	// transition above does not touch the config_errors channel, so this
+	// method is the one place the flip's warning contribution is recomputed.
+	// The splice is done INLINE — this method already holds configMu, and
+	// RefreshWebAccessLoadWarnings re-takes it (self-deadlock); it mirrors
+	// that method exactly: prefix-filter, then append the fresh slice.
+	fresh := config.WebAccessLoadWarnings(f.config.WebAccess, f.config.Experimental.Enabled)
+	kept := make([]string, 0, len(f.configLoadErrors)+len(fresh))
+	for _, w := range f.configLoadErrors {
+		if strings.HasPrefix(w, webAccessLoadWarningPrefix) {
+			continue
+		}
+		kept = append(kept, w)
+	}
+	kept = append(kept, fresh...)
+	f.configLoadErrors = kept
 
 	return nil
 }
@@ -1875,8 +1944,13 @@ func (f *FrontendAPI) SetLogLevel(level string) error {
 	switch level {
 	case "DEBUG", "INFO", "WARN", "ERROR":
 		f.logLevel = level
+		// The sibling call sites nil-check before use (CS #48): a shell app
+		// can have f.app non-nil with no manager yet, and either bare
+		// dereference would panic the RPC.
 		if f.app != nil {
-			f.app.Manager().SetLogLevel(level)
+			if m := f.app.Manager(); m != nil {
+				m.SetLogLevel(level)
+			}
 		}
 		if f.config != nil {
 			f.config.LogLevel = level

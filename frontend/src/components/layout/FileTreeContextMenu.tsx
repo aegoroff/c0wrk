@@ -19,6 +19,7 @@ import { useUIStore } from '@/stores/uiStore'
 import { useCursorMenuPosition } from '@/lib/cursorMenuPosition'
 import { logger } from '@/lib/logger'
 import type { FileEntry } from '@/types/models'
+import { generateUUID } from '@/lib/ids'
 
 interface FileTreeContextMenuProps {
   entry: FileEntry
@@ -130,7 +131,7 @@ export function FileTreeContextMenu({
       ).catch((err) => {
         logger.error('Failed to dispatch study-paper:', err)
         emit('runtime_error', {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           message: 'Failed to start studying the paper',
         })
       })
@@ -154,12 +155,13 @@ export function FileTreeContextMenu({
 
   // --- Copy Path (absolute) ---
   const handleCopyPath = useCallback(async () => {
-    try {
-      await clipboardSetText(entry.path)
-    } catch (err) {
-      logger.error('Failed to copy path:', err)
+    // `clipboardSetText` reports the verdict as a boolean — `false` (or a
+    // rejection, folded in defensively) is a failed copy: log it and toast it.
+    const ok = await clipboardSetText(entry.path).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy path to clipboard')
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy path to clipboard',
       })
     }
@@ -168,12 +170,11 @@ export function FileTreeContextMenu({
 
   // --- Copy Relative Path ---
   const handleCopyRelativePath = useCallback(async () => {
-    try {
-      await clipboardSetText(relativePath)
-    } catch (err) {
-      logger.error('Failed to copy relative path:', err)
+    const ok = await clipboardSetText(relativePath).catch(() => false)
+    if (!ok) {
+      logger.error('Failed to copy relative path to clipboard')
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to copy relative path to clipboard',
       })
     }

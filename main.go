@@ -4,6 +4,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -230,6 +231,18 @@ func mainImpl() int {
 	// and whenever detection does not apply (explicit policy choice, active
 	// fallback, no usable capture, already-safe resolution).
 	app.SetWebviewGpuWatchdog(desktop.NewWebviewGpuWatchdog(agentDir, logDir, stderrObserved, slog.Default()))
+
+	// Hand the web-access sidecar (ADR-101) the same SPA tree the Wails
+	// asset server serves: the dist subtree of the embedded assets, resolved
+	// once here where the embed lives. Best-effort by the same contract as
+	// the watchdog wiring above — fs.Sub cannot fail for a path this embed
+	// pattern guarantees, and a missing tree only degrades the sidecar to
+	// API+WS (the static route 404s); it must never block the desktop app.
+	if dist, subErr := fs.Sub(assets, "frontend/dist"); subErr == nil {
+		app.SetWebAccessStaticFS(dist)
+	} else {
+		slog.Warn("web access: embedded frontend tree unavailable; sidecar will serve API/WS only", "error", subErr)
+	}
 
 	// Restore the persisted window size (written on resize/shutdown) so the
 	// app reopens at the size the user left it. On first run (no state file)

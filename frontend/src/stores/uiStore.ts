@@ -109,7 +109,27 @@ interface UIState {
    * default. Persisted (the flag is a durable user preference).
    */
   tabsEnabled: boolean
+  /**
+   * Whether this page runs on the web-access sidecar's browser transport
+   * (the WebAccessGate probe's verdict). Runtime-only — never persisted —
+   * and a one-way latch for the page's lifetime: the transport cannot
+   * change under a loaded document. Readers that must treat the web
+   * transport as tabs-off go through selectEffectiveTabsEnabled instead of
+   * writing the durable tabsEnabled preference (a web tab must not clobber
+   * the desktop user's persisted choice).
+   */
+  webTransport: boolean
 }
+
+/**
+ * Effective "is the workspace tab bar enabled" — the durable user preference
+ * ANDed with the transport gate: the web transport always reads as off (a
+ * browser tab lives in the BROWSER's tab strip), without ever writing the
+ * persisted preference. Every tabsEnabled READER goes through this selector;
+ * only the desktop Settings switch writes tabsEnabled itself.
+ */
+export const selectEffectiveTabsEnabled = (s: Pick<UIState, 'tabsEnabled' | 'webTransport'>): boolean =>
+  !s.webTransport && s.tabsEnabled
 
 interface UIActions {
   setSidebarCollapsed: (collapsed: boolean) => void
@@ -124,6 +144,8 @@ interface UIActions {
   setShowSessionStats: (show: boolean) => void
   /** Show/hide the workspace tab bar (see tabStore — the layer itself is always live). */
   setTabsEnabled: (enabled: boolean) => void
+  /** Latch the page's transport as the web-access sidecar's browser transport (WebAccessGate; runtime-only). */
+  setWebTransport: (web: boolean) => void
   /** Switch the session list between grouped sections and the flat list. */
   setSessionListGrouped: (grouped: boolean) => void
 }
@@ -246,6 +268,7 @@ export const useUIStore = create<UIState & UIActions>()(
       showSessionStats: false,
       sessionListGrouped: false,
       tabsEnabled: false,
+      webTransport: false,
 
       setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
 
@@ -294,6 +317,10 @@ export const useUIStore = create<UIState & UIActions>()(
 
       setTabsEnabled: (enabled) => set((s) => (
         s.tabsEnabled === enabled ? s : { tabsEnabled: enabled }
+      )),
+
+      setWebTransport: (web) => set((s) => (
+        s.webTransport === web ? s : { webTransport: web }
       )),
     }),
     {

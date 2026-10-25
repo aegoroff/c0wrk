@@ -747,6 +747,18 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.ShellExec.PoshExec.OverrideActive() && cfg.ShellExec.PoshExec.Shell == "" {
 		cfg.ShellExec.PoshExec.Shell = DefaultShellKindPosh
 	}
+
+	// web_access defaults. The section is OFF by default — the zero Enabled
+	// (an absent section, or an explicit `enabled: false`) never starts the
+	// sidecar. Only the bind address is seeded, so the persisted shape always
+	// names the explicit loopback default even for an operator who only flips
+	// `enabled` on; port 0 (auto) and the empty token (minted once at the
+	// first start, then persisted) are the zero values by design. An UNSAFE
+	// enabled section is not handled here: normalizeWebAccess (load pipeline)
+	// warns and resets the section.
+	if cfg.WebAccess.Bind == "" {
+		cfg.WebAccess.Bind = DefaultWebAccessBind
+	}
 }
 
 // defaultToolGroupPolicies is the single source of truth for the configurable

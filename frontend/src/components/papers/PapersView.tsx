@@ -36,6 +36,7 @@ import {
 } from '@/stores/paperStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useProjectStore, selectIsNoProject } from '@/stores/projectStore'
+import { isWebTransport } from '@/api/runtime'
 import { cn } from '@/lib/utils'
 import { Combobox } from '@/components/ui/combobox'
 import { pickStudyDocument } from '@/api/papers'
@@ -452,16 +453,18 @@ export function PapersView() {
             }}
             className={INPUT_CLASS}
           />
-          <button
-            type="button"
-            data-testid="papers-invoke-pick"
-            aria-label="Pick a local document to study"
-            title="Pick a local document and study it in a new session"
-            onClick={() => void studyPicked()}
-            className="shrink-0 rounded border border-border bg-background p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <FolderOpen className="size-3.5" />
-          </button>
+          {!isWebTransport() && (
+            <button
+              type="button"
+              data-testid="papers-invoke-pick"
+              aria-label="Pick a local document to study"
+              title="Pick a local document and study it in a new session"
+              onClick={() => void studyPicked()}
+              className="shrink-0 rounded border border-border bg-background p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <FolderOpen className="size-3.5" />
+            </button>
+          )}
           <button
             type="button"
             data-testid="papers-invoke-study"

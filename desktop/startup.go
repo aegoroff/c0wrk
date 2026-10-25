@@ -539,6 +539,15 @@ func (a *App) Startup(ctx context.Context) {
 	// filterNoProject=true delegates No Project stripping to emitBackendReady
 	// when LLM is unconfigured.
 	a.emitBackendReady(cachedProjects, projectMgr, cfg.LLM.DefaultModel == "", log)
+
+	// ── Web access sidecar (browser mirror, ADR-101) ─────────────────
+	// Mounted only when web_access.enabled: constructs internal/webaccess
+	// over the live FrontendAPI (reflection dispatch target), the embedded
+	// SPA tree and the CSP middleware, registers the emit event tap, and
+	// starts the loopback listener. Fail-soft: a failed mount logs and the
+	// desktop app carries on (see initWebAccess).
+	a.initWebAccess(cfg, log)
+
 	log.Info("startup complete \u2014 backend ready", "total_elapsed_ms", time.Since(startTime).Milliseconds())
 
 	// ── Phase 6: macOS power-state wake recovery ──────────────────────
@@ -677,6 +686,14 @@ func (a *App) Shutdown(ctx context.Context) {
 	// a failure is logged rather than fatal (see stopEmbeddedLLM).
 	a.stopEmbeddedLLM(ctx)
 	shutdownStep("stopEmbeddedLLM")
+
+	// Stop the browser web-access sidecar if one is mounted: close the
+	// loopback listener and every browser WebSocket before the judge drain
+	// and the store closes, so a connected tab sees its stream end while the
+	// app is still winding down. Bounded at ~3s and fail-soft (see
+	// stopWebAccess) — a quit never hangs on a stateless listener.
+	a.stopWebAccess(ctx)
+	shutdownStep("stopWebAccess")
 
 	// Drain all pending confirmation/ask-user/step-limit channels so that
 	// blocked goroutines can exit cleanly instead of leaking.

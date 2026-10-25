@@ -29,9 +29,17 @@ import type { SessionInfo, AttachmentInfoUI, ModelInfo, PasteResultUI } from '@/
 const spies = vi.hoisted(() => ({
   pasteFromClipboard: vi.fn<(sessionId: string, supportsVision: boolean) => Promise<PasteResultUI>>(),
   removeAttachment: vi.fn<(sessionId: string, attachmentId: string) => Promise<void>>(),
+  attachFileContent: vi.fn<
+    (
+      sessionId: string,
+      file: { name: string; type: string; bytes: Uint8Array },
+    ) => Promise<AttachmentInfoUI[]>
+  >(),
+  getAttachments: vi.fn<(sessionId: string) => Promise<AttachmentInfoUI[]>>(),
   createSession: vi.fn<() => Promise<SessionInfo>>(),
   emit: vi.fn<(event: string, data: unknown) => void>(),
   insertAtCursor: vi.fn<(text: string) => void>(),
+  isWebTransport: vi.fn<() => boolean>(),
 }))
 
 vi.mock('@/api/attachments', async (importOriginal) => {
@@ -40,6 +48,8 @@ vi.mock('@/api/attachments', async (importOriginal) => {
     ...actual,
     pasteFromClipboard: spies.pasteFromClipboard,
     removeAttachment: spies.removeAttachment,
+    attachFileContent: spies.attachFileContent,
+    getAttachments: spies.getAttachments,
   }
 })
 
@@ -49,6 +59,7 @@ vi.mock('@/api/sessions', () => ({
 
 vi.mock('@/api/runtime', () => ({
   emit: spies.emit,
+  isWebTransport: spies.isWebTransport,
 }))
 
 const models: ModelInfo[] = [
@@ -120,6 +131,25 @@ function fakeTransfer(items: Array<{ kind: string; type: string; name?: string }
   } as unknown as DataTransfer
 }
 
+/** Web-transport DataTransfer stub: real-ish File objects in `files` (what the
+ *  web branch stages — arrayBuffer included, the web staging reads bytes)
+ *  plus a plain-text flavor accessor. */
+function webTransfer(files: Array<{ name: string; type: string }>, text = ''): DataTransfer {
+  return {
+    items: files.map((f) => ({
+      kind: 'file',
+      type: f.type,
+      getAsFile: () => f,
+    })),
+    files: files.map((f) => ({
+      name: f.name,
+      type: f.type,
+      arrayBuffer: async () => new TextEncoder().encode(`bytes-of-${f.name}`).buffer,
+    })) as unknown as FileList,
+    getData: (type: string) => (type === 'text/plain' ? text : ''),
+  } as unknown as DataTransfer
+}
+
 let container: HTMLDivElement
 let root: Root
 
@@ -135,9 +165,12 @@ beforeEach(() => {
 
   spies.pasteFromClipboard.mockReset()
   spies.removeAttachment.mockReset().mockResolvedValue(undefined)
+  spies.attachFileContent.mockReset()
+  spies.getAttachments.mockReset().mockResolvedValue([])
   spies.createSession.mockReset()
   spies.emit.mockReset()
   spies.insertAtCursor.mockReset()
+  spies.isWebTransport.mockReset().mockReturnValue(false)
   resetAttachmentUploadState()
 
   container = document.createElement('div')
@@ -299,6 +332,64 @@ describe('usePasteHandler routing', () => {
     expect(spies.emit).toHaveBeenCalledWith('runtime_error', expect.objectContaining({
       message: 'Failed to paste from clipboard',
     }))
+  })
+})
+
+describe('usePasteHandler web transport (denylisted PasteFromClipboard)', () => {
+  it('stages DataTransfer files client-side and never calls the denylisted RPC', async () => {
+    spies.isWebTransport.mockReturnValue(true)
+    const list = [makeAttachment('w1'), makeAttachment('w2')]
+    spies.attachFileContent.mockResolvedValue(list)
+
+    await act(async () => { await runPaste(webTransfer([
+      { name: 'shot.png', type: 'image/png' },
+      { name: 'spec.pdf', type: 'application/pdf' },
+    ])) })
+
+    // The denylisted RPC is never touched on the web transport.
+    expect(spies.pasteFromClipboard).not.toHaveBeenCalled()
+    // Each file uploads through AttachFileContent with its own bytes.
+    expect(spies.attachFileContent).toHaveBeenCalledTimes(2)
+    expect(spies.attachFileContent).toHaveBeenCalledWith('sess-1', expect.objectContaining({
+      name: 'shot.png',
+      type: 'image/png',
+    }))
+    expect(spies.attachFileContent).toHaveBeenCalledWith('sess-1', expect.objectContaining({
+      name: 'spec.pdf',
+      type: 'application/pdf',
+    }))
+    // The store carries the full pending list from the staging pipeline.
+    expect(useAttachmentsStore.getState().attachmentsBySession['sess-1']).toEqual(list)
+    expect(spies.emit).not.toHaveBeenCalled()
+  })
+
+  it('inserts a plain-text flavor riding alongside the staged files', async () => {
+    spies.isWebTransport.mockReturnValue(true)
+    spies.attachFileContent.mockResolvedValue([makeAttachment('w1')])
+
+    await act(async () => { await runPaste(webTransfer(
+      [{ name: 'shot.png', type: 'image/png' }],
+      'look at this',
+    )) })
+
+    expect(spies.pasteFromClipboard).not.toHaveBeenCalled()
+    expect(spies.insertAtCursor).toHaveBeenCalledWith('look at this')
+    expect(useAttachmentsStore.getState().attachmentsBySession['sess-1']).toEqual([
+      makeAttachment('w1'),
+    ])
+  })
+
+  it('never reaches the RPC even when the file items yield no File objects', async () => {
+    // A file-kind item that never materialized (empty `files`) with a text
+    // flavor: the desktop probe would 403 — the web branch must still route
+    // the text and return.
+    spies.isWebTransport.mockReturnValue(true)
+
+    await act(async () => { await runPaste(webTransfer([], 'just text')) })
+
+    expect(spies.pasteFromClipboard).not.toHaveBeenCalled()
+    expect(spies.attachFileContent).not.toHaveBeenCalled()
+    expect(spies.insertAtCursor).toHaveBeenCalledWith('just text')
   })
 })
 

@@ -2966,6 +2966,44 @@ export namespace desktop {
 	
 	
 	
+	export class WebAccessInfo {
+	    enabled: boolean;
+	    running: boolean;
+	    url: string;
+	    port: number;
+	    configured_port: number;
+	    configured_bind: string;
+	    bind_is_loopback: boolean;
+	    token: string;
+	    token_pinned: boolean;
+	    tls_enabled: boolean;
+	    tls_cert: string;
+	    tls_key: string;
+	    cert_status: string;
+	    cert_detail: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WebAccessInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.running = source["running"];
+	        this.url = source["url"];
+	        this.port = source["port"];
+	        this.configured_port = source["configured_port"];
+	        this.configured_bind = source["configured_bind"];
+	        this.bind_is_loopback = source["bind_is_loopback"];
+	        this.token = source["token"];
+	        this.token_pinned = source["token_pinned"];
+	        this.tls_enabled = source["tls_enabled"];
+	        this.tls_cert = source["tls_cert"];
+	        this.tls_key = source["tls_key"];
+	        this.cert_status = source["cert_status"];
+	        this.cert_detail = source["cert_detail"];
+	    }
+	}
 	export class wailsLogAdapter {
 	
 	
@@ -3751,7 +3789,7 @@ export namespace session {
 	    unfinished_task_status?: string;
 	    paused: boolean;
 	    compacting: boolean;
-	    compaction_availability: core.CompactionAvailability[];
+	    compaction_availability?: core.CompactionAvailability[];
 	    activity?: string;
 	    streaming: boolean;
 	    work_units?: WorkUnitStatus[];

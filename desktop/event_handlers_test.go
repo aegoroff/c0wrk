@@ -427,6 +427,76 @@ func TestHandleToolJudgeRequest_NoApplication(t *testing.T) {
 	if _, ok := a.pendingConfirmations.Load("cid-1"); ok {
 		t.Error("pending confirmation should be deleted when app is nil")
 	}
+
+	// The in-flight marker is released when the evaluation settles, so a
+	// (hypothetical) repeat frame afterwards would spawn a fresh evaluation
+	// instead of being dropped forever.
+	a.judgeWG.Wait()
+	if _, ok := a.judgeInFlight.Load("cid-1"); ok {
+		t.Error("in-flight marker should be released once the evaluation settles")
+	}
+}
+
+// TestBeginJudgeEvaluation_ClaimsAndReleases pins the marker mechanics: the
+// first claim wins, a claim while held is refused, and finishing the
+// evaluation makes the slot claimable again.
+func TestBeginJudgeEvaluation_ClaimsAndReleases(t *testing.T) {
+	a := &App{}
+
+	if !a.beginJudgeEvaluation("cid-1") {
+		t.Fatal("first claim on a fresh confirm_id should win")
+	}
+	if a.beginJudgeEvaluation("cid-1") {
+		t.Fatal("a claim while an evaluation is in flight should be refused")
+	}
+	// A different confirm_id is never blocked by another one's marker.
+	if !a.beginJudgeEvaluation("cid-2") {
+		t.Fatal("a different confirm_id should claim independently")
+	}
+
+	a.finishJudgeEvaluation("cid-1")
+	if !a.beginJudgeEvaluation("cid-1") {
+		t.Fatal("claim after finish should win again")
+	}
+}
+
+// TestHandleToolJudgeRequest_InFlightDropIsQuiet pins the handler-level drop:
+// a repeat frame for a confirmation whose evaluation is still running is
+// Debug-logged and spawns nothing — the pending entry stays untouched (an
+// evaluation with a nil app would have deleted it) and no response is emitted.
+func TestHandleToolJudgeRequest_InFlightDropIsQuiet(t *testing.T) {
+	a := &App{}
+	log, buf := captureLogger()
+	uiCalls := 0
+	uiEmit := func(session.Event) { uiCalls++ }
+
+	a.pendingConfirmations.Store("cid-drop", &pendingConfirmData{
+		ch:        make(chan sdktools.ConfirmationResponse, 1),
+		toolName:  "bash_exec",
+		input:     json.RawMessage(`{"command":"ls"}`),
+		sessionID: "sess-1",
+	})
+	// Simulate the evaluation a first frame is still running.
+	if !a.beginJudgeEvaluation("cid-drop") {
+		t.Fatal("failed to claim a fresh confirm_id")
+	}
+
+	a.handleToolJudgeRequest(map[string]any{"confirm_id": "cid-drop"}, uiEmit, log)
+
+	if !strings.Contains(buf.String(), "already in flight") {
+		t.Errorf("expected the in-flight drop debug record, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "level=WARN") || strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("the drop is expected behavior — must stay Debug, got %q", buf.String())
+	}
+	// No evaluation ran: the handler returned before the spawn, so the
+	// pending entry is intact and nothing was emitted.
+	if _, ok := a.pendingConfirmations.Load("cid-drop"); !ok {
+		t.Error("pending confirmation was deleted by a dropped repeat frame")
+	}
+	if uiCalls != 0 {
+		t.Errorf("uiEmit should not be called for a dropped repeat frame, got %d", uiCalls)
+	}
 }
 
 func TestHandleToolJudgeRequest_MissingConfirmID(t *testing.T) {

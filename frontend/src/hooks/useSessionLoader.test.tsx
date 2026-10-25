@@ -14,6 +14,16 @@ const mocks = vi.hoisted(() => ({
   subscribers: new Map<string, Array<(data: unknown) => void>>(),
 }))
 
+// Expected diagnostics of deliberately exercised failure paths (the api
+// wrapper's error report) are intercepted here and asserted in the specific
+// test that triggers them.
+const loggerMocks = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}))
+
 vi.mock('@/api/runtime', () => ({
   subscribe: (eventName: string, callback: (data: unknown) => void) => {
     const list = mocks.subscribers.get(eventName) ?? []
@@ -36,6 +46,8 @@ vi.mock('@/api/projects', () => ({
   // paths, but must exist so the store module initializes.
   saveProjectActiveSession: vi.fn(),
 }))
+
+vi.mock('@/lib/logger', () => ({ logger: loggerMocks, setLogLevel: vi.fn() }))
 
 import { useSessionLoader } from './useSessionLoader'
 import { useProjectStore } from '@/stores/projectStore'
@@ -110,11 +122,16 @@ beforeEach(() => {
   mocks.getProjectSwitchStateMock.mockReset()
   mocks.listSessionsMock.mockResolvedValue([])
   mocks.getProjectSwitchStateMock.mockResolvedValue(null)
+  loggerMocks.debug.mockClear()
+  loggerMocks.info.mockClear()
+  loggerMocks.warn.mockClear()
+  loggerMocks.error.mockClear()
   useProjectStore.setState({ projects: null, activeProjectId: 'project-1' })
   useSessionStore.setState({ sessions: null, activeSessionId: null })
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   if (root) {
     act(() => {
       root!.unmount()
@@ -288,5 +305,323 @@ describe('useSessionLoader', () => {
     fireEvent('session:renamed', { id: 's1', name: 'New name' })
 
     expect(useSessionStore.getState().sessions?.find(s => s.id === 's1')?.name).toBe('New name')
+  })
+
+  describe('sessions:changed re-read', () => {
+    it('re-reads the list once, trailing, after the debounce window', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(1)
+
+      const refreshed = [makeSession({ id: 'created', project_id: 'project-1' })]
+      mocks.listSessionsMock.mockResolvedValue(refreshed)
+      fireEvent('sessions:changed', undefined)
+      // Leading edge is suppressed: nothing is fetched inside the window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(249)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+      expect(useSessionStore.getState().sessions).toEqual(refreshed)
+    })
+
+    it('coalesces a burst of events into a single re-read', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      fireEvent('sessions:changed', undefined)
+      // Each event restarts the window: 300ms after the first event, nothing
+      // has fired yet; the trailing fetch lands 250ms after the LAST one.
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(249)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('updates the list without touching the active session, even while idle', async () => {
+      vi.useFakeTimers()
+      // A saved pointer exists, but the initial load restored nothing (the
+      // project was empty at the time).
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      renderLoader()
+      await flush()
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+
+      // The push carries the saved session — a foreign update must NOT
+      // auto-select it (no restoreIfIdle on the re-read path).
+      mocks.listSessionsMock.mockResolvedValue([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'other', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual(['other', 'saved-session'])
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+    })
+
+    it('does not re-read when the active project went away inside the window', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+      mocks.listSessionsMock.mockClear()
+
+      fireEvent('sessions:changed', undefined)
+      // The project disappears before the window elapses (switch to another
+      // project / No Project): the pending re-read is dropped.
+      act(() => {
+        useProjectStore.setState({ activeProjectId: null })
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000)
+      })
+
+      expect(mocks.listSessionsMock).not.toHaveBeenCalled()
+    })
+
+    it('drops a re-read whose project switched while the fetch was in flight', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+      expect(useSessionStore.getState().sessions).toEqual([])
+
+      let releaseRefresh!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseRefresh = resolve }),
+      )
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      // The user switches projects while the re-read is in flight: the hook
+      // re-runs for the new project (its own initial fetch) and the stale
+      // answer must never land in the store.
+      mocks.listSessionsMock.mockResolvedValue([
+        makeSession({ id: 'p2-session', project_id: 'project-2' }),
+      ])
+      act(() => {
+        useProjectStore.setState({ activeProjectId: 'project-2' })
+      })
+      await flush()
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(3)
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual(['p2-session'])
+
+      releaseRefresh([makeSession({ id: 'stale-p1', project_id: 'project-1' })])
+      await flush()
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual(['p2-session'])
+    })
+
+    it('supersedes the initial load when a re-read was issued while it was in flight', async () => {
+      vi.useFakeTimers()
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      let releaseInitial!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseInitial = resolve }),
+      )
+      renderLoader()
+
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      // The re-read (fresh, post-mutation) applies first; the project is still
+      // empty at that point.
+      expect(useSessionStore.getState().sessions).toEqual([])
+
+      // The slower initial read carries the pre-mutation list — it must be
+      // dropped instead of clobbering the fresh one. The switch's restore
+      // still runs, but against the applied (fresh, empty) list: the stale
+      // list's sessions never leak into the store or the selection.
+      releaseInitial([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'freshest', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      await flush()
+
+      expect(useSessionStore.getState().sessions).toEqual([])
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+    })
+
+    it('restores through the winning re-read when the initial fetch goes stale pre-application', async () => {
+      // The review race: the re-read is issued while the initial load is in
+      // flight AND the initial read resolves first — stale, with nothing
+      // applied yet. The re-read's apply deliberately never restores, so the
+      // activation's saved-session pointer would dangle unconsumed (no
+      // session auto-selected). The stale branch must arm a pending restore
+      // that the winning application carries once.
+      vi.useFakeTimers()
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      let releaseInitial!: (v: SessionInfo[]) => void
+      let releaseRefresh!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseInitial = resolve }),
+      )
+      renderLoader()
+
+      // The foreign mutation schedules the re-read fetch (gated too).
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseRefresh = resolve }),
+      )
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      // The INITIAL read resolves first — already stale (fetchSeq moved),
+      // and nothing has been applied yet: no restore may fire from the
+      // stale branch itself, the flag is armed instead.
+      releaseInitial([makeSession({ id: 'saved-session', project_id: 'project-1' })])
+      await flush()
+      expect(useSessionStore.getState().sessions).toBeNull()
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+
+      // The re-read applies the post-mutation list — and carries the
+      // activation's restore against it.
+      releaseRefresh!([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'forked', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      await flush()
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual([
+        'forked',
+        'saved-session',
+      ])
+      expect(useSessionStore.getState().activeSessionId).toBe('saved-session')
+    })
+
+    it('un-poisons a succeeded initial fetch when the superseding re-read fails (CS #26)', async () => {
+      vi.useFakeTimers()
+      mocks.getProjectSwitchStateMock.mockResolvedValue(savedState('saved-session'))
+      let releaseInitial!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseInitial = resolve }),
+      )
+      renderLoader()
+
+      // A re-read is issued while the initial load is still in flight — and
+      // FAILS. With ownership marked at issuance the initial load's eventual
+      // success used to stay dropped ("no list, no restore" until the next
+      // trigger); the release-on-failure rollback must make it current again.
+      mocks.listSessionsMock.mockRejectedValueOnce(new Error('re-read rpc down'))
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      releaseInitial([
+        makeSession({ id: 'saved-session', project_id: 'project-1' }),
+        makeSession({ id: 'freshest', project_id: 'project-1', last_active_at: '2026-06-01T00:00:00Z' }),
+      ])
+      await flush()
+
+      expect(useSessionStore.getState().sessions?.map(s => s.id)).toEqual(['freshest', 'saved-session'])
+      expect(useSessionStore.getState().activeSessionId).toBe('saved-session')
+    })
+
+    it('supersedes an older in-flight re-read with a newer one', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+
+      let releaseFirst!: (v: SessionInfo[]) => void
+      mocks.listSessionsMock.mockImplementationOnce(
+        () => new Promise<SessionInfo[]>((resolve) => { releaseFirst = resolve }),
+      )
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(2)
+
+      // A second event while the first re-read is still in flight schedules a
+      // new fetch that supersedes it.
+      const second = [makeSession({ id: 'second', project_id: 'project-1', name: 'Second' })]
+      mocks.listSessionsMock.mockResolvedValueOnce(second)
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+      expect(mocks.listSessionsMock).toHaveBeenCalledTimes(3)
+      expect(useSessionStore.getState().sessions).toEqual(second)
+
+      // The slow first re-read resolves last — its stale answer must not land.
+      releaseFirst([makeSession({ id: 'stale', project_id: 'project-1' })])
+      await flush()
+
+      expect(useSessionStore.getState().sessions).toEqual(second)
+    })
+
+    it('cancels the pending re-read on unmount', async () => {
+      vi.useFakeTimers()
+      renderLoader()
+      await flush()
+      mocks.listSessionsMock.mockClear()
+
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      act(() => {
+        root!.unmount()
+      })
+      root = undefined
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000)
+      })
+
+      expect(mocks.listSessionsMock).not.toHaveBeenCalled()
+    })
+
+    it('keeps the current list when the re-read fails, with the expected error reported once', async () => {
+      vi.useFakeTimers()
+      const existing = [makeSession({ id: 'keep', project_id: 'project-1' })]
+      mocks.listSessionsMock.mockResolvedValue(existing)
+      renderLoader()
+      await flush()
+      expect(loggerMocks.error).not.toHaveBeenCalled()
+
+      mocks.listSessionsMock.mockRejectedValueOnce(new Error('rpc down'))
+      fireEvent('sessions:changed', undefined)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250)
+      })
+
+      expect(useSessionStore.getState().sessions).toEqual(existing)
+      // The re-read failure is deliberately silent in the hook (the real api
+      // wrapper reports it at error level; here the wrapper is a mock): the
+      // list is kept and no diagnostic leaks from the hook itself.
+      expect(loggerMocks.error).not.toHaveBeenCalled()
+      expect(loggerMocks.warn).not.toHaveBeenCalled()
+    })
   })
 })

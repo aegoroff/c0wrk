@@ -238,6 +238,12 @@ func (p *EventPersister) Persist(evt Event) {
 		"attachments:changed",
 		"session_pinned", "session_unpinned",
 		"session_archived", "session_unarchived",
+		// Task activation is pure start-side UI state (it drives the
+		// live-sessions indicator via the desktop sessions:changed mirror);
+		// the durable task record is the task store's own row, so persisting
+		// this event would only add one dead event_unknown card per task on
+		// reload.
+		"task_started",
 		// Work-unit settlement is transient: the durable source is the unit
 		// ledger surfaced via GetSessionRuntimeStatus.work_units, so persisting
 		// this event would only add a dead row on reload.

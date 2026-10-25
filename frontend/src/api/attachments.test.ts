@@ -4,9 +4,15 @@
 // boundary used by the `attachments:changed` event handler and the attachment
 // RPCs. No React, no Wails runtime — just the mappers and the event guard.
 
-import { describe, it, expect } from 'vitest'
-import { mapAttachment, mapAttachments, isImagePath, attachmentBaseName, mapPasteResult } from '@/api/attachments'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { mapAttachment, mapAttachments, isImagePath, attachmentBaseName, mapPasteResult, attachFileContent, MAX_ATTACHMENT_UPLOAD_BYTES } from '@/api/attachments'
 import { isAttachmentsChangedData, isAttachmentInfoRaw, isPasteResultRaw } from '@/types/events'
+import { logger } from '@/lib/logger'
+
+// The RPC wrapper tests below mock the transport shim; the pure-mapping
+// tests above never touch it.
+const rpcApp = vi.hoisted(() => ({ AttachFileContent: vi.fn() }))
+vi.mock('@/api/runtime', () => ({ getApp: () => rpcApp }))
 
 describe('mapAttachment', () => {
   it('maps snake_case backend fields to camelCase UI fields', () => {
@@ -248,5 +254,75 @@ describe('isPasteResultRaw', () => {
 
   it('rejects an unknown kind', () => {
     expect(isPasteResultRaw({ kind: 'binary', files: [] })).toBe(false)
+  })
+})
+
+describe('attachFileContent (web upload path)', () => {
+  const rawInfo = { id: 'a1', original_name: 'dropped.md', format: 'md', size_bytes: 3 }
+  const mappedInfo = { id: 'a1', originalName: 'dropped.md', format: 'md', sizeBytes: 3 }
+
+  afterEach(() => {
+    rpcApp.AttachFileContent.mockReset()
+    vi.restoreAllMocks()
+  })
+
+  it('a browser file drop creates an attachment: bytes travel base64, response maps to UI records', async () => {
+    rpcApp.AttachFileContent.mockResolvedValue([rawInfo])
+
+    const result = await attachFileContent('sess-1', {
+      name: 'dropped.md',
+      type: 'text/markdown',
+      bytes: new Uint8Array([1, 2, 3]),
+    })
+
+    // arg4 is the Go []byte wire form: a base64 string ("AQID" = 01 02 03).
+    expect(rpcApp.AttachFileContent).toHaveBeenCalledWith('sess-1', 'dropped.md', 'text/markdown', 'AQID')
+    expect(result).toEqual([mappedInfo])
+  })
+
+  it('rejects oversize payloads before any RPC round-trip', async () => {
+    await expect(
+      attachFileContent('sess-1', {
+        name: 'huge.bin',
+        type: 'application/octet-stream',
+        bytes: new Uint8Array(MAX_ATTACHMENT_UPLOAD_BYTES + 1),
+      }),
+    ).rejects.toThrow('above the')
+
+    expect(rpcApp.AttachFileContent).not.toHaveBeenCalled()
+  })
+
+  it('accepts a payload at exactly the limit', async () => {
+    rpcApp.AttachFileContent.mockResolvedValue([])
+    await expect(
+      attachFileContent('sess-1', {
+        name: 'max.bin',
+        type: 'application/octet-stream',
+        bytes: new Uint8Array(MAX_ATTACHMENT_UPLOAD_BYTES),
+      }),
+    ).resolves.toEqual([])
+    expect(rpcApp.AttachFileContent).toHaveBeenCalledTimes(1)
+  })
+
+  it('logs and returns [] on an unexpected response shape', async () => {
+    rpcApp.AttachFileContent.mockResolvedValue({ nope: true })
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    await expect(
+      attachFileContent('sess-1', { name: 'a.md', type: 'text/markdown', bytes: new Uint8Array([1]) }),
+    ).resolves.toEqual([])
+
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('propagates a backend failure (logged at the boundary)', async () => {
+    rpcApp.AttachFileContent.mockRejectedValue(new Error('boom'))
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+
+    await expect(
+      attachFileContent('sess-1', { name: 'a.md', type: 'text/markdown', bytes: new Uint8Array([1]) }),
+    ).rejects.toThrow('boom')
+
+    expect(errorSpy).toHaveBeenCalledTimes(1)
   })
 })

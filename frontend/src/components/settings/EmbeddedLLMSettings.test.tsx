@@ -760,6 +760,11 @@ describe('EmbeddedLLMSettings — the projection scope self-disables under mtplx
     expect(item?.getAttribute('data-disabled')).not.toBeNull()
     // The title says WHY, so the disabled entry is not a dead end.
     expect(item?.getAttribute('title')).toContain('MTPLX')
+    // The refusal carries its own leading space: JSX strips the whitespace
+    // between the "Remove vision projector only" text child and the
+    // interpolated refusal, so without it the entry renders
+    // "…onlynot removable under the MTPLX engine".
+    expect(item?.textContent).toContain('only not removable under the MTPLX engine')
   })
 })
 

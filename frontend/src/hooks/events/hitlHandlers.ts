@@ -4,8 +4,19 @@
 // chat store regardless of which session the user is currently viewing.
 
 import { useChatStore, selectSessionMessages } from '@/stores/chatStore'
+import { useGoalStore } from '@/stores/goalStore'
+import { useActiveSessionsStore } from '@/stores/activeSessionsStore'
+import { getPendingActions } from '@/api/chat'
+import { logger } from '@/lib/logger'
 import { generateMessageId } from '@/lib/ids'
 import { autonomyDecisionContent } from '@/lib/autonomyDecision'
+import {
+  toolConfirmResolved,
+  stepLimitResolved,
+  getToolConfirmResolution,
+  getStepLimitResolution,
+  type StepLimitDecision,
+} from '@/types/messages'
 import type {
   ToolConfirmData,
   AskUserData,
@@ -13,6 +24,8 @@ import type {
   PlanReviewReadyData,
   ToolJudgePhaseData,
   AutonomyDecisionData,
+  HitlResolvedData,
+  HitlResolvedKind,
 } from '@/types/events'
 
 /** Handle a tool_confirm event for a session (active or background). */
@@ -168,4 +181,193 @@ export function handleToolJudgeStartedEvent(sessionId: string, _data: ToolJudgeP
  */
 export function handleToolJudgeFinishedEvent(sessionId: string, _data: ToolJudgePhaseData): void {
   useChatStore.getState().setActivityStatus(sessionId, null)
+}
+
+/**
+ * Handle a hitl_resolved event (active or background session): the backend
+ * broadcast that a pending HITL prompt was consumed — usually by ANOTHER
+ * surface (a second browser tab, the webview while the user works in a
+ * browser). Retire the local card immediately instead of waiting for the next
+ * session-switch / focus-resync reconcile, and converge on the EFFECTIVE
+ * decision (the first responder's answer) so a surface that raced the
+ * resolution shows what actually drove the agent.
+ *
+ * Idempotent by design: a surface that performed the resolution already
+ * marked its card resolved locally and skips the redundant write; a missing
+ * card (never rendered, or already reconciled) is a no-op FOR THE CHAT — the
+ * goal-store mirror is still settled above, because it lives independently of
+ * the message list (progress panel / status badge), and the sticky
+ * pending-HITL override bit is reconciled below for the same reason.
+ */
+/**
+ * Wire vocabularies for hitl_resolved decisions, mirroring the Go emitters in
+ * desktop/event_handlers.go (`confirmDecisionString`, `parseStepLimitResponse`).
+ * A recognized decision maps to the UI resolution vocabulary; an unrecognized
+ * non-empty value settles the card NEUTRALLY instead of being coerced to
+ * "denied" or cast unchecked (CS #25 — the guard validates only "some string").
+ */
+const TOOL_CONFIRM_WIRE_DECISIONS: ReadonlySet<string> = new Set(['allow_once', 'deny', 'deny_and_stop'])
+const STEP_LIMIT_WIRE_DECISIONS: ReadonlySet<string> = new Set(['allow_once', 'allow_more', 'allow_always', 'deny'])
+
+/** Map a tool_confirm wire decision to the UI vocabulary; null = no recorded decision. */
+function toolConfirmWireDecision(decision: string | undefined): 'confirmed' | 'denied' | null {
+  if (decision === undefined || decision === '') return null
+  if (decision === 'allow_once') return 'confirmed'
+  if (TOOL_CONFIRM_WIRE_DECISIONS.has(decision)) return 'denied'
+  return null
+}
+
+/** Validate a step_limit wire decision against the enum; null = no recorded decision. */
+function stepLimitWireDecision(decision: string | undefined): StepLimitDecision | null {
+  if (decision === undefined || decision === '') return null
+  return STEP_LIMIT_WIRE_DECISIONS.has(decision) ? (decision as StepLimitDecision) : null
+}
+
+export function handleHitlResolvedEvent(sessionId: string, data: HitlResolvedData): void {
+  // The goal store mirrors the pending prompt for the progress panel / badge:
+  // clear the entry ONLY when it is still this exact prompt, so a newer
+  // proposal (arrived between the answer and this event) is never wiped. Runs
+  // BEFORE the chat-card lookup: the mirror exists even when this surface
+  // never rendered the card.
+  if (data.kind === 'goal_proposal' || data.kind === 'goal_suggestion') {
+    const goal = useGoalStore.getState()
+    if (data.kind === 'goal_proposal') {
+      if (goal.pendingProposal[sessionId]?.request_id === data.id) goal.clearPendingProposal(sessionId)
+    } else if (goal.pendingSuggestion[sessionId]?.request_id === data.id) {
+      goal.clearPendingSuggestion(sessionId)
+    }
+  }
+
+  // Pending-HITL override reconcile: a sticky `true` bit in
+  // activeSessionsStore means this surface believes the session still blocks
+  // on a prompt, yet a resolution broadcast just landed — the bit's only
+  // `false` writer (this surface answering the prompt itself) is unreachable
+  // here, so without this the bit would stick forever (yellow badge with no
+  // actual prompt). Re-query the backend and apply the AUTHORITATIVE answer —
+  // NOT a blind clear: a second prompt may already be pending. Runs BEFORE
+  // the chat-card early return: the reconcile must also work when this
+  // surface never rendered the card. Fire-and-forget keeps the handler sync;
+  // a null result (RPC failure — getPendingActions never rejects) is not
+  // authoritative and keeps the bit.
+  if (useActiveSessionsStore.getState().pendingOverride[sessionId] === true) {
+    void getPendingActions(sessionId).then(pending => {
+      if (pending === null) {
+        logger.debug('hitl_resolved: pending-actions re-query failed, keeping override for', sessionId)
+        return
+      }
+      useActiveSessionsStore.getState().applyPendingActions(sessionId, pending)
+    })
+  }
+
+  const store = useChatStore.getState()
+  const idPrefix: Record<HitlResolvedKind, string> = {
+    tool_confirm: 'tool-confirm-',
+    ask_user: 'ask-user-',
+    step_limit: 'step-limit-',
+    plan_review: 'plan-review-',
+    goal_proposal: 'goal-proposal-',
+    goal_suggestion: 'goal-suggestion-',
+  }
+  const msg = selectSessionMessages(store, sessionId).find(m => m.id === idPrefix[data.kind] + data.id)
+  if (!msg) return
+  const alreadyResolved = msg.metadata?.resolved === true
+
+  if (msg.type === 'tool_confirm') {
+    // Converge on the effective decision: allow_once → confirmed,
+    // deny/deny_and_stop → denied, anything else (empty or unrecognized wire
+    // value) → resolved without a recorded decision (the neutral settled
+    // card). Validation goes through the per-kind wire vocabulary — an
+    // unknown non-empty decision must not render as "denied" (CS #25).
+    const decision = toolConfirmWireDecision(data.decision)
+    const tool = typeof msg.metadata?.tool === 'string' ? msg.metadata.tool : undefined
+    if (alreadyResolved) {
+      // The card was settled locally — by THIS surface's own answer, or by an
+      // earlier broadcast. Overwrite ONLY when this event carries the
+      // effective decision AND it differs from the local record: a surface
+      // that raced the resolution (its click lost first-responder-wins) must
+      // converge on what actually drove the agent. An event without a
+      // decision never touches a settled card.
+      if (decision === null) return
+      const current = getToolConfirmResolution(msg.metadata)
+      if (current === decision) return
+      store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...toolConfirmResolved(decision) } })
+      store.setActivityStatus(sessionId, decision === 'confirmed' && tool ? `Running tool: ${tool}...` : null)
+      return
+    }
+    const resolution: Record<string, unknown> =
+      decision !== null ? toolConfirmResolved(decision) : { resolved: true }
+    store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...resolution } })
+    // Release the linked tool card's awaiting flag (mirrors the local
+    // ToolConfirmation.handleResponse path).
+    const toolMsgId = typeof msg.metadata?.tool_msg_id === 'string' ? msg.metadata.tool_msg_id : undefined
+    if (toolMsgId) {
+      const toolMsg = selectSessionMessages(store, sessionId).find(m => m.id === toolMsgId)
+      if (toolMsg && toolMsg.metadata?.awaiting_confirmation === true) {
+        store.updateMessage(sessionId, toolMsg.id, {
+          metadata: { ...toolMsg.metadata, awaiting_confirmation: false },
+        })
+      }
+    }
+    store.setActivityStatus(sessionId, decision === 'confirmed' && tool ? `Running tool: ${tool}...` : null)
+    return
+  }
+
+  if (msg.type === 'step_limit') {
+    // Validated against the wire enum; an unrecognized non-empty value settles
+    // neutrally instead of an unchecked cast into StepLimitDecision (CS #25).
+    const decision = stepLimitWireDecision(data.decision)
+    if (alreadyResolved) {
+      // Same convergence rule as tool_confirm above.
+      if (decision === null) return
+      const current = getStepLimitResolution(msg.metadata)
+      if (current === decision) return
+      store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...stepLimitResolved(decision) } })
+      store.setActivityStatus(sessionId, null)
+      return
+    }
+    const resolution: Record<string, unknown> =
+      decision !== null ? stepLimitResolved(decision) : { resolved: true }
+    store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, ...resolution } })
+    store.setActivityStatus(sessionId, null)
+    return
+  }
+
+  // ask_user / plan_review / goal_proposal / goal_suggestion: the answers and
+  // feedback are owned by the answering surface — every other surface only
+  // needs the settlement.
+  if (!alreadyResolved) {
+    store.updateMessage(sessionId, msg.id, { metadata: { ...msg.metadata, resolved: true } })
+    store.setActivityStatus(sessionId, null)
+  }
+}
+
+/**
+ * Backstop for the hitl_resolved broadcast: when a tool_result arrives whose
+ * `tool_call_id` matches an UNRESOLVED tool_confirm card, settle the card
+ * neutrally. In the normal flow the backend's hitl_resolved event lands FIRST
+ * (the gate resolves before the tool runs) and already settled the card with
+ * the effective decision — this only fires when that push was missed (a
+ * dropped websocket with no reconnect trigger yet), trading the decision
+ * display for not leaving a ghost card that blocks the pending-actions bar
+ * while the tool it gated has demonstrably already run. Never overrides an
+ * existing resolution.
+ */
+export function resolveConfirmForToolResult(sessionId: string, toolCallId: string | undefined): void {
+  if (!toolCallId) return
+  const store = useChatStore.getState()
+  const card = selectSessionMessages(store, sessionId).find(
+    m => m.type === 'tool_confirm' && m.metadata?.resolved !== true && m.metadata?.tool_call_id === toolCallId,
+  )
+  if (!card) return
+  store.updateMessage(sessionId, card.id, { metadata: { ...card.metadata, resolved: true } })
+  const toolMsgId = typeof card.metadata?.tool_msg_id === 'string' ? card.metadata.tool_msg_id : undefined
+  if (toolMsgId) {
+    const toolMsg = selectSessionMessages(store, sessionId).find(m => m.id === toolMsgId)
+    if (toolMsg?.metadata?.awaiting_confirmation === true) {
+      store.updateMessage(sessionId, toolMsg.id, {
+        metadata: { ...toolMsg.metadata, awaiting_confirmation: false },
+      })
+    }
+  }
+  store.setActivityStatus(sessionId, null)
 }

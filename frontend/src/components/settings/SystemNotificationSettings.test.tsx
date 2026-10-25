@@ -12,7 +12,10 @@ const mocks = vi.hoisted(() => ({
   checkNotificationAuthorization: vi.fn(),
   initSystemNotifications: vi.fn(),
   showTestNotification: vi.fn(),
+  ensureNotificationPermission: vi.fn(),
+  webNotificationDenialCause: vi.fn(),
   isWailsReady: vi.fn(),
+  isWebTransport: vi.fn(),
   send: vi.fn(),
   getBannerTimeout: vi.fn(),
   setBannerTimeout: vi.fn(),
@@ -26,6 +29,8 @@ vi.mock('@/api/notifications', async (importOriginal) => {
     checkNotificationAuthorization: mocks.checkNotificationAuthorization,
     initSystemNotifications: mocks.initSystemNotifications,
     showTestNotification: mocks.showTestNotification,
+    ensureNotificationPermission: mocks.ensureNotificationPermission,
+    webNotificationDenialCause: mocks.webNotificationDenialCause,
   }
 })
 
@@ -38,6 +43,7 @@ vi.mock('@/lib/systemNotifications', () => ({
 
 vi.mock('@/api/runtime', () => ({
   isWailsReady: mocks.isWailsReady,
+  isWebTransport: mocks.isWebTransport,
 }))
 
 vi.mock('@/api/config', () => ({
@@ -47,6 +53,7 @@ vi.mock('@/api/config', () => ({
 
 import { SystemNotificationSettings } from './SystemNotificationSettings'
 import { useSystemNotificationStore } from '@/stores/systemNotificationStore'
+import { NotificationPermissionError } from '@/api/notifications'
 
 let container: HTMLDivElement
 let root: Root
@@ -80,6 +87,12 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.isWailsReady.mockReturnValue(true)
+  mocks.isWebTransport.mockReturnValue(false)
+  mocks.ensureNotificationPermission.mockResolvedValue('granted')
+  // Secure-context default: a real browser serving over HTTPS/localhost that
+  // denied the site can lift the block in its settings — that wording is the
+  // fallback the insecure-origin test below overrides.
+  mocks.webNotificationDenialCause.mockReturnValue('site-settings')
   mocks.checkNotificationAuthorization.mockResolvedValue(true)
   mocks.initSystemNotifications.mockResolvedValue(undefined)
   mocks.showTestNotification.mockResolvedValue(undefined)
@@ -205,6 +218,76 @@ describe('SystemNotificationSettings', () => {
     await flush()
     expect(testButton()).toBeNull()
   })
+
+  it('toggle-on on the desktop keeps a real denied authorization (no-op ensure must not wipe the hint)', async () => {
+    // The mount probe read the REAL OS authorization (macOS System Settings:
+    // denied). The desktop ensureNotificationPermission is a no-op resolving
+    // 'granted' — folding that constant into the section state used to hide
+    // the hint and reveal the Test button while the OS still refuses.
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    expect(hintText()).not.toBeNull()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    // The hint survives the off→on toggle; the button stays hidden and the
+    // preview stays suppressed (the send lands nowhere on a denied channel).
+    expect(hintText()).toBe(
+      'Notifications are disabled for c0wrk in macOS Settings — enable them to receive alerts',
+    )
+    expect(testButton()).toBeNull()
+    expect(mocks.send).not.toHaveBeenCalled()
+  })
+
+  it('toggle-on on the web previews the banner after a since-fixed denial (outcome, not the stale closure)', async () => {
+    // The mount probe read a real denial, the user lifted the block in the
+    // browser's site settings, and the re-enable click's ensure resolves
+    // 'granted'. The render-scope `permission` closure still reads 'denied'
+    // at that point — suppression must derive from the fresh outcome, or
+    // the confirmation banner never fires.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.ensureNotificationPermission.mockResolvedValue('granted')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    expect(mocks.send).toHaveBeenCalledTimes(1)
+    const [content] = mocks.send.mock.calls[0] as [{ title: string }]
+    expect(content.title).toBe('c0wrk — System notifications enabled')
+  })
+
+  it('toggle-on on the web still derives the section state from the prompt outcome', async () => {
+    // The web outcome IS a permission verdict, so the derivation must keep
+    // running there: a denied prompt keeps the browser-specific hint.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.ensureNotificationPermission.mockResolvedValue('denied')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    expect(hintText()).not.toBeNull()
+
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+
+    expect(hintText()).toBe(
+      'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts',
+    )
+    expect(testButton()).toBeNull()
+  })
 })
 
 // --- Banner lifetime -------------------------------------------------------
@@ -304,5 +387,150 @@ describe('banner lifetime control', () => {
     await flush()
 
     expect(bannerTimeoutButtons().length).toBeGreaterThan(0)
+  })
+})
+
+describe('SystemNotificationSettings web transport', () => {
+  it('the toggle-on click requests the browser permission before the preview', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.ensureNotificationPermission.mockResolvedValue('granted')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+    // The gesture ordering contract: permission first, preview after.
+    expect(mocks.ensureNotificationPermission).toHaveBeenCalledTimes(1)
+    expect(mocks.initSystemNotifications).toHaveBeenCalledTimes(1)
+    expect(mocks.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('a denied permission renders the browser-specific hint (not the macOS one)', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    render()
+    await flush()
+    expect(hintText()).toContain('browser')
+    expect(hintText()).not.toContain('macOS')
+    expect(testButton()).toBeNull()
+  })
+
+  it('an insecure-origin denial renders the dedicated hint without the site-settings wording', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.webNotificationDenialCause.mockReturnValue('insecure-context')
+    render()
+    await flush()
+    const hint = hintText()
+    // Names the actual fix (a secure origin — HTTPS/localhost, e.g. an SSH
+    // tunnel) and must NOT offer the site-settings advice: no site setting
+    // can lift a browser platform rule on a plain-HTTP origin.
+    expect(hint).toContain('secure origins (HTTPS or localhost)')
+    expect(hint).toContain('plain HTTP')
+    expect(hint).toContain('http://localhost:<port>')
+    expect(hint).toContain('SSH tunnel')
+    expect(hint).not.toContain('site settings')
+    // requestPermission auto-refuses on insecure origins — no button.
+    expect(testButton()).toBeNull()
+  })
+
+  it('a secure-context denial keeps the site-settings hint and hides the test button', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(false)
+    mocks.webNotificationDenialCause.mockReturnValue('site-settings')
+    render()
+    await flush()
+    expect(hintText()).toBe(
+      'Notifications are blocked for this site in your browser — allow them in the browser’s site settings to receive alerts',
+    )
+    expect(testButton()).toBeNull()
+  })
+
+  it('keeps the test button reachable in a fresh browser (permission never asked)', async () => {
+    // The api layer maps the unasked 'default' permission to "not denied"
+    // (ADR-101 decision 11: the Test button's click is the gesture that
+    // requests it) — the probe resolving true here IS that fresh-browser
+    // state. The button must render, not the blocked-site hint.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.checkNotificationAuthorization.mockResolvedValue(true)
+    useSystemNotificationStore.setState({ enabled: true })
+    render()
+    await flush()
+    expect(hintText()).toBeNull()
+    expect(testButton()).not.toBeNull()
+  })
+
+  it('a prompt closed without an answer keeps the neutral state: no hint, Test button visible', async () => {
+    // The toggle-on gesture ran, the browser prompt was DISMISSED: the api
+    // layer resolves 'default' — NOT a denial (ADR-101, decision 11). The
+    // section must stay neutral: no blocked hint, and the Test button stays
+    // visible as the documented retry gesture. No preview either — nothing
+    // was granted.
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.ensureNotificationPermission.mockResolvedValue('default')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+    expect(hintText()).toBeNull()
+    expect(testButton()).not.toBeNull()
+    expect(mocks.send).not.toHaveBeenCalled()
+  })
+
+  it('a real denial (Block) from the toggle gesture renders the hint and hides the Test button', async () => {
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.ensureNotificationPermission.mockResolvedValue('denied')
+    useSystemNotificationStore.setState({ enabled: false })
+    render()
+    await flush()
+    await act(async () => {
+      toggleInput().click()
+    })
+    await flush()
+    expect(hintText()).toContain('blocked for this site')
+    expect(testButton()).toBeNull()
+    expect(mocks.send).not.toHaveBeenCalled()
+  })
+
+  it('a dismissed prompt from the Test button keeps the button reachable (retry gesture)', async ({
+    onTestFinished,
+  }) => {
+    const logSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    onTestFinished(() => logSpy.mockRestore())
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.showTestNotification.mockRejectedValueOnce(new NotificationPermissionError('default'))
+    render()
+    await flush()
+    await act(async () => {
+      testButton()?.click()
+    })
+    await flush()
+    // Not a denial: no hint, the button is still right there to try again.
+    expect(hintText()).toBeNull()
+    expect(testButton()).not.toBeNull()
+    expect(logSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a real denial from the Test button surfaces the hint and hides the button', async ({
+    onTestFinished,
+  }) => {
+    const logSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    onTestFinished(() => logSpy.mockRestore())
+    mocks.isWebTransport.mockReturnValue(true)
+    mocks.showTestNotification.mockRejectedValueOnce(new NotificationPermissionError('denied'))
+    render()
+    await flush()
+    await act(async () => {
+      testButton()?.click()
+    })
+    await flush()
+    expect(hintText()).toContain('blocked for this site')
+    expect(testButton()).toBeNull()
+    expect(logSpy).toHaveBeenCalledTimes(1)
   })
 })

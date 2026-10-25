@@ -26,7 +26,7 @@ import {
   initSystemNotifications as initGoNotifications,
   sendSystemNotification as sendGoNotification,
 } from '@/api/notifications'
-import { isWailsReady } from '@/api/runtime'
+import { isWailsReady, isWebTransport } from '@/api/runtime'
 import { useSystemNotificationStore } from '@/stores/systemNotificationStore'
 import { logger } from '@/lib/logger'
 
@@ -164,23 +164,28 @@ export function classifyNotificationContent(
 
 // --- Transport --------------------------------------------------------------
 //
-// Every call goes through the Go bindings (@/api/notifications). The bridge
-// methods are absent when the Wails App bindings are not injected (vitest,
-// SSR, `make dev-frontend`), so init/send degrade to no-ops exactly like the
-// old window.runtime feature detection did — resolved via isWailsReady, so
-// getApp() never throws on a runtime-less host.
+// Desktop: every call goes through the Go bindings (@/api/notifications).
+// Web transport (ADR-101): @/api/notifications branches to the browser
+// Notification API itself, so the SAME lib entry points serve both. The
+// availability guard below accepts either transport; the web branches live
+// behind the api layer so this module stays a pure event→content mapping
+// with toggle + best-effort semantics. The web permission contract also
+// lives behind that api boundary: the per-event send path never prompts and
+// never errors on a missing grant — it drops the banner silently (debug per
+// occurrence, one warn per app run), and only the Settings toggle and the
+// Test button (real user gestures) request the permission.
 
-/** True when the desktop App bindings (the Go notification transport) are
- *  available. False under vitest/SSR/dev-frontend, where notifications
- *  silently no-op. */
-function goBindingsAvailable(): boolean {
-  return isWailsReady()
+/** True when SOME notification transport exists: the Go bindings (desktop
+ *  webview) or the browser Notification API (web-access sidecar tab). False
+ *  under vitest/SSR/dev-frontend, where notifications silently no-op. */
+function notificationTransportAvailable(): boolean {
+  return isWailsReady() || isWebTransport()
 }
 
 /**
  * Show one native notification. A silent no-op when the master toggle is off
- * or the Wails App bindings are absent. Best-effort: failures are logged at
- * warn and swallowed — never break the event pipeline.
+ * or no transport exists. Best-effort: failures are logged at warn and
+ * swallowed — never break the event pipeline.
  */
 export async function sendSystemNotification(
   content: SessionNotificationContent,
@@ -188,7 +193,7 @@ export async function sendSystemNotification(
 ): Promise<void> {
   try {
     if (!useSystemNotificationStore.getState().enabled) return
-    if (!goBindingsAvailable()) return
+    if (!notificationTransportAvailable()) return
     await sendGoNotification(
       content.title,
       content.body,
@@ -200,19 +205,20 @@ export async function sendSystemNotification(
 }
 
 /**
- * Lazily initialize the OS notification bridge on the Go side
+ * Lazily initialize the notification bridge: the Go side
  * (InitializeNotifications + the click callback + the macOS authorization
- * prompt). Idempotent: the work runs at most once per app run — concurrent
- * and later calls await/return the same settled promise. Never throws: a
- * platform without notifications (Linux without a D-Bus notification
- * service, a denied authorization) is logged and left enabled — individual
- * sends simply fail softly. A FAILED init is NOT memoized on the backend,
- * but this memoized frontend entry still calls it only once per app run;
- * retry happens after the next reload.
+ * prompt) on the desktop, a permission read on the web transport.
+ * Idempotent: the work runs at most once per app run — concurrent and later
+ * calls await/return the same settled promise. Never throws: a platform
+ * without notifications (Linux without a D-Bus notification service, a
+ * denied authorization, a browser without the Notification API) is logged
+ * and left enabled — individual sends simply fail softly. A FAILED init is
+ * NOT memoized on the backend, but this memoized frontend entry still calls
+ * it only once per app run; retry happens after the next reload.
  */
 async function runInitSystemNotifications(): Promise<void> {
-  if (!goBindingsAvailable()) {
-    logger.debug('[system-notifications] Go bindings absent; skipping init')
+  if (!notificationTransportAvailable()) {
+    logger.debug('[system-notifications] no notification transport; skipping init')
     return
   }
   try {

@@ -16,10 +16,61 @@
       idempotent.
     -->
     <script src="./prepaint-theme.js"></script>
+    <link rel="icon" type="image/png" href="./favicon.png" />
     <title>c0wrk</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!--
+        Boot loader — static, CSS-only, shipped inside the React container.
+
+        It renders on the very first HTML paint, before the JS bundle is even
+        fetched (the app's module script loads asynchronously), so the window
+        is never blank during startup. It mirrors App's own splash exactly
+        (fixed overlay, centered ring spinner, One Dark background) for a
+        seamless handoff: main.tsx removes this node after the app mounts,
+        and because both this style block and the loader live inside #root,
+        React's first render also clears them as it takes over the container.
+
+        CSP: inline markup and inline <style> are fine (production allows
+        style-src 'unsafe-inline'), but inline scripts are not (script-src
+        'self') — this file must never gain one.
+
+        Zoom safety: the overlay is positioned with an inset of zero and
+        sized with absolute lengths only; no viewport-percentage units are
+        used anywhere (the project-wide zoom guard scans this file verbatim).
+        Colors use var() with One Dark fallbacks so the pre-stylesheet paint
+        already matches the app shell, and the persisted theme takes over as
+        soon as the stylesheet lands.
+      -->
+      <style>
+        #boot-loader {
+          position: fixed;
+          inset: 0;
+          z-index: 50;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background-color: var(--color-background, #282c34);
+        }
+        #boot-loader .boot-spinner {
+          width: 2rem;
+          height: 2rem;
+          border: 2px solid var(--color-primary, #abb2bf);
+          border-top-color: transparent;
+          border-radius: 50%;
+          animation: boot-loader-spin 1s linear infinite;
+        }
+        @keyframes boot-loader-spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      </style>
+      <div id="boot-loader" role="status" aria-label="Loading c0wrk">
+        <div class="boot-spinner"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

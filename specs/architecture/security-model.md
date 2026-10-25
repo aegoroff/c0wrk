@@ -200,6 +200,12 @@ ToolRegistry.Execute()
   │   │
   │   ▼
   │ frontend emits response → backend resolves channel
+  │   │
+  │   ▼
+  │ backend broadcasts hitl_resolved {kind, id, decision} → every surface
+  │ (webview + each web-access tab) retires its card; the payload carries the
+  │ effective first-responder decision so a surface that raced the answer
+  │ converges on what actually drove the agent
   │
   ├─ ConfirmAllowOnce → execute tool
   ├─ ConfirmDeny → return error ToolResult (agent sees denial + reason)

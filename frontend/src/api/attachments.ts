@@ -61,6 +61,76 @@ export function attachmentBaseName(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1)
 }
 
+/** Client-side mirror of the backend's maxAttachContentBytes (the raw
+ *  attachment buffer cap the pipeline enforces). The wrapper rejects oversize
+ *  payloads before encoding, so a too-big upload fails fast with a clear
+ *  error instead of a 40×-inflated base64 round-trip. */
+export const MAX_ATTACHMENT_UPLOAD_BYTES = 32 * 1024 * 1024
+
+/** Encode bytes as a base64 string (the wire form of a Go []byte argument on
+ *  both bridges). Chunked because `btoa`/`String.fromCharCode` blow the
+ *  argument stack on large arrays; 0x8000 is the classic safe chunk size. */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+/** An in-memory file staged from the web transport: a browser
+ *  `<input type="file">` pick or an HTML5 drag-drop has no absolute path, so
+ *  its content travels through AttachFileContent instead of AttachFiles. */
+export interface AttachmentFileInput {
+  /** The file's name as delivered by the browser (untrusted; the backend
+   *  reduces it to a bare base name before staging). */
+  name: string
+  /** MIME type reported by the browser; fills in a missing image extension
+   *  on the backend. */
+  type: string
+  /** Raw file bytes. */
+  bytes: Uint8Array
+}
+
+/**
+ * Stage an in-memory file as a pending attachment for a session via the
+ * backend's AttachFileContent RPC — the web-transport upload path. The
+ * backend runs the FULL AttachFiles pipeline (extension routing, image
+ * limits, markitdown conversion with vision, storage, events), so the
+ * returned list is identical to attachFiles' for the same content on disk.
+ *
+ * Rejects oversize payloads client-side (MAX_ATTACHMENT_UPLOAD_BYTES) and
+ * maps the snake_case response exactly like attachFiles.
+ *
+ * Known divergence from the generated binding (CS #8): the Go parameter is
+ * `[]byte`, so `App.d.ts` declares `data: Array<number>`, but this wrapper
+ * sends a base64 STRING. It is deliberate and works on both bridges —
+ * `encoding/json` accepts a base64 string for `[]byte` — but a caller going
+ * through the typed signature directly would break; keep the divergence in
+ * mind when touching the wire shape.
+ */
+export async function attachFileContent(sessionId: string, file: AttachmentFileInput): Promise<AttachmentInfoUI[]> {
+  if (file.bytes.byteLength > MAX_ATTACHMENT_UPLOAD_BYTES) {
+    throw new Error(
+      `attachFileContent: ${file.name} is ${file.bytes.byteLength} bytes, ` +
+        `above the ${MAX_ATTACHMENT_UPLOAD_BYTES} byte attachment limit`,
+    )
+  }
+  try {
+    const app = getApp()
+    const result = await app.AttachFileContent(sessionId, file.name, file.type, bytesToBase64(file.bytes))
+    if (!isArrayOf(result, isAttachmentInfoRaw)) {
+      logger.error('attachFileContent: unexpected response shape, returning []', result)
+      return []
+    }
+    return mapAttachments(result)
+  } catch (err) {
+    logger.error('Failed to attach file content:', err)
+    throw err
+  }
+}
+
 /**
  * Open the native file picker for attachment selection.
  * Returns the chosen absolute paths (empty if the user cancelled).

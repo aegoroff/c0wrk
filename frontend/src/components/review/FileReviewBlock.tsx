@@ -7,6 +7,7 @@ import { emit } from '@/api/runtime'
 import { logger } from '@/lib/logger'
 import type { ReviewFileDiff } from '@/api/review'
 import { HunkReviewBlock } from './HunkReviewBlock'
+import { generateUUID } from '@/lib/ids'
 
 interface FileReviewBlockProps {
   sessionId: string
@@ -37,7 +38,7 @@ export function FileReviewBlock({ sessionId, file, readOnly }: FileReviewBlockPr
       // Roll back the optimistic update so the UI matches the DB state.
       setFileComment(sessionId, file.path, previous)
       emit('runtime_error', {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         message: 'Failed to save file comment',
       })
     }

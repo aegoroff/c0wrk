@@ -27,6 +27,12 @@ import type { WorkspaceChoiceWire } from '@/stores/sessionWorkspaceStore'
  *                   first message of a task. Mutually exclusive with goal.
  * @param reviewMode Marks the message as code review feedback the agent must
  *                   address (the system prompt gains a Code Review section).
+ * @param clientSendId Optional id of the optimistic user card this surface
+ *                     rendered before the RPC; the message_received echo
+ *                     carries it back so the sending surface dedups the echo
+ *                     by identity (two surfaces sending identical text inside
+ *                     the echo window stay two cards). Empty when no
+ *                     optimistic card was rendered.
  * @param workspace  The fresh window's workspace choice (ADR-091): a pending
  *                   branch pick makes THIS send provision the managed
  *                   worktree and bind the session before the task starts.
@@ -46,15 +52,16 @@ export async function sendMessage(
   goalBudget: string = '',
   e2s: boolean = false,
   reviewMode: boolean = false,
+  clientSendId: string = '',
   workspace: WorkspaceChoiceWire | null = null,
 ): Promise<void> {
   try {
     const app = getApp()
     // Positional args must match the Go SendMessage binding EXACTLY
     // (id, text, skills, agents, mcpServers, modelOverride, reasoning, goal,
-    // goalBudget, e2s, reviewMode, workspace) — a drift silently drops mode
-    // flags before they reach HandleOptions.
-    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode, workspace)
+    // goalBudget, e2s, reviewMode, clientSendId, workspace) — a drift
+    // silently drops mode flags before they reach HandleOptions.
+    await app.SendMessage(sessionId, text, activeSkills, activeAgents, activeMCPServers, modelOverride, reasoningOverride, goal, goalBudget, e2s, reviewMode, clientSendId, workspace)
   } catch (err) {
     logger.error('Failed to send message:', err)
     throw err
@@ -223,7 +230,8 @@ export interface SessionRuntimeStatus {
    * Per-strategy manual-compaction prediction for the session's current
    * conversation history (see backend GetSessionRuntimeStatus): whether each
    * strategy would actually shrink the dialogue right now, plus its predicted
-   * reclaim. Absent/undefined (older backend, unknown session) fails OPEN: the
+   * reclaim. Absent/undefined/null (older backend, unknown session, or a
+   * session without an in-memory orchestrator) fails OPEN: the
    * compact menu shows every strategy clickable, and a pointless click reports
    * the existing nothing_compacted outcome.
    */
@@ -259,11 +267,16 @@ function isSessionRuntimeStatus(d: unknown): d is SessionRuntimeStatus {
   return typeof d === 'object' && d !== null
     && typeof (d as Record<string, unknown>).active === 'boolean'
     && typeof (d as Record<string, unknown>).has_unfinished_task === 'boolean'
+    // `paused` is declared-required (the reconcile overlay reads it: an
+    // undefined would collapse paused detection) — validate it like its
+    // boolean siblings (CS #51).
+    && typeof (d as Record<string, unknown>).paused === 'boolean'
     && (!('unfinished_task_status' in d)
       || (d as Record<string, unknown>).unfinished_task_status === undefined
       || typeof (d as Record<string, unknown>).unfinished_task_status === 'string')
     && (!('compaction_availability' in d)
       || (d as Record<string, unknown>).compaction_availability === undefined
+      || (d as Record<string, unknown>).compaction_availability === null
       || isArrayOf((d as Record<string, unknown>).compaction_availability, isCompactionAvailability))
     && (!('compacting' in d)
       || (d as Record<string, unknown>).compacting === undefined

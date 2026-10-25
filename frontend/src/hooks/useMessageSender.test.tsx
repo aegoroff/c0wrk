@@ -146,8 +146,13 @@ describe('useMessageSender optimistic metadata', () => {
       await capturedSend!('review this', undefined, [], [], 's-origin')
     })
 
+    // The last arg is the optimistic card's id — the backend echoes it back
+    // in message_received so THIS surface dedups the echo by identity.
+    // reviewMode stays explicitly false in position 11.
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's-origin', 'review this', [], [], [], '', '', false, '', false, false, null,
+      's-origin', 'review this', [], [], [], '', '', false, '', false, false,
+      userMessages('s-origin')[0]!.id,
+      null,
     )
     expect(userMessages('s-origin')).toHaveLength(1)
     expect(userMessages('s-other')).toHaveLength(0)
@@ -166,7 +171,9 @@ describe('useMessageSender optimistic metadata', () => {
     expect(useInputModeStore.getState().goalEnabled).toBe(false)
     expect(useInputModeStore.getState().goalBudget).toBe('')
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false, false, null,
+      's1', 'fix the bug', [], [], [], '', '', true, '{"max_turns":3}', false, false,
+      userMessages('s1')[0]!.id,
+      null,
     )
   })
 
@@ -185,7 +192,9 @@ describe('useMessageSender optimistic metadata', () => {
     // e2s rides after goalBudget (position 10) — and goal must NOT be
     // re-armed by the send.
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'run with explicit state', [], [], [], '', '', false, '', true, false, null,
+      's1', 'run with explicit state', [], [], [], '', '', false, '', true, false,
+      userMessages('s1')[0]!.id,
+      null,
     )
     // E2S is per-task opt-in: the toggle resets after the defining message.
     expect(useInputModeStore.getState().e2sEnabled).toBe(false)
@@ -204,7 +213,9 @@ describe('useMessageSender optimistic metadata', () => {
       await capturedSend!('plain message')
     })
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'plain message', [], [], [], '', '', false, '', false, false, null,
+      's1', 'plain message', [], [], [], '', '', false, '', false, false,
+      userMessages('s1')[0]!.id,
+      null,
     )
   })
 
@@ -381,6 +392,7 @@ describe('useMessageSender consumption window (ADR-091 workspace bind)', () => {
     // The choice rides on the wire, and the window is OPEN while it flies.
     expect(spies.sendMessage).toHaveBeenCalledWith(
       's1', 'provision feat/x', [], [], [], '', '', false, '', false, false,
+      userMessages('s1')[0]!.id,
       { branch: 'feat/x', create_branch: false, start_point: '' },
     )
     expect(useSessionWorkspaceStore.getState().consumingFor).toBe('s1')
@@ -458,7 +470,8 @@ describe('useMessageSender consumption window (ADR-091 workspace bind)', () => {
     expect(useSessionWorkspaceStore.getState().consumingFor).toBeNull()
     expect(spies.listSessions).not.toHaveBeenCalled()
     expect(spies.sendMessage).toHaveBeenCalledWith(
-      's1', 'plain local send', [], [], [], '', '', false, '', false, false, null,
+      's1', 'plain local send', [], [], [], '', '', false, '', false, false,
+      userMessages('s1')[0]!.id, null,
     )
   })
 

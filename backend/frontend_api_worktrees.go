@@ -640,6 +640,7 @@ func (f *FrontendAPI) forkManagedSession(ctx context.Context, src *session.Sessi
 	// starts at the source's committed HEAD, so the checkout cache is a
 	// near-perfect match for its first index pass.
 	f.seedWorktreeEmbeddingCache(src.ProjectID, treeName)
+	f.emitSessionsChanged()
 	return info, nil
 }
 

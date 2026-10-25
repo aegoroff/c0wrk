@@ -347,6 +347,22 @@ func DatabasePath(agentDir string) string {
 	return filepath.Join(agentDir, "database.db")
 }
 
+// WebAccessCertPath returns the fixed location of the web-access sidecar's
+// app-owned self-signed certificate (<agentDir>/web-access.crt). This is the
+// only path the Generate control writes (ADR-102 decision 3): idempotent to
+// regenerate and never an operator-authored certificate, which is authored
+// by pointing web_access.tls.cert at any location by hand.
+func WebAccessCertPath(agentDir string) string {
+	return filepath.Join(agentDir, "web-access.crt")
+}
+
+// WebAccessKeyPath returns the fixed location of the web-access sidecar
+// certificate's private key (<agentDir>/web-access.key) — the key half of
+// the app-owned pair WebAccessCertPath names.
+func WebAccessKeyPath(agentDir string) string {
+	return filepath.Join(agentDir, "web-access.key")
+}
+
 // LogsDir returns the app-level logs directory (session-*.log files).
 func LogsDir(agentDir string) string {
 	return filepath.Join(agentDir, "logs")

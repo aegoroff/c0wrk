@@ -14,6 +14,23 @@ import (
 const (
 	EventStepLimit         = "step_limit"
 	EventStepLimitResponse = "step_limit_response"
+	// EventTaskStarted is emitted when a session task is ACTIVATED — the
+	// fresh, goal, E2S, and continue-interrupted dispatches all funnel
+	// through the single activation point in SendMessage, so one emission
+	// covers every way a task can start. It is the start-side counterpart of
+	// the terminal (task_complete / task_cancelled / error /
+	// task_failed_resumable) and pause/resume (session_paused /
+	// session_resumed) lifecycle events, each of which the desktop layer
+	// mirrors into the global sessions:changed push so every surface's
+	// session list (sidebar, live-sessions radar) sees the session turn
+	// running without waiting for the safety poll. The resume path announces
+	// itself through task_resumed + session_resumed instead — task_started
+	// is deliberately NOT emitted there, or one resume would push the
+	// list-change signal twice. No payload: the session-scoped envelope
+	// already names the session. Transient: never persisted (the durable
+	// task record is the task store's own row, and a persisted copy would
+	// render as a dead event_unknown card on reload).
+	EventTaskStarted = "task_started"
 	// EventAutonomyDecision carries an automatic (no-human) security decision
 	// taken under an automatic autonomy posture — silent
 	// (security.silent_mode) or assisted (a strict-judge DENY terminating a
@@ -74,6 +91,20 @@ type SessionPinnedData struct {
 type MessageReceivedData struct {
 	SessionID string `json:"session_id"`
 	Text      string `json:"text"`
+	// ClientSendID, when non-empty, is the sending surface's optimistic-card
+	// id echoed back (WithClientMessageID): the sender dedups the echo by
+	// this id instead of content+time-window, so identical text sent from
+	// another surface inside the dedup window still renders. Absent on sends
+	// without an optimistic card.
+	ClientSendID string `json:"client_send_id,omitempty"`
+	// IsNudge mirrors the persisted row's is_nudge metadata stamp
+	// (mergeIsNudgeMetadata): true when the send was classified as a live
+	// interjection or a nudge-resume, absent on fresh tasks. Surfaces without
+	// an optimistic copy render their card from this event, so the flag lets
+	// them show the Nudge badge immediately instead of waiting for a history
+	// reload. The event flag and the DB stamp must agree — both are set from
+	// the same session-locked send classification.
+	IsNudge bool `json:"is_nudge,omitempty"`
 }
 
 // TaskCompleteData is the payload for "task_complete" events.
@@ -248,6 +279,40 @@ type GoalSuggestionPayload struct {
 	// Reason is the classifier's short user-facing explanation (in the
 	// user's language) of WHY the request fits goal mode.
 	Reason string `json:"reason"`
+}
+
+// --- HITL resolution payloads ---
+
+// HitlResolvedKind identifies which kind of HITL prompt a HitlResolvedPayload
+// settles. Values mirror the frontend message types (tool_confirm, ask_user,
+// ...) so the UI can locate the exact card to retire.
+type HitlResolvedKind string
+
+const (
+	HitlResolvedToolConfirm    HitlResolvedKind = "tool_confirm"
+	HitlResolvedAskUser        HitlResolvedKind = "ask_user"
+	HitlResolvedStepLimit      HitlResolvedKind = "step_limit"
+	HitlResolvedPlanReview     HitlResolvedKind = "plan_review"
+	HitlResolvedGoalProposal   HitlResolvedKind = "goal_proposal"
+	HitlResolvedGoalSuggestion HitlResolvedKind = "goal_suggestion"
+)
+
+// HitlResolvedData is the typed Data payload for "hitl_resolved" session
+// events — broadcast to EVERY surface (desktop webview plus all web-access
+// tabs) when a pending HITL prompt is consumed by the first responder, so a
+// surface that did not perform the resolution can retire its card immediately
+// instead of waiting for the next session switch / focus-resync reconcile.
+// ID carries the confirm_id (tool_confirm) or request_id (every other kind)
+// of the settled prompt. Decision carries the EFFECTIVE decision — the first
+// responder's answer, so a surface that raced the resolution converges on the
+// outcome that actually drove the agent rather than its own local guess;
+// empty when the prompt was consumed without a user answer. Transient (not
+// persisted): the durable resolution lives in the resolved pending message
+// row, and a restart re-reads it through GetPendingActions reconciliation.
+type HitlResolvedData struct {
+	Kind     HitlResolvedKind `json:"kind"`
+	ID       string           `json:"id"`
+	Decision string           `json:"decision,omitempty"`
 }
 
 // --- Emitter event data types (typed Data field payloads) ---

@@ -11,7 +11,7 @@ import { FolderPlus, Trash2, Loader2, AlertTriangle } from 'lucide-react'
 import { useWorkDirsStore } from '@/stores/workDirsStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { onGlobalEvent } from '@/api/runtime'
+import { isWebTransport, onGlobalEvent } from '@/api/runtime'
 import { pickDirectory } from '@/api/projects'
 import type { WorkDirectoryRecord, WorkDirScope } from '@/api/workdirs'
 
@@ -277,7 +277,13 @@ export function WorkDirsModal() {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[640px] max-h-[calc(var(--ui-vh)*0.8)] flex flex-col overflow-hidden">
+      <DialogContent
+        className="sm:max-w-[640px] max-h-[calc(var(--ui-vh)*0.8)] flex flex-col overflow-hidden"
+        // No DialogDescription in this modal; opt out explicitly so Radix
+        // does not warn about the missing description (and does not point
+        // aria-describedby at a non-existent node).
+        aria-describedby={undefined}
+      >
         <DialogHeader>
           <DialogTitle>Working Directories</DialogTitle>
         </DialogHeader>
@@ -332,7 +338,17 @@ export function WorkDirsModal() {
               {/* Add flow */}
               <div className="mt-3 pt-3 border-t border-border">
                 {!pendingPath ? (
-                  <Button variant="outline" size="sm" onClick={handlePick} title="Pick a directory to add">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePick}
+                    title={
+                      isWebTransport()
+                        ? 'Adding a work directory needs the desktop app (native folder dialog)'
+                        : 'Pick a directory to add'
+                    }
+                    disabled={isWebTransport()}
+                  >
                     <FolderPlus className="size-4" />
                     Add directory
                   </Button>
