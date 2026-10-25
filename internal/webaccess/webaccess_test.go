@@ -459,17 +459,21 @@ func TestTransportDiscovery(t *testing.T) {
 	_, ts := newTestServer(t, nil)
 	base := ts.URL
 
+	// The anonymous answer carries ONLY the transport marker: no ws path
+	// (disclosure), no authenticated field (session-presence oracle). Both
+	// arrive with the session cookie below.
 	anon := doJSON(t, &http.Client{}, "GET", base+"/api/transport", "")
 	defer func() { _ = anon.Body.Close() }()
-	var info transportInfo
-	if err := json.NewDecoder(anon.Body).Decode(&info); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(anon.Body).Decode(&raw); err != nil {
 		t.Fatalf("decode transport: %v", err)
 	}
-	if info.Transport != "web" || info.WS != "/ws" {
-		t.Fatalf("transport payload = %#v", info)
+	if len(raw) != 1 {
+		t.Fatalf("anonymous transport payload = %v, want exactly the transport marker", raw)
 	}
-	if info.Authenticated {
-		t.Error("authenticated must be false before login")
+	var marker string
+	if err := json.Unmarshal(raw["transport"], &marker); err != nil || marker != "web" {
+		t.Fatalf("transport marker = %v (%v), want \"web\"", raw["transport"], err)
 	}
 
 	authed := loginClient(t, base, "static-test-token-0123456789")
@@ -478,6 +482,9 @@ func TestTransportDiscovery(t *testing.T) {
 	var after transportInfo
 	if err := json.NewDecoder(resp.Body).Decode(&after); err != nil {
 		t.Fatalf("decode transport: %v", err)
+	}
+	if after.Transport != "web" || after.WS != wsPath {
+		t.Errorf("authenticated payload = %+v, want ws %q", after, wsPath)
 	}
 	if !after.Authenticated {
 		t.Error("authenticated must be true after login")
@@ -500,6 +507,45 @@ func TestStaticServedThroughInjectedCSP(t *testing.T) {
 	}
 	if body := bodyString(t, resp); body != "<html>spa shell</html>" {
 		t.Errorf("body = %q", body)
+	}
+}
+
+// TestSecurityHeadersOnEveryResponse pins the transport hardening headers:
+// nosniff + Referrer-Policy ride every response class — JSON API success,
+// JSON API error, and the static tree (with and without the injected CSP).
+func TestSecurityHeadersOnEveryResponse(t *testing.T) {
+	_, ts := newTestServer(t, func(o *Options) { o.Static = staticFS(); o.CSP = cspStamper })
+	base := ts.URL
+	client := &http.Client{}
+
+	cases := []struct {
+		name string
+		call func() *http.Response
+	}{
+		{"api success", func() *http.Response {
+			return doJSON(t, client, "GET", base+"/api/transport", "")
+		}},
+		{"api error", func() *http.Response {
+			return doJSON(t, client, "POST", base+"/api/rpc/Echo", `["x"]`)
+		}},
+		{"static asset", func() *http.Response {
+			return doJSON(t, client, "GET", base+"/assets/app.js", "")
+		}},
+		{"static 404", func() *http.Response {
+			return doJSON(t, client, "GET", base+"/nope.js", "")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := tc.call()
+			defer func() { _ = resp.Body.Close() }()
+			if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+			if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+				t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+			}
+		})
 	}
 }
 
@@ -643,11 +689,14 @@ func TestLoginLimiterIgnoresMalformedBodies(t *testing.T) {
 	}
 }
 
-// TestHostMatchesBind pins the DNS-rebinding backstop behind sameOrigin:
-// the request Host must name the configured bind or the loopback set; a
-// rebound DNS name must not. A wildcard bind names no serving host, so
-// every Host passes there (cookie scoping stays the gate).
-func TestHostMatchesBind(t *testing.T) {
+// TestHostAllowed pins the DNS-rebinding backstop behind sameOrigin: the
+// request Host must name an address the server actually serves. A
+// NON-wildcard bind keeps the exact-match rule; a WILDCARD bind — where the
+// old code accepted ANY Host — now requires the Host to be loopback, a
+// serving IP from the Start snapshot, or a hostname resolving into one.
+func TestHostAllowed(t *testing.T) {
+	// Non-wildcard binds: the historical exact-match table, unchanged.
+	srv := mustNew(t, newTestOptions(stubDispatch{}, nil))
 	cases := []struct {
 		host, bind string
 		want       bool
@@ -659,12 +708,71 @@ func TestHostMatchesBind(t *testing.T) {
 		{"192.168.1.10:8321", "192.168.1.10", true},
 		{"attacker.example:8321", "127.0.0.1", false},
 		{"192.168.1.10:8321", "127.0.0.1", false},
-		{"attacker.example:8321", "0.0.0.0", true},
 	}
 	for _, tc := range cases {
-		if got := hostMatchesBind(tc.host, tc.bind); got != tc.want {
-			t.Errorf("hostMatchesBind(%q, %q) = %v, want %v", tc.host, tc.bind, got, tc.want)
+		srv.cfg.Bind = tc.bind
+		if got := srv.hostAllowed(tc.host); got != tc.want {
+			t.Errorf("hostAllowed(%q, bind %q) = %v, want %v", tc.host, tc.bind, got, tc.want)
 		}
+	}
+
+	// Wildcard binds: the serving-address snapshot decides.
+	wild := mustNew(t, newTestOptions(stubDispatch{}, func(o *Options) {
+		o.Config.Bind = "0.0.0.0"
+		o.Config.AllowInsecureLAN = true
+	}))
+	lanIP := net.ParseIP("192.168.1.10")
+	wild.servingHosts = []net.IP{lanIP}
+	// IP-literal and localhost rows are resolver-free; hostname verdicts are
+	// seeded through dnsCache — the resolver seam this test owns (the real
+	// lookup is bounded by hostResolveBudget and fail-closed below).
+	wild.dnsCache = map[string]dnsCacheEntry{
+		"my-mac.local":     {allowed: true, expires: time.Now().Add(time.Minute)},
+		"attacker.example": {allowed: false, expires: time.Now().Add(time.Minute)},
+	}
+	wildCases := []struct {
+		host    string
+		want    bool
+		wantWhy string
+	}{
+		{"127.0.0.1:8321", true, "loopback IP literal"},
+		{"localhost:8321", true, "localhost name"},
+		{"[::1]:8321", true, "loopback v6 literal"},
+		{"192.168.1.10:8321", true, "serving IP from the snapshot"},
+		{"10.9.9.9:8321", false, "a non-serving IP literal (rebinding to another host)"},
+		{"my-mac.local:8321", true, "a hostname whose resolver verdict says serving (the mDNS way in)"},
+		{"attacker.example:8321", false, "a hostname whose resolver verdict says not-served"},
+	}
+	for _, tc := range wildCases {
+		if got := wild.hostAllowed(tc.host); got != tc.want {
+			t.Errorf("wildcard hostAllowed(%q) = %v, want %v (%s)", tc.host, got, tc.want, tc.wantWhy)
+		}
+	}
+
+	// The cache verdict expires: a stale entry is re-consulted. The fresh
+	// resolve runs for real (bounded by hostResolveBudget) but the verdict
+	// is snapshot-determined — with NO serving addresses nothing can
+	// intersect, so the answer is false regardless of what DNS says.
+	wild.servingHosts = nil
+	wild.dnsCache = map[string]dnsCacheEntry{
+		"my-mac.local": {allowed: true, expires: time.Now().Add(-time.Second)},
+	}
+	if wild.hostAllowed("my-mac.local:8321") {
+		t.Error("an expired positive verdict must be re-resolved, and with no serving snapshot the answer is false")
+	}
+
+	// No snapshot (handler served without Start): only loopback passes —
+	// fail-closed for every other address class.
+	empty := mustNew(t, newTestOptions(stubDispatch{}, func(o *Options) {
+		o.Config.Bind = "0.0.0.0"
+		o.Config.AllowInsecureLAN = true
+	}))
+	empty.dnsCache = nil
+	if !empty.hostAllowed("127.0.0.1:8321") {
+		t.Error("loopback must pass without a snapshot")
+	}
+	if empty.hostAllowed("192.168.1.10:8321") {
+		t.Error("a serving-class IP must NOT pass without a snapshot (fail-closed)")
 	}
 }
 
@@ -782,15 +890,31 @@ func TestNewValidatesOptions(t *testing.T) {
 
 // --- stage-2 bind posture -----------------------------------------------------
 
-// TestNewAcceptsNonLoopbackBinds pins the stage-2 widening: any valid bind —
-// the unspecified wildcard or a specific LAN address — constructs, and each
-// draws exactly one Warn naming the exposure (slog hook).
+// TestNewAcceptsNonLoopbackBinds pins the stage-2 widening BEHIND the
+// insecure-LAN gate: any valid bind — the unspecified wildcard or a specific
+// LAN address — constructs WITH the allow_insecure_lan opt-in (or TLS), and
+// each draws exactly one Warn naming the exposure (slog hook). WITHOUT the
+// opt-in the plaintext shape is refused fail-closed at construction — the
+// mount backstop of the gate the load/save paths enforce.
 func TestNewAcceptsNonLoopbackBinds(t *testing.T) {
 	for _, bind := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5"} {
-		t.Run(bind, func(t *testing.T) {
+		t.Run(bind+" refused without the opt-in", func(t *testing.T) {
+			opts := newTestOptions(stubDispatch{}, func(o *Options) {
+				o.Config.Bind = bind
+			})
+			_, err := New(opts)
+			if err == nil {
+				t.Fatalf("New(%q) without allow_insecure_lan/tls must fail closed", bind)
+			}
+			if !strings.Contains(err.Error(), "allow_insecure_lan") || !strings.Contains(err.Error(), "tls") {
+				t.Fatalf("refusal must name both ways out, got %v", err)
+			}
+		})
+		t.Run(bind+" constructs with the opt-in", func(t *testing.T) {
 			capture := &captureHandler{}
 			opts := newTestOptions(stubDispatch{}, func(o *Options) {
 				o.Config.Bind = bind
+				o.Config.AllowInsecureLAN = true
 				o.Logger = slog.New(capture)
 			})
 			if _, err := New(opts); err != nil {
@@ -806,6 +930,9 @@ func TestNewAcceptsNonLoopbackBinds(t *testing.T) {
 				}
 				if !strings.Contains(r.Message, "the auth token is the only protection") {
 					t.Errorf("warning %q does not name the token as the only protection", r.Message)
+				}
+				if !strings.Contains(r.Message, "accepted via web_access.allow_insecure_lan") {
+					t.Errorf("warning %q does not name the accepted-risk opt-in", r.Message)
 				}
 				warns++
 			}
@@ -837,12 +964,16 @@ func TestNewSilentOnLoopbackBinds(t *testing.T) {
 }
 
 // TestStartOnWildcardBindServesLoopback drives the widened contract end to
-// end: the 0.0.0.0 listener answers on the loopback address and shuts down
-// cleanly, with exactly one exposure warning logged at construction.
+// end (behind the allow_insecure_lan opt-in): the 0.0.0.0 listener answers
+// on the loopback address and shuts down cleanly, with exactly one exposure
+// warning logged at construction. A rebound non-serving Host is refused 403
+// by the wildcard Host gate (hostAllowed) — the DNS-rebinding backstop the
+// old wildcard behavior let through.
 func TestStartOnWildcardBindServesLoopback(t *testing.T) {
 	capture := &captureHandler{}
 	srv := mustNew(t, newTestOptions(stubDispatch{}, func(o *Options) {
 		o.Config.Bind = "0.0.0.0"
+		o.Config.AllowInsecureLAN = true
 		o.Logger = slog.New(capture)
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -858,6 +989,12 @@ func TestStartOnWildcardBindServesLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split %q: %v", addr, err)
 	}
+	srv.mu.Lock()
+	snapshotLen := len(srv.servingHosts)
+	srv.mu.Unlock()
+	if snapshotLen == 0 {
+		t.Fatal("Start must snapshot the serving addresses for the wildcard Host gate")
+	}
 	url := "http://127.0.0.1:" + port + "/api/transport"
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
 	if err != nil {
@@ -872,10 +1009,33 @@ func TestStartOnWildcardBindServesLoopback(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+
+	// The wildcard Host gate: a POST whose Host names an address this
+	// machine does not serve is refused 403 before the handler (the
+	// sameOrigin gate consults hostAllowed on the POST routes too).
+	reboundURL := "http://127.0.0.1:" + port + "/api/login"
+	rreq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, reboundURL,
+		strings.NewReader(`{"token":"x"}`))
+	if err != nil {
+		t.Fatalf("rebound request: %v", err)
+	}
+	rreq.Host = "203.0.113.7:" + port // TEST-NET-3: never a serving address
+	rreq.Header.Set("Content-Type", "application/json")
+	rreq.Header.Set("Origin", "http://203.0.113.7:"+port)
+	rresp, err := (&http.Client{}).Do(rreq)
+	if err != nil {
+		t.Fatalf("rebound request: %v", err)
+	}
+	bodyString(t, rresp)
+	_ = rresp.Body.Close()
+	if rresp.StatusCode != http.StatusForbidden {
+		t.Fatalf("rebound-Host status = %d, want 403", rresp.StatusCode)
+	}
+
 	if err := srv.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if n := capture.count(t, `webaccess: bind "0.0.0.0" is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection`); n != 1 {
+	if n := capture.count(t, `webaccess: bind "0.0.0.0" is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS (accepted via web_access.allow_insecure_lan), the auth token is the only protection`); n != 1 {
 		t.Fatalf("exposure warnings = %d, want 1", n)
 	}
 }

@@ -31,8 +31,12 @@ export function reportDroppedEvent(event: string, data: unknown): void {
 //     Detected synchronously — Wails injects them before any bundle code runs.
 //   - 'web':   served by the web-access sidecar over plain HTTP (ADR-101).
 //     Detected by asking the origin: GET /api/transport answers
-//     `{transport:"web", ws:"/ws", authenticated:...}`. RPCs dispatch to
-//     POST /api/rpc/<Method>, events arrive over the WebSocket named by `ws`.
+//     `{transport:"web", ws:"/ws", authenticated:true}` once the tab holds a
+//     session, and the minimal `{transport:"web"}` before login (no /ws
+//     disclosure, no session oracle). RPCs dispatch to
+//     POST /api/rpc/<Method>, events arrive over the WebSocket named by `ws`
+//     (the module default '/ws' covers the pre-auth tab; login reloads the
+//     page so the post-login probe carries the explicit value).
 //   - 'none':  neither (plain `make dev-frontend` browser session, vitest,
 //     SSR). RPC wrappers throw the legacy errors, event helpers no-op —
 //     exactly the pre-web-transport behavior.
@@ -82,8 +86,16 @@ async function detectWebTransport(): Promise<TransportMode> {
     })
     if (!res.ok) return 'none'
     const info = (await res.json()) as TransportInfo
-    if (info.transport !== 'web' || typeof info.ws !== 'string' || info.ws === '') return 'none'
-    webWsPath = info.ws
+    if (info.transport !== 'web') return 'none'
+    // The ws field rides only the AUTHENTICATED answer (the sidecar's
+    // pre-auth response is deliberately {transport:"web"} — no /ws
+    // disclosure and no session-presence oracle before login). An ABSENT ws
+    // keeps the module default ('/ws'); a PRESENT ws must still be a
+    // non-empty string — garbage keeps the strict 'none' refusal.
+    if (info.ws !== undefined) {
+      if (typeof info.ws !== 'string' || info.ws === '') return 'none'
+      webWsPath = info.ws
+    }
     // Fail closed: an absent/odd `authenticated` field reads as "must log in".
     // A wrong guess self-corrects — the login POST works regardless, and the
     // page reloads once the cookie is set.

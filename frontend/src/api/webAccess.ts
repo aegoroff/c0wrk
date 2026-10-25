@@ -34,6 +34,16 @@ export interface WebAccessInfo {
    *  bind is a deliberate network listener. Absent on an older payload
    *  → true: loopback is the only shape such a payload could describe. */
   readonly bindIsLoopback: boolean
+  /** The PERSISTED web_access.allow_insecure_lan opt-in — the explicit
+   *  accepted-risk flag for the one exposure shape refused by default (an
+   *  enabled, non-loopback, plain-HTTP listener). Absent on an older
+   *  payload → false (the shape was never opted into). */
+  readonly allowInsecureLAN: boolean
+  /** Whether the CURRENT pins (bind + TLS) describe that refused shape: the
+   *  enable toggle, a re-bind onto it and the TLS-off flip all refuse until
+   *  the opt-in is set. The section renders its opt-in checkbox from this
+   *  hint. Absent on an older payload → false. */
+  readonly allowInsecureLANRequired: boolean
   /** The browser login credential ('' when none applies yet). */
   readonly token: string
   /** Whether a static token is persisted in config.yaml (a credential that
@@ -84,6 +94,8 @@ export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
         : 0,
     configuredBind: typeof r.configured_bind === 'string' ? r.configured_bind : '',
     bindIsLoopback: r.bind_is_loopback !== false,
+    allowInsecureLAN: r.allow_insecure_lan === true,
+    allowInsecureLANRequired: r.allow_insecure_lan_required === true,
     token: r.token,
     tokenPinned: r.token_pinned === true,
     // The TLS fields (ADR-102) tolerate a legacy payload the same way the
@@ -148,6 +160,25 @@ export async function setWebAccessEnabled(enabled: boolean): Promise<void> {
     await app.SetWebAccessEnabled(enabled)
   } catch (err) {
     logger.error('Failed to set web access enabled:', err)
+    throw err
+  }
+}
+
+/**
+ * Set the web_access.allow_insecure_lan opt-in (Settings → Web Access): the
+ * explicit accepted-risk flag for the one exposure shape refused by default —
+ * an enabled, non-loopback, plain-HTTP listener. Setting it is what lets the
+ * enable toggle / re-bind / TLS-off flip accept that shape; CLEARING it while
+ * the section would sit in the shape is refused by the backend (disable web
+ * access, re-bind loopback, or enable TLS first). The flag never changes a
+ * running listener, so no restart rides this call. Throws on failure.
+ */
+export async function setWebAccessAllowInsecureLAN(allow: boolean): Promise<void> {
+  try {
+    const app = getApp()
+    await app.SetWebAccessAllowInsecureLAN(allow)
+  } catch (err) {
+    logger.error('Failed to set web access allow_insecure_lan:', err)
     throw err
   }
 }

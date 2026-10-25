@@ -64,7 +64,7 @@
 // behavior. With web_access.tls enabled the sidecar terminates TLS (New
 // fails closed on an enabled-but-unreadable pair, so a listener configured
 // as encrypted never silently downgrades to plaintext; MinVersion is pinned
-// to TLS 1.2) and the cookie carries Secure. HttpOnly/SameSite=Strict, the
+// to TLS 1.3) and the cookie carries Secure. HttpOnly/SameSite=Strict, the
 // per-launch session secret and the token gate remain the compensations on
 // every transport; the non-loopback exposure warning stands with or without
 // TLS, naming the effective transport (ADR-102 decision 6). Websocket origin
@@ -200,6 +200,16 @@ type Server struct {
 	httpSrv  *http.Server
 	stopOnce sync.Once
 	stopped  chan struct{}
+	// servingHosts is the snapshot of this machine's serving addresses
+	// captured at Start (net.InterfaceAddrs()), guarding the wildcard-bind
+	// Host gate (hostAllowed). Written once under mu before the serve
+	// goroutine starts; nil until then (fail-closed: with no snapshot only
+	// the loopback/localhost structural cases pass on a wildcard bind).
+	servingHosts []net.IP
+	// dnsMu guards dnsCache — the bounded TTL cache of hostname→served
+	// verdicts for the wildcard-bind Host gate (nameServes).
+	dnsMu    sync.Mutex
+	dnsCache map[string]dnsCacheEntry
 	// started makes Start single-use: a second call — or a call after Stop —
 	// would bind a second listener this type never tracks. Misuse fails
 	// loudly instead of leaking.
@@ -207,6 +217,13 @@ type Server struct {
 
 	wsMu    sync.Mutex
 	wsConns map[*WSConn]struct{}
+	// wsReserved counts in-flight websocket slot reservations: a handshake
+	// reserves capacity before Hijack (see handleWS) and the reservation
+	// converts into a registration (registerWS) or is released on every
+	// failure path in between. The cap check is
+	// len(wsConns)+wsReserved >= maxWSConns, so a burst of parallel
+	// handshakes cannot each see "one slot free" and all proceed.
+	wsReserved int
 
 	wsInbound func(c *WSConn, data []byte)
 }
@@ -228,6 +245,17 @@ func New(opts Options) (*Server, error) {
 	if opts.Config.Port < 0 || opts.Config.Port > 65535 {
 		return nil, fmt.Errorf("webaccess: port %d out of range (0 = auto)", opts.Config.Port)
 	}
+	// Insecure-LAN fail-closed backstop (the mount half of the exposure
+	// gate): an enabled non-loopback bind over plain HTTP without the
+	// explicit allow_insecure_lan opt-in is refused here — the same
+	// predicate and message the config load (fail-soft), config save
+	// (fail-closed) and the desktop interactive boundaries enforce. A
+	// listener the operator configured as LAN-exposed never comes up on
+	// plaintext unless the accepted-risk opt-in names it; with
+	// web_access.tls enabled this check is inert (the pair loads below).
+	if err := config.ValidateWebAccessExposure(opts.Config); err != nil {
+		return nil, err
+	}
 	// TLS termination (ADR-102): an enabled subsection MUST yield a readable,
 	// parseable, matching pair. New refuses to construct the sidecar here —
 	// a listener the operator configured as encrypted never silently
@@ -247,9 +275,11 @@ func New(opts Options) (*Server, error) {
 		}
 		tlsCfg = &tls.Config{
 			// The sidecar's clients are mainstream browsers on the machine's
-			// own network segment; 1.2 is the agreed floor (ADR-102
-			// decision 6).
-			MinVersion:   tls.VersionTLS12,
+			// own network segment; TLS 1.3 is the floor (originally 1.2 per
+			// ADR-102 decision 6, raised in the security-review fix round:
+			// every mainstream browser has required 1.3 since ~2020-21, so
+			// the 1.2 floor only kept downgrade surface alive).
+			MinVersion:   tls.VersionTLS13,
 			Certificates: []tls.Certificate{pair},
 		}
 	}
@@ -273,16 +303,16 @@ func New(opts Options) (*Server, error) {
 	}
 
 	// Stage-2 posture: a valid non-loopback bind puts the listener on the
-	// network. Allowed (the operator owns the exposure decision) but loudly
-	// surfaced — the warning names the effective transport so it stays
-	// truthful under web_access.tls (ADR-102); the exposure classification
-	// itself is about reachability, never encryption, and ADR-101 decision
-	// 12's warn-only model stands.
+	// network. Allowed (the operator owns the exposure decision — and on
+	// plain HTTP has named it through allow_insecure_lan, enforced above)
+	// but loudly surfaced — the warning names the effective transport so it
+	// stays truthful under web_access.tls (ADR-102); the exposure
+	// classification itself is about reachability, never encryption.
 	if !config.IsLoopbackBind(opts.Config.Bind) {
 		if tlsCfg != nil {
 			log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, the transport is TLS-encrypted, the auth token is the only protection", opts.Config.Bind))
 		} else {
-			log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS, the auth token is the only protection", opts.Config.Bind))
+			log.Warn(fmt.Sprintf("webaccess: bind %q is not loopback — the listener is reachable beyond this machine, traffic is plain HTTP without TLS (accepted via web_access.allow_insecure_lan), the auth token is the only protection", opts.Config.Bind))
 		}
 	}
 
@@ -319,6 +349,7 @@ func New(opts Options) (*Server, error) {
 		limiter:       newLoginLimiter(loginMaxAttempts, loginWindow),
 		stopped:       make(chan struct{}),
 		wsConns:       make(map[*WSConn]struct{}),
+		dnsCache:      make(map[string]dnsCacheEntry),
 		wsInbound:     opts.WSInbound,
 		tls:           tlsCfg,
 	}
@@ -346,8 +377,28 @@ func (s *Server) buildHandler() http.Handler {
 		})
 	}
 	// The outer recover is the last line of defense for every route,
-	// including injected middleware and the static handler.
-	return s.recoverWrap(mux)
+	// including injected middleware and the static handler. securityHeaders
+	// sits INSIDE the recover so a panicking route cannot strip the headers
+	// from the 500 the recover writes, and OUTSIDE everything else so it
+	// covers API, /ws and the static tree in one place (including the
+	// no-CSP dev shape).
+	return s.recoverWrap(securityHeaders(mux))
+}
+
+// securityHeaders stamps the transport-level hardening headers onto every
+// response the sidecar emits: X-Content-Type-Options: nosniff (a sniffed
+// content type must never turn a JSON error or an asset into executable
+// content — CSP 'none' already contains the practical blast radius, this is
+// defense-in-depth) and Referrer-Policy: no-referrer (the sidecar's origin
+// is the operator's machine host:port — it must not leak into outbound
+// Referer headers from the mirrored UI).
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // armReadDeadline arms the per-request body-read deadline (see
@@ -424,7 +475,7 @@ func (s *Server) Addr() (string, bool) {
 // Start binds the configured interface (resolving port 0 to a free port) and
 // serves until Stop or ctx cancellation. When the config section enables TLS
 // (ADR-102) the same listener terminates TLS with the pair loaded in New
-// (MinVersion 1.2); otherwise it serves plain HTTP exactly as before. It
+// (MinVersion 1.3); otherwise it serves plain HTTP exactly as before. It
 // returns after the listener is bound; serve errors after that are logged,
 // not returned. Start is single-use: a second Start (or Start after Stop)
 // returns an error instead of leaking a second listener.
@@ -439,7 +490,13 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("webaccess: listen on %s: %w", addr, err)
 	}
 
+	// Snapshot the machine's serving addresses for the wildcard-bind Host
+	// gate (hostAllowed → ipServed): every unicast address the wildcard
+	// listener answers on. Computed once per Start; an empty snapshot on
+	// error keeps the gate fail-closed (loopback/localhost still pass).
+	serving := servingHostSnapshot()
 	s.mu.Lock()
+	s.servingHosts = serving
 	s.ln = ln
 	// Pin HTTP/1.1-only: /ws is a Hijacker-based Upgrade handshake and cannot
 	// survive HTTP/2, and an automatic h2 setup would let browsers attempt
@@ -453,7 +510,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// pin is removed.
 	protos := new(http.Protocols)
 	protos.SetHTTP1(true)     // the zero (empty) set denies every protocol
-	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-102), floor 1.2 pinned in New; timeouts set below
+	s.httpSrv = &http.Server{ //nolint:gosec // local sidecar for the desktop UI; TLS opt-in via web_access.tls (ADR-102), floor 1.3 pinned in New; timeouts set below
 		Handler:           s.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,

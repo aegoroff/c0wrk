@@ -429,6 +429,8 @@ export function SetUpdateSettings(arg1:boolean):Promise<backend.UpdateSettings>;
 
 export function SetWailsLogger(arg1:desktop.wailsLogAdapter):Promise<void>;
 
+export function SetWebAccessAllowInsecureLAN(arg1:boolean):Promise<void>;
+
 export function SetWebAccessConnection(arg1:string,arg2:number):Promise<void>;
 
 export function SetWebAccessEnabled(arg1:boolean):Promise<void>;

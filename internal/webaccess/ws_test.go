@@ -13,15 +13,16 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
-
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,82 @@ func TestWSAdmissionMatrix(t *testing.T) {
 }
 
 func hostOrigin(host string) string { return "http://" + host }
+
+// TestWSCapRejectsBeyondMax pins the connection cap: the first maxWSConns
+// upgrades succeed; the next is refused 503 with the JSON envelope while
+// the ResponseWriter is still alive (the reservation is taken before the
+// hijack precisely so this error can be written). Closing one connection
+// frees its slot again — the cap bounds, it never wedges.
+func TestWSCapRejectsBeyondMax(t *testing.T) {
+	srv, ts := newTestServer(t, nil)
+	host := strings.TrimPrefix(ts.URL, "http://")
+	client := loginClient(t, ts.URL, srv.AuthToken())
+	cookie := cookieHeader(t, client, ts.URL)
+
+	conns := make([]net.Conn, 0, maxWSConns)
+	t.Cleanup(func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	for i := 0; i < maxWSConns; i++ {
+		conn := dialWS(t, ts, cookie, hostOrigin(host), fmt.Sprintf("dGhlIHNhbXBsZSBub25jZQ==%d", i))
+		resp := readWSResponse(t, conn)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("conn %d: status = %d, want 101", i, resp.StatusCode)
+		}
+		conns = append(conns, conn)
+	}
+
+	// The overflow handshake: 503 + the error envelope, not a hang.
+	over := dialWS(t, ts, cookie, hostOrigin(host), "b3ZlcmZsb3cta2V5LTEyMw==")
+	oresp := readWSResponse(t, over)
+	defer func() { _ = oresp.Body.Close() }()
+	if oresp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("overflow status = %d, want 503", oresp.StatusCode)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(oresp.Body).Decode(&env); err != nil || env.Error == "" {
+		t.Fatalf("overflow body must be the error envelope, got %v (%v)", env, err)
+	}
+
+	// Closing one live connection frees exactly one slot.
+	first := conns[0]
+	conns = conns[1:]
+	_ = first.Close()
+	// The read pump reclaims the connection asynchronously (real socket, so
+	// no synctest bubble): the freed slot is awaited through a completion
+	// channel behind a bounded hang watchdog — never a sleep. The poller
+	// self-terminates at its own deadline, and the buffered channel keeps
+	// the send from blocking after a watchdog failure.
+	freed := make(chan struct{}, 1)
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			srv.wsMu.Lock()
+			live := len(srv.wsConns)
+			srv.wsMu.Unlock()
+			if live < maxWSConns {
+				freed <- struct{}{}
+				return
+			}
+			runtime.Gosched()
+		}
+	}()
+	select {
+	case <-freed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closing a live connection must free its slot")
+	}
+	again := dialWS(t, ts, cookie, hostOrigin(host), "YWdhaW4ta2V5LTQ1Ng==")
+	aresp := readWSResponse(t, again)
+	_ = aresp.Body.Close()
+	if aresp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("post-close status = %d, want 101 (a freed slot admits the next upgrade)", aresp.StatusCode)
+	}
+	conns = append(conns, again)
+}
 
 // TestWSHandshakeVersionValidation pins the RFC6455 version gate: only
 // version 13 upgrades; anything else is refused with 426 and the supported

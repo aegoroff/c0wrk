@@ -2974,6 +2974,8 @@ export namespace desktop {
 	    configured_port: number;
 	    configured_bind: string;
 	    bind_is_loopback: boolean;
+	    allow_insecure_lan: boolean;
+	    allow_insecure_lan_required: boolean;
 	    token: string;
 	    token_pinned: boolean;
 	    tls_enabled: boolean;
@@ -2995,6 +2997,8 @@ export namespace desktop {
 	        this.configured_port = source["configured_port"];
 	        this.configured_bind = source["configured_bind"];
 	        this.bind_is_loopback = source["bind_is_loopback"];
+	        this.allow_insecure_lan = source["allow_insecure_lan"];
+	        this.allow_insecure_lan_required = source["allow_insecure_lan_required"];
 	        this.token = source["token"];
 	        this.token_pinned = source["token_pinned"];
 	        this.tls_enabled = source["tls_enabled"];

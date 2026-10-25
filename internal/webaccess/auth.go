@@ -185,18 +185,36 @@ func jsonContentTypeGate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// handleTransport answers the unauthenticated bootstrap question the SPA
-// shell asks first: which transport am I on, where is the event channel, and
-// am I already authenticated.
+// handleTransport answers the bootstrap question the SPA shell asks first:
+// which transport am I on — and, once the tab holds a valid session, where
+// the event channel is. The payload is split by authentication: an
+// unauthenticated caller learns ONLY that this origin serves the web
+// transport (no session-presence oracle, no /ws path disclosure — both are
+// meaningless before login and were a free banner-grab surface on a LAN
+// bind), while an authenticated caller gets the full {ws, authenticated}
+// answer the shim needs to open its event socket. The SPA's probe treats a
+// missing ws field as the default /ws, so the split changes nothing on the
+// wire for legitimate flows (frontend/src/api/runtime.ts).
 func (s *Server) handleTransport(w http.ResponseWriter, r *http.Request) {
+	if !s.hasSessionCookie(r) {
+		writeJSON(w, http.StatusOK, transportPublic{Transport: "web"})
+		return
+	}
 	writeJSON(w, http.StatusOK, transportInfo{
 		Transport:     "web",
 		WS:            wsPath,
-		Authenticated: s.hasSessionCookie(r),
+		Authenticated: true,
 	})
 }
 
-// transportInfo is the /api/transport payload.
+// transportPublic is the pre-authentication /api/transport payload: only the
+// transport marker — deliberately a separate struct so the anonymous answer
+// cannot serialize an empty ws or a stale authenticated field.
+type transportPublic struct {
+	Transport string `json:"transport"`
+}
+
+// transportInfo is the authenticated /api/transport payload.
 type transportInfo struct {
 	Transport     string `json:"transport"`
 	WS            string `json:"ws"`

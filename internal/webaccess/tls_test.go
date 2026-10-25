@@ -457,56 +457,68 @@ func TestServer_TLSEndToEnd(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
+		// No cookie on this client: the anonymous transport answer carries
+		// only the transport marker (no ws, no authenticated oracle).
 		var ti transportInfo
 		if err := json.NewDecoder(resp.Body).Decode(&ti); err != nil {
 			t.Fatalf("decode transport payload: %v", err)
 		}
-		if ti.Transport != "web" || ti.WS != wsPath {
+		if ti.Transport != "web" {
 			t.Errorf("transport payload = %+v", ti)
 		}
-	})
-
-	t.Run("TLS 1.2 exactly is accepted", func(t *testing.T) {
-		resp := doGet(t, secureClient(tls.VersionTLS12, tls.VersionTLS12), base+"/api/transport")
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		if ti.WS != "" || ti.Authenticated {
+			t.Errorf("anonymous transport payload = %+v, want the transport marker only", ti)
 		}
 	})
 
-	t.Run("TLS 1.1 is refused by the 1.2 floor", func(t *testing.T) {
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-			base+"/api/transport", http.NoBody)
-		if err != nil {
-			t.Fatalf("build TLS 1.1 request: %v", err)
-		}
-		resp, err := secureClient(tls.VersionTLS10, tls.VersionTLS11).Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			t.Error("TLS 1.1 client must fail the handshake (server floor is 1.2)")
-		}
-		// The refusal is expected diagnostics: intercepted at the source
-		// (ErrorLog → slog), asserted, never leaked to the test output.
-		// The record is written from the server's connection goroutine and
-		// can land after the client has already observed its handshake
-		// error — the two sides share no synchronization primitive (real
-		// socket, so no synctest bubble) — so the count is awaited through
-		// a completion channel behind the bounded hang watchdog instead of
-		// being asserted on the first snapshot.
-		records := make(chan int, 1)
-		go func() {
-			for {
-				if n := countSubstringRecords(t, capture, "TLS handshake error"); n > 0 {
-					records <- n
-					return
-				}
-				runtime.Gosched()
+	t.Run("TLS 1.2 and below are refused by the 1.3 floor", func(t *testing.T) {
+		// The floor is 1.3 (raised from the ADR-102 decision-6 value of 1.2
+		// in the security-review fix round): every mainstream browser has
+		// required 1.3 since ~2020-21, so the 1.2 surface was pure downgrade
+		// exposure. A 1.2-pinned client — and anything older — must fail the
+		// handshake.
+		for _, client := range []struct {
+			name string
+			lo   uint16
+			hi   uint16
+		}{
+			{"TLS 1.2", tls.VersionTLS12, tls.VersionTLS12},
+			{"TLS 1.1", tls.VersionTLS10, tls.VersionTLS11},
+		} {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+				base+"/api/transport", http.NoBody)
+			if err != nil {
+				t.Fatalf("build %s request: %v", client.name, err)
 			}
-		}()
-		select {
-		case <-records:
-		case <-time.After(2 * time.Second):
-			t.Error("server must record the refused handshake")
+			resp, err := secureClient(client.lo, client.hi).Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				t.Errorf("%s client must fail the handshake (server floor is 1.3)", client.name)
+				continue
+			}
+			// The refusal is expected diagnostics: intercepted at the source
+			// (ErrorLog → slog), asserted, never leaked to the test output.
+			// The record is written from the server's connection goroutine
+			// and can land after the client has already observed its
+			// handshake error — the two sides share no synchronization
+			// primitive (real socket, so no synctest bubble) — so the count
+			// is awaited through a completion channel behind the bounded
+			// hang watchdog instead of being asserted on the first snapshot.
+			records := make(chan int, 1)
+			go func() {
+				for {
+					if n := countSubstringRecords(t, capture, "TLS handshake error"); n > 0 {
+						records <- n
+						return
+					}
+					runtime.Gosched()
+				}
+			}()
+			select {
+			case <-records:
+			case <-time.After(2 * time.Second):
+				t.Errorf("server must record the refused %s handshake", client.name)
+			}
 		}
 	})
 

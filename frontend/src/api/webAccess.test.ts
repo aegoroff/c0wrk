@@ -25,6 +25,7 @@ import {
   WEB_ACCESS_TOKEN_MAX_LENGTH,
   getWebAccessInfo,
   setWebAccessEnabled,
+  setWebAccessAllowInsecureLAN,
   setWebAccessConnection,
   setWebAccessTLS,
   generateWebAccessCertificate,
@@ -42,6 +43,8 @@ const validInfo = {
   configured_port: 8765,
   configured_bind: '127.0.0.1',
   bind_is_loopback: true,
+  allow_insecure_lan: false,
+  allow_insecure_lan_required: false,
   token: 'per-launch-token',
   token_pinned: false,
   tls_enabled: false,
@@ -60,6 +63,8 @@ describe('parseWebAccessInfo', () => {
     configuredPort: 8765,
     configuredBind: '127.0.0.1',
     bindIsLoopback: true,
+    allowInsecureLAN: false,
+    allowInsecureLANRequired: false,
     token: 'per-launch-token',
     tokenPinned: false,
     tlsEnabled: false,
@@ -111,6 +116,30 @@ describe('parseWebAccessInfo', () => {
     ).toEqual({ ...parsedValid, configuredBind: 'localhost', bindIsLoopback: true })
   })
 
+  it('maps the allow_insecure_lan fields (opt-in set / required hint)', () => {
+    expect(
+      parseWebAccessInfo({
+        ...validInfo,
+        configured_bind: '0.0.0.0',
+        bind_is_loopback: false,
+        allow_insecure_lan: true,
+        allow_insecure_lan_required: true,
+      }),
+    ).toEqual({
+      ...parsedValid,
+      configuredBind: '0.0.0.0',
+      bindIsLoopback: false,
+      allowInsecureLAN: true,
+      allowInsecureLANRequired: true,
+    })
+  })
+
+  it('defaults the allow_insecure_lan fields when absent or wrong-typed (stale fixture tolerance)', () => {
+    expect(parseWebAccessInfo({ ...validInfo, allow_insecure_lan: 'yes', allow_insecure_lan_required: 1 })).toEqual(
+      parsedValid,
+    )
+  })
+
   it('defaults the pin fields when absent (stale fixture tolerance)', () => {
     const legacy = {
       enabled: true,
@@ -124,6 +153,8 @@ describe('parseWebAccessInfo', () => {
       configuredPort: 0,
       configuredBind: '',
       bindIsLoopback: true,
+      allowInsecureLAN: false,
+      allowInsecureLANRequired: false,
       tokenPinned: false,
       tlsEnabled: false,
       tlsCert: '',
@@ -255,6 +286,22 @@ describe('setWebAccessEnabled', () => {
   it('rethrows on failure (a rejected toggle must surface)', async () => {
     mockApp.SetWebAccessEnabled = vi.fn().mockRejectedValue(new Error('denied'))
     await expect(setWebAccessEnabled(false)).rejects.toThrow('denied')
+    expect(logger.error).toHaveBeenCalled()
+  })
+})
+
+describe('setWebAccessAllowInsecureLAN', () => {
+  it('passes the flag through and resolves on success', async () => {
+    mockApp.SetWebAccessAllowInsecureLAN = vi.fn().mockResolvedValue(undefined)
+    await expect(setWebAccessAllowInsecureLAN(true)).resolves.toBeUndefined()
+    expect(mockApp.SetWebAccessAllowInsecureLAN).toHaveBeenCalledWith(true)
+    await setWebAccessAllowInsecureLAN(false)
+    expect(mockApp.SetWebAccessAllowInsecureLAN).toHaveBeenLastCalledWith(false)
+  })
+
+  it('rethrows on failure (the refused flag-off must surface)', async () => {
+    mockApp.SetWebAccessAllowInsecureLAN = vi.fn().mockRejectedValue(new Error('refused'))
+    await expect(setWebAccessAllowInsecureLAN(false)).rejects.toThrow('refused')
     expect(logger.error).toHaveBeenCalled()
   })
 })

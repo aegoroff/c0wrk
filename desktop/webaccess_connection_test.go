@@ -410,7 +410,12 @@ func TestSetWebAccessConnection_RequiresConfigRef(t *testing.T) {
 // (EADDRNOTAVAIL) regardless of which binds the sidecar is willing to accept.
 func TestSetWebAccessConnection_BindPinRoundTrip(t *testing.T) {
 	pinned := reserveLoopbackPort(t)
-	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n")
+	// allow_insecure_lan: the 192.0.2.1 rollback leg re-binds onto a
+	// NON-loopback plaintext address — refused by the exposure gate without
+	// the explicit opt-in, before the listener could fail. With the flag the
+	// re-bind passes the gate and fails at the LISTENER (EADDRNOTAVAIL),
+	// which is the rollback path this test exists to pin.
+	cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n  allow_insecure_lan: true\n")
 	a := newWebAccessTestApp(t, cfg, path)
 	a.initWebAccess(cfg, a.log())
 	first := a.webAccess.Load()

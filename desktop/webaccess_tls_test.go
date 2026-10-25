@@ -824,13 +824,17 @@ func TestWebAccessControlRPCsRefreshConfigLoadWarnings(t *testing.T) {
 web_access:
   enabled: true
   bind: %s
+  allow_insecure_lan: true
   tls:
     enabled: false
     cert: %q
     key: %q
 `, nonLoopbackBind, certPath, keyPath))
 
-	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: nonLoopbackBind}, true)[0]
+	// The opt-in rides the exposure seed too: the accepted-risk warning is
+	// what the flag-on state draws (without it the gate disables the section
+	// and the warning channel never sees exposure at all).
+	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: nonLoopbackBind, AllowInsecureLAN: true}, true)[0]
 	unrelated := "autonomy: legacy smart_approve folded into silent_mode"
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))

@@ -247,8 +247,9 @@ func TestGetWebAccessInfo_BindFields(t *testing.T) {
 		// A running wildcard listener (the sidecar binds 0.0.0.0 for real)
 		// must surface the browser-openable localhost form — no browser can
 		// open http://0.0.0.0:port — while the machine-local dial still
-		// reaches the very listener behind it.
-		cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n  bind: 0.0.0.0\n")
+		// reaches the very listener behind it. The plaintext wildcard needs
+		// the allow_insecure_lan opt-in to mount at all (the exposure gate).
+		cfg, path := writeWebAccessConfig(t, "web_access:\n  enabled: true\n  bind: 0.0.0.0\n  allow_insecure_lan: true\n")
 		a := newWebAccessTestApp(t, cfg, path)
 		a.initWebAccess(cfg, a.log())
 
@@ -572,4 +573,135 @@ func loginWebAccessClient(t *testing.T, baseURL, token string) *http.Client {
 		t.Fatalf("login status = %d, want 200 (body: %s)", resp.StatusCode, body)
 	}
 	return client
+}
+
+// TestWebAccessInsecureLANGates pins the interactive half of the exposure
+// gate: the enable flip, a re-bind onto plaintext LAN and the TLS-off flip
+// all refuse the shape without the explicit allow_insecure_lan opt-in — and
+// SetWebAccessAllowInsecureLAN is the honest way in (and out: off is refused
+// while the section would sit in the shape). The load path already disabled
+// the hand-authored shape, so the enable refusal operates on the pre-staged
+// bind under a disabled section.
+func TestWebAccessInsecureLANGates(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "pair.crt")
+	keyPath := filepath.Join(dir, "pair.key")
+	if err := webaccess.GenerateWebAccessCertificate("0.0.0.0", certPath, keyPath); err != nil {
+		t.Fatalf("generate pair: %v", err)
+	}
+
+	cfg, path := writeWebAccessConfigGate(t, "experimental:\n  enabled: true\n", `
+web_access:
+  enabled: true
+  bind: 0.0.0.0
+  tls:
+    enabled: false
+    cert: '`+certPath+`'
+    key: '`+keyPath+`'
+`)
+	a := newWebAccessTestApp(t, cfg, path)
+
+	// The load gate already disabled the hand-authored shape.
+	if cfg.WebAccess.Enabled {
+		t.Fatal("the load gate must disable the insecure-LAN shape")
+	}
+	// The info surface explains WHY: these pins require the opt-in.
+	if info := a.GetWebAccessInfo(); !info.AllowInsecureLANRequired || info.AllowInsecureLAN {
+		t.Errorf("info = (%v required, %v set), want (true, false)", info.AllowInsecureLANRequired, info.AllowInsecureLAN)
+	}
+
+	// Enable without the opt-in: refused, nothing persisted as enabled.
+	if err := a.SetWebAccessEnabled(true); err == nil {
+		t.Fatal("SetWebAccessEnabled(true) must refuse the insecure-LAN shape")
+	} else if !strings.Contains(err.Error(), "allow_insecure_lan") {
+		t.Fatalf("enable refusal must name the opt-in, got %v", err)
+	}
+	if cfg.WebAccess.Enabled {
+		t.Error("the refused enable must not flip the section on")
+	}
+
+	// The honest way in: the opt-in RPC persists the flag.
+	if err := a.SetWebAccessAllowInsecureLAN(true); err != nil {
+		t.Fatalf("SetWebAccessAllowInsecureLAN(true): %v", err)
+	}
+	if info := a.GetWebAccessInfo(); !info.AllowInsecureLAN || info.AllowInsecureLANRequired {
+		t.Errorf("info after opt-in = (%v required, %v set), want (false, true)", info.AllowInsecureLANRequired, info.AllowInsecureLAN)
+	}
+
+	// Now the enable mounts the sidecar for real.
+	if err := a.SetWebAccessEnabled(true); err != nil {
+		t.Fatalf("SetWebAccessEnabled(true) with the opt-in: %v", err)
+	}
+	if a.webAccess.Load() == nil {
+		t.Fatal("the sidecar must mount with the opt-in in place")
+	}
+
+	// Turning the opt-in back OFF while the section sits in the shape is
+	// refused — the operator must first disable, re-bind loopback, or
+	// encrypt. The running sidecar is untouched.
+	if err := a.SetWebAccessAllowInsecureLAN(false); err == nil {
+		t.Fatal("SetWebAccessAllowInsecureLAN(false) must refuse while the section sits in the shape")
+	}
+	if !a.GetWebAccessInfo().AllowInsecureLAN {
+		t.Error("the refused flag-off must leave the opt-in persisted")
+	}
+}
+
+// TestWebAccessInsecureLANRebindAndTLSOffGates: on a section already
+// enabled, the re-bind onto a plaintext LAN address and the TLS-off flip
+// are both refused without the opt-in — the exposure must not appear
+// through the connection or transport switches either.
+func TestWebAccessInsecureLANRebindAndTLSOffGates(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "pair.crt")
+	keyPath := filepath.Join(dir, "pair.key")
+	if err := webaccess.GenerateWebAccessCertificate("127.0.0.1", certPath, keyPath); err != nil {
+		t.Fatalf("generate pair: %v", err)
+	}
+
+	// Loopback plaintext, enabled: mounts without any opt-in.
+	cfg, path := writeWebAccessConfigGate(t, "experimental:\n  enabled: true\n", `
+web_access:
+  enabled: true
+  bind: 127.0.0.1
+  tls:
+    enabled: true
+    cert: '`+certPath+`'
+    key: '`+keyPath+`'
+`)
+	a := newWebAccessTestApp(t, cfg, path)
+	a.initWebAccess(cfg, a.log())
+	if a.webAccess.Load() == nil {
+		t.Fatal("the TLS-encrypted loopback sidecar must mount")
+	}
+
+	// TLS off on a LOOPBACK bind stays fine (loopback is never insecure-LAN).
+	if err := a.SetWebAccessTLS(false, "", ""); err != nil {
+		t.Fatalf("SetWebAccessTLS(off) on loopback must pass: %v", err)
+	}
+
+	// Re-bind onto plaintext LAN without the opt-in: refused, pin untouched.
+	if err := a.SetWebAccessConnection("0.0.0.0", 0); err == nil {
+		t.Fatal("SetWebAccessConnection(0.0.0.0) must refuse without the opt-in")
+	} else if !strings.Contains(err.Error(), "allow_insecure_lan") {
+		t.Fatalf("re-bind refusal must name the opt-in, got %v", err)
+	}
+	if got := a.GetWebAccessInfo().ConfiguredBind; got != "127.0.0.1" {
+		t.Errorf("the refused re-bind must leave the pin untouched, got %q", got)
+	}
+
+	// With the opt-in the same re-bind goes through (wildcard mounts).
+	if err := a.SetWebAccessAllowInsecureLAN(true); err != nil {
+		t.Fatalf("SetWebAccessAllowInsecureLAN(true): %v", err)
+	}
+	if err := a.SetWebAccessConnection("0.0.0.0", 0); err != nil {
+		t.Fatalf("SetWebAccessConnection(0.0.0.0) with the opt-in: %v", err)
+	}
+
+	// And TLS-off now needs the opt-in it already has — accepted; turning
+	// the opt-in OFF while plaintext-LAN is refused (covered above), so the
+	// loop closes: no switch can strand the shape in place silently.
+	if err := a.SetWebAccessEnabled(false); err != nil {
+		t.Fatalf("SetWebAccessEnabled(false): %v", err)
+	}
 }

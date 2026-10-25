@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Copy, Pin } from 'lucide-react'
-import { getWebAccessInfo, parseWebAccessAddress, setWebAccessConnection, type WebAccessInfo } from '@/api/webAccess'
+import { AlertTriangle, Check, Copy, Pin } from 'lucide-react'
+import {
+  getWebAccessInfo,
+  parseWebAccessAddress,
+  setWebAccessAllowInsecureLAN,
+  setWebAccessConnection,
+  type WebAccessInfo,
+} from '@/api/webAccess'
 import { Input } from '@/components/ui/input'
 import { useWebAccessCopyFlash } from './useWebAccessCopyFlash'
 
@@ -47,7 +53,33 @@ export function WebAccessAddressSettings({ info, onInfo, onConfigChanged }: WebA
   const [addressDraft, setAddressDraft] = useState('')
   const [pinBusy, setPinBusy] = useState(false)
   const [addressError, setAddressError] = useState<string | null>(null)
+  const [flagBusy, setFlagBusy] = useState(false)
   const { copied, copy } = useWebAccessCopyFlash()
+
+  /** Commit the allow_insecure_lan opt-in: the explicit accepted-risk flag
+   *  the backend requires before an enabled non-loopback plaintext listener
+   *  can persist or mount. Clearing it while the section sits in that shape
+   *  is refused by the backend — the error lands in the same slot. */
+  const commitAllowInsecureLAN = useCallback(
+    async (next: boolean) => {
+      if (flagBusy) return
+      setFlagBusy(true)
+      setAddressError(null)
+      try {
+        await setWebAccessAllowInsecureLAN(next)
+        // The flag moves the section's config-load warning (accepted-risk
+        // text) — the banner re-reads the recomputed warnings.
+        onConfigChanged?.()
+        const fresh = await getWebAccessInfo()
+        if (fresh) onInfo(fresh)
+      } catch (err) {
+        setAddressError(err instanceof Error ? err.message : 'Failed to apply the plaintext opt-in.')
+      } finally {
+        setFlagBusy(false)
+      }
+    },
+    [flagBusy, onInfo, onConfigChanged],
+  )
 
   // Seed the draft when the authoritative read lands and after every applied
   // change: the re-read canonicalizes the shape — including the URL scheme,
@@ -134,6 +166,30 @@ export function WebAccessAddressSettings({ info, onInfo, onConfigChanged }: WebA
         <p className="text-xs text-destructive" role="alert" data-testid="web-access-address-error">
           {addressError}
         </p>
+      )}
+      {(info.allowInsecureLANRequired || info.allowInsecureLAN) && (
+        <label
+          className="flex max-w-[32rem] items-start gap-2 rounded-md border border-warning/25 bg-warning/10 p-2 text-xs"
+          data-testid="web-access-insecure-lan"
+        >
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            data-testid="web-access-insecure-lan-checkbox"
+            checked={info.allowInsecureLAN}
+            disabled={flagBusy}
+            onChange={(e) => void commitAllowInsecureLAN(e.target.checked)}
+          />
+          <span className="text-warning">
+            <AlertTriangle className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
+            This address serves <span className="font-semibold">plain HTTP beyond this machine</span> — the
+            token and the whole session travel unencrypted. The backend refuses this setup until you accept
+            the risk here (or enable TLS).{' '}
+            {info.allowInsecureLAN
+              ? 'Accepted: enable, re-bind and TLS-off writes go through.'
+              : 'Required before the enable toggle (or a re-bind onto this address) is accepted.'}
+          </span>
+        </label>
       )}
     </div>
   )
