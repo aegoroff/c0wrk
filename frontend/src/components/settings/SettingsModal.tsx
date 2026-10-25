@@ -99,7 +99,7 @@ export function SettingsModal() {
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
   // One banner refresher shared by every writer that can move the
   // config-load-warning channel: the LLM saves (handleSettingsSaved) and the
-  // Web Access control RPCs (ADR-100 — the banner follows the live section).
+  // Web Access control RPCs (ADR-102 — the banner follows the live section).
   const refreshBanner = useCallback(() => setBannerRefreshKey((k) => k + 1), [])
   const [closeBlocked, setCloseBlocked] = useState(false)
   const [checkingClose, setCheckingClose] = useState(false)
@@ -294,13 +294,13 @@ export function SettingsModal() {
               {/* Web Access is an experimental surface, gated on the master
                   switch like Session Statistics — and a DESKTOP-window control:
                   in the web transport the control RPCs are unreachable from a
-                  tab (ADR-099 isolation), so the section would only ever
+                  tab (ADR-101 isolation), so the section would only ever
                   render its "Status unavailable" state. Gated here (not inside
                   the component) so the border wrapper disappears with the
                   block. */}
               {experimentalEnabled && !isWebTransport() && (
                 <div className="border-t border-border pt-4">
-                  {/* ADR-100: every successful transport-affecting Web Access
+                  {/* ADR-102: every successful transport-affecting Web Access
                       write recomputes the section's config-load warnings, so
                       the banner above must re-read them. */}
                   <WebAccessSettings onConfigChanged={refreshBanner} />

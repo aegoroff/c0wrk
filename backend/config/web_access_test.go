@@ -54,7 +54,7 @@ llm:
 
 // writeWebAccessTLSPair generates a real self-signed certificate/key pair
 // (ECDSA P-256) into dir and returns the two PEM paths. The load path reads
-// and parses the pair (ADR-100), so tests exercising an enabled subsection
+// and parses the pair (ADR-102), so tests exercising an enabled subsection
 // need real, loadable files on disk.
 func writeWebAccessTLSPair(t *testing.T, dir string) (certPath, keyPath string) {
 	t.Helper()
@@ -189,7 +189,7 @@ web_access:
 			!strings.Contains(warnings[0], "network-accessible") {
 			t.Errorf("bind %q: warning must name the section and the network exposure, got %q", bind, warnings[0])
 		}
-		// ADR-100: the load warning exists only for the plain-HTTP
+		// ADR-102: the load warning exists only for the plain-HTTP
 		// combination, so the message names the transport and must never
 		// carry the retired TLS-encrypted variant.
 		if !strings.Contains(warnings[0], "plain HTTP without TLS") {
@@ -233,7 +233,7 @@ web_access:
 }
 
 func TestWebAccessTLS_NonLoopbackBindLoadsWarningFree(t *testing.T) {
-	// ADR-100 + ADR-100: the config-load exposure warning is reserved for
+	// ADR-102 + ADR-102: the config-load exposure warning is reserved for
 	// the plain-HTTP combination, and an enabled subsection must carry a
 	// pair that actually loads (the config layer reads the files). A
 	// TLS-encrypted non-loopback bind over a REAL usable pair is a
@@ -264,7 +264,7 @@ web_access:
 }
 
 func TestWebAccessTLS_NonLoopbackBindBrokenTLSStaysDisabled(t *testing.T) {
-	// ADR-100: a TLS subsection the sidecar cannot serve — here the
+	// ADR-102: a TLS subsection the sidecar cannot serve — here the
 	// structural shape, empty paths — never downgrades the listener to
 	// plain HTTP. The whole section turns OFF with exactly one warning
 	// naming the subsection, and the non-loopback bind draws NO exposure
@@ -647,7 +647,7 @@ func TestValidateWebAccessToken(t *testing.T) {
 }
 
 func TestWebAccessTLS_AbsentSubsectionDefaultsOff(t *testing.T) {
-	// Additivity (ADR-100): a config authored before the tls subsection
+	// Additivity (ADR-102): a config authored before the tls subsection
 	// existed — or one that simply omits it — loads identically: the zero
 	// subsection, zero warnings, the enabled section untouched.
 	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
@@ -668,7 +668,7 @@ web_access:
 }
 
 func TestWebAccessTLS_ValidSubsectionSavesAndRoundTrips(t *testing.T) {
-	// A fully-configured subsection over a REAL usable pair (ADR-100: the
+	// A fully-configured subsection over a REAL usable pair (ADR-102: the
 	// load path reads and parses the files) is valid: it saves without
 	// error and reloads warning-free with every value intact.
 	dir := t.TempDir()
@@ -727,7 +727,7 @@ web_access:
 }
 
 func TestWebAccessTLS_EmptyPathsDisableAtLoad(t *testing.T) {
-	// ADR-100 (structural half of the usability rule): tls enabled with
+	// ADR-102 (structural half of the usability rule): tls enabled with
 	// either path empty is UNUSABLE at load — the section turns off (the
 	// sidecar never serves plain HTTP in its place), the subsection and the
 	// connection values are preserved for the fix-and-re-enable flow, and
@@ -770,7 +770,7 @@ web_access:
 }
 
 func TestWebAccessTLS_BrokenPairFilesDisableAtLoad(t *testing.T) {
-	// ADR-100 (file half of the usability rule): an enabled subsection
+	// ADR-102 (file half of the usability rule): an enabled subsection
 	// whose pair does not load — missing files, garbage PEM, a key that
 	// does not match its certificate — is UNUSABLE: the section turns off
 	// with exactly one warning naming the reason, the subsection is
@@ -837,7 +837,7 @@ web_access:
 }
 
 func TestWebAccessTLS_SaveGateIgnoresFiles(t *testing.T) {
-	// The save gate is deliberately NOT a file gate (ADR-100): filesystem
+	// The save gate is deliberately NOT a file gate (ADR-102): filesystem
 	// state must never brick an unrelated settings save. An enabled section
 	// with a structurally valid subsection pointing at nonexistent files
 	// saves fine — the unusable pair is the load path's fail-soft concern
@@ -867,7 +867,7 @@ func TestWebAccessTLS_SaveGateIgnoresFiles(t *testing.T) {
 		t.Fatalf("the reload of the unusable pair must draw exactly one warning, got %v", loaded.LoadErrors)
 	}
 	if loaded.Config.WebAccess.Enabled {
-		t.Errorf("the reload must heal the section to disabled (ADR-100), got %+v", loaded.Config.WebAccess)
+		t.Errorf("the reload must heal the section to disabled (ADR-102), got %+v", loaded.Config.WebAccess)
 	}
 	if !loaded.Config.WebAccess.TLS.Enabled {
 		t.Errorf("the subsection must survive the healing untouched, got %+v", loaded.Config.WebAccess.TLS)
@@ -877,7 +877,7 @@ func TestWebAccessTLS_SaveGateIgnoresFiles(t *testing.T) {
 func TestWebAccessTLS_SectionResetPreservesSubsection(t *testing.T) {
 	// The bind/port fail-soft reset preserves the authored tls subsection
 	// (only Enabled/Bind/Port/Token return to the default state) — the same
-	// preserve-the-subsection contract as the ADR-100 branch below it. A
+	// preserve-the-subsection contract as the ADR-102 branch below it. A
 	// doubly-broken section therefore stacks the tls warning on top of the
 	// section one: both repair flows are named, and the section ends up
 	// disabled either way.
@@ -915,7 +915,7 @@ func TestWebAccessTLS_BindResetPreservesUsablePair(t *testing.T) {
 	// fail-soft reset must heal only the connection/credential fields — the
 	// cert/key paths survive verbatim, so the next unrelated settings save
 	// cannot persist the pair away, and the fix-and-re-enable flow
-	// (ADR-100) finds its subsection intact.
+	// (ADR-102) finds its subsection intact.
 	dir := t.TempDir()
 	certPath, keyPath := writeWebAccessTLSPair(t, dir)
 	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
@@ -950,7 +950,7 @@ web_access:
 }
 
 func TestWebAccessTLS_SaveRejectsEmptyPaths(t *testing.T) {
-	// Fail-closed (ADR-100, decision 2): an enabled sidecar with a
+	// Fail-closed (ADR-102, decision 2): an enabled sidecar with a
 	// structurally invalid tls subsection must never be persisted — the load
 	// path resets it before it can be re-saved, so these states are only
 	// reachable through in-memory mutation. The disabled counterpart of the
@@ -1030,7 +1030,7 @@ func TestValidateWebAccessTLS(t *testing.T) {
 }
 
 func TestValidateWebAccessTLSPair(t *testing.T) {
-	// The exported usability mirror (ADR-100): a disabled subsection is
+	// The exported usability mirror (ADR-102): a disabled subsection is
 	// inert, structural incompleteness fails with the same messages as
 	// ValidateWebAccessTLS, an unloadable pair fails with the load reason,
 	// and a real pair on disk passes.
@@ -1057,7 +1057,7 @@ func TestValidateWebAccessTLSPair(t *testing.T) {
 
 func TestWebAccessLoadWarnings(t *testing.T) {
 	// The pure runtime counterpart of the normalizeWebAccess warning tail
-	// (ADR-100): state-only, no mutation, and — for every section state the
+	// (ADR-102): state-only, no mutation, and — for every section state the
 	// load path leaves surviving — byte-identical to what the load pipeline
 	// produces, so the runtime recompute can never drift from the load text.
 	dir := t.TempDir()
@@ -1103,7 +1103,7 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 			TLS:     WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath},
 		}
 		if got := WebAccessLoadWarnings(section); got != nil {
-			t.Errorf("TLS-encrypted exposure = %v, want nil (ADR-100)", got)
+			t.Errorf("TLS-encrypted exposure = %v, want nil (ADR-102)", got)
 		}
 	})
 

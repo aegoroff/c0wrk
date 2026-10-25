@@ -8,7 +8,7 @@
 // always catches it because Wails injects the runtime and the generated
 // bindings BEFORE any bundle code runs, so a subscriber mounted at the App
 // root is registered in time. A browser tab that joins later (the web
-// transport, ADR-099) subscribes only after its page loads — by then the
+// transport, ADR-101) subscribes only after its page loads — by then the
 // event is long gone — so gating web arming on `backend:ready` leaves web
 // tabs permanently disarmed: their focus/visibility triggers never fire and
 // the missed-delta repair stays dead. Transport detection (api/runtime) is

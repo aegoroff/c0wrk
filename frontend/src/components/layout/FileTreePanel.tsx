@@ -323,7 +323,7 @@ export function FileTreePanel() {
     // Start watching the workspace root for changes. Ordered AFTER the
     // project's selection persist: the backend's WatchDirectory freshness
     // check resolves the active session from the PERSISTED selection
-    // (project_ui_state.saved_session_id, ADR-099), so a watch sent while the
+    // (project_ui_state.saved_session_id, ADR-101), so a watch sent while the
     // persist of the selection this root is based on is still in flight could
     // be (correctly) skipped as stale — awaiting it first keeps the re-scope
     // on the tree the user actually selected.

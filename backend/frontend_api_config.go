@@ -730,7 +730,7 @@ func (f *FrontendAPI) UpdateProxySettings(settings ProxySettingsRequest) error {
 
 // runExperimentalChangedHook invokes the installed desktop hook. The hook
 // is written once, inside Init's seed critical section (the
-// FrontendAPIConfig seam, ADR-099) and before the seedPublished flag, so
+// FrontendAPIConfig seam, ADR-101) and before the seedPublished flag, so
 // every caller here has passed seedAcquire first and the plain read is
 // ordered after the install — no lock is needed. The hook itself runs
 // SYNCHRONOUSLY on the caller's goroutine — the same contract

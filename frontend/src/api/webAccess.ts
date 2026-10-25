@@ -1,4 +1,4 @@
-// Web-access sidecar control bridge (ADR-099) — thin wrappers over the
+// Web-access sidecar control bridge (ADR-101) — thin wrappers over the
 // desktop App bindings. Mirrors desktop/app.go GetWebAccessInfo /
 // SetWebAccessEnabled: the Settings section's whole view of the sidecar
 // (persisted switch, runtime state, loopback URL, login token) and the
@@ -39,7 +39,7 @@ export interface WebAccessInfo {
   /** Whether a static token is persisted in config.yaml (a credential that
    *  survives restarts) as opposed to the ephemeral per-launch secret. */
   readonly tokenPinned: boolean
-  /** The PERSISTED web_access.tls.enabled switch (ADR-100) — the operator's
+  /** The PERSISTED web_access.tls.enabled switch (ADR-102) — the operator's
    *  HTTPS intent, not the runtime transport (the url field carries the
    *  sidecar's actual scheme). Absent on an older payload → false. */
   readonly tlsEnabled: boolean
@@ -86,7 +86,7 @@ export function parseWebAccessInfo(raw: unknown): WebAccessInfo | null {
     bindIsLoopback: r.bind_is_loopback !== false,
     token: r.token,
     tokenPinned: r.token_pinned === true,
-    // The TLS fields (ADR-100) tolerate a legacy payload the same way the
+    // The TLS fields (ADR-102) tolerate a legacy payload the same way the
     // pin fields do: the pins shipped in one binary with the TLS section, so
     // absence can only describe "unconfigured, plain HTTP" — never a state
     // worth guessing at.
@@ -175,7 +175,7 @@ export async function setWebAccessConnection(bind: string, port: number): Promis
 }
 
 /**
- * Persist the web_access.tls subsection (Settings → Web Access, ADR-100):
+ * Persist the web_access.tls subsection (Settings → Web Access, ADR-102):
  * the HTTPS switch and the PEM certificate/key paths in one immediate config
  * write, applied live through the section's restart-or-rollback — a running
  * sidecar rebuilds onto the new transport or the previous settings are

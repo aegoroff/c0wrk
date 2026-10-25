@@ -5,7 +5,7 @@
 // `window.go` (the generated RPC bindings) and `window.runtime` (the Wails
 // event/OS surface) are the desktop transport's raw capabilities: RPC dispatch,
 // event delivery, clipboard, window title, native browser open, Go-process
-// logging. The web transport (web-access sidecar, ADR-099) must be able to
+// logging. The web transport (web-access sidecar, ADR-101) must be able to
 // substitute ALL of them — which is only possible if every access funnels
 // through the single shim in `src/api/runtime.ts`. A second access point would
 // silently keep desktop-only behavior in the browser (a thrown RPC, a lost

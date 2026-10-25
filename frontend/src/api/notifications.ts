@@ -13,7 +13,7 @@
 // send/init bookkeeping would live in two places — exactly the split-brain
 // this wrapper exists to prevent.
 
-// Web-access note (ADR-099, browser transport): a browser tab cannot reach
+// Web-access note (ADR-101, browser transport): a browser tab cannot reach
 // the desktop.App notification bindings (they are not on the web dispatch
 // surface), and it SHOULDN'T — the browser has its own notification center.
 // In the web transport every entry point below branches to the Web
@@ -124,7 +124,7 @@ function readNotificationPermission(): 'default' | 'granted' | 'denied' | null {
  * window. `tag` collapses per session, so a burst of events for one session
  * replaces the stale banner instead of stacking duplicates.
  *
- * Permission contract (ADR-099): the send path NEVER prompts — the grant
+ * Permission contract (ADR-101): the send path NEVER prompts — the grant
  * gestures are the Settings master toggle and the Test button, and a
  * gestureless requestPermission here would be dismissed by most browsers
  * anyway. Without a granted permission the banner is dropped WITHOUT an
@@ -213,7 +213,7 @@ export function __resetPermissionWarnForTest(): void {
 }
 
 /** How a web permission request can settle. 'default' means the prompt was
- *  closed WITHOUT an answer — it is NOT a denial (ADR-099, decision 11): the
+ *  closed WITHOUT an answer — it is NOT a denial (ADR-101, decision 11): the
  *  Settings Test button stays the documented retry gesture, so consumers must
  *  keep it reachable instead of surfacing the blocked hint. */
 export type NotificationPermissionOutcome = 'granted' | 'denied' | 'default'
@@ -252,7 +252,7 @@ export async function ensureNotificationPermission(): Promise<NotificationPermis
  * macOS answers from UNNotificationCenter; Linux/Windows always grant (no
  * authorization concept). Web: the browser permission state — 'default'
  * (never asked) is NOT a denial: the Settings toggle and the Test button
- * are the documented user gestures that request the permission (ADR-099,
+ * are the documented user gestures that request the permission (ADR-101,
  * decision 11), so only a real 'denied' may surface the blocked hint. An
  * RPC failure resolves to true — a transient transport error must not paint
  * a misleading "disabled in macOS Settings" hint.
@@ -309,7 +309,7 @@ export function webNotificationDenialCause(): WebNotificationDenialCause | null 
  *  settle on 'granted'. `outcome` distinguishes the two non-grant results so
  *  the Settings section can react differently: a REAL 'denied' surfaces the
  *  blocked hint (the Test button hides), while 'default' — the prompt was
- *  closed without an answer — is NOT a denial (ADR-099, decision 11): the
+ *  closed without an answer — is NOT a denial (ADR-101, decision 11): the
  *  section stays neutral and the button remains the documented retry
  *  gesture. */
 export class NotificationPermissionError extends Error {
@@ -330,7 +330,7 @@ export class NotificationPermissionError extends Error {
  *  'denied' or a dismissed prompt — 'default', not a denial). */
 export async function showTestNotification(): Promise<void> {
   if (isWebTransport()) {
-    // The click IS the documented permission gesture (ADR-099, decision 11):
+    // The click IS the documented permission gesture (ADR-101, decision 11):
     // request first, then send through the granted-only path.
     const outcome = await ensureNotificationPermission()
     if (outcome !== 'granted') {

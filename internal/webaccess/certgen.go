@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // certgen.go — self-signed certificate generation for the web-access sidecar
-// (ADR-100): the Generate control writes the fixed app-owned PEM pair, a
+// (ADR-102): the Generate control writes the fixed app-owned PEM pair, a
 // leaf certificate scoped to the currently pinned bind address.
 //
 // The file is deliberately STDLIB-ONLY (crypto/x509, crypto/ecdsa,
 // encoding/pem, os) — the same isolation rule the package's import-hygiene
 // test enforces for the whole sidecar core.
 //
-// Security posture (ADR-100 decision 3):
+// Security posture (ADR-102 decision 3):
 //   - ECDSA P-256 key, self-signed leaf: KeyUsage DigitalSignature,
 //     ExtKeyUsage ServerAuth, BasicConstraintsValid with IsCA=false, a fresh
 //     crypto/rand 128-bit serial per generation.
@@ -23,7 +23,7 @@
 //     ambient umask) and renamed into place; the private key is published
 //     0600, the certificate 0644. A crash between the two renames can pair
 //     a new key with the previous certificate — the mount refuses such a
-//     pair fail-closed (ADR-100 decision 2) and regeneration is the fix;
+//     pair fail-closed (ADR-102 decision 2) and regeneration is the fix;
 //     a plaintext fallback never is.
 
 package webaccess
@@ -44,7 +44,7 @@ import (
 	"time"
 )
 
-// webAccessCertValidity is the generated leaf's validity window (ADR-100
+// webAccessCertValidity is the generated leaf's validity window (ADR-102
 // decision 3): 825 days.
 const webAccessCertValidity = 825 * 24 * time.Hour
 
@@ -54,7 +54,7 @@ const webAccessCertValidity = 825 * 24 * time.Hour
 // sidecar bind (config.IsValidWebAccessBind): the certificate's SANs are
 // derived from it (certSANs), so the browser-facing host of the CURRENT bind
 // is always covered — regenerating after a bind change is the documented
-// mismatch fix (ADR-100 decision 5).
+// mismatch fix (ADR-102 decision 5).
 //
 // The function never reads pre-existing files (a pure overwrite of the
 // standard pair it owns) and never creates parent directories — callers pass
@@ -63,7 +63,7 @@ const webAccessCertValidity = 825 * 24 * time.Hour
 // desktop surface can be clicked. It never flips web_access.tls.enabled and
 // never touches operator-authored paths; the persistence of the pair's paths
 // into the config section and the sidecar hot-restart are the desktop
-// layer's side of the Generate control (ADR-100 decision 3).
+// layer's side of the Generate control (ADR-102 decision 3).
 func GenerateWebAccessCertificate(bind, certPath, keyPath string) error {
 	if certPath == "" || keyPath == "" {
 		return errors.New("webaccess: tls: certificate and key paths are required")
@@ -89,7 +89,7 @@ func GenerateWebAccessCertificate(bind, certPath, keyPath string) error {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	// Stage both files completely, then publish — the key first, so a crash
 	// mid-publication leaves a NEW key with the OLD certificate: a mismatch
-	// the sidecar refuses fail-closed (ADR-100 decision 2), never a listener
+	// the sidecar refuses fail-closed (ADR-102 decision 2), never a listener
 	// serving a certificate whose key nobody holds anymore.
 	if err := writeFileAtomic(keyPath, keyPEM, 0o600); err != nil {
 		return err
@@ -109,7 +109,7 @@ func GenerateWebAccessCertificate(bind, certPath, keyPath string) error {
 }
 
 // certSANs maps a validated sidecar bind to the certificate's SAN set — the
-// four bind classes (ADR-100 decision 3):
+// four bind classes (ADR-102 decision 3):
 //
 //  1. the "localhost" name         → the loopback set;
 //  2. a loopback IP literal        → the loopback set;

@@ -227,9 +227,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		// Secure rides the transport (ADR-100): set exactly when the sidecar
+		// Secure rides the transport (ADR-102): set exactly when the sidecar
 		// terminates TLS, omitted on plain HTTP — byte-identical to the
-		// pre-ADR-100 behavior there. HttpOnly/SameSite=Strict, the
+		// pre-ADR-102 behavior there. HttpOnly/SameSite=Strict, the
 		// per-launch session secret and the token gate stay the compensations
 		// on both transports.
 		Secure: s.tls != nil,

@@ -6,7 +6,7 @@
 // arguments, exactly like the generated wailsjs bindings call them.
 //
 // The denylist is the only reduction. A browser tab holds full control of
-// the app by design (ADR-099); entries exist solely for methods that are
+// the app by design (ADR-101); entries exist solely for methods that are
 // hazards of the WEB TRANSPORT itself, each with its reason inline. Never
 // add an entry for ordinary business policy — policy belongs to the methods.
 

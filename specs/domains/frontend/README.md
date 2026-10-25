@@ -2,7 +2,7 @@
 
 ## Purpose
 
-React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with the Go backend through the `src/api/runtime.ts` transport seam: Wails IPC in the desktop webview; in a browser tab served by the web-access sidecar, `POST /api/rpc` + a WebSocket carrying the same event stream ([ADR-099](../../decisions/099-browser-web-access.md)) — identical behavior in both transports (see [loading-states.md](loading-states.md)).
+React 19 application providing the user interface for c0wrk: chat interaction, plan visualization, file viewing, and workspace management. Communicates with the Go backend through the `src/api/runtime.ts` transport seam: Wails IPC in the desktop webview; in a browser tab served by the web-access sidecar, `POST /api/rpc` + a WebSocket carrying the same event stream ([ADR-101](../../decisions/101-browser-web-access.md)) — identical behavior in both transports (see [loading-states.md](loading-states.md)).
 
 ## Key Files
 
@@ -211,7 +211,7 @@ Dark color-scheme. Focus outlines globally suppressed. Custom scrollbar (8px, se
 │  src/stores/* ←──Events──      ├─ desktop webview (Wails):   │
 │       ↑                        │    window.go.desktop.App.*  │
 │  src/hooks/* ←──handlers──     │    window.runtime.EventsOn()│
-│       ↑                        └─ browser tab (ADR-099):     │
+│       ↑                        └─ browser tab (ADR-101):     │
 │  src/components/* ←── React renders ←── store selectors      │
 │       (the seam picks the transport per environment:         │
 │        POST /api/rpc/<Method> + /ws via the web-access       │

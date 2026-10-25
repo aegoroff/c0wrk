@@ -2118,7 +2118,7 @@ notifications:
 # ---------------------------------------------------------------------------
 # Lets the desktop UI be mirrored into a browser window: c0wrk starts an
 # HTTP/WebSocket sidecar that serves the same frontend and bridges its live
-# events into the browser tab it opens (ADR-099). OFF by default — with the
+# events into the browser tab it opens (ADR-101). OFF by default — with the
 # section absent (or enabled: false) no listener is created and the app
 # behaves exactly as before.
 #
@@ -2133,7 +2133,7 @@ notifications:
 # reachable from this machine only. A non-loopback bind exposes the listener
 # to the network; without TLS the traffic — including the login POST body —
 # travels unencrypted, so do not point it at a network you do not fully
-# control (the tls subsection below adds optional HTTPS; ADR-100).
+# control (the tls subsection below adds optional HTTPS; ADR-102).
 #
 #   enabled (default false) — master switch; false starts nothing.
 #
@@ -2177,7 +2177,7 @@ notifications:
 #                            token is a durable credential in this file —
 #                            treat it like a password.
 #
-#   tls (default off)       — optional HTTPS for the sidecar (ADR-100):
+#   tls (default off)       — optional HTTPS for the sidecar (ADR-102):
 #                              serve the same UI over TLS instead of plain
 #                              HTTP, so a non-loopback bind no longer means
 #                              a token over plaintext.
@@ -2198,7 +2198,7 @@ notifications:
 #                               actually serve — either path empty, or the
 #                               pair failing to load (missing file, parse
 #                               error, key/cert mismatch) — is unusable
-#                               (ADR-100): the config load turns the whole
+#                               (ADR-102): the config load turns the whole
 #                               web_access section OFF with a warning
 #                               naming the reason (a requested TLS is never
 #                               downgraded to plain HTTP; fix the pair and

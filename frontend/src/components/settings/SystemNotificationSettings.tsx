@@ -21,7 +21,7 @@ import { logger } from '@/lib/logger'
 
 /** Tri-state of the section's permission view. 'checking' while the lazy
  *  mount probe runs; 'neutral' is every not-blocked state — granted, or an
- *  UNANSWERED 'default' prompt (not a denial, ADR-099 decision 11: the Test
+ *  UNANSWERED 'default' prompt (not a denial, ADR-101 decision 11: the Test
  *  button stays the documented retry gesture); 'denied' surfaces the muted
  *  hint and hides the button. */
 type PermissionState = 'checking' | 'neutral' | 'denied'
@@ -140,7 +140,7 @@ export function SystemNotificationSettings() {
       .then((outcome) => {
         // Three outcomes: 'granted' previews the confirmation banner; a real
         // 'denied' flips to the muted hint; 'default' — the prompt was
-        // closed WITHOUT an answer — is NOT a denial (ADR-099, decision 11):
+        // closed WITHOUT an answer — is NOT a denial (ADR-101, decision 11):
         // it lands in the neutral state, so no hint shows and the Test
         // button stays available as the documented retry gesture.
         //
@@ -178,7 +178,7 @@ export function SystemNotificationSettings() {
   // without navigating anywhere. A web rejection carries the gesture's
   // outcome: only a REAL denial ('denied') flips the section to its hint;
   // a dismissed prompt ('default', not a denial) keeps the neutral state so
-  // the button stays right here as the retry gesture (ADR-099, decision 11).
+  // the button stays right here as the retry gesture (ADR-101, decision 11).
   const handleTest = (): void => {
     void showTestNotification().catch((err) => {
       logger.warn('[system-notifications] test notification failed', err)

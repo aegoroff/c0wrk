@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // webaccess_connection_test.go — the connection surface of the browser
-// web-access sidecar (ADR-099): SetWebAccessConnection pins the bind/port,
+// web-access sidecar (ADR-101): SetWebAccessConnection pins the bind/port,
 // RegenerateWebAccessToken rotates the persistent credential, and
 // SetWebAccessToken persists an operator-typed one. All persist to
 // config.yaml through the same immediate write every settings change uses,

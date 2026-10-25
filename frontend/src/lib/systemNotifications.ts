@@ -165,7 +165,7 @@ export function classifyNotificationContent(
 // --- Transport --------------------------------------------------------------
 //
 // Desktop: every call goes through the Go bindings (@/api/notifications).
-// Web transport (ADR-099): @/api/notifications branches to the browser
+// Web transport (ADR-101): @/api/notifications branches to the browser
 // Notification API itself, so the SAME lib entry points serve both. The
 // availability guard below accepts either transport; the web branches live
 // behind the api layer so this module stays a pure event→content mapping

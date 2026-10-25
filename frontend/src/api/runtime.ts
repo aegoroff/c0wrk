@@ -1,6 +1,6 @@
 // Transport shim — the single access point for the desktop (Wails) runtime
 // bindings (`window.go` / `window.runtime`) and for the browser transport
-// used when this same bundle is served by the web-access sidecar (ADR-099).
+// used when this same bundle is served by the web-access sidecar (ADR-101).
 // Every `window.go`/`window.runtime` access in the frontend lives here; the
 // test/wailsAccessInvariant scan enforces it project-wide.
 
@@ -29,7 +29,7 @@ export function reportDroppedEvent(event: string, data: unknown): void {
 // Three states, resolved once per page load:
 //   - 'wails': the Wails runtime bindings are injected (desktop webview).
 //     Detected synchronously — Wails injects them before any bundle code runs.
-//   - 'web':   served by the web-access sidecar over plain HTTP (ADR-099).
+//   - 'web':   served by the web-access sidecar over plain HTTP (ADR-101).
 //     Detected by asking the origin: GET /api/transport answers
 //     `{transport:"web", ws:"/ws", authenticated:...}`. RPCs dispatch to
 //     POST /api/rpc/<Method>, events arrive over the WebSocket named by `ws`.
