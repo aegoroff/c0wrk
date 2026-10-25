@@ -356,6 +356,8 @@ export function ResetToCommit(arg1:string,arg2:string):Promise<void>;
 
 export function ResolvePendingMessage(arg1:string,arg2:string,arg3:string,arg4:string,arg5:Record<string, any>):Promise<void>;
 
+export function ResolveSkillResourcePath(arg1:string,arg2:string):Promise<string>;
+
 export function ResumeSession(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function ResumeTask(arg1:string,arg2:string,arg3:string):Promise<void>;

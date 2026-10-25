@@ -81,6 +81,25 @@ jobs:
       - name: Build
         run: xvfb-run make build
 
+      # The committed `frontend/wailsjs/go/` bindings are the Go ↔ TS contract
+      # (specs/contracts/desktop-frontend.md) and are rewritten by every
+      # `wails build`. No build or test step consumes them mechanically, so a
+      # PR can otherwise merge with stale bindings (as happened after #193).
+      # Fail when the build just performed rewrote them: the author must run
+      # the same build locally and commit the result. `frontend/wailsjs/runtime/`
+      # is untracked by design and is deliberately not checked.
+      - name: Verify committed wailsjs/go bindings are fresh
+        shell: bash
+        run: |
+          drift="$(git status --porcelain -- frontend/wailsjs/go)"
+          if [ -n "$drift" ]; then
+            echo "::error::frontend/wailsjs/go bindings are stale. Run 'make build' locally and commit the regenerated bindings."
+            echo "$drift"
+            git diff --stat -- frontend/wailsjs/go
+            exit 1
+          fi
+          echo "OK: committed wailsjs/go bindings match the build output"
+
       # Recipe smoke for the OpenVINO flavor channel (ADR-046 pattern): a
       # broken wheel URL, a stale pinned digest, or a recipe regression must
       # fail the PR instead of the release. Runs the real download + digest
@@ -153,6 +172,20 @@ jobs:
 
       - name: Build
         run: make build
+
+      # Same freshness gate as the linux job: committed `frontend/wailsjs/go/`
+      # bindings must match what the pinned wails CLI generates.
+      - name: Verify committed wailsjs/go bindings are fresh
+        shell: bash
+        run: |
+          drift="$(git status --porcelain -- frontend/wailsjs/go)"
+          if [ -n "$drift" ]; then
+            echo "::error::frontend/wailsjs/go bindings are stale. Run 'make build' locally and commit the regenerated bindings."
+            echo "$drift"
+            git diff --stat -- frontend/wailsjs/go
+            exit 1
+          fi
+          echo "OK: committed wailsjs/go bindings match the build output"
 
   windows:
     runs-on: windows-latest
@@ -256,6 +289,21 @@ jobs:
 
       - name: Build (Wails)
         run: wails build
+
+      # Same freshness gate as the linux/macos jobs: committed
+      # `frontend/wailsjs/go/` bindings must match what the pinned wails CLI
+      # generates.
+      - name: Verify committed wailsjs/go bindings are fresh
+        shell: bash
+        run: |
+          drift="$(git status --porcelain -- frontend/wailsjs/go)"
+          if [ -n "$drift" ]; then
+            echo "::error::frontend/wailsjs/go bindings are stale. Run 'wails build' locally and commit the regenerated bindings."
+            echo "$drift"
+            git diff --stat -- frontend/wailsjs/go
+            exit 1
+          fi
+          echo "OK: committed wailsjs/go bindings match the build output"
 
   # Dependency vulnerability gate: fails CI when a Go vulnerability from the
   # official database is reachable from this module's code. Run once, not

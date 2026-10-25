@@ -698,6 +698,10 @@ export function ResolvePendingMessage(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['desktop']['App']['ResolvePendingMessage'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function ResolveSkillResourcePath(arg1, arg2) {
+  return window['go']['desktop']['App']['ResolveSkillResourcePath'](arg1, arg2);
+}
+
 export function ResumeSession(arg1, arg2, arg3, arg4) {
   return window['go']['desktop']['App']['ResumeSession'](arg1, arg2, arg3, arg4);
 }
