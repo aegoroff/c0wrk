@@ -822,14 +822,14 @@ const webAccessLoadWarningPrefix = "web_access"
 // RefreshWebAccessLoadWarnings recomputes the web_access section's
 // contribution to the config-load-warning channel (GetConfig().config_errors
 // → the Settings "Configuration warning" banner, ADR-102): every entry with
-// the webAccessLoadWarningPrefix is dropped and the warnings the section's
-// CURRENT state draws (config.WebAccessLoadWarnings) are appended, so an
-// HTTP→HTTPS flip, a re-bind, or the enable toggle moves the banner with the
-// live section instead of freezing it on the launch-time snapshot. Warnings
-// from every other load-pipeline section (autonomy migration, MCP timeouts,
-// …) are preserved untouched — this is a surgical replacement of one
-// section's slice, never a clear-all (unlike the settings writers that nil
-// the whole channel once their own section validated).
+// the webAccessLoadWarningPrefix is dropped and the warnings the CURRENT
+// state draws (config.WebAccessLoadWarnings, gate conjunction included) are
+// appended, so an HTTP→HTTPS flip, a re-bind, or the enable toggle moves the
+// banner with the live section instead of freezing it on the launch-time
+// snapshot. Warnings from every other load-pipeline section (autonomy
+// migration, MCP timeouts, …) are preserved untouched — this is a surgical
+// replacement of one section's slice, never a clear-all (unlike the settings
+// writers that nil the whole channel once their own section validated).
 //
 // The method lives on the Lifecycle (not the FrontendAPI surface) by the
 // SetConfigLoadState precedent: a Wails-bindable method would widen the RPC
@@ -837,8 +837,8 @@ const webAccessLoadWarningPrefix = "web_access"
 // invoke it OUTSIDE webAccessMu — it takes configMu, and
 // UpdateExperimentalFeatures already holds configMu while taking webAccessMu,
 // so acquiring configMu under webAccessMu would close an ABBA cycle. The
-// desktop-owned section mutation itself stays unguarded by configMu (the
-// accepted one-word window documented at SetWebAccessEnabled): a concurrent
+// desktop-owned section mutation itself stays unguarded by configMu — see
+// the whole-file window documented at SetWebAccessEnabled: a concurrent
 // GetConfig between the mutation and this refresh can observe the new
 // section beside the old warning — the pre-existing staleness this method
 // exists to bound, narrowed to one RPC-gap.
@@ -849,7 +849,7 @@ func (l *FrontendAPILifecycle) RefreshWebAccessLoadWarnings() {
 	if l.f.config == nil {
 		return
 	}
-	fresh := config.WebAccessLoadWarnings(l.f.config.WebAccess)
+	fresh := config.WebAccessLoadWarnings(l.f.config.WebAccess, l.f.config.Experimental.Enabled)
 	kept := make([]string, 0, len(l.f.configLoadErrors)+len(fresh))
 	for _, w := range l.f.configLoadErrors {
 		if strings.HasPrefix(w, webAccessLoadWarningPrefix) {

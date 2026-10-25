@@ -818,6 +818,25 @@ func (f *FrontendAPI) UpdateExperimentalFeatures(enabled bool) error {
 	// persisted gate (a failed persist returned above).
 	f.runExperimentalChangedHook(enabled)
 
+	// The gate flip moves the section's exposure-warning state: the plain-
+	// HTTP warning is suppressed while the gate is closed and restored when
+	// it opens (the conjunction now lives INSIDE config.WebAccessLoadWarnings,
+	// so load and every recompute share one condition). The sidecar
+	// transition above does not touch the config_errors channel, so this
+	// method is the one place the flip's warning contribution is recomputed.
+	// The splice is done INLINE — this method already holds configMu, and
+	// RefreshWebAccessLoadWarnings re-takes it (self-deadlock); it mirrors
+	// that method exactly: prefix-filter, then append the fresh slice.
+	fresh := config.WebAccessLoadWarnings(f.config.WebAccess, f.config.Experimental.Enabled)
+	kept := make([]string, 0, len(f.configLoadErrors)+len(fresh))
+	for _, w := range f.configLoadErrors {
+		if strings.HasPrefix(w, webAccessLoadWarningPrefix) {
+			continue
+		}
+		kept = append(kept, w)
+	}
+	f.configLoadErrors = append(kept, fresh...)
+
 	return nil
 }
 

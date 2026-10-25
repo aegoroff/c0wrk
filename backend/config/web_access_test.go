@@ -227,7 +227,7 @@ web_access:
 	}
 	// Parity: the section-level predicate is unchanged — it still classifies
 	// the exposure; only the load call site gates on the master switch.
-	if got := WebAccessLoadWarnings(cfg.WebAccess); len(got) != 1 {
+	if got := WebAccessLoadWarnings(cfg.WebAccess, true); len(got) != 1 {
 		t.Fatalf("WebAccessLoadWarnings must still classify the exposure, got %v", got)
 	}
 }
@@ -911,11 +911,14 @@ func TestWebAccessTLS_SectionResetPreservesSubsection(t *testing.T) {
 func TestWebAccessTLS_BindResetPreservesUsablePair(t *testing.T) {
 	// The realistic loss scenario: an operator hand-authors a usable PEM
 	// pair (config.example.yaml documents hand-editing the paths as THE way
-	// to bring an operator-owned certificate) alongside a malformed bind. The
-	// fail-soft reset must heal only the connection/credential fields — the
-	// cert/key paths survive verbatim, so the next unrelated settings save
-	// cannot persist the pair away, and the fix-and-re-enable flow
-	// (ADR-102) finds its subsection intact.
+	// to bring an operator-owned certificate) and a static token alongside a
+	// malformed bind. The fail-soft reset must heal only the connection
+	// fields — the cert/key paths AND the hand-authored token survive
+	// verbatim, so the next unrelated settings save cannot persist the pair
+	// or the credential away (silently wiping the token would mint a
+	// DIFFERENT credential at the next sidecar start — the exact loss the
+	// reset's warning, which names bind/port alone, would never hint at),
+	// and the fix-and-re-enable flow (ADR-102) finds its subsection intact.
 	dir := t.TempDir()
 	certPath, keyPath := writeWebAccessTLSPair(t, dir)
 	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
@@ -941,8 +944,8 @@ web_access:
 	if cfg.WebAccess.Bind != DefaultWebAccessBind || cfg.WebAccess.Port != 0 {
 		t.Errorf("bind/port must reset to the defaults, got %q/%d", cfg.WebAccess.Bind, cfg.WebAccess.Port)
 	}
-	if cfg.WebAccess.Token != "" {
-		t.Errorf("the credential must reset to empty, got %q", cfg.WebAccess.Token)
+	if cfg.WebAccess.Token != "my-static-token-0123456789" {
+		t.Errorf("the hand-authored token must survive the reset verbatim, got %q", cfg.WebAccess.Token)
 	}
 	if !cfg.WebAccess.TLS.Enabled || cfg.WebAccess.TLS.Cert != certPath || cfg.WebAccess.TLS.Key != keyPath {
 		t.Errorf("the authored pair must survive the reset verbatim, got %+v", cfg.WebAccess.TLS)
@@ -1065,21 +1068,21 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 
 	t.Run("disabled section warns nothing even non-loopback plain", func(t *testing.T) {
 		section := WebAccessConfig{Enabled: false, Bind: "192.168.23.2"}
-		if got := WebAccessLoadWarnings(section); got != nil {
+		if got := WebAccessLoadWarnings(section, true); got != nil {
 			t.Errorf("disabled non-loopback plain = %v, want nil (no listener, nothing to expose)", got)
 		}
 	})
 
 	t.Run("enabled loopback warns nothing", func(t *testing.T) {
 		section := WebAccessConfig{Enabled: true, Bind: DefaultWebAccessBind}
-		if got := WebAccessLoadWarnings(section); got != nil {
+		if got := WebAccessLoadWarnings(section, true); got != nil {
 			t.Errorf("enabled loopback = %v, want nil", got)
 		}
 	})
 
 	t.Run("enabled non-loopback plain draws the exposure warning", func(t *testing.T) {
 		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}
-		got := WebAccessLoadWarnings(section)
+		got := WebAccessLoadWarnings(section, true)
 		if len(got) != 1 {
 			t.Fatalf("got %v, want exactly one warning", got)
 		}
@@ -1091,7 +1094,7 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 
 	t.Run("unspecified bind is non-loopback class", func(t *testing.T) {
 		section := WebAccessConfig{Enabled: true, Bind: "0.0.0.0"}
-		if got := WebAccessLoadWarnings(section); len(got) != 1 {
+		if got := WebAccessLoadWarnings(section, true); len(got) != 1 {
 			t.Errorf("0.0.0.0 plain HTTP = %v, want the exposure warning", got)
 		}
 	})
@@ -1102,8 +1105,18 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 			Bind:    "192.168.23.2",
 			TLS:     WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath},
 		}
-		if got := WebAccessLoadWarnings(section); got != nil {
+		if got := WebAccessLoadWarnings(section, true); got != nil {
 			t.Errorf("TLS-encrypted exposure = %v, want nil (ADR-102)", got)
+		}
+	})
+
+	t.Run("closed gate suppresses the exposure warning", func(t *testing.T) {
+		// CS #65 lives inside the shared predicate: gate closed → the
+		// sidecar cannot mount, so the present-tense exposure warning would
+		// overstate the exposure — nil, exactly like the load tail.
+		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}
+		if got := WebAccessLoadWarnings(section, false); got != nil {
+			t.Errorf("gate-closed non-loopback plain = %v, want nil", got)
 		}
 	})
 
@@ -1111,9 +1124,10 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 		// Parity holds while the compound gate is OPEN (the runtime recompute
 		// runs after a live gate flip — the warning's own case): the load
 		// pipeline then emits the same exposure warning the section-level
-		// predicate draws. The closed-gate suppression (CS #65) is a
-		// deliberate load-site divergence pinned by
-		// TestWebAccess_NonLoopbackBindSuppressedBehindClosedGate.
+		// predicate draws. The closed-gate suppression (CS #65) is no longer
+		// a load-site divergence — the gate conjunction lives INSIDE
+		// WebAccessLoadWarnings, so both paths share it (pinned by the
+		// "closed gate suppresses" subtest below).
 		for name, section := range map[string]WebAccessConfig{
 			"loopback plain":     {Enabled: true, Bind: DefaultWebAccessBind},
 			"non-loopback plain": {Enabled: true, Bind: "192.168.23.2"},
@@ -1123,7 +1137,7 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 		} {
 			live := Config{WebAccess: section, Experimental: ExperimentalConfig{Enabled: true}}
 			loadWarnings := normalizeWebAccess(&live)
-			got := WebAccessLoadWarnings(section)
+			got := WebAccessLoadWarnings(section, true)
 			if len(got) != len(loadWarnings) {
 				t.Errorf("%s: runtime = %v, load pipeline = %v", name, got, loadWarnings)
 				continue

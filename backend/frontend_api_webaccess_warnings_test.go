@@ -13,7 +13,7 @@ import (
 // interchangeable strings).
 func staleWebAccessExposure(t *testing.T) string {
 	t.Helper()
-	warnings := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3"})
+	warnings := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3"}, true)
 	if len(warnings) != 1 {
 		t.Fatalf("the fixture exposure warning = %v, want exactly one", warnings)
 	}
@@ -22,9 +22,15 @@ func staleWebAccessExposure(t *testing.T) string {
 
 // newWarningTestAPI builds a bare FrontendAPI carrying the given live config,
 // with the seed-publication flag set so GetConfig serves without the Init
-// barrier (the git-hardening test's precedent for zero-value APIs).
+// barrier (the git-hardening test's precedent for zero-value APIs). The
+// experimental gate is OPEN: the exposure warning this suite pins is the
+// gate-open conjunction (the gate-closed suppression is its own case in
+// config's TestWebAccessLoadWarnings and the desktop gate-flip test).
 func newWarningTestAPI(webAccess config.WebAccessConfig, seeded []string) *FrontendAPI {
-	f := &FrontendAPI{config: &config.Config{WebAccess: webAccess}}
+	f := &FrontendAPI{config: &config.Config{
+		WebAccess:    webAccess,
+		Experimental: config.ExperimentalConfig{Enabled: true},
+	}}
 	f.seedPublished.Store(true)
 	f.configLoadErrors = seeded
 	return f
@@ -47,7 +53,7 @@ func TestRefreshWebAccessLoadWarnings(t *testing.T) {
 
 		f.Lifecycle().RefreshWebAccessLoadWarnings()
 
-		fresh := config.WebAccessLoadWarnings(f.config.WebAccess)
+		fresh := config.WebAccessLoadWarnings(f.config.WebAccess, f.config.Experimental.Enabled)
 		want := append([]string{unrelated}, fresh...)
 		if got := f.GetConfig().ConfigErrors; !reflect.DeepEqual(got, want) {
 			t.Errorf("ConfigErrors = %v, want %v", got, want)

@@ -13,8 +13,13 @@
 // Stage-1 scope: text frames in and out, ping/pong/close handled, control
 // frames interleaved with fragmented messages, fragment total capped. No
 // compression (permessage-deflate is never offered). A dead peer is
-// reclaimed when a write fails or the read loop errors; there is no
-// keepalive timer yet (stage 2).
+// reclaimed when a write fails, when the read loop errors, or when the peer
+// stays silent past the keepalive window: the server pings every client on
+// a fixed interval and the read pump arms a liveness deadline around each
+// frame read — any inbound frame re-arms it — so a peer that completes the
+// handshake and then goes silent (or trickles bytes) can no longer pin its
+// connection and its two goroutines indefinitely (http.Server IdleTimeout
+// does not cover hijacked conns).
 
 package webaccess
 
@@ -29,6 +34,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +53,16 @@ const (
 	wsWriteTimeout = 10 * time.Second
 	// wsHandshakeTimeout bounds reading the (already-arrived) handshake bytes.
 	wsHandshakeTimeout = 10 * time.Second
+	// wsPingInterval is the server keepalive cadence: every connected client
+	// is pinged this often, and its pong (or any other frame) re-arms the
+	// read pump's liveness deadline.
+	wsPingInterval = 30 * time.Second
+	// wsReadIdleTimeout is that liveness window: how long the read pump waits
+	// for ANY frame before declaring the peer dead. It deliberately exceeds
+	// two ping intervals, so one lost ping/pong exchange must not tear down a
+	// live-but-idle tab, while a truly dead or silent peer is reclaimed in
+	// bounded time instead of pinning the conn and its goroutines forever.
+	wsReadIdleTimeout = 75 * time.Second
 )
 
 // WebSocket opcodes (RFC6455 §5.2).
@@ -152,6 +168,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn.SetDeadline(time.Time{}) //nolint:errcheck // best-effort bound
 	go s.wsWritePump(c)
 	go s.wsReadPump(c)
+	go s.wsPingLoop(c)
 }
 
 // wsHandshakeKey validates the upgrade headers and returns the client key,
@@ -215,8 +232,32 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	allowed := scheme + "://" + r.Host
-	return origin == allowed
+	return canonicalOrigin(origin) == canonicalOrigin(scheme+"://"+r.Host)
+}
+
+// canonicalOrigin reduces an origin — scheme://host or scheme://host:port —
+// to scheme://host, carrying the port only when it is not the scheme's
+// default. Browsers serialize the Origin header WITHOUT the default port
+// (:80 on http, :443 on https), while a typed Host header can retain it;
+// without this normalization the explicit-default-port spelling of the SAME
+// origin would be misread as cross-origin — fail-closed, but it 403s the
+// operator's own browser on login and the WS handshake. Malformed input is
+// returned unchanged and simply never matches a well-formed counterpart
+// (fail-closed, as the exact-compare it replaces).
+func canonicalOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	host := u.Hostname()
+	if host == "" {
+		return raw
+	}
+	port := u.Port()
+	if port == "" || (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return u.Scheme + "://" + host
+	}
+	return u.Scheme + "://" + net.JoinHostPort(host, port)
 }
 
 // hostMatchesBind reports whether a Host header value (host or host:port)
@@ -373,7 +414,11 @@ func (c *WSConn) writeFrame(opcode byte, payload []byte) error {
 
 // wsReadPump drains frames until the peer goes away. Every message is
 // delivered to the inbound callback (if wired); the goroutine carries its
-// own recover so a misbehaving callback cannot take the process down.
+// own recover so a misbehaving callback cannot take the process down. A
+// liveness deadline is armed around every frame read and re-armed by every
+// successfully read frame (a pong, an event, an inbound HITL reply — any
+// traffic counts), so a peer that goes silent past wsReadIdleTimeout errors
+// the read with a timeout and the connection is reclaimed.
 func (s *Server) wsReadPump(c *WSConn) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -382,6 +427,11 @@ func (s *Server) wsReadPump(c *WSConn) {
 		c.Close()
 	}()
 	for {
+		// Liveness bound, not a rate limit: an idle-but-alive tab answers
+		// the keepalive ping (wsPingLoop) well inside the window and stays.
+		if err := c.conn.SetReadDeadline(time.Now().Add(wsReadIdleTimeout)); err != nil {
+			return
+		}
 		opcode, payload, err := c.readMessage()
 		if err != nil {
 			return
@@ -392,6 +442,29 @@ func (s *Server) wsReadPump(c *WSConn) {
 		case opText, opBinary:
 			if s.wsInbound != nil {
 				s.wsInbound(c, payload)
+			}
+		}
+	}
+}
+
+// wsPingLoop sends a protocol-level ping every wsPingInterval until the
+// connection is torn down. The peer's pong (browsers answer automatically)
+// re-arms the read pump's liveness deadline — this is the server-side half
+// of the keepalive pair that reclaims a peer which completed the handshake
+// and then went silent. A failed ping write means the peer is gone: the
+// connection is aborted (no graceful close frame to a wedged socket) and
+// the loop exits.
+func (s *Server) wsPingLoop(c *WSConn) {
+	ticker := time.NewTicker(wsPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.closing:
+			return
+		case <-ticker.C:
+			if err := c.writeFrame(opPing, nil); err != nil {
+				c.abort()
+				return
 			}
 		}
 	}

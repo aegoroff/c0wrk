@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -66,11 +67,21 @@ func ipSetsEqual(a, b []net.IP) bool {
 }
 
 // TestCertSANs_BindClasses pins the SAN derivation for every bind class
-// (ADR-102 decision 3): the loopback set {localhost, 127.0.0.1, ::1} is
-// always present; the "localhost" name, a loopback literal and a wildcard
-// bind add nothing; a specific non-loopback IP adds itself (mapped IPv4
-// forms normalize to their 4-byte encoding); anything unparsable is refused.
+// (ADR-102 decision 3, as amended for the wildcard class): the loopback set
+// {localhost, 127.0.0.1, ::1} is always present; the "localhost" name and a
+// loopback literal add nothing; a wildcard bind adds the machine's
+// non-loopback unicast addresses (stubbed here — the assertions must not
+// depend on the host's live interfaces); a specific non-loopback IP adds
+// itself (mapped IPv4 forms normalize to their 4-byte encoding); anything
+// unparsable is refused.
 func TestCertSANs_BindClasses(t *testing.T) {
+	stubIPs := func(ips []net.IP) {
+		orig := webAccessInterfaceIPs
+		webAccessInterfaceIPs = func() []net.IP { return ips }
+		t.Cleanup(func() { webAccessInterfaceIPs = orig })
+	}
+	lan := []net.IP{net.IPv4(192, 168, 7, 42), net.ParseIP("2001:db8::42")}
+	stubIPs(lan)
 	cases := []struct {
 		name    string
 		bind    string
@@ -80,8 +91,8 @@ func TestCertSANs_BindClasses(t *testing.T) {
 		{"class 1: localhost name", "localhost", loopbackSANSet(), false},
 		{"class 2: loopback IPv4", "127.0.0.1", loopbackSANSet(), false},
 		{"class 2: loopback IPv6", "::1", loopbackSANSet(), false},
-		{"class 3: wildcard IPv4 names localhost", "0.0.0.0", loopbackSANSet(), false},
-		{"class 3: wildcard IPv6 names localhost", "::", loopbackSANSet(), false},
+		{"class 3: wildcard IPv4 adds the LAN set", "0.0.0.0", append(loopbackSANSet(), lan...), false},
+		{"class 3: wildcard IPv6 adds the LAN set", "::", append(loopbackSANSet(), lan...), false},
 		{"class 4: specific IPv4 names itself", "192.168.1.10",
 			append(loopbackSANSet(), net.IPv4(192, 168, 1, 10)), false},
 		{"class 4: specific IPv6 names itself", "2001:db8::1",
@@ -111,6 +122,51 @@ func TestCertSANs_BindClasses(t *testing.T) {
 				t.Errorf("ip SANs = %v, want %v", ips, tc.wantIPs)
 			}
 		})
+	}
+}
+
+// TestCertSANs_WildcardDegradation pins the amendment's best-effort and
+// bounded edges: an interface enumeration error degrades to the loopback
+// set (never a failed Generate), and the LAN set is capped at
+// wildcardIPSANCaps with a deterministic order.
+func TestCertSANs_WildcardDegradation(t *testing.T) {
+	stubIPs := func(ips []net.IP) {
+		orig := webAccessInterfaceIPs
+		webAccessInterfaceIPs = func() []net.IP { return ips }
+		t.Cleanup(func() { webAccessInterfaceIPs = orig })
+	}
+
+	stubIPs(nil) // enumeration failure → loopback-only set
+	dns, ips, err := certSANs("0.0.0.0")
+	if err != nil {
+		t.Fatalf("certSANs(0.0.0.0) with a failing enumerator: %v", err)
+	}
+	if !ipSetsEqual(ips, loopbackSANSet()) {
+		t.Errorf("degraded ip SANs = %v, want the loopback set %v", ips, loopbackSANSet())
+	}
+	_ = dns
+
+	flood := make([]net.IP, 0, wildcardIPSANCaps+3)
+	for i := 0; i < wildcardIPSANCaps+3; i++ {
+		flood = append(flood, net.IPv4(10, 1, byte(i), 7))
+	}
+	stubIPs(flood)
+	_, ips, err = certSANs("::")
+	if err != nil {
+		t.Fatalf("certSANs(::) with an over-cap enumerator: %v", err)
+	}
+	if len(ips) != 2+wildcardIPSANCaps {
+		t.Fatalf("ip SANs len = %d, want %d (loopback pair + cap)", len(ips), 2+wildcardIPSANCaps)
+	}
+	// The expectation mirrors the enumerator's contract: sorted by the IP's
+	// string form, then capped.
+	sorted := make([]net.IP, len(flood))
+	copy(sorted, flood)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].String() < sorted[j].String() })
+	for i, ip := range ips[2:] {
+		if want := sorted[i].String(); ip.String() != want {
+			t.Errorf("capped SAN[%d] = %s, want %s (deterministic order)", i, ip, want)
+		}
 	}
 }
 

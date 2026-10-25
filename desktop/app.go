@@ -170,10 +170,16 @@ type App struct {
 	// sections through it; it is kept solely so the desktop-owned
 	// web_access section can be flipped and persisted by SetWebAccessEnabled
 	// without a backend edit. Writes are serialized between themselves by
-	// webAccessMu (the toggle path); a concurrent backend save can only ever
-	// READ the section it persists — the one-word window this seam accepts,
-	// documented at SetWebAccessEnabled. Guarded by stateMu like the rest of
-	// the lifecycle state.
+	// webAccessMu (the toggle path). The persist marshals and writes the
+	// WHOLE config file while holding only webAccessMu (desktop cannot take
+	// configMu — the zero-backend-edit constraint), so a backend save can
+	// land inside that window: its field mutations interleave with this
+	// marshal's reads, and the two atomic renames are last-writer-wins — an
+	// older desktop snapshot can overwrite a just-persisted backend mutation
+	// on disk (memory is unaffected; the next backend save heals the file).
+	// The whole-file window is rare (operator-paced toggles), self-healing,
+	// and accepted in full knowledge — documented at SetWebAccessEnabled.
+	// Guarded by stateMu like the rest of the lifecycle state.
 	liveConfig     *config.Config
 	liveConfigPath string
 
@@ -1131,12 +1137,18 @@ func (a *App) refreshWebAccessLoadWarnings() {
 // flip, persist, start/stop — against the startup mount and the Shutdown
 // stop, so a toggle can never race a teardown into a leaked listener. The
 // config mutation itself deliberately does NOT take FrontendAPI's unexported
-// configMu (desktop cannot; that is the zero-backend-edit constraint):
-// desktop is the sole WRITER of the web_access section (backend code never
-// touches it at runtime), and a concurrent backend config save can only READ
-// the section it persists wholesale — the accepted one-word window of this
-// desktop-owned seam. The warning refresh runs after the unlock, so the
-// never-takes-configMu-under-webAccessMu rule survives (ADR-102).
+// configMu (desktop cannot; that is the zero-backend-edit constraint).
+// Desktop is the sole WRITER of the web_access section (backend code never
+// touches it at runtime), but the persist below marshals and writes the
+// WHOLE config file while holding only webAccessMu: a concurrent backend
+// save can mutate another section between this method's field reads, and
+// the two atomic renames are last-writer-wins — this older snapshot can land
+// after a newer backend save and drop its on-disk mutation (memory stays
+// consistent; the next backend save heals the file). The window is
+// whole-file, not one-word — rare (operator-paced toggles), self-healing,
+// and accepted in full knowledge. The warning refresh runs after the
+// unlock, so the never-takes-configMu-under-webAccessMu rule survives
+// (ADR-102).
 func (a *App) SetWebAccessEnabled(on bool) error {
 	a.webAccessMu.Lock()
 	err := a.setWebAccessEnabledLocked(on)
@@ -1633,9 +1645,13 @@ func dnsSANCovers(pattern, host string) bool {
 // (e.g. the pinned port is already taken), prev — the section state the
 // sidecar was running with — is restored in memory, persisted, and the
 // sidecar is brought back on it; the returned error names both failures and
-// the app is never left silently without a sidecar it had before. Callers
-// hold webAccessMu and have already persisted the new state into cfg; what
-// names the change in error messages comes through what.
+// the app is never left silently without a sidecar it had before. A FAILED
+// rollback persist is surfaced in the returned error the same way: the
+// operator is never told the previous settings were restored while disk
+// still holds the pin that failed to serve (the next launch would retry it
+// with no persisted trace of the rollback). Callers hold webAccessMu and
+// have already persisted the new state into cfg; what names the change in
+// error messages comes through what.
 func (a *App) restartWebAccessOrRollbackLocked(prev config.WebAccessConfig, cfg *config.Config, cfgPath, what string) error {
 	if a.webAccess.Load() == nil {
 		return nil
@@ -1655,18 +1671,29 @@ func (a *App) restartWebAccessOrRollbackLocked(prev config.WebAccessConfig, cfg 
 	}
 
 	// The new state does not serve. Restore the previous one on disk and
-	// bring the sidecar back up on it; both failures are named to the caller.
+	// bring the sidecar back up on it; every failure is named to the caller.
 	cfg.WebAccess = prev
-	if saveErr := config.Save(cfg, cfgPath); saveErr != nil {
+	saveErr := config.Save(cfg, cfgPath)
+	if saveErr != nil {
 		a.log().Error("web access: failed to persist the rolled-back settings", "err", saveErr)
 	}
 	restored, restartErr := a.startWebAccessLocked(a.log())
 	if restartErr != nil {
+		if saveErr != nil {
+			return fmt.Errorf(
+				"web access %s not applied: the sidecar failed to start with the new settings (%w) and could not be restored on the previous ones (%w); persisting the rolled-back settings also failed (%w) — disk still holds the settings that failed to serve, and the sidecar is down until the next launch",
+				what, err, restartErr, saveErr)
+		}
 		return fmt.Errorf(
 			"web access %s not applied: the sidecar failed to start with the new settings (%w) and could not be restored on the previous ones (%w) — it will retry on the next launch",
 			what, err, restartErr)
 	}
 	logWebAccessReady(a.log(), restored)
+	if saveErr != nil {
+		return fmt.Errorf(
+			"web access %s not applied: the sidecar failed to start with the new settings (%w); the sidecar is running again on the previous settings, but persisting the rollback failed (%w) — disk still holds the settings that failed to serve and will retry them on the next launch",
+			what, err, saveErr)
+	}
 	return fmt.Errorf(
 		"web access %s not applied: the sidecar failed to start with the new settings (%w); the previous settings were restored and the sidecar is running again",
 		what, err)

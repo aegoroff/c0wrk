@@ -16,8 +16,9 @@
 //     honor. A long-lived install can silently cross the expiry; the desktop
 //     surface computes cert_status=expired and regeneration is the fix.
 //   - SANs cover the pinned bind (certSANs): {localhost, 127.0.0.1, ::1}
-//     always, plus the bind's browser-facing host — a wildcard bind names
-//     localhost, a specific IP names itself.
+//     always, plus the bind's browser-facing hosts — a wildcard bind adds
+//     the machine's non-loopback global unicast addresses (bounded,
+//     best-effort), a specific IP names itself.
 //   - Atomic publication: both files are fully staged in the target
 //     directory (fsync'd, exact fchmod — the published mode survives any
 //     ambient umask) and renamed into place; the private key is published
@@ -41,6 +42,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -109,12 +111,15 @@ func GenerateWebAccessCertificate(bind, certPath, keyPath string) error {
 }
 
 // certSANs maps a validated sidecar bind to the certificate's SAN set — the
-// four bind classes (ADR-102 decision 3):
+// four bind classes (ADR-102 decision 3, as amended for the wildcard class):
 //
 //  1. the "localhost" name         → the loopback set;
 //  2. a loopback IP literal        → the loopback set;
-//  3. a wildcard bind (0.0.0.0/::) → the loopback set (the browser-facing
-//     host of a wildcard bind is localhost on this machine);
+//  3. a wildcard bind (0.0.0.0/::) → the loopback set PLUS the machine's
+//     non-loopback global unicast addresses (bounded, best-effort — see
+//     interfaceUnicastIPs): a wildcard bind serves every interface, and the
+//     address the browser on the LAN actually opens is one of them, so the
+//     generated pair covers it instead of guaranteeing a mismatch screen;
 //  4. a specific non-loopback IP   → the loopback set PLUS the bind itself,
 //     the host the browser actually opens.
 //
@@ -133,7 +138,26 @@ func certSANs(bind string) (dnsNames []string, ips []net.IP, err error) {
 	if ip == nil {
 		return nil, nil, fmt.Errorf("webaccess: tls: bind %q is not a valid IP literal or \"localhost\"", bind)
 	}
-	if ip.IsLoopback() || ip.IsUnspecified() {
+	if ip.IsLoopback() {
+		return dnsNames, ips, nil
+	}
+	if ip.IsUnspecified() {
+		// Wildcard bind: the machine's LAN-reachable addresses join the SAN
+		// set so the primary LAN use case (open https://<LAN-IP>:port from
+		// another device) gets a cert that covers the address actually
+		// opened. The set is sorted and capped HERE, at the consumption
+		// point, so the certificate body is deterministic regardless of the
+		// enumeration source. An address beyond the cap (or a host whose
+		// interface table cannot be read) still surfaces as
+		// cert_status=mismatch with regeneration the documented fix — the
+		// amendment narrows the gap for the common topology, it does not
+		// attempt to close it entirely.
+		lan := webAccessInterfaceIPs()
+		sort.Slice(lan, func(i, j int) bool { return lan[i].String() < lan[j].String() })
+		if len(lan) > wildcardIPSANCaps {
+			lan = lan[:wildcardIPSANCaps]
+		}
+		ips = append(ips, lan...)
 		return dnsNames, ips, nil
 	}
 	// Specific non-loopback bind: normalize IPv4-mapped forms to their 4-byte
@@ -143,6 +167,54 @@ func certSANs(bind string) (dnsNames []string, ips []net.IP, err error) {
 		ip = v4
 	}
 	return dnsNames, append(ips, ip), nil
+}
+
+// wildcardIPSANCaps bounds the interface-derived IP SAN set for a wildcard
+// bind: a certificate carrying dozens of SANs is a size/parsing hazard, and
+// a machine with more than this many non-loopback global unicast addresses
+// is far outside the sidecar's target topology — the leftover addresses stay
+// covered by the documented mismatch+regeneration flow.
+const wildcardIPSANCaps = 8
+
+// webAccessInterfaceIPs is the wildcard-bind address source, behind a
+// package-level indirection so tests can stub the enumeration — SAN
+// assertions must not depend on the host's live interfaces.
+var webAccessInterfaceIPs = interfaceUnicastIPs
+
+// interfaceUnicastIPs enumerates the machine's non-loopback, non-link-local
+// global unicast addresses — the addresses a browser on the LAN can actually
+// open a wildcard-bound sidecar under. Best-effort by contract: any error
+// (or an empty table) degrades to nil, i.e. the loopback-only SAN set of the
+// pre-amendment behavior, never a failed Generate. IPv4-mapped forms are
+// normalized to their 4-byte encoding; the consumer (certSANs) owns the
+// deterministic sort and the wildcardIPSANCaps cap.
+func interfaceUnicastIPs() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(addrs))
+	ips := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipnet.IP
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || !ip.IsGlobalUnicast() {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		key := ip.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		ips = append(ips, ip)
+	}
+	return ips
 }
 
 // certTemplate builds the certificate body: SANs from the bind, a fresh

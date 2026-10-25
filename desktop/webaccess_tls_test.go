@@ -824,14 +824,14 @@ web_access:
     key: %q
 `, certPath, keyPath))
 
-	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "192.168.23.2"})[0]
+	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}, true)[0]
 	unrelated := "autonomy: legacy smart_approve folded into silent_mode"
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// A standalone (nil-app) FrontendAPI so the channel is observable through
 	// GetConfig; the swap happens before any goroutine, so the published-once
 	// seed invariant is not at play.
-	fapi := backend.NewFrontendAPI(backend.FrontendAPIConfig{Config: cfg, Logger: quiet})
+	fapi := backend.NewFrontendAPI(backend.FrontendAPIConfig{Config: cfg, ConfigPath: path, Logger: quiet})
 	a := NewApp()
 	a.FrontendAPI = fapi
 	a.logger = quiet
@@ -872,4 +872,26 @@ web_access:
 		t.Fatalf("SetWebAccessEnabled(false): %v", err)
 	}
 	assertChannel("after disable", unrelated)
+
+	// The ADR-101 gate-flip case (CS #65): the flip recomputes the section's
+	// slice INLINE under configMu (UpdateExperimentalFeatures holds configMu;
+	// the lifecycle refresh would self-deadlock). A closed gate suppresses
+	// the exposure warning — the compound gate keeps the sidecar unmounted,
+	// so a present-tense listener warning would overstate the exposure — and
+	// reopening the gate restores it, without any section RPC in between.
+	// The section is re-enabled first so the flip has exposure to move.
+	if err := a.SetWebAccessEnabled(true); err != nil {
+		t.Fatalf("SetWebAccessEnabled(true): %v", err)
+	}
+	assertChannel("after re-enable (gate open)", unrelated, exposure)
+
+	if err := fapi.UpdateExperimentalFeatures(false); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(false): %v", err)
+	}
+	assertChannel("after gate close", unrelated)
+
+	if err := fapi.UpdateExperimentalFeatures(true); err != nil {
+		t.Fatalf("UpdateExperimentalFeatures(true): %v", err)
+	}
+	assertChannel("after gate reopen", unrelated, exposure)
 }

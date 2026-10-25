@@ -55,8 +55,11 @@ var windowsReservedBaseNames = func() map[string]struct{} {
 // extensionless image drop still routes through the image pipeline instead
 // of failing as an unsupported document. A Windows reserved device base name
 // is underscore-escaped ("nul.png" → "nul_.png") so the staged name is
-// always a regular file on every platform. Returns "" when nothing usable
-// remains.
+// always a regular file on every platform — the check covers the FIRST-dot
+// segment, because Windows device resolution keys on the stem before the
+// first dot, not the last extension: "nul.tar.gz" would otherwise sail
+// through a last-extension check and still open the NUL device. Returns ""
+// when nothing usable remains.
 func sanitizeAttachmentName(fileName, mimeType string) string {
 	base := fileName
 	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
@@ -71,10 +74,12 @@ func sanitizeAttachmentName(fileName, mimeType string) string {
 			base += ext
 		}
 	}
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	if _, reserved := windowsReservedBaseNames[strings.ToLower(name)]; reserved {
-		base = name + "_" + ext
+	stem := base
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		stem = base[:i]
+	}
+	if _, reserved := windowsReservedBaseNames[strings.ToLower(stem)]; reserved {
+		base = stem + "_" + base[len(stem):]
 	}
 	return base
 }

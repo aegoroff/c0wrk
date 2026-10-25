@@ -83,6 +83,20 @@ func (l *loginLimiter) allow(key string, now time.Time) bool {
 	return b.count <= l.max
 }
 
+// succeed clears the key's bucket after a SUCCESSFUL login. The limiter
+// exists to make wrong-guess brute force expensive, and a success proves
+// the client holds the secret — its spent attempts no longer belong in the
+// window. On the default loopback bind every local process shares one
+// per-IP bucket, so counting successes would let the operator's own rapid
+// re-logins (ten in a minute) lock their browser out of login; resetting
+// keeps the legitimate path unbound while every wrong guess still burns an
+// attempt it cannot recover.
+func (l *loginLimiter) succeed(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.hits, key)
+}
+
 // noStore stamps cache-suppression onto every dynamic response: API results
 // and auth state must never land in any cache.
 func noStore(next http.HandlerFunc) http.Handler {
@@ -221,6 +235,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
+	// Success clears the limiter bucket: a client that just proved it holds
+	// the secret starts from a clean window (the loopback bucket is shared
+	// by every local process — counting successes would let the operator's
+	// own re-logins trigger the limit; see loginLimiter.succeed).
+	s.limiter.succeed(clientKey(r))
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    s.sessionToken,

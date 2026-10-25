@@ -349,12 +349,20 @@ func webAccessLoopbackWarning(bind string) string {
 
 // WebAccessLoadWarnings is the pure, state-only counterpart of the
 // normalizeWebAccess warning tail (ADR-102), for callers that mutate the
-// section at runtime (desktop's control RPCs) and must keep the UI's
-// config-load-warning channel — GetConfig().config_errors → the Settings
-// "Configuration warning" banner — in step with the live section instead of
-// freezing it on the launch-time snapshot. It returns the warnings the
-// section's CURRENT state draws without touching anything, so a runtime
-// recompute is idempotent and safe after failures and rollbacks alike.
+// section at runtime (desktop's control RPCs, the experimental-gate flip)
+// and must keep the UI's config-load-warning channel — GetConfig().
+// config_errors → the Settings "Configuration warning" banner — in step
+// with the live state instead of freezing it on the launch-time snapshot.
+// It returns the warnings the CURRENT state draws without touching
+// anything, so a runtime recompute is idempotent and safe after failures
+// and rollbacks alike.
+//
+// experimentalEnabled is the master gate's live value and part of the
+// warning's condition, exactly as at load (CS #65): while the gate is
+// closed the sidecar cannot mount, so the present-tense exposure warning
+// would overstate the actual exposure — the load path and every runtime
+// recompute share the SAME conjunction here and can never drift apart on
+// the gate axis.
 //
 // Only the exposure warning is computable here, and only from state. The
 // interactive writers preflight a TLS pair fail-closed (the TLS commit loads
@@ -366,8 +374,8 @@ func webAccessLoopbackWarning(bind string) string {
 // nothing (no listener, nothing to expose); an enabled non-loopback bind
 // warns only while the effective transport is plain HTTP (ADR-102) — a
 // TLS-encrypted exposure stays a section-banner + start-log matter.
-func WebAccessLoadWarnings(section WebAccessConfig) []string {
-	if !section.Enabled {
+func WebAccessLoadWarnings(section WebAccessConfig, experimentalEnabled bool) []string {
+	if !section.Enabled || !experimentalEnabled {
 		return nil
 	}
 	if IsLoopbackBind(section.Bind) || section.TLS.Enabled {
@@ -395,11 +403,11 @@ func defaultWebAccessState() WebAccessConfig {
 // normalizeWebAccess validates the web_access section in place and returns
 // load warnings. VALIDITY problems are FAIL-SOFT: an enabled section with an
 // unparseable bind or an out-of-range port is warned about and has its
-// connection/credential fields reset to the default state (the sidecar stays
-// off) while the authored tls subsection survives — the same
-// preserve-the-subsection contract as the TLS branch below, so a bind/port
-// typo can never silently wipe a hand-authored certificate pair or static
-// token — never fatal, because a broken section must
+// connection fields reset to the default state (the sidecar stays off) while
+// the authored tls subsection AND a hand-authored static token survive — the
+// same preserve-the-subsection contract as the TLS branch below, so a
+// bind/port typo can never silently wipe a hand-authored certificate pair or
+// static token — never fatal, because a broken section must
 // not keep the app from starting, and must not leave a half-applied unsafe
 // listener either. A VALID non-loopback bind is not a validity problem: the
 // section stays enabled and — while the effective transport is plain HTTP
@@ -435,16 +443,17 @@ func normalizeWebAccess(cfg *Config) []string {
 		warning := "web_access ignored (the sidecar stays disabled; fix bind/port and re-enable): " +
 			strings.Join(reasons, "; ")
 		// The reset mirrors the sibling ADR-102 branch below: only the
-		// connection/credential fields return to the default state and the
-		// authored tls subsection survives (only Enabled/Bind/Port/Token are
-		// reset). A disabled section is inert — the persisted shape stays
-		// valid either way — and silently wiping a hand-authored PEM pair or
-		// static token because of a bind/port typo would destroy real
-		// operator config on the next unrelated save (the warning names
-		// bind/port alone, so nothing would hint at the loss).
+		// connection fields return to the default state and the authored
+		// tls subsection AND static token survive (only Enabled/Bind/Port
+		// are reset). A disabled section is inert — the persisted shape
+		// stays valid either way — and silently wiping a hand-authored PEM
+		// pair or static token because of a bind/port typo would destroy
+		// real operator config on the next unrelated save (the warning
+		// names bind/port alone, so nothing would hint at the loss).
 		authored := cfg.WebAccess
 		cfg.WebAccess = defaultWebAccessState()
 		cfg.WebAccess.TLS = authored.TLS
+		cfg.WebAccess.Token = authored.Token
 		warnings = append(warnings, warning)
 	}
 	// ADR-102: a tls subsection the sidecar cannot serve — structurally
@@ -472,16 +481,14 @@ func normalizeWebAccess(cfg *Config) []string {
 	// warning-free (its exposure stays surfaced by the Settings section
 	// banner and the sidecar start log).
 	//
-	// Suppressed while the experimental master switch is closed (CS #65):
-	// the compound gate guarantees the sidecar cannot mount, so the
-	// present-tense "listener is network-accessible, traffic is plain HTTP"
-	// warning would overstate the actual exposure at load time. The runtime
-	// recompute after a live gate flip calls WebAccessLoadWarnings directly
-	// (desktop's refreshWebAccessLoadWarnings) — that is the case the
-	// warning is written for, and it keeps firing there.
-	if cfg.Experimental.Enabled {
-		warnings = append(warnings, WebAccessLoadWarnings(cfg.WebAccess)...)
-	}
+	// The experimental master gate is part of the shared condition (CS #65):
+	// while it is closed the compound gate guarantees the sidecar cannot
+	// mount, so the present-tense "listener is network-accessible, traffic
+	// is plain HTTP" warning would overstate the actual exposure. The gate
+	// lives INSIDE WebAccessLoadWarnings, so the runtime recomputes (the
+	// control RPCs' refresh and the gate flip's own recompute in
+	// UpdateExperimentalFeatures) apply the identical conjunction.
+	warnings = append(warnings, WebAccessLoadWarnings(cfg.WebAccess, cfg.Experimental.Enabled)...)
 	return warnings
 }
 
