@@ -938,6 +938,19 @@ describe('web transport login gating', () => {
     await expect(runtime.webAuthRequired()).resolves.toBe(true)
   })
 
+  it('resolves the minimal pre-auth answer (no ws, no authenticated) as web + gated', async () => {
+    // The sidecar's anonymous /api/transport is exactly {transport:"web"}:
+    // the absent ws keeps the module default ('/ws') and the absent
+    // authenticated reads as "must log in" — the gate must hold without the
+    // transport collapsing to 'none'.
+    respondTransport({ transport: 'web' })
+    runtime = await bootedRuntime()
+
+    expect(runtime.isWebTransport()).toBe(true)
+    await expect(runtime.webAuthRequired()).resolves.toBe(true)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
   it('does not open the event socket for an unauthenticated tab', async () => {
     // A pre-auth upgrade attempt can only 401-loop against the sidecar;
     // login reloads the page, so the post-auth probe reconnects instead.

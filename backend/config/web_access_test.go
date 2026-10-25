@@ -166,13 +166,16 @@ web_access:
 }
 
 func TestWebAccess_NonLoopbackBindLoadsWithWarning(t *testing.T) {
-	// Stage 2: a valid non-loopback bind is a deliberate LAN-exposed listener,
-	// not a validity problem — it loads ENABLED with exactly one
-	// network-exposure warning and its values preserved verbatim. The warning
-	// fires only while the compound gate can actually produce a listener, so
-	// the fixture opens the experimental master switch (CS #65).
+	// Stage 2 + the insecure-LAN gate: a valid non-loopback bind over plain
+	// HTTP is REFUSED BY DEFAULT — exactly one warning naming the fix, the
+	// section disabled, values preserved for the fix-and-re-enable flow.
+	// With the explicit allow_insecure_lan opt-in the shape loads ENABLED
+	// with exactly one accepted-risk warning. The warning fires only while
+	// the compound gate can actually produce a listener, so the fixture
+	// opens the experimental master switch (CS #65).
 	for _, bind := range []string{"0.0.0.0", "::", "192.168.1.10", "10.0.0.5"} {
-		cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+		t.Run(bind+" refused without the opt-in", func(t *testing.T) {
+			cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
 experimental:
   enabled: true
 web_access:
@@ -181,43 +184,134 @@ web_access:
   port: 8765
   token: s3cret-token
 `))
-		if len(warnings) != 1 {
-			t.Fatalf("bind %q: expected exactly one load warning, got %v", bind, warnings)
+			if len(warnings) != 1 {
+				t.Fatalf("bind %q: expected exactly one load warning, got %v", bind, warnings)
+			}
+			if !strings.Contains(warnings[0], "web_access") ||
+				!strings.Contains(warnings[0], "not loopback") ||
+				!strings.Contains(warnings[0], "allow_insecure_lan") {
+				t.Errorf("bind %q: warning must name the section and the opt-in, got %q", bind, warnings[0])
+			}
+			if !strings.Contains(warnings[0], "the sidecar stays disabled") {
+				t.Errorf("bind %q: warning must name the disabled outcome, got %q", bind, warnings[0])
+			}
+			if cfg.WebAccess.Enabled {
+				t.Errorf("bind %q: the insecure-LAN section must load DISABLED by default", bind)
+			}
+			if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+				t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
+			}
+		})
+		t.Run(bind+" enabled with the opt-in", func(t *testing.T) {
+			cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
+experimental:
+  enabled: true
+web_access:
+  enabled: true
+  bind: "`+bind+`"
+  port: 8765
+  token: s3cret-token
+  allow_insecure_lan: true
+`))
+			if len(warnings) != 1 {
+				t.Fatalf("bind %q: expected exactly one load warning, got %v", bind, warnings)
+			}
+			if !strings.Contains(warnings[0], "web_access") ||
+				!strings.Contains(warnings[0], "not loopback") ||
+				!strings.Contains(warnings[0], "network-accessible") {
+				t.Errorf("bind %q: warning must name the section and the network exposure, got %q", bind, warnings[0])
+			}
+			// ADR-102: the load warning exists only for the plain-HTTP
+			// combination, so the message names the transport and the
+			// accepted-risk opt-in, and must never carry the retired
+			// TLS-encrypted variant.
+			if !strings.Contains(warnings[0], "plain HTTP without TLS") ||
+				!strings.Contains(warnings[0], "accepted via allow_insecure_lan") {
+				t.Errorf("bind %q: warning must name the plain-HTTP transport and the opt-in, got %q", bind, warnings[0])
+			}
+			if strings.Contains(warnings[0], "TLS-encrypted") {
+				t.Errorf("bind %q: plain-HTTP warning must not mention TLS encryption, got %q", bind, warnings[0])
+			}
+			if !cfg.WebAccess.Enabled {
+				t.Errorf("bind %q: the opted-in section must stay enabled", bind)
+			}
+			if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
+				t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
+			}
+			if !cfg.WebAccess.AllowInsecureLAN {
+				t.Errorf("bind %q: the opt-in must round-trip", bind)
+			}
+		})
+	}
+}
+
+func TestWebAccess_InsecureLANGateMatrix(t *testing.T) {
+	// The gate predicate (webAccessInsecureLAN / ValidateWebAccessExposure)
+	// is the one rule shared by load, save, the interactive boundaries and
+	// the mount backstop — pinned here in the pure, so drift between the
+	// enforcement points shows up as a unit failure before it shows up as a
+	// policy hole.
+	refused := []WebAccessConfig{
+		{Enabled: true, Bind: "0.0.0.0"},
+		{Enabled: true, Bind: "::"},
+		{Enabled: true, Bind: "192.168.1.10"},
+	}
+	for _, sec := range refused {
+		err := ValidateWebAccessExposure(sec)
+		if err == nil {
+			t.Errorf("ValidateWebAccessExposure(%+v) = nil, want the insecure-LAN refusal", sec)
+			continue
 		}
-		if !strings.Contains(warnings[0], "web_access") ||
-			!strings.Contains(warnings[0], "not loopback") ||
-			!strings.Contains(warnings[0], "network-accessible") {
-			t.Errorf("bind %q: warning must name the section and the network exposure, got %q", bind, warnings[0])
+		if !strings.Contains(err.Error(), "allow_insecure_lan") || !strings.Contains(err.Error(), "tls") {
+			t.Errorf("refusal must name both ways out, got %q", err.Error())
 		}
-		// ADR-102: the load warning exists only for the plain-HTTP
-		// combination, so the message names the transport and must never
-		// carry the retired TLS-encrypted variant.
-		if !strings.Contains(warnings[0], "plain HTTP without TLS") {
-			t.Errorf("bind %q: warning must name the plain-HTTP transport, got %q", bind, warnings[0])
+	}
+	allowed := []WebAccessConfig{
+		{Enabled: true, Bind: "127.0.0.1"},                                            // loopback
+		{Enabled: true, Bind: "localhost"},                                            // loopback name
+		{Enabled: true, Bind: "::1"},                                                  // loopback v6
+		{Enabled: true, Bind: "192.168.1.10", TLS: WebAccessTLSConfig{Enabled: true}}, // encrypted
+		{Enabled: true, Bind: "0.0.0.0", AllowInsecureLAN: true},                      // explicit opt-in
+		{Enabled: false, Bind: "0.0.0.0"},                                             // paper state
+		{},                                                                            // zero section
+	}
+	for _, sec := range allowed {
+		if err := ValidateWebAccessExposure(sec); err != nil {
+			t.Errorf("ValidateWebAccessExposure(%+v) = %v, want nil", sec, err)
 		}
-		if strings.Contains(warnings[0], "TLS-encrypted") {
-			t.Errorf("bind %q: plain-HTTP warning must not mention TLS encryption, got %q", bind, warnings[0])
-		}
-		if !cfg.WebAccess.Enabled {
-			t.Errorf("bind %q: a valid non-loopback section must stay enabled", bind)
-		}
-		if cfg.WebAccess.Bind != bind || cfg.WebAccess.Port != 8765 || cfg.WebAccess.Token != "s3cret-token" {
-			t.Errorf("bind %q: section values must be preserved, got %+v", bind, cfg.WebAccess)
-		}
+	}
+
+	// Fail-closed at save: the refused shape must never persist through any
+	// config write, while the opted-in counterpart saves fine.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := minimalValidConfig()
+	cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: "0.0.0.0"}
+	if err := Save(cfg, path); err == nil {
+		t.Error("Save must refuse the insecure-LAN shape")
+	} else if !strings.Contains(err.Error(), "allow_insecure_lan") {
+		t.Errorf("save refusal must name the opt-in, got %q", err.Error())
+	}
+	cfg.WebAccess.AllowInsecureLAN = true
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save must accept the opted-in shape, got %v", err)
 	}
 }
 
 func TestWebAccess_NonLoopbackBindSuppressedBehindClosedGate(t *testing.T) {
-	// CS #65: the plain-HTTP exposure warning is present-tense — it must not
-	// fire at load time while the experimental master switch guarantees the
-	// sidecar cannot mount. The section loads enabled and silent; the
-	// runtime recompute after a live gate flip still owns the warning.
+	// CS #65: the accepted-risk exposure warning is present-tense — it must
+	// not fire at load time while the experimental master switch guarantees
+	// the sidecar cannot mount. The section (with the allow_insecure_lan
+	// opt-in in place — without it the load gate disables it) loads enabled
+	// and silent; the runtime recompute after a live gate flip still owns
+	// the warning.
 	cfg, warnings := loadWebAccessYAML(t, minimalWebAccessYAML(`
 web_access:
   enabled: true
   bind: "192.168.1.10"
   port: 8765
   token: s3cret-token
+  allow_insecure_lan: true
 `))
 	if len(warnings) != 0 {
 		t.Fatalf("closed gate must suppress the exposure warning, got %v", warnings)
@@ -439,37 +533,52 @@ func TestWebAccess_SaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestWebAccess_NonLoopbackBindSaveRoundTrip(t *testing.T) {
-	// A valid non-loopback bind is an operator decision, not a validity
-	// problem: it saves without error and re-loads with exactly the
-	// network-exposure warning, values intact. The exposure warning fires
-	// only while the compound gate can produce a listener, so the fixture
-	// opens the experimental master switch (CS #65).
+	// A valid non-loopback bind over plain HTTP is an operator decision
+	// ONLY behind the explicit allow_insecure_lan opt-in: with the flag the
+	// section saves without error and re-loads ENABLED with exactly the
+	// accepted-risk warning, values intact; without it the save itself is
+	// refused (the gate is fail-closed on the write path too). The exposure
+	// warning fires only while the compound gate can produce a listener, so
+	// the fixture opens the experimental master switch (CS #65).
 	for _, bind := range []string{"0.0.0.0", "192.168.1.10"} {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "config.yaml")
-		cfg := minimalValidConfig()
-		cfg.Experimental.Enabled = true
-		cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: bind, Port: 8765, Token: "s3cret-token"}
-		if err := Save(cfg, path); err != nil {
-			t.Fatalf("bind %q: Save must accept a valid non-loopback bind, got %v", bind, err)
-		}
-		if _, statErr := os.Stat(path); statErr != nil {
-			t.Fatalf("bind %q: accepted save must create the file: %v", bind, statErr)
-		}
-		loaded, err := LoadWithResult(path)
-		if err != nil {
-			t.Fatalf("bind %q: LoadWithResult: %v", bind, err)
-		}
-		if len(loaded.LoadErrors) != 1 {
-			t.Fatalf("bind %q: reload must carry exactly the loopback warning, got %v", bind, loaded.LoadErrors)
-		}
-		if !strings.Contains(loaded.LoadErrors[0], "not loopback") ||
-			!strings.Contains(loaded.LoadErrors[0], "network-accessible") {
-			t.Errorf("bind %q: reload warning must name the network exposure, got %q", bind, loaded.LoadErrors[0])
-		}
-		if loaded.Config.WebAccess != cfg.WebAccess {
-			t.Errorf("bind %q: round trip = %+v, want %+v", bind, loaded.Config.WebAccess, cfg.WebAccess)
-		}
+		t.Run(bind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			cfg := minimalValidConfig()
+			cfg.Experimental.Enabled = true
+			cfg.WebAccess = WebAccessConfig{Enabled: true, Bind: bind, Port: 8765, Token: "s3cret-token"}
+			if err := Save(cfg, path); err == nil {
+				t.Fatalf("bind %q: Save must refuse the insecure-LAN shape without the opt-in", bind)
+			} else if !strings.Contains(err.Error(), "allow_insecure_lan") {
+				t.Fatalf("bind %q: save refusal must name the opt-in, got %v", bind, err)
+			}
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("bind %q: refused save must not create the file", bind)
+			}
+
+			cfg.WebAccess.AllowInsecureLAN = true
+			if err := Save(cfg, path); err != nil {
+				t.Fatalf("bind %q: Save must accept the opted-in non-loopback bind, got %v", bind, err)
+			}
+			if _, statErr := os.Stat(path); statErr != nil {
+				t.Fatalf("bind %q: accepted save must create the file: %v", bind, statErr)
+			}
+			loaded, err := LoadWithResult(path)
+			if err != nil {
+				t.Fatalf("bind %q: LoadWithResult: %v", bind, err)
+			}
+			if len(loaded.LoadErrors) != 1 {
+				t.Fatalf("bind %q: reload must carry exactly the loopback warning, got %v", bind, loaded.LoadErrors)
+			}
+			if !strings.Contains(loaded.LoadErrors[0], "not loopback") ||
+				!strings.Contains(loaded.LoadErrors[0], "network-accessible") ||
+				!strings.Contains(loaded.LoadErrors[0], "accepted via allow_insecure_lan") {
+				t.Errorf("bind %q: reload warning must name the network exposure and the opt-in, got %q", bind, loaded.LoadErrors[0])
+			}
+			if loaded.Config.WebAccess != cfg.WebAccess {
+				t.Errorf("bind %q: round trip = %+v, want %+v", bind, loaded.Config.WebAccess, cfg.WebAccess)
+			}
+		})
 	}
 }
 
@@ -1081,19 +1190,29 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 	})
 
 	t.Run("enabled non-loopback plain draws the exposure warning", func(t *testing.T) {
-		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}
+		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2", AllowInsecureLAN: true}
 		got := WebAccessLoadWarnings(section, true)
 		if len(got) != 1 {
 			t.Fatalf("got %v, want exactly one warning", got)
 		}
-		want := `web_access: bind "192.168.23.2" is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS`
+		want := `web_access: bind "192.168.23.2" is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS (accepted via allow_insecure_lan)`
 		if got[0] != want {
 			t.Errorf("warning = %q, want %q", got[0], want)
 		}
 	})
 
+	t.Run("non-loopback plain without the opt-in warns nothing — it cannot survive", func(t *testing.T) {
+		// The refused shape is disabled by the load gate and refused by the
+		// interactive boundaries, so the runtime recompute never sees it;
+		// the predicate is total anyway — no flag, no accepted-risk warning.
+		section := WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}
+		if got := WebAccessLoadWarnings(section, true); got != nil {
+			t.Errorf("non-opted-in non-loopback plain = %v, want nil (the state cannot survive to here)", got)
+		}
+	})
+
 	t.Run("unspecified bind is non-loopback class", func(t *testing.T) {
-		section := WebAccessConfig{Enabled: true, Bind: "0.0.0.0"}
+		section := WebAccessConfig{Enabled: true, Bind: "0.0.0.0", AllowInsecureLAN: true}
 		if got := WebAccessLoadWarnings(section, true); len(got) != 1 {
 			t.Errorf("0.0.0.0 plain HTTP = %v, want the exposure warning", got)
 		}
@@ -1129,8 +1248,9 @@ func TestWebAccessLoadWarnings(t *testing.T) {
 		// WebAccessLoadWarnings, so both paths share it (pinned by the
 		// "closed gate suppresses" subtest below).
 		for name, section := range map[string]WebAccessConfig{
-			"loopback plain":     {Enabled: true, Bind: DefaultWebAccessBind},
-			"non-loopback plain": {Enabled: true, Bind: "192.168.23.2"},
+			"loopback plain": {Enabled: true, Bind: DefaultWebAccessBind},
+			"non-loopback plain (opted-in)": {Enabled: true, Bind: "192.168.23.2",
+				AllowInsecureLAN: true},
 			"non-loopback TLS": {Enabled: true, Bind: "192.168.23.2",
 				TLS: WebAccessTLSConfig{Enabled: true, Cert: certPath, Key: keyPath}},
 			"disabled": {Enabled: false, Bind: "192.168.23.2"},

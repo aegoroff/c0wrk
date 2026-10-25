@@ -32,6 +32,8 @@ const plainInfo: WebAccessInfo = {
   configuredPort: 8765,
   configuredBind: '127.0.0.1',
   bindIsLoopback: true,
+  allowInsecureLAN: false,
+  allowInsecureLANRequired: false,
   token: 'tok-abcdef0123456789',
   tokenPinned: true,
   tlsEnabled: false,

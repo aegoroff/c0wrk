@@ -842,6 +842,10 @@ export function SetWailsLogger(arg1) {
   return window['go']['desktop']['App']['SetWailsLogger'](arg1);
 }
 
+export function SetWebAccessAllowInsecureLAN(arg1) {
+  return window['go']['desktop']['App']['SetWebAccessAllowInsecureLAN'](arg1);
+}
+
 export function SetWebAccessConnection(arg1, arg2) {
   return window['go']['desktop']['App']['SetWebAccessConnection'](arg1, arg2);
 }

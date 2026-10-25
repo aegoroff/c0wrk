@@ -2142,11 +2142,22 @@ notifications:
 #                            ("127.0.0.1", "127.x.y.z", "::1"), the
 #                            unspecified "0.0.0.0"/"::", or a specific
 #                            LAN/public IPv4/IPv6 address — plus the
-#                            "localhost" name. A non-loopback bind is a
-#                            LAN-exposed listener: over plain HTTP it loads
-#                            with a warning ("web_access: bind … is not
-#                            loopback — the listener is network-accessible,
-#                            traffic is plain HTTP without TLS"); with the
+#                            "localhost" name. A non-loopback bind over
+#                            PLAIN HTTP is the one exposure shape REFUSED
+#                            BY DEFAULT: without allow_insecure_lan (below)
+#                            or the tls subsection the section loads
+#                            disabled with a warning naming both ways out
+#                            ("web_access: bind … is not loopback and tls is
+#                            off — an unencrypted LAN-exposed listener needs
+#                            allow_insecure_lan: true … or web_access.tls
+#                            enabled"); enabling it from Settings, re-binding
+#                            onto it and saving such a state are refused the
+#                            same way. With the opt-in in place it loads
+#                            with exactly one accepted-risk warning
+#                            ("web_access: bind … is not loopback — the
+#                            listener is network-accessible, traffic is
+#                            plain HTTP without TLS (accepted via
+#                            allow_insecure_lan)"); with the
 #                            tls subsection enabled it loads warning-free —
 #                            the exposure is surfaced by the Settings → Web
 #                            Access banner and the sidecar start log
@@ -2157,6 +2168,19 @@ notifications:
 #                            the section is reset to the safe default
 #                            (sidecar off); saving such a state is refused
 #                            with an error.
+#
+#   allow_insecure_lan (default false) — the explicit accepted-risk opt-in
+#                            for the shape above: an enabled, non-loopback,
+#                            plain-HTTP listener. Flip it only on a network
+#                            you fully control — with it on, the login POST
+#                            body (the token) and the session cookie travel
+#                            unencrypted to every machine on the path. It is
+#                            inert for loopback and TLS-encrypted binds;
+#                            turning it back off while the section sits in
+#                            the shape is refused (disable web access, rebind
+#                            loopback, or enable TLS first). Also settable
+#                            from Settings → Web Access (the checkbox under
+#                            the address field).
 #
 #   port (default 0)        — TCP port to listen on. 0 = auto: a free port
 #                            is picked at every start.
@@ -2189,8 +2213,10 @@ notifications:
 #                               there is display-only — accepted and
 #                               stripped, any other scheme is refused —
 #                               which transport actually serves the sidecar
-#                               is this toggle alone). A TLS 1.2 floor
-#                               is pinned; with TLS off the behavior is
+#                               is this toggle alone). A TLS 1.3 floor
+#                               is pinned (raised from the original 1.2 in
+#                               the security-review fix round); with TLS off
+#                               the behavior is
 #                               byte-identical to pre-TLS builds.
 #
 #     tls.cert / tls.key      — paths to the PEM certificate and the PEM
@@ -2224,6 +2250,7 @@ notifications:
 #   enabled: false
 #   bind: "127.0.0.1"
 #   port: 0
+#   allow_insecure_lan: false
 #   token: ""
 #   tls:
 #     enabled: false

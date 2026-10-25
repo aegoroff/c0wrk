@@ -51,6 +51,8 @@ const runningInfo: WebAccessInfo = {
   configuredBind: '127.0.0.1',
   configuredPort: 8765,
   bindIsLoopback: true,
+  allowInsecureLAN: false,
+  allowInsecureLANRequired: false,
   token: 'tok-abcdef0123456789',
   tokenPinned: true,
   tlsEnabled: false,
@@ -67,6 +69,8 @@ const offInfo: WebAccessInfo = {
   configuredBind: '127.0.0.1',
   configuredPort: 0,
   bindIsLoopback: true,
+  allowInsecureLAN: false,
+  allowInsecureLANRequired: false,
   token: '',
   tokenPinned: false,
   tlsEnabled: false,
@@ -453,6 +457,8 @@ describe('WebAccessSettings address (one URL-style field, commit on Enter/blur)'
       ...runningInfo,
       configuredBind: '127.0.0.1',
       bindIsLoopback: true,
+      allowInsecureLAN: false,
+      allowInsecureLANRequired: false,
       configuredPort: 0,
       tokenPinned: true,
     })
@@ -520,6 +526,8 @@ describe('WebAccessSettings address (one URL-style field, commit on Enter/blur)'
       ...runningInfo,
       configuredBind: '::1',
       bindIsLoopback: true,
+      allowInsecureLAN: false,
+      allowInsecureLANRequired: false,
       configuredPort: 8765,
     })
     // A fresh mount seeds the IPv6 shape with its brackets.

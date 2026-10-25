@@ -13,7 +13,10 @@ import (
 // interchangeable strings).
 func staleWebAccessExposure(t *testing.T) string {
 	t.Helper()
-	warnings := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3"}, true)
+	// The accepted-risk shape: the flag-on state is the only enabled
+	// non-loopback plaintext that survives the load gate, so the warning
+	// fixture carries the opt-in.
+	warnings := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3", AllowInsecureLAN: true}, true)
 	if len(warnings) != 1 {
 		t.Fatalf("the fixture exposure warning = %v, want exactly one", warnings)
 	}
@@ -46,7 +49,7 @@ func newWarningTestAPI(webAccess config.WebAccessConfig, seeded []string) *Front
 func TestRefreshWebAccessLoadWarnings(t *testing.T) {
 	unrelated := "autonomy: legacy smart_approve folded into silent_mode"
 	stale := staleWebAccessExposure(t)
-	exposed := config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3"}
+	exposed := config.WebAccessConfig{Enabled: true, Bind: "10.1.2.3", AllowInsecureLAN: true}
 
 	t.Run("replaces stale exposure, keeps unrelated, appends fresh", func(t *testing.T) {
 		f := newWarningTestAPI(exposed, []string{stale, unrelated})

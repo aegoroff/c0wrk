@@ -976,6 +976,17 @@ type WebAccessInfo struct {
 	// the sidecar machine-local, any other valid bind exposes it to the
 	// network.
 	BindIsLoopback bool `json:"bind_is_loopback"`
+	// AllowInsecureLAN mirrors the persisted web_access.allow_insecure_lan
+	// opt-in — the explicit accepted-risk flag for the one exposure shape
+	// refused by default (an enabled, non-loopback, plain-HTTP listener).
+	AllowInsecureLAN bool `json:"allow_insecure_lan"`
+	// AllowInsecureLANRequired reports whether the CURRENT connection pins
+	// (bind + TLS) describe that refused shape: enabling the section, a
+	// re-bind onto it and the TLS-off flip are all refused until the
+	// operator sets the opt-in (or encrypts the transport / re-binds
+	// loopback). The Settings surface renders its opt-in checkbox from this
+	// hint, so the operator sees WHY the toggle refuses before being told.
+	AllowInsecureLANRequired bool `json:"allow_insecure_lan_required"`
 	// Token is the credential a browser pastes at the login screen: the live
 	// token while running, else the configured one (empty only before the
 	// very first start — that start mints one and persists it). This is
@@ -1074,6 +1085,15 @@ func (a *App) GetWebAccessInfo() WebAccessInfo {
 		info.Enabled = sec.Enabled
 		info.ConfiguredBind = sec.Bind
 		info.BindIsLoopback = config.IsLoopbackBind(sec.Bind)
+		info.AllowInsecureLAN = sec.AllowInsecureLAN
+		// The UI hint is state-only: would these pins be refused if the
+		// section were enabled? (config.ValidateWebAccessExposure over the
+		// snapshot with Enabled forced true — the same predicate every
+		// boundary applies, so the checkbox can never disagree with the
+		// refusals.)
+		asEnabled := sec
+		asEnabled.Enabled = true
+		info.AllowInsecureLANRequired = config.ValidateWebAccessExposure(asEnabled) != nil
 		info.ConfiguredPort = sec.Port
 		info.TokenPinned = sec.Token != ""
 		info.TLSEnabled = sec.TLS.Enabled
@@ -1171,6 +1191,18 @@ func (a *App) setWebAccessEnabledLocked(on bool) error {
 	// this is an interactive boundary, not a broken config file.
 	if on && cfg.WebAccess.TLS.Enabled {
 		if err := config.ValidateWebAccessTLSPair(cfg.WebAccess.TLS); err != nil {
+			return fmt.Errorf("cannot enable web access: %w", err)
+		}
+	}
+	// Insecure-LAN gate: enabling onto a non-loopback plaintext bind without
+	// the explicit allow_insecure_lan opt-in is refused up front — the same
+	// predicate the load path (fail-soft), the save gate (fail-closed) and
+	// the sidecar mount backstop enforce, so a pre-staged LAN pin cannot be
+	// switched on by a toggle that never names the accepted risk.
+	if on {
+		next := cfg.WebAccess
+		next.Enabled = true
+		if err := config.ValidateWebAccessExposure(next); err != nil {
 			return fmt.Errorf("cannot enable web access: %w", err)
 		}
 	}
@@ -1315,6 +1347,20 @@ func (a *App) setWebAccessConnectionLocked(bind string, port int) error {
 		return err
 	}
 	if err := config.ValidateWebAccessPort(port); err != nil {
+		return err
+	}
+	// Insecure-LAN gate on the re-bind boundary: while the section is
+	// enabled, moving the pin onto a non-loopback address without TLS and
+	// without the explicit allow_insecure_lan opt-in is refused before
+	// anything mutates or persists — the restart would refuse it at mount
+	// anyway; refusing here keeps the caller's error a single honest step
+	// instead of a failed restart rollback. A disabled section keeps the
+	// paper-state doctrine: the pin persists regardless and the exposure
+	// gate fires at the enable boundary (and at load/save).
+	next := cfg.WebAccess
+	next.Bind = bind
+	next.Port = port
+	if err := config.ValidateWebAccessExposure(next); err != nil {
 		return err
 	}
 
@@ -1477,6 +1523,18 @@ func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 	if err := config.ValidateWebAccessTLS(next); err != nil {
 		return err
 	}
+	// Insecure-LAN gate on the TLS-off boundary: while the section is
+	// enabled on a non-loopback bind, turning TLS off without the explicit
+	// allow_insecure_lan opt-in is refused before anything persists — the
+	// transport must not silently become a plaintext LAN exposure through
+	// the very switch that was added to encrypt it (the restart would
+	// refuse the state at mount anyway; refusing here keeps the caller's
+	// error one honest step).
+	exposureNext := cfg.WebAccess
+	exposureNext.TLS = next
+	if err := config.ValidateWebAccessExposure(exposureNext); err != nil {
+		return err
+	}
 	if cfg.WebAccess.TLS == next {
 		return nil
 	}
@@ -1488,6 +1546,51 @@ func (a *App) setWebAccessTLSLocked(enabled bool, cert, key string) error {
 		return fmt.Errorf("failed to persist web access config: %w", err)
 	}
 	return a.restartWebAccessOrRollbackLocked(prev, cfg, cfgPath, "TLS switch")
+}
+
+// SetWebAccessAllowInsecureLAN persists the explicit accepted-risk opt-in
+// for the one exposure shape refused by default: an enabled, non-loopback
+// bind served over plain HTTP (config.ValidateWebAccessExposure carries the
+// exact predicate the load/save paths and the sidecar mount enforce).
+// Flipping the flag ON is what lets the enable toggle, the re-bind and the
+// TLS-off boundary accept that shape; flipping it OFF while the section
+// would sit in that shape is refused — the operator must first disable web
+// access, re-bind loopback, or enable TLS (the mount would refuse the state
+// anyway, and persisting it would wedge every later config save on the
+// exposure gate). While the section is disabled the flag is pure paper
+// state and flips freely. The flag never changes a RUNNING listener
+// (transport and bind are untouched), so no hot-restart rides this call;
+// the load-warning refresh runs after the unlock like every
+// transport-affecting control RPC (the accepted-risk warning rides the
+// flag). Locking discipline: webAccessMu, exactly like SetWebAccessTLS.
+func (a *App) SetWebAccessAllowInsecureLAN(allow bool) error {
+	a.webAccessMu.Lock()
+	err := a.setWebAccessAllowInsecureLANLocked(allow)
+	a.webAccessMu.Unlock()
+	a.refreshWebAccessLoadWarnings()
+	return err
+}
+
+func (a *App) setWebAccessAllowInsecureLANLocked(allow bool) error {
+	cfg, cfgPath := a.configRef()
+	if cfg == nil || cfgPath == "" {
+		return errors.New("config not initialized")
+	}
+	if cfg.WebAccess.AllowInsecureLAN == allow {
+		return nil
+	}
+	next := cfg.WebAccess
+	next.AllowInsecureLAN = allow
+	if err := config.ValidateWebAccessExposure(next); err != nil {
+		return err
+	}
+	prev := cfg.WebAccess
+	cfg.WebAccess.AllowInsecureLAN = allow
+	if err := config.Save(cfg, cfgPath); err != nil {
+		cfg.WebAccess = prev
+		return fmt.Errorf("failed to persist web access config: %w", err)
+	}
+	return nil
 }
 
 // GenerateWebAccessCertificate regenerates the app-owned self-signed pair for

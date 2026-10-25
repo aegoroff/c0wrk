@@ -21,10 +21,14 @@
 //     IPv4/IPv6 address) or the "localhost" name. The stage-1 loopback-only
 //     rule survives as a WARNING classification (IsLoopbackBind), not as
 //     validity: a valid non-loopback bind is a deliberate LAN-exposed
-//     listener that persists as-is. The LOAD warning is reserved for the
-//     plain-HTTP combination (ADR-102) — a TLS-encrypted non-loopback bind
-//     loads warning-free, its exposure staying surfaced by the Settings
-//     section banner and the sidecar start log.
+//     listener that persists as-is — BUT only with an encrypted transport or
+//     the explicit allow_insecure_lan opt-in: the enabled + non-loopback +
+//     plain-HTTP shape without the flag is the one exposure combination
+//     refused by default (webAccessInsecureLAN — fail-soft at load, see
+//     below). The LOAD warning is reserved for the
+//     plain-HTTP-with-opt-in combination (ADR-102) — a TLS-encrypted
+//     non-loopback bind loads warning-free, its exposure staying surfaced
+//     by the Settings section banner and the sidecar start log.
 //   - Load-time VALIDITY problems are FAIL-SOFT (the shell_exec precedent):
 //     an invalid section (unparseable bind, out-of-range port) produces a
 //     visible load warning and is reset to the safe default state (disabled,
@@ -100,6 +104,19 @@ type WebAccessConfig struct {
 	// ValidateWebAccessToken) and rotates it through
 	// RegenerateWebAccessToken — both serialize on desktop's webAccessMu.
 	Token string `yaml:"token"`
+	// AllowInsecureLAN is the explicit operator opt-in for the one exposure
+	// shape that is REFUSED BY DEFAULT: an ENABLED, NON-loopback bind served
+	// over PLAIN HTTP (no web_access.tls). Without this flag such a section
+	// is fail-soft at load (the sidecar stays disabled with a visible
+	// warning naming the fix), fail-closed at save, refused at the
+	// interactive enable/re-bind/TLS-off boundaries, and refused again at
+	// sidecar mount — the token-over-plaintext combination is an accepted
+	// risk the operator must name, not a state a missed warning can drift
+	// into. TLS-encrypted or loopback sections are unaffected by this flag
+	// (it is inert for them); turning TLS on or moving back to loopback
+	// makes the flag unnecessary again. The load warning keeps naming the
+	// exposure while the flag is on — the risk is accepted, not gone.
+	AllowInsecureLAN bool `yaml:"allow_insecure_lan"`
 	// TLS is the `tls:` subsection (ADR-102): the HTTPS transport switch for
 	// the sidecar. Validated only while the sidecar itself is enabled — a
 	// disabled web_access section is inert, subsection included (the same
@@ -336,15 +353,52 @@ func ValidateWebAccessToken(token string) error {
 }
 
 // webAccessLoopbackWarning is the load warning for a valid non-loopback bind
-// served over PLAIN HTTP: the listener becomes reachable beyond the machine
-// while the traffic stays unencrypted — the token-over-plaintext combination
-// is the one exposure shape that belongs in the UI's config_errors banner.
-// A TLS-encrypted non-loopback bind (ADR-102) deliberately does NOT draw this
-// warning: it loads warning-free, its exposure staying surfaced by the
-// Settings → Web Access section banner and the sidecar start log (ADR-102).
-// The classification is a warned operator decision either way — never a gate.
+// served over PLAIN HTTP with the operator opt-in in place
+// (allow_insecure_lan): the listener becomes reachable beyond the machine
+// while the traffic stays unencrypted — the accepted-risk state the flag
+// names, still surfaced (accepted is not gone). A TLS-encrypted non-loopback
+// bind (ADR-102) deliberately does NOT draw this warning: it loads
+// warning-free, its exposure staying surfaced by the Settings → Web Access
+// section banner and the sidecar start log (ADR-102). Without the flag the
+// same plain-HTTP shape is not a warning case at all — the section is turned
+// OFF by normalizeWebAccess (see webAccessInsecureLAN).
 func webAccessLoopbackWarning(bind string) string {
-	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS", bind)
+	return fmt.Sprintf("web_access: bind %q is not loopback — the listener is network-accessible, traffic is plain HTTP without TLS (accepted via allow_insecure_lan)", bind)
+}
+
+// webAccessInsecureLAN reports whether the section describes the one
+// exposure shape refused by default: an ENABLED, NON-loopback bind served
+// over PLAIN HTTP without the explicit allow_insecure_lan opt-in. This is
+// the gate predicate shared by every enforcement point — the fail-soft load
+// normalization, the fail-closed save validation, the interactive enable /
+// re-bind / TLS-off boundaries (desktop) and the sidecar mount backstop
+// (internal/webaccess.New) — so the rule can never drift apart between them.
+// TLS-encrypted and loopback sections are never insecure-LAN by definition;
+// a disabled section describes no listener and is checked only while
+// enabled (the callers that flip Enabled consult the predicate on the
+// would-be-next state).
+func webAccessInsecureLAN(section WebAccessConfig) bool {
+	return section.Enabled && !IsLoopbackBind(section.Bind) && !section.TLS.Enabled && !section.AllowInsecureLAN
+}
+
+// webAccessInsecureLANError is the single refusal message every enforcement
+// point reports for the webAccessInsecureLAN shape, naming both ways out.
+func webAccessInsecureLANError(bind string) error {
+	return fmt.Errorf("web_access: bind %q is not loopback and tls is off — an unencrypted LAN-exposed listener needs allow_insecure_lan: true (an explicit accepted-risk opt-in) or web_access.tls enabled", bind)
+}
+
+// ValidateWebAccessExposure is the exported form of the exposure gate for
+// callers outside the package that mutate the section at runtime (desktop's
+// enable flip, connection pin and TLS switch): a section describing an
+// enabled non-loopback plaintext listener without the allow_insecure_lan
+// opt-in is refused with the exact message the load/save paths produce. The
+// caller passes the WOULD-BE-NEXT state (post-flip), so an enable onto a
+// pre-staged non-loopback pin is caught at the door instead of at mount.
+func ValidateWebAccessExposure(section WebAccessConfig) error {
+	if webAccessInsecureLAN(section) {
+		return webAccessInsecureLANError(section.Bind)
+	}
+	return nil
 }
 
 // WebAccessLoadWarnings is the pure, state-only counterpart of the
@@ -371,14 +425,18 @@ func webAccessLoopbackWarning(bind string) string {
 // already-persisted usable TLS stay owned by the section's cert_status
 // banner and the sidecar mount's fail-closed backstop, not by this function.
 // Semantics mirror the load pipeline exactly: a disabled section warns
-// nothing (no listener, nothing to expose); an enabled non-loopback bind
-// warns only while the effective transport is plain HTTP (ADR-102) — a
+// nothing (no listener, nothing to expose); the refused insecure-LAN shape
+// (enabled + non-loopback + plain HTTP + no allow_insecure_lan) never
+// reaches the recompute either — load turns it off, the interactive
+// boundaries refuse it — so an enabled non-loopback bind warns only while
+// the effective transport is plain HTTP AND the operator opt-in is in place
+// (ADR-102 for the TLS axis; the flag for the accepted-risk axis) — a
 // TLS-encrypted exposure stays a section-banner + start-log matter.
 func WebAccessLoadWarnings(section WebAccessConfig, experimentalEnabled bool) []string {
 	if !section.Enabled || !experimentalEnabled {
 		return nil
 	}
-	if IsLoopbackBind(section.Bind) || section.TLS.Enabled {
+	if IsLoopbackBind(section.Bind) || section.TLS.Enabled || !section.AllowInsecureLAN {
 		return nil
 	}
 	return []string{webAccessLoopbackWarning(section.Bind)}
@@ -444,16 +502,18 @@ func normalizeWebAccess(cfg *Config) []string {
 			strings.Join(reasons, "; ")
 		// The reset mirrors the sibling ADR-102 branch below: only the
 		// connection fields return to the default state and the authored
-		// tls subsection AND static token survive (only Enabled/Bind/Port
-		// are reset). A disabled section is inert — the persisted shape
-		// stays valid either way — and silently wiping a hand-authored PEM
-		// pair or static token because of a bind/port typo would destroy
-		// real operator config on the next unrelated save (the warning
-		// names bind/port alone, so nothing would hint at the loss).
+		// tls subsection, static token AND the allow_insecure_lan opt-in
+		// survive (only Enabled/Bind/Port are reset). A disabled section is
+		// inert — the persisted shape stays valid either way — and silently
+		// wiping a hand-authored PEM pair, static token or the accepted-risk
+		// opt-in because of a bind/port typo would destroy real operator
+		// config on the next unrelated save (the warning names bind/port
+		// alone, so nothing would hint at the loss).
 		authored := cfg.WebAccess
 		cfg.WebAccess = defaultWebAccessState()
 		cfg.WebAccess.TLS = authored.TLS
 		cfg.WebAccess.Token = authored.Token
+		cfg.WebAccess.AllowInsecureLAN = authored.AllowInsecureLAN
 		warnings = append(warnings, warning)
 	}
 	// ADR-102: a tls subsection the sidecar cannot serve — structurally
@@ -470,6 +530,20 @@ func normalizeWebAccess(cfg *Config) []string {
 			err.Error()
 		cfg.WebAccess.Enabled = false
 		warnings = append(warnings, warning)
+	}
+	// The insecure-LAN gate: an enabled non-loopback bind over plain HTTP
+	// without the explicit allow_insecure_lan opt-in is the one exposure
+	// shape refused BY DEFAULT. Fail-soft here exactly like the TLS-unusable
+	// branch above — the section turns OFF with a visible warning naming
+	// both ways out, and every authored field survives (the operator flips
+	// the flag, turns TLS on, re-binds loopback, or leaves it off). A missed
+	// warning must never be the only thing between the network and a
+	// plaintext listener; the save gate below, the interactive boundaries
+	// and the sidecar mount backstop enforce the same predicate.
+	if webAccessInsecureLAN(cfg.WebAccess) {
+		warnings = append(warnings, "web_access ignored (the sidecar stays disabled): "+
+			webAccessInsecureLANError(cfg.WebAccess.Bind).Error())
+		cfg.WebAccess.Enabled = false
 	}
 	// Fires only for a SURVIVING enabled section — the resets above leave
 	// either the loopback default or a disabled master switch. The tail
@@ -517,5 +591,14 @@ func validateWebAccessForSave(cfg *Config) error {
 	if err := validateWebAccessPort(cfg.WebAccess.Port); err != nil {
 		return err
 	}
-	return validateWebAccessTLS(cfg.WebAccess.TLS)
+	if err := validateWebAccessTLS(cfg.WebAccess.TLS); err != nil {
+		return err
+	}
+	// The insecure-LAN gate is a save gate too (fail-closed): the refused
+	// shape must never persist through ANY config write — an unrelated
+	// settings save over a section the load path disabled must not
+	// resurrect it. The load path disables the shape before a re-save can
+	// see it, so this fires only on in-memory mutations that tried to
+	// create it.
+	return ValidateWebAccessExposure(cfg.WebAccess)
 }

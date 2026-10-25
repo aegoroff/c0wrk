@@ -25,6 +25,7 @@ package webaccess
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -63,6 +64,27 @@ const (
 	// live-but-idle tab, while a truly dead or silent peer is reclaimed in
 	// bounded time instead of pinning the conn and its goroutines forever.
 	wsReadIdleTimeout = 75 * time.Second
+	// maxWSConns caps simultaneous websocket connections: each carries three
+	// goroutines and a 1024-frame outbox, so a leaked tab fan-out must stay
+	// bounded. The cap is a slot RESERVATION taken before the hijack (see
+	// handleWS): once the ResponseWriter is hijacked an HTTP error can no
+	// longer be written, so an over-cap handshake must be refused while the
+	// writer is still alive. Authenticated tabs that exceed the cap get 503
+	// and reconnect with backoff.
+	maxWSConns = 16
+	// hostResolveBudget bounds one DNS lookup on the wildcard-bind Host gate
+	// (hostAllowed → nameServes): a wedged resolver must not stall the
+	// handshake beyond this.
+	hostResolveBudget = 1500 * time.Millisecond
+	// hostCachePositiveTTL / hostCacheNegativeTTL are the cache windows for
+	// resolved hostnames: positives briefly (interface addresses change),
+	// negatives very briefly (the rebinding window must not be held open by a
+	// stale "not served" answer either — the fail-closed default re-queries).
+	hostCachePositiveTTL = 30 * time.Second
+	hostCacheNegativeTTL = 5 * time.Second
+	// hostCacheMax bounds the hostname cache: on overflow it is dropped
+	// wholesale — it is a performance shim, never authority.
+	hostCacheMax = 256
 )
 
 // WebSocket opcodes (RFC6455 §5.2).
@@ -130,13 +152,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capacity must be reserved while the ResponseWriter is still alive:
+	// after Hijack an HTTP status can no longer be written, so an over-cap
+	// handshake has to be refused BEFORE the connection is taken over. The
+	// reservation converts into the registration below (registerWS consumes
+	// it); every failure path between here and there releases it.
+	if !s.tryReserveWSSlot() {
+		writeJSONError(w, http.StatusServiceUnavailable, "too many websocket connections")
+		return
+	}
 	hj, ok := w.(http.Hijacker)
 	if !ok {
+		s.releaseWSSlot()
 		writeJSONError(w, http.StatusInternalServerError, "connection cannot be upgraded")
 		return
 	}
 	conn, brw, err := hj.Hijack()
 	if err != nil {
+		s.releaseWSSlot()
 		writeJSONError(w, http.StatusInternalServerError, "connection cannot be upgraded")
 		return
 	}
@@ -216,7 +249,8 @@ func tokenListContains(h http.Header, name, want string) bool {
 // and host:port. Missing Origin is a non-browser client; the handshake is
 // rejected because cookie credentials make every origin potentially hostile.
 // The Host header itself is additionally checked against the configured
-// bind (or the loopback set): an Origin==Host pair whose host is a rebound
+// bind (or the loopback set / the actually-served addresses on a wildcard
+// bind — see hostAllowed): an Origin==Host pair whose host is a rebound
 // DNS name would otherwise pass the equality check. This is
 // defense-in-depth on top of the host-scoped SameSite=Strict cookie — a
 // rebinding attacker without the cookie is already rejected by requireAuth.
@@ -225,7 +259,7 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 	if origin == "" {
 		return false
 	}
-	if !hostMatchesBind(r.Host, s.cfg.Bind) {
+	if !s.hostAllowed(r.Host) {
 		return false
 	}
 	scheme := "http"
@@ -260,30 +294,156 @@ func canonicalOrigin(raw string) string {
 	return u.Scheme + "://" + net.JoinHostPort(host, port)
 }
 
-// hostMatchesBind reports whether a Host header value (host or host:port)
-// names the configured bind or the loopback set. A wildcard bind (the
-// unspecified address) names no single serving host, so every Host is
-// accepted there — the cookie scope remains the gate for that class, as for
-// every class this check alone cannot cover.
-func hostMatchesBind(hostHeader, bind string) bool {
-	if bind == "0.0.0.0" || bind == "::" {
+// hostAllowed reports whether a Host header value (host or host:port) names
+// an address this server actually serves — the DNS-rebinding backstop behind
+// sameOrigin.
+//
+// A NON-wildcard bind keeps the exact-match rule: the Host must equal the
+// configured bind, be "localhost", or be a loopback IP literal — no network
+// lookups on that path.
+//
+// A WILDCARD bind (the unspecified "0.0.0.0"/"::") names every interface, so
+// the old behavior accepted ANY Host — an Origin==Host pair on a rebound DNS
+// name sailed through the same-origin equality. Now the wildcard branch
+// requires the Host to name an address the listener genuinely serves:
+//   - a loopback IP literal or "localhost" (machine-local access), or
+//   - an IP literal among the serving addresses snapshotted at Start
+//     (net.InterfaceAddrs()), or
+//   - a hostname that RESOLVES (bounded, cached) into one of those serving
+//     addresses — the legitimate mDNS/DNS way in ("my-mac.local"); a rebound
+//     attacker name resolves somewhere else and fails.
+//
+// The cookie's host scope stays the primary gate for the wildcard class, as
+// for every class this check alone cannot cover; this closes the hole where
+// the same-origin equality itself was spoofable.
+func (s *Server) hostAllowed(hostHeader string) bool {
+	if s.cfg.Bind != "0.0.0.0" && s.cfg.Bind != "::" {
+		host := hostOnly(hostHeader)
+		if strings.EqualFold(host, s.cfg.Bind) || strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	}
+	host := hostOnly(hostHeader)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
-	host := hostHeader
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || s.ipServed(ip)
+	}
+	return s.nameServes(host)
+}
+
+// hostOnly strips the port from a Host header value, returning the host
+// part (or the whole value when no port split applies).
+func hostOnly(hostHeader string) string {
 	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
-		host = h
+		return h
 	}
-	if strings.EqualFold(host, bind) || strings.EqualFold(host, "localhost") {
-		return true
+	return hostHeader
+}
+
+// ipServed reports whether ip is among the serving addresses snapshotted at
+// Start. An empty snapshot (handler used without Start) serves nothing —
+// fail-closed: only the loopback/localhost structural cases pass.
+func (s *Server) ipServed(ip net.IP) bool {
+	s.mu.Lock()
+	hosts := s.servingHosts
+	s.mu.Unlock()
+	for _, h := range hosts {
+		if h.Equal(ip) {
+			return true
+		}
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return false
+}
+
+// nameServes reports whether hostname resolves into a serving address, with
+// a bounded TTL cache: the resolve is a network round trip on the request
+// path (the same-origin gate), so its result is remembered — positives
+// briefly (an interface address can change), negatives very briefly (the
+// rebinding window must not be propped open by a long negative TTL). The
+// cache is a performance shim, never authority: dropping it wholesale at
+// hostCacheMax keeps it bounded without an eviction ordering to maintain.
+func (s *Server) nameServes(hostname string) bool {
+	key := strings.ToLower(hostname)
+	now := time.Now()
+	s.dnsMu.Lock()
+	if e, ok := s.dnsCache[key]; ok && now.Before(e.expires) {
+		s.dnsMu.Unlock()
+		return e.allowed
+	}
+	s.dnsMu.Unlock()
+
+	allowed := s.resolveNameServes(hostname)
+
+	ttl := hostCacheNegativeTTL
+	if allowed {
+		ttl = hostCachePositiveTTL
+	}
+	s.dnsMu.Lock()
+	if len(s.dnsCache) >= hostCacheMax {
+		s.dnsCache = make(map[string]dnsCacheEntry, hostCacheMax/2)
+	}
+	s.dnsCache[key] = dnsCacheEntry{allowed: allowed, expires: now.Add(ttl)}
+	s.dnsMu.Unlock()
+	return allowed
+}
+
+// resolveNameServes performs the bounded DNS lookup behind nameServes. A
+// lookup error, a timeout, or an empty answer all read as "not served"
+// (fail-closed) — a resolver hiccup must not open the wildcard gate.
+func (s *Server) resolveNameServes(hostname string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), hostResolveBudget)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return false
+	}
+	for _, ia := range ips {
+		if s.ipServed(ia.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+// servingHostSnapshot collects the unicast addresses a wildcard listener
+// answers on: every interface address minus multicast (a wildcard TCP bind
+// serves all of them — loopback included, which hostAllowed also accepts
+// structurally, so its presence here is harmless redundancy). An error
+// yields nil, and ipServed treats nil as "serves nothing" — fail-closed.
+func servingHostSnapshot() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var ips []net.IP
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsMulticast() {
+			continue
+		}
+		ips = append(ips, ipnet.IP)
+	}
+	return ips
+}
+
+// dnsCacheEntry is one cached hostname→served verdict (nameServes).
+type dnsCacheEntry struct {
+	allowed bool
+	expires time.Time
 }
 
 // registry ---------------------------------------------------------------------
 
 func (s *Server) registerWS(c *WSConn) {
 	s.wsMu.Lock()
+	s.wsReserved--
 	s.wsConns[c] = struct{}{}
 	s.wsMu.Unlock()
 }
@@ -291,6 +451,28 @@ func (s *Server) registerWS(c *WSConn) {
 func (s *Server) unregisterWS(c *WSConn) {
 	s.wsMu.Lock()
 	delete(s.wsConns, c)
+	s.wsMu.Unlock()
+}
+
+// tryReserveWSSlot claims one of the maxWSConns capacity slots for an
+// in-flight handshake. The count includes reservations, so a burst of
+// parallel upgrades cannot each observe "one slot left" and all proceed.
+func (s *Server) tryReserveWSSlot() bool {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	if len(s.wsConns)+s.wsReserved >= maxWSConns {
+		return false
+	}
+	s.wsReserved++
+	return true
+}
+
+// releaseWSSlot returns a reservation that will not become a registration
+// (a pre-hijack failure path). Registering connections release their slot
+// through registerWS→unregisterWS instead.
+func (s *Server) releaseWSSlot() {
+	s.wsMu.Lock()
+	s.wsReserved--
 	s.wsMu.Unlock()
 }
 
