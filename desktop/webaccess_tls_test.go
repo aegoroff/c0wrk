@@ -802,29 +802,35 @@ func mustSidecarAddr(t *testing.T, a *App) string {
 // config-load-warning channel (GetConfig().config_errors → the Settings
 // "Configuration warning" banner) in step with the live section — an
 // HTTP→HTTPS flip drops the plain-HTTP exposure warning, the reverse flip
-// and a re-bind onto a LAN address bring it back, a loopback re-bind and the
-// disable drop it, and an unrelated section's load warning survives every
-// transition untouched. The sidecar itself stays unmounted (persist-only
-// transitions: no restart path has a running listener to rebuild), so the
-// test never binds a socket.
+// and a re-bind onto a non-loopback address bring it back, a loopback
+// re-bind and the disable drop it, and an unrelated section's load warning
+// survives every transition untouched. The TLS/re-bind/disable transitions
+// are persist-only (no listener is running, so no restart path has anything
+// to rebuild), but the re-enable and the gate reopen DO mount the sidecar
+// for real — so the bind must be an address every test host can listen on.
+// The unspecified wildcard "0.0.0.0" is that address: non-loopback (the
+// exposure warning still applies, IsLoopbackBind classifies it) yet bindable
+// even on CI runners with no LAN interface, where a specific private literal
+// such as 192.168.23.2 fails with "cannot assign requested address".
 func TestWebAccessControlRPCsRefreshConfigLoadWarnings(t *testing.T) {
+	const nonLoopbackBind = "0.0.0.0"
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "pair.crt")
 	keyPath := filepath.Join(dir, "pair.key")
-	if err := webaccess.GenerateWebAccessCertificate("192.168.23.2", certPath, keyPath); err != nil {
+	if err := webaccess.GenerateWebAccessCertificate(nonLoopbackBind, certPath, keyPath); err != nil {
 		t.Fatalf("generate the app-owned pair: %v", err)
 	}
 	cfg, path := writeWebAccessConfig(t, fmt.Sprintf(`
 web_access:
   enabled: true
-  bind: 192.168.23.2
+  bind: %s
   tls:
     enabled: false
     cert: %q
     key: %q
-`, certPath, keyPath))
+`, nonLoopbackBind, certPath, keyPath))
 
-	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: "192.168.23.2"}, true)[0]
+	exposure := config.WebAccessLoadWarnings(config.WebAccessConfig{Enabled: true, Bind: nonLoopbackBind}, true)[0]
 	unrelated := "autonomy: legacy smart_approve folded into silent_mode"
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -863,10 +869,10 @@ web_access:
 	}
 	assertChannel("after re-bind to loopback", unrelated)
 
-	if err := a.SetWebAccessConnection("192.168.23.2", 0); err != nil {
-		t.Fatalf("SetWebAccessConnection(LAN): %v", err)
+	if err := a.SetWebAccessConnection(nonLoopbackBind, 0); err != nil {
+		t.Fatalf("SetWebAccessConnection(non-loopback): %v", err)
 	}
-	assertChannel("after re-bind to LAN", unrelated, exposure)
+	assertChannel("after re-bind to non-loopback", unrelated, exposure)
 
 	if err := a.SetWebAccessEnabled(false); err != nil {
 		t.Fatalf("SetWebAccessEnabled(false): %v", err)
