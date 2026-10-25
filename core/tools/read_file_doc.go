@@ -48,7 +48,7 @@ Use when: you already know the exact path — discover paths first with list_dir
 Inputs: path (absolute or workspace-relative); optional start_line / end_line (1-based, inclusive) to read a portion of a large file or converted document.
 Outputs: content with a metadata header (file name, returned range, total line count); when content remains beyond the range, a continuation hint names the next start_line — continue with another read_file call; an over-long single line is truncated with a hash marker — recover it via tool_result_read(line=N).
 Example: start_line 100, end_line 250 reads the second chunk of a long file.
-Anti-example: not for pattern search (ripgrep), meaning search (semantic_search) or name search (glob); do not read huge files whole — paginate.`
+Anti-example: not for pattern search (ripgrep), meaning search (semantic_search) or name search (glob); there is no limit or count parameter — paginate with start_line/end_line instead; do not read huge files whole.`
 
 // isDocExt reports whether the file at path has a document/binary extension
 // that should be converted to markdown via markitdown.

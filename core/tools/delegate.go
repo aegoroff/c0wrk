@@ -15,11 +15,11 @@ import (
 )
 
 const toolDelegateDescription = `Purpose: launch subagents that each run a task in their own context window — parallelize independent work, keep the main context lean.
-Use when: tasks are independent and parallelizable, or the main context risks overflow. Target a specialized Subagent Profile via agent. The subagent sees the blackboard and its task brief — not this chat's full history.
-Inputs: tasks — array of {id (unique, e.g. del_1), summary (5-7 word UI label), task (What/How/Where/Acceptance criteria), acceptance_criteria (optional explicit checks), tools (optional: "all" | "read-only" | array of group tokens), depends_on (prerequisite ids), mode ("blocking" | "async"), max_steps (0 = config default), allow_redelegate (default false), agent (optional Subagent Profile name)}.
-Outputs: progress events per subagent; blocking tasks return output in this result, async ones return a delegation id at once.
+Use when: tasks are independent and parallelizable, or the main context risks overflow. The subagent sees the blackboard and its brief, not full chat history.
+Inputs: tasks — array of {id (unique, e.g. del_1), summary (5-7 word UI label), task (What/How/Where/Acceptance criteria), acceptance_criteria (optional explicit checks), tools (optional: "all" | "read-only" bare strings, or group-token array — never ["read-only"]), depends_on (blocking delegation ids that must finish first; async ids rejected), mode ("blocking" | "async"), max_steps (0 = config default), allow_redelegate (default false), agent (optional; must name an existing Subagent Profile)}.
+Outputs: progress events per subagent; blocking tasks return output here, async ones return a delegation id.
 Example: two independent refactors as two tasks without depends_on — they run in parallel.
-Anti-example: no re-delegation from inside a subagent unless allow_redelegate is set; not for sequential steps (chain via depends_on or run inline); delegating does not replace reading key files yourself.`
+Anti-example: no re-delegation from inside a subagent unless allow_redelegate is set; not for sequential steps (chain via depends_on or run inline); delegating does not replace reading key files.`
 
 // maxDelegationBatchSize bounds how many tasks a single delegate call may
 // carry. The concurrency cap (agents.max_parallel_subagents) limits how many
@@ -50,17 +50,17 @@ const delegateSchemaTemplate = `{
 					"task": {"type": "string", "description": "Full task description with What/How/Where/Acceptance Criteria"},
 					"acceptance_criteria": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit criteria the subagent verifies before finishing"},
 					"tools": {
-						"description": "Capability groups granted to the subagent, on top of the always-included system group (finish, facts, checklist, meta tools — but NOT the goal-loop tools, which never reach a subagent): \"all\" (default — full toolset minus Conductor-only tools), \"read-only\" (read-only exploration: local-read + remote-read, no MCP), or a non-empty array of group names to grant selectively (e.g. [\"local-read\",\"execute\"]); [\"system\"] alone grants only the system group. Kebab-case (\"local-read\") is the canonical spelling; the underscore spelling of the same tokens (\"local_read\") is also accepted, mirroring Subagent Profile AGENT.md tool lists.",
+						"description": "Capability groups granted to the subagent, on top of the always-included system group (finish, facts, checklist, meta tools — but NOT the goal-loop tools, which never reach a subagent): \"all\" (default — full toolset minus Conductor-only tools), \"read-only\" (read-only exploration: local-read + remote-read, no MCP), or a non-empty array of group names to grant selectively (e.g. [\"local-read\",\"execute\"]); [\"system\"] alone grants only the system group. Kebab-case (\"local-read\") is the canonical spelling; the underscore spelling of the same tokens (\"local_read\") is also accepted, mirroring Subagent Profile AGENT.md tool lists. \"all\" and \"read-only\" are bare-string presets only — never valid inside the array ([\"read-only\"] is rejected); the array form carries group tokens only.",
 						"anyOf": [
 							{"type": "string", "enum": ["all", "read-only"]},
 							{"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["__GROUP_TOKENS__"]}}
 						]
 					},
-					"depends_on": {"type": "array", "items": {"type": "string"}, "description": "IDs of delegations that must complete before this one starts"},
+					"depends_on": {"type": "array", "items": {"type": "string"}, "description": "IDs of BLOCKING delegations that must complete before this one starts — from this batch or an earlier delegate call in the same Conductor run. Async delegations cannot be depended upon (rejected at validation); read their results via read_step_output instead. A task cannot depend on itself, and the combined dependency graph must be acyclic."},
 					"mode": {"type": "string", "enum": ["blocking", "async"], "description": "blocking (default) returns output in result; async returns delegation_id immediately"},
 					"max_steps": {"type": "integer", "description": "Per-subagent ReAct iteration cap; 0 = config default"},
 					"allow_redelegate": {"type": "boolean", "description": "Grant the subagent the delegate tool (capped by config maxRedelegationDepth); default false"},
-					"agent": {"type": "string", "description": "Name of a Subagent Profile (.agents/agents/<name>/AGENT.md) to apply. When set, the profile's system prompt, tool preference, max-steps, model, and allow-redelegate override the task fields. Unknown name fails fast."}
+					"agent": {"type": "string", "description": "Must name an existing Subagent Profile (.agents/agents/<name>/AGENT.md) — an unknown name fails the whole delegate call before any subagent launches. When set, the profile's system prompt, tool preference, max-steps, model, and allow-redelegate override the task fields."}
 				},
 				"required": ["id", "summary", "task"]
 			}
