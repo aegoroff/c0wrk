@@ -691,15 +691,22 @@ func (f *FrontendAPI) ListDirectory(dirPath string, recursive bool) ([]FileNode,
 	return nodes, nil
 }
 
-// WatchDirectory adds a directory to the file watcher.
+// WatchDirectory re-scopes the file watcher to the given workspace root.
 //
 // For No Project (CHAT mode), it re-scopes the watcher to the given session
 // workspace: each chat session is isolated, so the watcher root must follow the
 // active session to detect its file changes. The frontend calls this with the
 // active session's workspace on every session switch, so re-scoping here keeps
 // the watcher in sync without requiring a separate RPC or frontend/binding
-// changes. For CODE mode, the directory is added to the existing project
-// watcher.
+// changes. CODE mode performs the SAME session-following re-scope: the
+// renderer-supplied path must belong to this project (inside the active
+// workspace, or one of its managed worktrees), and a workspace root — the
+// checkout itself or a managed tree — re-roots the watcher there, moving the
+// tracked research/papers emit roots along with it. A re-scope is applied
+// only when the requested root still matches the active-session authority at
+// execution time (scopeRootMatchesActiveSessionLocked): binding calls race,
+// so a late request for an older tree is skipped instead of parking the
+// watcher — and the tracked roots with it — on the wrong tree.
 func (f *FrontendAPI) WatchDirectory(dirPath string) error {
 	f.seedAcquire()
 	if f.isNoProject() {
@@ -727,20 +734,138 @@ func (f *FrontendAPI) WatchDirectory(dirPath string) error {
 		}
 		return f.reScopeNoProjectWatcher(absDir)
 	}
-	f.watcherMu.Lock()
-	defer f.watcherMu.Unlock()
-	if f.watcher == nil {
-		return errors.New("no active file watcher")
+	// CODE mode: dirPath is renderer-supplied, so it must belong to this
+	// project — inside the active workspace, or one of its managed worktrees
+	// — before it can influence watcher state.
+	f.activeProjectMu.RLock()
+	projectPath := f.activeProjectPath
+	f.activeProjectMu.RUnlock()
+	if projectPath == "" {
+		return errors.New("no active project")
 	}
-	return f.watcher.WatchDir(dirPath)
+	absDir, err := filepath.Abs(dirPath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+	absRoot, err := filepath.Abs(projectPath)
+	if err != nil {
+		return fmt.Errorf("invalid workspace path: %w", err)
+	}
+	within, withinErr := config.IsWithinPath(absRoot, absDir)
+	managedRoot, managed := config.ManagedWorktreeRootForPath(absRoot, absDir)
+	if (withinErr != nil || !within) && !managed {
+		return errors.New("path outside project workspace")
+	}
+
+	// Only a workspace root (the checkout itself, or the managed tree root
+	// the path belongs to) may re-root the watcher; a deeper contained path
+	// keeps the additive single-directory watch — re-rooting at it would
+	// shrink the watched workspace. An unchanged root keeps the live watcher:
+	// FileTreePanel re-issues this call on every mount, and tearing the
+	// watcher down for those would drop events for nothing (a nil watcher is
+	// still created lazily, mirroring the CHAT branch).
+	scopeRoot := ""
+	switch {
+	case absDir == absRoot:
+		scopeRoot = absDir
+	case managed:
+		scopeRoot = managedRoot
+	}
+	f.watcherMu.Lock()
+	var watchErr error
+	rescoped := false
+	switch {
+	case scopeRoot != "":
+		if f.watcher == nil || f.watcher.Root() != scopeRoot {
+			// Freshness re-check before any re-scope: every Wails binding call
+			// runs on its own goroutine, so two rapid WatchDirectory calls can
+			// execute server-side in either order, and a LATE request for an
+			// older tree must not re-root the watcher — nor the tracked
+			// research/papers emit roots that follow it — at a tree the
+			// active-session authority no longer resolves to (the same
+			// authority the research RPCs read through). The authority is
+			// re-resolved here, under watcherMu, so the check and the re-scope
+			// are atomic against other re-scopes; the bounded
+			// activeSessionWorkspace lookup never acquires watcherMu itself,
+			// and a degraded (slow/failed) lookup skips the re-scope — a
+			// skipped re-scope self-heals on the next panel mount or session
+			// switch (the frontend re-issues this call), while a stale one
+			// would park the watcher on the wrong tree until then. A skipped
+			// request moves NOTHING: neither the watcher nor the tracked
+			// roots (the write below is gated on rescoped).
+			if f.scopeRootMatchesActiveSessionLocked(scopeRoot, absRoot) {
+				watchErr = f.reScopeCodeWatcherLocked(scopeRoot, config.ProjectResearchPath(absRoot))
+				rescoped = watchErr == nil
+			} else {
+				f.log().Debug("skipping stale watcher re-scope", "requested", scopeRoot)
+			}
+		} else {
+			// Same-root re-issue (FileTreePanel re-sends on every mount):
+			// keep the tracked roots in step — idempotent, and it heals a
+			// roots/watcher drift from an earlier skipped request.
+			rescoped = true
+		}
+	case f.watcher == nil:
+		watchErr = errors.New("no active file watcher")
+	default:
+		// Admit before watching: a managed tree lives outside the checkout
+		// the watcher is rooted at (a no-op for in-checkout paths).
+		if allowErr := f.watcher.AllowRoot(absDir); allowErr != nil {
+			f.log().Debug("failed to admit session workspace root", "dir", absDir, "error", allowErr)
+		}
+		watchErr = f.watcher.WatchDir(absDir)
+	}
+	f.watcherMu.Unlock()
+	if watchErr != nil {
+		return watchErr
+	}
+
+	// The tracked emit roots follow the watched workspace (the callbacks
+	// snapshot them per batch under activeProjectMu). Only an APPLIED re-scope
+	// moves them: a freshness-skipped request must leave the roots on the
+	// tree the watcher is actually rooted at, and the project guard keeps a
+	// stale RPC from poisoning the tracked roots of a project that switched
+	// while this re-scope ran.
+	if scopeRoot != "" && rescoped {
+		f.activeProjectMu.Lock()
+		if f.activeProjectPath == absRoot {
+			sessionRoot := config.ProjectResearchPath(scopeRoot)
+			f.activeResearchRoot = sessionRoot
+			f.activePapersRoot = config.PaperLibraryPathIn(sessionRoot)
+			f.activeComparisonsRoot = config.ComparisonsPathIn(sessionRoot)
+		}
+		f.activeProjectMu.Unlock()
+	}
+	return nil
+}
+
+// scopeRootMatchesActiveSessionLocked reports whether scopeRoot is still the
+// root the active-session authority resolves to right now: the active
+// session's workspace (activeSessionWorkspace — the persisted user selection
+// first, activity-latest fallback), or the project checkout when the
+// authority has no session — the fallback every consumer of
+// activeSessionWorkspace applies. The caller must hold f.watcherMu; the
+// session-manager/store reads are bounded by terminalPathLookupTimeout and
+// never acquire watcherMu themselves, so the nested activeProjectMu read
+// cannot deadlock (no path holds activeProjectMu and then waits on watcherMu
+// — the same one-directional order the watcher callback's snapshot uses).
+func (f *FrontendAPI) scopeRootMatchesActiveSessionLocked(scopeRoot, checkout string) bool {
+	f.activeProjectMu.RLock()
+	projectID := f.activeProjectID
+	f.activeProjectMu.RUnlock()
+	if ws, ok := f.activeSessionWorkspace(projectID); ok && ws != "" {
+		return ws == scopeRoot
+	}
+	return scopeRoot == checkout
 }
 
 // UnwatchDirectory is a no-op in both CHAT and CODE modes.
 //
 // The workspace watcher is fully managed by the backend: it is created and
-// scoped to the project workspace (CODE mode) or the active session's workspace
-// (CHAT mode) by switchProjectSetupWatcher / WatchDirectory, and torn down on
-// project switch. The frontend calls this from FileTreePanel's effect cleanup,
+// scoped to the active session's workspace in BOTH modes (the project
+// checkout when no CODE session workspace resolves) by
+// switchProjectSetupWatcher / WatchDirectory, and torn down on project
+// switch. The frontend calls this from FileTreePanel's effect cleanup,
 // which runs whenever FileTreePanel unmounts — and in CODE mode FileTreePanel
 // unmounts when the user switches the sidebar tab (Explorer → Git/Search),
 // collapses the sidebar, or during React StrictMode's mount/unmount/remount

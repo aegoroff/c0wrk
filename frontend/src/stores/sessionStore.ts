@@ -16,6 +16,28 @@ function sortByActivity(sessions: SessionInfo[]): SessionInfo[] {
   })
 }
 
+// --- Selection-persist ordering (backend watcher authority) ---
+//
+// The backend resolves the "active session" for the research/papers roots and
+// the workspace watcher from the PERSISTED selection
+// (project_ui_state.saved_session_id, ADR-099), and WatchDirectory skips a
+// re-scope whose root no longer matches that authority. The persist in
+// selectSession is fire-and-forget, so a WatchDirectory sent immediately after
+// a session switch could otherwise reach the backend BEFORE the selection it
+// is based on — the freshness check would then skip the re-scope and park the
+// watcher on the previous tree. Callers that watch a workspace root await
+// this first. Lazily-populated module state, no import-time side effects.
+const selectionPersists = new Map<string, Promise<void>>()
+
+/**
+ * Resolves when the project's most recent selection persist settles (or
+ * immediately when none is in flight). Never rejects.
+ */
+export function selectionPersisted(projectId: string | null): Promise<void> {
+  if (!projectId) return Promise.resolve()
+  return selectionPersists.get(projectId) ?? Promise.resolve()
+}
+
 /**
  * SessionInfo fields that must NOT, by themselves, force a `setSessions`
  * update. `active` is the live in-memory task flag the backend overlays on the
@@ -140,10 +162,17 @@ export const useSessionStore = create<SessionState & SessionActions>((set, get) 
     }
     // Fire-and-forget: a failed persist must not break selection — the
     // in-memory activeSessionId is already updated, and the next successful
-    // selection (or the switch-time save) repairs the persisted value.
-    void saveProjectActiveSession(projectId, id).catch((err: unknown) => {
-      logger.warn('sessionStore.selectSession: failed to persist active session', err)
-    })
+    // selection (or the switch-time save) repairs the persisted value. The
+    // in-flight promise is still tracked (selectionPersisted) so workspace
+    // consumers can order themselves after it.
+    const persist = saveProjectActiveSession(projectId, id)
+      .catch((err: unknown) => {
+        logger.warn('sessionStore.selectSession: failed to persist active session', err)
+      })
+      .finally(() => {
+        if (selectionPersists.get(projectId) === persist) selectionPersists.delete(projectId)
+      })
+    selectionPersists.set(projectId, persist)
   },
 
   addSession: (session) => set((s) => ({
