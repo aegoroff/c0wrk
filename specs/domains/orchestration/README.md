@@ -128,7 +128,7 @@ type HandleResult struct {
 ```
 HandleMessage(ctx, message, sessionID, opts)
 │
-├─ 0. Inject vector search hints (non-blocking, 2s timeout)
+├─ 0. Inject vector search hints (non-blocking, 3s default wait bound)
 ├─ 0a. Emit initial context_fill (0%)
 │
 ├─ 1. Blackboard lifecycle:

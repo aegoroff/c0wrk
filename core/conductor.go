@@ -37,17 +37,8 @@ type trajectoryHolder struct {
 func (h *trajectoryHolder) Sync(steps []agent.Step) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// The trajectory never shrinks. Subagent executors get their OWN holder
-	// (see subagentCtx / runRedelegBlocking), so under normal wiring only the
-	// parent conductor syncs here; this length-monotonic guard stays as
-	// defense in depth: if any foreign executor ever reaches this holder with
-	// a shorter list (a mis-wired context, a resumed seed narrower than the
-	// held trajectory), the sync is ignored rather than erasing the task
-	// checkpoint the parent persisted — the persisted trajectory must never go
-	// backwards. Guarding against EMPTY syncs alone is not enough: a first
-	// non-empty foreign sync (a single step) would still shrink the held
-	// trajectory, so the guard is monotonic — any sync shorter than what is
-	// already held is ignored.
+	// Length-monotonic guard: a shorter sync is ignored — a mis-wired executor
+	// can never erase the parent's task checkpoint (session-lifecycle.md).
 	if len(steps) < len(h.steps) {
 		return
 	}
@@ -61,42 +52,15 @@ func (h *trajectoryHolder) Steps() []agent.Step {
 	return h.steps
 }
 
-// planRunState tracks whether the plan workflow is active during the CURRENT
-// Conductor run. Two sources activate it:
-//
-//   - declared: a plan was declared in this run (via declare_plan →
-//     conductorPublisher.Publish).
-//   - continuable: this run RESUMED a paused task whose declared plan still
-//     has unreached (not successfully completed) steps — seeded by RunConductor
-//     from conductorDeps.resumedWithPlan, which Orchestrator.Resume computes.
-//     The approved plan on the blackboard is still authoritative, so the run
-//     continues the plan workflow without a re-declare: execute_plan works,
-//     delegate stays disabled, and declare_plan returns a soft hint.
-//
-// A plan restored from a previous COMPLETED task is historical context only:
-// on such a continuation neither flag is set, so the Conductor is free to act
-// plan-less (standalone checklist), declare a new plan, or delegate — and
-// execute_plan refuses to re-run the restored steps.
-//
-// The guards (ChecklistGuard, delegate guard PlanChecker.HasDeclaredPlan, the
-// execute_plan restored-plan guard, and the lifecycle's completeAll gate)
-// consult this instead of the raw blackboard plan.
+// planRunState tracks whether the plan workflow is active in the CURRENT run
+// (declared | continuable); the plan-workflow guards consult this, not the
+// raw blackboard plan — specs/domains/orchestration/conductor.md.
 type planRunState struct {
 	mu          sync.Mutex
 	declared    bool
 	continuable bool
-	// standaloneChecklist records that a standalone (empty step_id) checklist
-	// was emitted EARLIER in this run. It lets the ChecklistGuard keep
-	// accepting an empty-step_id checklist after a plan becomes active in the
-	// same run (the model laid out a plan-less checklist, then refined the work
-	// into plan steps).
-	//
-	// Invariant: the guard rejects an empty-step_id call while the plan is
-	// active unless this flag is already set, so the flag is only ever set
-	// while the plan is NOT active — before a declare, or after an abandon
-	// deactivated an earlier one. Its live value is therefore exactly "a
-	// standalone checklist already exists earlier in this run". No snapshot at
-	// declare time is needed.
+	// standaloneChecklist: a standalone checklist was emitted EARLIER in this
+	// run (only while the plan is inactive) — the monotone flag (conductor.md).
 	standaloneChecklist bool
 }
 
@@ -113,14 +77,8 @@ func (s *planRunState) markDeclared() {
 	s.mu.Unlock()
 }
 
-// unmarkDeclared clears the declared flag, deactivating the plan workflow for
-// the rest of this Conductor run. Called when the user abandons a plan at the
-// approval prompt: publishing the plan for review marked it declared, but an
-// abandoned plan must not leave the run locked in the plan workflow (delegate
-// disabled, standalone checklist rejected, execute_plan willing to run the
-// abandoned draft). Only the declared flag is cleared — the continuable flag
-// is a run-start seed that abandon can never reach (a continuable resume
-// returns the soft "already approved" hint before the approval prompt).
+// unmarkDeclared deactivates the plan workflow (declare_plan abandon); only
+// declared is cleared — abandon cannot reach continuable (conductor.md).
 func (s *planRunState) unmarkDeclared() {
 	s.mu.Lock()
 	s.declared = false
@@ -142,12 +100,9 @@ func (s *planRunState) isContinuable() bool {
 	return s.continuable
 }
 
-// isActive reports whether the plan workflow is active in this run: a plan was
-// declared via declare_plan OR the run resumed a task whose approved plan still
-// has unreached steps. This is what the guards (HasDeclaredPlan, the
-// execute_plan restored-plan guard, ChecklistGuard, completeAll) actually mean
-// to ask — a continuable resumed run is locked into the plan workflow exactly
-// like a freshly declared one.
+// isActive reports whether the plan workflow is active in this run (declared
+// OR continuable) — what the plan-workflow guards actually mean to ask. See
+// specs/domains/orchestration/conductor.md.
 func (s *planRunState) isActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,22 +118,17 @@ func (s *planRunState) markStandaloneChecklist() {
 	s.mu.Unlock()
 }
 
-// hasStandaloneChecklist reports whether a standalone (empty step_id) checklist
-// was emitted earlier in this run (while the plan workflow was inactive). The
-// ChecklistGuard accepts an empty-step_id checklist once this is true, even
-// with an active plan.
+// hasStandaloneChecklist reports whether a standalone checklist was emitted
+// earlier in this run — the ChecklistGuard's exception (conductor.md).
 func (s *planRunState) hasStandaloneChecklist() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.standaloneChecklist
 }
 
-// newChecklistGuard builds the ChecklistGuardFunc for a Conductor run. It
-// rejects a standalone (empty step_id) checklist while the plan workflow is
-// active in this run — UNLESS a standalone checklist was already emitted
-// earlier in the same run (see planRunState.standaloneChecklist). planState is
-// always non-nil in RunConductor, so isActive() is safe there; the nil check is
-// purely defensive for direct (test) construction.
+// newChecklistGuard builds the ChecklistGuardFunc: rejects a standalone
+// checklist while the plan is active in this run, unless one was emitted
+// earlier (planRunState.standaloneChecklist; conductor.md "Checklist Guard").
 func newChecklistGuard(planState *planRunState) agent.ChecklistGuardFunc {
 	return func(stepID string) string {
 		if stepID != "" || planState == nil {
@@ -191,41 +141,25 @@ func newChecklistGuard(planState *planRunState) agent.ChecklistGuardFunc {
 	}
 }
 
-// compositeTrajectoryStore implements agent.TrajectoryStore. It keeps an
-// in-memory copy of the current trajectory (so the reflect tool reads it
-// synchronously) AND persists the full trajectory to the DB on every Sync.
-//
-// The DB write is best-effort and non-blocking: at most one write is
-// outstanding at a time (a semaphore of size 1). If a previous write is still
-// in flight when Sync is called again, the new write is queued only by
-// retrying on the *next* Sync — it is never allowed to block the ReAct loop.
-// Because every write is a full-snapshot upsert, dropping an intermediate Sync
-// while a write is in flight is safe: the next completed Sync persists a
-// fresher snapshot, and the persisted trajectory never goes backwards.
-//
-// When taskStore is nil or taskID is empty (e.g. tests / non-persistent
-// sessions) the store degrades to the plain in-memory trajectoryHolder.
+// compositeTrajectoryStore implements agent.TrajectoryStore: in-memory copy
+// for reflect + best-effort non-blocking full-snapshot DB upsert per Sync
+// (session-lifecycle.md, "Task trajectory persistence").
 type compositeTrajectoryStore struct {
 	memory *trajectoryHolder
 	taskID string
 	store  TaskPersistence
 	logger *slog.Logger
 
-	// mu serializes the async-writer lifecycle. It guards the wg Add/Wait
-	// transitions (Flush must never Wait while a Sync Adds — the WaitGroup
-	// reuse rule) and keeps two full-snapshot upserts from interleaving on the
-	// same taskID. It is required because async subagents inherit this store
-	// through the context (see TrajectoryStore's concurrency contract in
-	// sp4rk), so Sync and Flush may run on different goroutines.
+	// mu guards the async-writer lifecycle (wg Add/Wait transitions, upsert
+	// interleaving): async subagents inherit this store, so Sync and Flush run
+	// on different goroutines.
 	mu sync.Mutex
 
-	// sem limits concurrent DB writes to at most one. Send (non-blocking) to
-	// acquire a write slot; receive releases it from the writer goroutine.
+	// sem caps concurrent DB writes at one (send acquires, receive releases).
 	sem chan struct{}
 
-	// wg tracks the in-flight async writer so Flush can drain it before
-	// performing a final synchronous write. Add(1) happens only when Sync
-	// acquires the slot while holding mu; Done() fires when the writer exits.
+	// wg tracks the in-flight writer so Flush can drain it before the final
+	// synchronous write.
 	wg sync.WaitGroup
 }
 
@@ -241,23 +175,9 @@ func newCompositeTrajectoryStore(memory *trajectoryHolder, taskID string, store 
 	}
 }
 
-// wireDelegationSpecSink installs a persistence sink on a delegation registry
-// so every unit registered in it is recorded at register time (spec at
-// register) — both in the durable unit ledger and, when a task store is
-// supplied, as the legacy DelegationSpec the Resume auto-resume wave rebuilds
-// from. parentID is "" for the root registry (top-level delegations) or the
-// delegating subagent's step ID for child registries (allow_redelegate).
-//
-// The unit ledger is the single writer of unit lifecycle; this sink is where
-// registration (the "spec at register" transition) enters it. The ledger kind
-// is derived from the spec's Kind (subagent vs plan step). A nil ledger (a
-// non-persistable blackboard) degrades to the legacy spec persistence only.
-// Plan-step registries pass a nil task store: their units are rebuilt from the
-// blackboard plan, and writing plan steps into the delegation-spec store would
-// corrupt the resume wave. Best-effort and synchronous: the spec is tiny (a
-// single row), and the delegation must be resumable even if the app dies
-// immediately after registration — a background queue could drop it.
-// Persistence failures are logged, never propagated.
+// wireDelegationSpecSink records every unit at register time (spec at
+// register) in the unit ledger and, with a task store, the legacy
+// DelegationSpec; plan-step registries pass a nil store (delegation.md).
 func wireDelegationSpecSink(registry *tools.DelegationRegistry, ledger units.Ledger, parentID, taskID string, store TaskPersistence, logger *slog.Logger) {
 	registry.SetSpecSink(parentID, func(spec tools.DelegationSpec) {
 		// Unit ledger — spec at register.
@@ -277,8 +197,7 @@ func wireDelegationSpecSink(registry *tools.DelegationRegistry, ledger units.Led
 					"task_id", taskID, "unit_id", spec.Task.ID, "error", err)
 			}
 		}
-		// Legacy delegation-spec persistence — the record the Resume wave reads.
-		// Skipped for plan steps (nil store), which are rebuilt from the plan.
+		// Legacy DelegationSpec — the record the Resume wave reads.
 		if store == nil {
 			return
 		}
@@ -302,20 +221,9 @@ func unitKindForDelegation(kind tools.DelegationKind) units.UnitKind {
 	}
 }
 
-// Sync updates the in-memory holder synchronously (so the reflect tool sees
-// the latest trajectory immediately) and kicks off a best-effort, non-blocking
-// DB persist. The DB write runs on a background goroutine; a slow DB never
-// stalls the ReAct loop.
-//
-// Immutability invariant: the executor appends new steps to its trajectory but
-// never mutates an already-appended step in place — this is enforced by the
-// executor's trajectory lock (see Orchestrator.mu). The defensive snapshot
-// below is therefore a shallow copy: it captures each Step value (slice
-// headers included), and the shared backing arrays for ReasoningItems and
-// Arguments are safe for the async writer to read concurrently because they
-// are never written after the step is published. If that invariant ever
-// changes, the snapshot must deep-copy the slice/byte backing arrays; the
-// mutex guard comment above documents the required lock discipline.
+// Sync updates the holder synchronously and kicks off the best-effort DB
+// persist (session-lifecycle.md); the shallow copy relies on the executor's
+// append-only step invariant — deep-copy if that ever changes.
 func (c *compositeTrajectoryStore) Sync(steps []agent.Step) {
 	c.memory.Sync(steps)
 
@@ -324,14 +232,11 @@ func (c *compositeTrajectoryStore) Sync(steps []agent.Step) {
 		return
 	}
 
-	// Serialize the writer lifecycle against Flush: async subagents share this
-	// store, so a concurrent Flush may be draining wg — hold mu so our Add can
-	// never race its Wait.
+	// Serialize against a concurrent Flush's wg.Wait (WaitGroup reuse rule).
 	c.mu.Lock()
 
-	// Acquire the single write slot without blocking. If a previous write is
-	// still in flight, skip — the next Sync (or the final Flush) persists a
-	// fresher snapshot.
+	// One outstanding write; skip when busy — a later Sync or the final Flush
+	// persists a fresher snapshot.
 	select {
 	case c.sem <- struct{}{}:
 	default:
@@ -339,13 +244,8 @@ func (c *compositeTrajectoryStore) Sync(steps []agent.Step) {
 		return
 	}
 
-	// Defensive copy of the *guarded* in-memory trajectory rather than the raw
-	// caller steps: the holder ignores a sync shorter than what it already holds
-	// (a freshly-started subagent's first boundary sync, which is shorter than
-	// the parent conductor's trajectory), and the persisted snapshot must honor
-	// the same never-shrink invariant — otherwise a stale shorter upsert could
-	// race ahead of the final Flush. Steps() returns the live slice, so copy it
-	// for the async writer.
+	// Copy the guarded holder trajectory for the async writer (never-shrink
+	// invariant; Steps() returns the live slice).
 	effective := c.memory.Steps()
 	snapshot := make([]agent.Step, len(effective))
 	copy(snapshot, effective)
@@ -361,26 +261,15 @@ func (c *compositeTrajectoryStore) Sync(steps []agent.Step) {
 	}()
 }
 
-// Flush blocks until any in-flight async DB write has drained, then performs a
-// final synchronous write of the current in-memory trajectory. This guarantees
-// the freshest snapshot is persisted even when the last Sync was dropped
-// because a write was already in flight.
-//
-// It is called once after the ReAct loop stops (success, error, or shutdown)
-// so an interrupted task's checkpoint reflects its final steps. At that point
-// the executor is no longer mutating its trajectory, so the snapshot is stable;
-// the brief blocking write is acceptable because the ReAct loop has ended.
+// Flush drains in-flight writes and persists the trajectory synchronously —
+// once, after the ReAct loop stops (the final checkpoint).
 func (c *compositeTrajectoryStore) Flush() {
 	// Nothing to persist when there is no DB store or no task to key on.
 	if c.store == nil || c.taskID == "" {
 		return
 	}
 
-	// Serialize against concurrent Syncs: async subagents share this store, so
-	// hold mu across the drain + snapshot + final write. This prevents an Add
-	// from racing the Wait (WaitGroup reuse rule) and keeps a second upsert
-	// from interleaving with ours (two full-snapshot writes on the same taskID
-	// could otherwise leave the DB with a stale ordering).
+	// Serialize against a concurrent Flush (WaitGroup reuse rule, upsert order).
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -409,11 +298,8 @@ type conductorDeps struct {
 	contextFactory ContextManagerFactory
 	toolExec       agent.ToolExecutor
 	toolRegistry   *sdktools.ToolRegistry
-	// disabledTools is the set of tool names disabled for the current mode
-	// (e.g. CHAT / No-Project mode disables glob/ripgrep/semantic_search). The
-	// Conductor uses it to (a) exclude dead tools from subagent toolsets and
-	// (b) compute the per-mode mandatory read-only base. Mirrors
-	// Orchestrator.coreToolRegistry.DisabledTools(); nil/empty = nothing disabled.
+	// disabledTools: mode-disabled tool names (CHAT/No-Project) — excluded from
+	// subagent toolsets and the read-only base; nil = nothing disabled.
 	disabledTools    map[string]bool
 	llm              agent.LLMCaller
 	modelRegistry    *llm.ModelRegistry
@@ -432,190 +318,98 @@ type conductorDeps struct {
 	reflector        *reflector.Reflector
 	maxRedelegDepth  int
 	maxDepCtxChars   int
-	// maxParallelSubagents caps concurrent subagents. It is enforced through
-	// the launcher's shared limiter (conductorLauncher.subagentSlots), which
-	// every dispatch path acquires from — the plan-wave and blocking-delegate
-	// fan-out (runSubAgentsParallel) and the per-task async launches
-	// (launchAsync) alike. <= 0 means unlimited.
+	// maxParallelSubagents caps concurrent subagents via the shared launcher
+	// limiter; <= 0 = unlimited (delegation.md).
 	maxParallelSubagents int
 	reasoningEffort      string
 	preWarningPct        int
 
-	// toolCallTimeout, when positive, bounds a SINGLE tool call in the ReAct
-	// loop. configureExecutor installs it on every subagent executor the
-	// launcher builds (SetToolCallTimeout) and the Conductor's own main
-	// executor receives it through ConductorConfig.ToolCallTimeout. 0 disables
-	// the bound. Mirrors the Orchestrator's config.ToolCallTimeout.
+	// toolCallTimeout bounds a SINGLE tool call on the main and every subagent
+	// executor; 0 disables. Mirrors Orchestrator config.ToolCallTimeout.
 	toolCallTimeout time.Duration
 
 	// toolCallTimeoutExempt mirrors OrchestratorConfig.ToolCallTimeoutExemptTools:
-	// the ceiling's exempt tool-NAME set. nil keeps sp4rk's built-in default
-	// exempt set; a non-nil (possibly empty) slice replaces it wholesale — on
-	// the main executor via ConductorConfig.ToolCallTimeoutExemptTools and on
-	// every subagent executor via SetToolCallTimeoutExempt in configureExecutor.
+	// nil keeps sp4rk's default exempt set, non-nil replaces it wholesale (main
+	// executor + every subagent via configureExecutor).
 	toolCallTimeoutExempt []string
 
-	// lifecycle is the inline plan-step lifecycle tracker. It is created in
-	// RunConductor (from emitter + blackboard) and threaded in here so the
-	// launcher can mark plan steps completed without post-construction field
-	// mutation. Nil when the launcher is used outside RunConductor (e.g. in
-	// tests); Execute guards every access with a nil check.
+	// lifecycle is the inline plan-step lifecycle tracker, created in
+	// RunConductor and threaded in (no post-construction mutation); nil in
+	// direct test construction — Execute nil-checks every access.
 	lifecycle *inlineStepLifecycle
 
-	// conversationHistory holds prior user/assistant exchanges from the
-	// session. Injected into the Conductor's ContextManager so the LLM sees
-	// dialogue context for follow-up messages. Nil for Resume (the Conductor
-	// continues the same task — the original request is the task message).
+	// conversationHistory: prior dialogue for follow-up context; nil on Resume
+	// (conductor.md, "Conversation History Injection").
 	conversationHistory []llm.Message
 
-	// contentBlocks carries structured content blocks (text + images) for the
-	// task user message. When non-nil, RunConductor sets
-	// ConductorConfig.ContentBlocks so the sp4rk engine calls
-	// SetTaskWithBlocks (via the BlockTaskAware capability) instead of
-	// SetTask — the ContextManager emits a Message carrying ContentBlocks
-	// and providers give the blocks precedence over the plain Content
-	// string. nil preserves the legacy text-only path (backward compatible).
+	// contentBlocks: structured blocks (text+images) for the task message;
+	// non-nil switches the engine to SetTaskWithBlocks. nil = text-only.
 	contentBlocks []llm.ContentBlock
 
-	// taskStore is the optional DB-backed persistence store. When non-nil and
-	// the blackboard carries a task ID, the Conductor's trajectory is persisted
-	// (best-effort, non-blocking) on every ReAct iteration so it survives app
-	// restart. Nil in tests / non-persistent sessions — the trajectory stays
-	// purely in-memory.
+	// taskStore is the optional DB-backed persistence store: with it (and a
+	// task ID on the blackboard) the trajectory persists best-effort per Sync;
+	// nil keeps it in-memory (tests / non-persistent sessions).
 	taskStore TaskPersistence
 
-	// unitSink, when non-nil, is the ledger-bound persistence sink for an
-	// ISOLATED Conductor run (the goal verifier). Such a run has no
-	// PersistableBlackboard to hang the usual delegation-spec / step-result
-	// persistence off — its blackboard is a throwaway seeded MapBlackboard —
-	// so RunConductor wires the registry's spec sink from this deps field
-	// INSTEAD of from bb.(PersistableBlackboard), and the launcher records the
-	// settled units (spec + resume checkpoint) through it. The sink writes only
-	// to the ledger, so the run's LLM view stays its isolated blackboard and
-	// the live task's incomplete state cannot leak in. Nil = derive the sink
-	// from the blackboard/store as before (the mainline path).
+	// unitSink: ledger-bound sink for an ISOLATED run (goal verifier) — the
+	// registry sink wires from it instead of the blackboard (delegation.md);
+	// nil = mainline blackboard/store path.
 	unitSink *unitSink
 
-	// resumeSteps holds pre-existing ReAct steps for resuming an interrupted
-	// task from a checkpoint. When non-empty, RunConductor sets
-	// ConductorConfig.ResumeSteps so the sp4rk engine seeds the
-	// ContextManager (StepSeedable) and the Executor (WithResumeSteps) with
-	// these steps — the step counter continues from len(steps)+1 and the full
-	// prior trajectory appears in the context window. Zero-value (nil/empty)
-	// is the default fresh-start behavior.
+	// resumeSteps: persisted steps seeded into CM (StepSeedable) + Executor
+	// (WithResumeSteps) on resume; nil = fresh start (conductor.md).
 	resumeSteps []agent.Step
 
-	// resumedWithPlan marks this run as a RESUME of a task whose declared plan
-	// still has unreached (not successfully completed) steps. Orchestrator.
-	// Resume computes it (plan != nil && at least one step without a successful
-	// StepResult) and RunConductor seeds it into the per-run planRunState, so
-	// the approved plan stays authoritative for this run: execute_plan runs the
-	// remaining steps WITHOUT a re-declare, delegate stays disabled, and
-	// declare_plan returns a soft "already approved — continue with
-	// execute_plan" hint. A plan restored from a previous COMPLETED task does
-	// not set this flag — such a run keeps the restored-plan refusals. Zero
-	// value (false) is the fresh-start / plan-less default.
+	// resumedWithPlan seeds continuable: resume of a task whose approved plan
+	// has unreached steps — no re-declare (conductor.md).
 	resumedWithPlan bool
 
-	// forceCompactionStrategy is the one-shot manual-compaction override from
-	// the resume flow (RequestResumeCompaction → Resume → runConductor /
-	// resumeGoalLoop). When non-empty, RunConductor (a) replaces the
-	// routing-derived compaction strategy with it for the ENTIRE run — every
-	// compaction the run performs (the forced start-of-run pass AND any later
-	// threshold-triggered reactive compactions) uses this strategy — and (b)
-	// sets ConductorConfig.CompactOnStart so the sp4rk engine compacts the
-	// merged trajectory (seeded resumeSteps + the resumed run) exactly once,
-	// up front, BEFORE the first LLM call, regardless of fill thresholds.
-	// Empty (the default) preserves the normal behavior: the strategy derives
-	// from routing domain/complexity and compaction stays threshold-driven.
+	// forceCompactionStrategy: resume compaction override — replaces the
+	// routing strategy for the whole run + forces CompactOnStart (compaction.md).
 	forceCompactionStrategy string
 
-	// systemPromptOverride, when non-nil, overrides the default Conductor
-	// system-prompt factory (buildSystemPrompt + Conductor Guidance). Used by
-	// goal derivation (deriveGoal) to run the Conductor with the specialized
-	// derivation directive while STILL reusing the shared project-context
-	// prefix (AGENTS.md, workspace, env, skills, ...) via
-	// buildSpecializedSystemPrompt. All other conductor wiring — context
-	// injection, trajectory store, toolset — is reused unchanged. Zero-value
-	// (nil) is the default behavior: the standard orchestrator system prompt
-	// is assembled.
+	// systemPromptOverride: specialized-run prompt factory (goal derivation),
+	// built on the shared project-context prefix (goal-mode.md); nil = standard.
 	systemPromptOverride orchestration.SystemPromptFactory
 
-	// verifyOnEdit, when non-nil, arms the mechanical edit-verification hook
-	// (executor.verify_on_edit) on the main executor and every subagent
-	// executor: after a successful write_file/edit_file the runner executes
-	// the user-configured command and the executor injects its (truncated)
-	// output as a system observation. Suppressed for CHAT mode (see
-	// buildConductorDeps) and specialized goal passes (see RunConductor).
+	// verifyOnEdit, when non-nil, arms the mechanical edit-verification hook on
+	// the main and every subagent executor (suppressed for CHAT mode and
+	// specialized passes). See specs/domains/verify-on-edit.md.
 	verifyOnEdit agent.EditVerifyRunner
 
 	// verifyOnEditMaxOutputChars caps the injected verification output;
 	// 0 falls back to agent.DefaultVerifyOnEditCap.
 	verifyOnEditMaxOutputChars int
 
-	// goalProposer is the backend hook that submits a {condition, verify}
-	// goal proposal to the user and blocks for approval. Used by deriveGoal,
-	// which wraps it in a capturingProposer (to record the agent's proposal)
-	// before injecting it into the Conductor context. Zero-value (nil) is the
-	// default: propose_goal returns "no goal proposer in context" if invoked.
+	// goalProposer: desktop hook deriveGoal uses to submit {condition, verify}
+	// and block for approval; nil = propose_goal no-op (goal-mode.md).
 	goalProposer tools.GoalProposer
 
-	// agentResolver resolves a Subagent Profile name to a *agents.Agent. It is
-	// populated from the Orchestrator's agentManager in buildConductorDeps and
-	// injected into the Conductor context so buildSubAgentTask can apply a
-	// requested profile (system prompt, tools, max-steps, model, redelegate).
-	// Nil when no agentManager is configured (profiles unavailable) — a
-	// non-empty `agent` field is then rejected by delegate validation.
+	// agentResolver resolves a Subagent Profile name; nil = profiles
+	// unavailable, non-empty `agent` rejected by delegate validation.
 	agentResolver tools.AgentResolver
 
-	// skillResolver resolves an Agent Skill name to a *skills.Skill. It is
-	// populated from the Orchestrator's skillManager in buildConductorDeps and
-	// consulted by buildSubAgentTask to activate a Subagent Profile's required
-	// skills (AGENT.md `skills:`) for the subagent. Nil when no skillManager is
-	// configured — a profile with a non-empty skill requirement then fails the
-	// delegation (fail-closed) rather than launching the subagent without the
-	// skills it is mandated to follow. Names are the same shape as skill dir
-	// names (skills.SkillManager.Get). See agents.Agent.RequiredSkills.
+	// skillResolver resolves a profile's required skills, fail-closed
+	// (delegation.md, "Profile Required Skills").
 	skillResolver func(name string) (*skills.Skill, bool)
 
-	// pauseChecker is the cooperative pause signal wired into every conductor
-	// run via ConductorConfig.PauseChecker → executor.SetPauseChecker. It
-	// reads the active request's pause signal (o.activePause) at each step
-	// boundary; PauseSession flips it. Populated by buildConductorDeps so ALL
-	// conductor runs — normal path and every goal-loop turn — are pauseable
-	// through one universal signal. Subagent executors are wired with the same
-	// checker via configureExecutor, so delegated/plan-step subagents pause at
-	// their own step boundary too (instead of running to natural completion).
-	// Nil disables pausing (default).
+	// pauseChecker: the universal cooperative-pause signal checked at every
+	// step boundary of every run and subagent executor; PauseSession flips it.
+	// Nil disables pausing (goal-mode.md, delegation.md).
 	pauseChecker func(context.Context) bool
 
-	// userMessageSource is the live user-message queue wired into every
-	// conductor run via ConductorConfig.UserMessageSource →
-	// executor.SetUserMessageSource. The executor polls it at every step
-	// boundary (right after the pause check); a non-empty return is delivered
-	// to the LLM as a {role:user} interjection in the very next request.
-	// Populated by buildConductorDeps so ALL conductor runs — normal path,
-	// resume, and every goal-loop turn — deliver queued live messages. Nil
-	// disables live delivery (default). Subagent executors are built
-	// separately and never receive the source: a live message belongs to the
-	// user's dialogue with the Conductor, not to a delegated subtask.
+	// userMessageSource: live user-message queue polled per step boundary;
+	// delivered as a {role:user} interjection. Main runs only — subagents
+	// never receive it; nil disables (session-lifecycle.md).
 	userMessageSource func(context.Context) string
 
-	// nudge is a one-shot resume-with-nudge user message threaded to
-	// ConductorConfig.PendingUserInterjection. When non-empty it lands as the
-	// final user message after the seeded step history in the very next LLM
-	// call. Set per-resume; empty for fresh tasks (the default no-nudge path).
+	// nudge: one-shot resume nudge delivered as the final user message of the
+	// next LLM call; empty on fresh tasks.
 	nudge string
 
-	// stopTools names ordinary tool calls that TERMINATE this run (the turn)
-	// when they execute successfully — threaded to ConductorConfig.StopTools →
-	// executor.SetStopTools. The goal loop sets it to `declare_goal_status` for
-	// every per-turn working run, so a goal turn ends the moment the agent
-	// declares its verdict: the loop then advances turn-by-turn (TurnCount
-	// increments, the UI leaves turn 0) and the turn budget is enforced instead
-	// of the agent packing the whole goal — including its own verification loop
-	// — into a single unbounded turn. Empty (default) changes nothing: every
-	// ordinary tool keeps the run going.
+	// stopTools: ordinary tools that terminate the run on success — the goal
+	// loop sets declare_goal_status so turns end at the verdict (turn budget).
+	// Empty = no-op (goal-mode.md).
 	stopTools []string
 }
 
@@ -624,45 +418,20 @@ type conductorDeps struct {
 type conductorLauncher struct {
 	deps conductorDeps
 	bb   orchestration.Blackboard
-	// asyncBaseCtx is the RUN-scoped context an ASYNC delegation is based on.
-	// The delegate tool returns as soon as an async task is launched, but that
-	// task keeps running in the background under the executor's per-tool
-	// watchdog. The watchdog cancels the tool-call context the moment the call
-	// returns, which would tear the just-launched background subagent down
-	// before it does any work. The run context outlives the tool call yet is
-	// still cancelled with the task, so an async delegation keeps exactly the
-	// lifetime it had before the tool-call watchdog existed: it survives the
-	// delegate call and a cooperative pause, and dies with a task cancel / the
-	// run. Set once in RunConductor just before the conductor starts; nil under
-	// direct (test) construction, where launchAsync falls back to the
-	// dispatched context.
+	// asyncBaseCtx: the RUN-scoped context async delegations are based on —
+	// the per-tool watchdog would kill a just-launched subagent otherwise.
+	// Set once in RunConductor; nil in tests (delegation.md).
 	asyncBaseCtx context.Context
-	// runPlanStepWave executes one wave of ready plan steps concurrently and
-	// returns their outcomes. Defaults to defaultPlanStepWave (which builds an
-	// isolated subagent executor per step and runs them via
-	// agent.RunSubAgentsParallel). Tests override it to exercise the Execute
-	// DAG scheduler — wave detection, failure cascade, cycle detection, and
-	// cancellation — without real LLM-driven executors.
+	// runPlanStepWave executes one wave of ready plan steps; default
+	// defaultPlanStepWave, overridden by tests for the DAG scheduler.
 	runPlanStepWave func(ctx context.Context, ready []orchestration.PlanStep, registry *tools.DelegationRegistry) []planStepOutcome
-	// planState tracks whether a plan was declared in THIS Conductor run. It
-	// is shared with the conductorPublisher so HasDeclaredPlan (the delegate
-	// guard) reflects only plans declared via declare_plan, not restored ones.
-	// Nil only under direct (test) construction — see HasDeclaredPlan fallback.
+	// planState is shared with the publisher so the delegate guard reflects
+	// only plans declared in THIS run; nil only in tests.
 	planState *planRunState
-	// ledger is the durable unit ledger this launcher writes every unit's
-	// lifecycle through — the SINGLE writer of unit lifecycle for plan steps,
-	// blocking/async delegates and redelegations (spec at register, running at
-	// start, paused+steps at checkpoint, completed/failed at settle).
-	// RunConductor wires the mainline ledger from the blackboard; the
-	// resume-wave launcher leaves it nil and derives one lazily via unitLedger,
-	// which memoizes the derived instance so a unit's registration and its
-	// later settle always land in the SAME ledger (and share its overlay).
-	// Nil (or a ledger with no store) degrades to in-memory / no-op writes, so
-	// every write is nil-safe.
-	//
-	// This field is set at CONSTRUCTION only; the lazily derived ledger lives in
-	// derivedLedger below, so the unsynchronized read here can never race a
-	// write. Neither field is ever reassigned after the launcher is shared.
+	// ledger is the durable unit ledger — the SINGLE writer of unit lifecycle
+	// (delegation.md). Set at CONSTRUCTION (RunConductor); the resume-wave
+	// launcher derives one lazily via unitLedger (memoized — register and
+	// settle must land in the SAME ledger). Nil degrades to no-op writes.
 	ledger units.Ledger
 	// ledgerOnce memoizes the lazily derived ledger so the derivation is
 	// executed exactly once and its result is safely published.
@@ -670,30 +439,17 @@ type conductorLauncher struct {
 	// derivedLedger caches the ledger lazily derived from the blackboard.
 	derivedLedger units.Ledger
 
-	// slots is the launcher-wide subagent concurrency limiter: a buffered
-	// channel whose capacity is deps.maxParallelSubagents (nil = unlimited).
-	// It is the SINGLE limiter every subagent execution acquires a slot from —
-	// both the wave/batch fan-out (runSubAgentsParallel) and the per-task async
-	// launches (launchAsync) — so the configured cap holds across ALL dispatch
-	// paths and across paths running at the same time (a wave that mixes async
-	// and blocking tasks cannot exceed it here). Lazily built by subagentSlots
-	// from the configured cap so a launcher constructed directly (tests) still
-	// honors it; the once-guard publishes it safely to the concurrent callers.
+	// slots is the launcher-wide concurrency limiter shared by every dispatch
+	// path (delegation.md); lazily built from the cap so direct (test)
+	// construction honors it too, published once.
 	slotsOnce sync.Once
 	slots     chan struct{}
 }
 
-// unitLedger returns the ledger this launcher writes unit lifecycle through.
-// It prefers the explicitly wired ledger (RunConductor) and otherwise derives
-// one from the blackboard, MEMOIZING the derived instance: a launcher built by
-// the resume wave does not wire a ledger, and building a fresh one on each call
-// would put a unit's Begin and its later settle in different ledger instances —
-// losing the shared in-memory overlay, paying a store reload per transition,
-// and (for a supported store-less blackboard) making every get return
-// not-found so every launcher unit write silently no-ops.
-//
-// A blackboard that is not persistable has no durable unit store, so this
-// returns nil and every write becomes a no-op.
+// unitLedger returns the launcher's ledger: the wired one (RunConductor), else
+// a blackboard-derived instance MEMOIZED so a unit's Begin and its settle land
+// in the same ledger (shared overlay, no per-transition reload). A
+// non-persistable blackboard yields nil — every write no-ops.
 func (l *conductorLauncher) unitLedger() units.Ledger {
 	if l.ledger != nil {
 		return l.ledger
@@ -739,19 +495,9 @@ func (l *conductorLauncher) recordUnitLedger(id string, execErr error, steps []a
 	}
 }
 
-// HasDeclaredPlan implements tools.PlanChecker. Returns true when the plan
-// workflow is active in the CURRENT Conductor run: a plan was declared in this
-// run via declare_plan, OR this run resumed a paused task whose approved plan
-// still has unreached steps (continuable — the approved plan stays
-// authoritative, so delegate stays disabled and execute_plan is the only
-// execution path for plan steps). Used by the delegate guard to enforce
-// orthogonality.
-//
-// Crucially, this consults planRunState, NOT the raw blackboard plan: on a
-// continuation, a plan restored from a previous COMPLETED task must NOT lock
-// the new run into the plan workflow. When planState is nil (direct
-// construction in tests), it falls back to the blackboard-plan check so
-// existing direct-construction tests keep working.
+// HasDeclaredPlan implements tools.PlanChecker: plan workflow active in the
+// CURRENT run (planRunState, not the blackboard plan; nil falls back for
+// direct test construction) — conductor.md.
 func (l *conductorLauncher) HasDeclaredPlan() bool {
 	if l.planState != nil {
 		return l.planState.isActive()
@@ -759,80 +505,32 @@ func (l *conductorLauncher) HasDeclaredPlan() bool {
 	return l.bb != nil && l.bb.GetPlan() != nil
 }
 
-// PlanContinuation reports whether THIS Conductor run resumed a task whose
-// approved plan still has unreached steps. Detected by declare_plan via the
-// optional tools.PlanContinuation capability interface, so the tool can return
-// a soft "plan already approved — continue with execute_plan" hint instead of
-// re-publishing (and thereby resetting) the approved roadmap. Nil planState
-// (direct test construction) means no continuation.
+// PlanContinuation reports whether THIS run resumed a task whose approved plan
+// still has unreached steps (declare_plan reads it to return the soft
+// "continue with execute_plan" hint instead of re-publishing the roadmap).
 func (l *conductorLauncher) PlanContinuation() bool {
 	return l.planState != nil && l.planState.isContinuable()
 }
 
-// Execute runs the declared plan's steps in DAG order with parallelism for
-// independent steps. It implements tools.PlanStepExecutor.
-//
-// Execute is resumable. A step that already has a successful result on the
-// blackboard (StepResult.Error == nil) is skipped, so a second call re-runs
-// only failed or never-started steps instead of repeating side effects. An
-// explicit stepIDs list forces the named steps — and any step that depends on
-// them, directly or transitively — to re-run even if they previously
-// succeeded; other already-successful steps are still skipped.
-//
-// Two continuation flavors are distinguished:
-//   - Resumed paused task with an approved plan (continuable, seeded by
-//     Orchestrator.Resume via planRunState): Execute runs WITHOUT a
-//     re-declare — the plan on the blackboard is still authoritative and
-//     already-successful steps are skipped by the resume logic above.
-//   - Plan restored from a previous COMPLETED task (neither declared in this
-//     run nor continuable): refused. planRunState (fresh per run) tracks
-//     whether declare_plan ran in THIS run, and Execute will not re-run a
-//     restored plan's steps (which would duplicate side effects). The
-//     Conductor must publish a new plan via declare_plan, or use delegate
-//     for plan-less work.
-//
-// Each step runs as an isolated subagent (its own Executor + ContextManager),
-// but events are emitted as plan_step_start/plan_step_complete (not
-// subagent_launch/subagent_complete) via the planStepEventTranslator. This
-// reuses the full subagent machinery (parallel execution, context isolation,
-// dependency injection) while presenting the work as plan steps in the UI.
-//
-// After each step completes, its result is:
-//   - stored on the blackboard (SetStepResult) — accessible via read_step_output
-//   - marked in the inlineStepLifecycle (markCompleted) — prevents the
-//     finish-fallback completeAll from double-completing
+// Execute runs the declared plan's steps in DAG order with parallelism
+// (tools.PlanStepExecutor). Resumable: successful steps skipped unless forced
+// via stepIDs; continuable resumes run without a re-declare, restored plans
+// refused. Isolated-subagent execution presented as plan-step events
+// (conductor.md, "Inline Step Lifecycle").
 func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]tools.PlanStepResult, error) {
 	plan := l.bb.GetPlan()
 	if plan == nil || len(plan.Steps) == 0 {
 		return nil, errors.New("no plan declared — call declare_plan first")
 	}
 
-	// Restored-plan guard. The plan must be active in THIS run; two cases pass:
-	//   - plan declared in this run (declare_plan)            → execute.
-	//   - continuable resume (paused task, approved plan with
-	//     unreached steps, seeded by Orchestrator.Resume)     → execute WITHOUT
-	//     a re-declare: the approved plan is still authoritative and the resume
-	//     logic below skips already-successful steps.
-	// Two inactive cases are refused — on both, re-running the steps would
-	// duplicate side effects (file edits, etc.) for no benefit:
-	//   - a plan merely restored from a previous COMPLETED task; and
-	//   - a plan the user abandoned at the approval prompt (its declared flag
-	//     was cleared by conductorPublisher.AbandonPlan).
-	// When planState is nil (direct test construction), this guard is inert and
-	// Execute proceeds on whatever plan is on the blackboard, preserving the
-	// behavior the DAG-scheduler tests rely on.
+	// Restored-plan guard: the plan must be active in THIS run (declared or
+	// continuable); restored/abandoned plans are refused. Inert when nil.
 	if l.planState != nil && !l.planState.isActive() {
 		return nil, errors.New("execute_plan: the plan on the blackboard was not declared in this run and is not a continuable resume — it is either a plan restored from a previous (completed) task or one abandoned at the approval prompt — call declare_plan to publish a new plan, or use delegate for plan-less work")
 	}
 
-	// Well-formedness preflight. Plans published via declare_plan are
-	// validated there, but plans can also reach the blackboard by other
-	// routes (restored from previous sessions, legacy data). An empty or
-	// duplicate step ID would otherwise surface mid-registration as a cryptic
-	// `register plan step "": delegation ID already exists` with no recovery
-	// hint. Fail fast — before any step is registered or any wave launches —
-	// with an actionable message. The error deliberately carries no
-	// "execute_plan:" prefix: the tool wrapper prepends it.
+	// Well-formedness preflight for plans that bypassed declare_plan validation
+	// (restored/legacy) — fail fast; the tool wrapper adds the error prefix.
 	if err := planStepsWellFormed(plan.Steps); err != nil {
 		return nil, err
 	}
@@ -847,29 +545,22 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 		}
 	}
 
-	// Local registry for dependency resolution between plan steps. This is
-	// SEPARATE from the Conductor's main delegation registry — plan steps are
-	// not delegations and should not appear in cancel_delegation.
+	// Local registry for plan-step dependency resolution — separate from the
+	// Conductor's main delegation registry: plan steps are not delegations.
 	localReg := tools.NewDelegationRegistry()
-	// Plan steps register through the same spec sink as delegates so their unit
-	// lifecycle enters the ledger at register time (spec at register). The task
-	// store is nil: plan steps are rebuilt from the blackboard plan, so writing
-	// them into the delegation-spec store would corrupt the resume wave.
+	// Same spec sink as delegates (spec at register); nil store — plan steps
+	// are rebuilt from the blackboard plan.
 	wireDelegationSpecSink(localReg, l.unitLedger(), "", "", nil, l.deps.logger)
 
-	// indexByID preserves plan-declaration order for deterministic result
-	// ordering (map iteration is randomised, so the aggregated result would
-	// otherwise be non-reproducible across runs).
+	// indexByID preserves declaration order for deterministic result ordering.
 	indexByID := make(map[string]int, len(plan.Steps))
 	pending := make(map[string]orchestration.PlanStep, len(plan.Steps))
 	results := make([]tools.PlanStepResult, 0, len(plan.Steps))
 
 	for i, step := range plan.Steps {
 		indexByID[step.ID] = i
-		// RegisterTaskKind (rather than Register) so the registration sink fires
-		// and the step's unit record (kind plan_step, spec = the step) enters the
-		// ledger at register time. The registry entry itself is identical to a
-		// plain Register.
+		// RegisterTaskKind: identical to Register, but fires the registration
+		// sink (unit ledger, spec at register).
 		if err := localReg.RegisterTaskKind(tools.DelegationKindPlanStep, tools.DelegationTask{
 			ID:        step.ID,
 			Summary:   step.Summary,
@@ -881,9 +572,8 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 			return nil, fmt.Errorf("register plan step %q: %w", step.ID, err)
 		}
 
-		// Skip an already-successful step unless it is in the forced-rerun set.
-		// Its previous result is replayed into the local registry so dependents
-		// see their dependency as satisfied and can read its output.
+		// Skip an already-successful step unless forced; replay its result into
+		// the registry so dependents see the dependency as satisfied.
 		if !forced[step.ID] {
 			if sr, ok := l.successfulStepResult(step.ID); ok {
 				localReg.Complete(step.ID, sr.FullOutput, nil, sr.Steps)
@@ -892,18 +582,9 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 					StepID: step.ID, Summary: step.Summary,
 					Status: "completed", Output: sr.FullOutput,
 				})
-				// The step already succeeded on the blackboard. If this run has
-				// not yet recorded its terminal state, settle it according to
-				// who owns the plan panel state (issue #99):
-				//   - plan re-declared in THIS run (declare_plan): the panel
-				//     was reset to pending, so emit the synthesized success
-				//     pair to mark the skipped step completed again;
-				//   - continuation resume (plan active without a re-declare):
-				//     the terminal events were emitted by the run that executed
-				//     the step and history already shows it completed — record
-				//     the terminal state silently.
-				// On a same-run retry the step is already completed and needs
-				// no new events either way.
+				// Terminal-state settlement for a skipped step (issue #99):
+				// re-declared → re-emit success; continuation → settle
+				// silently (history already shows it).
 				if l.deps.lifecycle != nil && !l.deps.lifecycle.isCompleted(step.ID) {
 					if l.deps.lifecycle.planDeclaredThisRun() {
 						l.emitSkippedStepCompleted(step.ID)
@@ -946,12 +627,8 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 			}
 		}
 		if len(ready) == 0 {
-			// Dependencies unsatisfiable — every remaining step is blocked by
-			// an upstream failure. None of them launched, so the translator
-			// never emitted PlanStepStart/Complete for them. Emit a terminal
-			// pair directly (mirroring completeAll) so they do not linger
-			// "pending" in the plan panel, then mark them completed so the
-			// finish fallback does not double-complete.
+			// Dependencies unsatisfiable — nothing launched, so emit the
+			// terminal pairs directly (they would otherwise linger "pending").
 			for id, step := range pending {
 				err := fmt.Errorf("step %q: dependencies could not be satisfied (upstream failure)", id)
 				l.settleUnit(id, err)
@@ -959,9 +636,7 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 					StepID: id, Summary: step.Summary,
 					Status: "failed", Error: err,
 				})
-				// The step never launched, so the translator did not emit a
-				// terminal pair for it — emit one directly so it is not left
-				// "pending" in the plan panel.
+				// Never launched — emit the terminal pair directly.
 				l.emitNeverStartedStep(id, err.Error())
 				if l.deps.lifecycle != nil {
 					l.deps.lifecycle.markCompleted(id)
@@ -1009,9 +684,8 @@ func (l *conductorLauncher) Execute(ctx context.Context, stepIDs []string) ([]to
 			delete(pending, oc.stepID)
 		}
 
-		// A cooperative pause stopped one or more steps in this wave. Stop
-		// scheduling further waves; the remaining steps are left unrun and
-		// will be (re)dispatched on resume via a fresh execute_plan call.
+		// A cooperative pause stopped this wave; remaining steps are
+		// (re)dispatched on resume via a fresh execute_plan call.
 		if pausedWave {
 			break
 		}
@@ -1036,10 +710,8 @@ func (l *conductorLauncher) successfulStepResult(stepID string) (orchestration.S
 	return sr, true
 }
 
-// CompletedStep implements tools.DelegationLauncher: it reports the settled
-// outcome of a delegation id that already carries a successful StepResult on
-// the blackboard. The delegate tool's duplicate guard uses it to refuse the
-// re-delegation and replay the settled entry instead of re-running the work.
+// CompletedStep implements tools.DelegationLauncher: the settled outcome for
+// an id with a successful StepResult (the delegate duplicate guard replays it).
 func (l *conductorLauncher) CompletedStep(stepID string) (tools.DelegationCompletedStep, bool) {
 	sr, ok := l.successfulStepResult(stepID)
 	if !ok {
@@ -1053,16 +725,9 @@ func (l *conductorLauncher) CompletedStep(stepID string) (tools.DelegationComple
 // is to publish a fresh, valid one.
 const malformedPlanFix = "re-declare the plan with declare_plan (every task needs a unique non-empty id, summary, description)"
 
-// planStepsWellFormed verifies that every plan step has a non-empty, unique
-// ID. Execute keys its local delegation registry, dependency resolution, and
-// result bookkeeping off step IDs, so empty or duplicate IDs corrupt the run
-// (two empty IDs collide inside the registry with a cryptic error). Plans
-// published through declare_plan are validated there; this preflight guards
-// Execute against plans that bypassed that validation — restored plans from
-// previous sessions, legacy blackboard data. Step numbers in the errors are
-// 1-based declaration positions. The messages carry no "execute_plan:"
-// prefix: the execute_plan tool wrapper prepends one when surfacing the error
-// to the model.
+// planStepsWellFormed verifies non-empty unique step IDs (Execute keys its
+// registry/deps/results off them). declare_plan validates too; this guards
+// restored/legacy plans. 1-based numbers in errors; the wrapper adds the prefix.
 func planStepsWellFormed(steps []orchestration.PlanStep) error {
 	seen := make(map[string]int, len(steps))
 	for i, step := range steps {
@@ -1077,10 +742,8 @@ func planStepsWellFormed(steps []orchestration.PlanStep) error {
 	return nil
 }
 
-// forcedRerunSet computes the set of step IDs that must re-run when explicit
-// step IDs are passed to execute_plan: the targets themselves plus every step
-// that transitively depends on a target (its output is now stale). Returns an
-// error if any target is not part of the plan.
+// forcedRerunSet: explicit execute_plan step IDs force the targets plus their
+// transitive dependents to re-run (their outputs are stale).
 func forcedRerunSet(plan *orchestration.Plan, targets []string) (map[string]bool, error) {
 	known := make(map[string]bool, len(plan.Steps))
 	for _, s := range plan.Steps {
@@ -1155,30 +818,11 @@ func (l *conductorLauncher) releaseSubagentSlot() {
 	}
 }
 
-// runSubAgentsParallel is the SINGLE fan-out through which both the plan-wave
-// path (defaultPlanStepWave) and the blocking-delegate path
-// (runRegularBlocking) launch their subagents. Every worker acquires a slot
-// from the launcher-wide limiter (subagentSlots) — the SAME limiter the async
-// launches (launchAsync) acquire from — so agents.max_parallel_subagents caps
-// concurrency across every dispatch path, and across paths running at the same
-// time, instead of once per call. Results are returned in input order.
-//
-// When the cap is unset (<= 0) the fan-out is delegated to the SDK's
-// agent.RunSubAgentsParallel, which is unbounded in that case.
-//
-// The workers mirror agent.RunSubAgentsParallel's shape (one goroutine per
-// task, one running slot per worker) but acquire the launcher's shared limiter
-// rather than the SDK's per-call semaphore — that sharing is exactly what lets
-// the cap span separate dispatch paths. agent.RunSubAgent already runs each
-// subagent on its own goroutine with panic recovery, so this only schedules
-// and collects.
-//
-// No slot-holder here can itself delegate: the plan-wave path runs under
-// subagentCtx (delegation machinery stripped) and the blocking path receives
-// only non-redelegating tasks (runBlocking splits the redelegating ones out to
-// runRedelegBlocking, which is intentionally NOT gated). So an active slot
-// never waits on a nested launch for a slot it is itself holding — the shared
-// limiter cannot deadlock on nested delegation.
+// runSubAgentsParallel is the SINGLE fan-out for plan-wave and blocking
+// dispatch: every worker draws from the launcher-wide limiter (async launches
+// use the same one), so max_parallel_subagents caps all concurrent paths;
+// input order preserved. No slot-holder can itself delegate → no nested
+// deadlock (delegation.md).
 func (l *conductorLauncher) runSubAgentsParallel(ctx context.Context, tasks []agent.SubAgentTask) []agent.SubAgentResult {
 	if len(tasks) == 0 {
 		return nil
@@ -1204,19 +848,12 @@ func (l *conductorLauncher) runSubAgentsParallel(ctx context.Context, tasks []ag
 	return results
 }
 
-// defaultPlanStepWave is the production wave dispatcher: it builds an isolated
-// subagent executor per ready step and runs the wave concurrently via
-// agent.RunSubAgentsParallel. Steps whose task construction fails are returned
-// as failed outcomes with a directly-emitted terminal event pair (the
-// translator never ran, so no SubAgentLaunch/Complete fired for them).
+// defaultPlanStepWave: an isolated subagent executor per ready step, run
+// concurrently; build failures get directly-emitted terminal pairs.
 func (l *conductorLauncher) defaultPlanStepWave(ctx context.Context, ready []orchestration.PlanStep, registry *tools.DelegationRegistry) []planStepOutcome {
-	// Plan-step subagents get the same narrowed context as every other
-	// subagent launch path: goal-loop sinks cleared (defense in depth on top
-	// of resolveTaskTools stripping the goal tools from every toolset), no
-	// Conductor-only delegation/plan machinery, and no subagent-roster prompt
-	// sections. Plan steps are plain blocking subagents — they need none of
-	// the Conductor's context handles (the registry is passed explicitly and
-	// the profile resolver survives the narrowing).
+	// Plan-step subagents run under the same narrowed context as every other
+	// launch path (see subagentCtx / delegation.md "Subagent Context
+	// Narrowing"): plan steps are plain blocking subagents.
 	ctx = subagentCtx(ctx)
 	subTasks := make([]agent.SubAgentTask, 0, len(ready))
 	outcomes := make([]planStepOutcome, 0, len(ready))
@@ -1232,9 +869,7 @@ func (l *conductorLauncher) defaultPlanStepWave(ctx context.Context, ready []orc
 		scopedEvents := l.scopePlanStepEvents(step.ID, step.Summary)
 		st, err := l.buildSubAgentTask(ctx, task, registry, scopedEvents)
 		if err != nil {
-			// Build failed — the subagent never launched, so the
-			// planStepEventTranslator did not emit PlanStepStart/Complete.
-			// Emit a terminal pair directly so the step is not left "pending".
+			// Build failed — no translator events ran; emit the terminal pair directly.
 			l.emitNeverStartedStep(step.ID, err.Error())
 			l.settleUnit(step.ID, err)
 			outcomes = append(outcomes, planStepOutcome{stepID: step.ID, err: err})
@@ -1271,9 +906,8 @@ func (l *conductorLauncher) defaultPlanStepWave(ctx context.Context, ready []orc
 }
 
 // emitNeverStartedStep emits the PlanStepStart + PlanStepComplete(success=false)
-// terminal pair for a plan step that never launched (unsatisfiable dependency
-// or build failure). PlanStepStart dedups on the root emitter, so this is safe
-// even if a stray start was already recorded.
+// pair for a step that never launched; PlanStepStart dedups on the root
+// emitter, so a stray start is harmless.
 func (l *conductorLauncher) emitNeverStartedStep(stepID, errMsg string) {
 	if l.deps.emitter == nil {
 		return
@@ -1283,10 +917,9 @@ func (l *conductorLauncher) emitNeverStartedStep(stepID, errMsg string) {
 	l.deps.emitter.PlanStepComplete(stepID, false, 0, errMsg)
 }
 
-// emitSkippedStepCompleted emits the PlanStepStart + PlanStepComplete(success=true)
-// terminal pair for a step skipped by the resume path because it already has a
-// successful result on the blackboard. Mirrors emitNeverStartedStep, but the
-// step succeeded, so the terminal pair records success and an empty error.
+// emitSkippedStepCompleted mirrors emitNeverStartedStep with success=true, for
+// a step the resume path skipped because it already succeeded on the
+// blackboard.
 func (l *conductorLauncher) emitSkippedStepCompleted(stepID string) {
 	if l.deps.emitter == nil {
 		return
@@ -1315,12 +948,9 @@ func (l *conductorLauncher) Launch(ctx context.Context, tasks []tools.Delegation
 	results := make([]tools.DelegationResult, 0, len(tasks))
 	pending := make(map[string]tools.DelegationTask, len(tasks))
 
-	// NOTE: the duplicate guard (a task id that already carries a SUCCESSFUL
-	// StepResult on the blackboard must not silently re-run) lives in the
-	// delegate TOOL, before registration — see delegate.go. Launch itself
-	// needs no guard: its callers are the delegate tool (guarded there) and
-	// the resume wave, which relaunches only paused/crash-interrupted specs
-	// — neither can carry a successful StepResult by construction.
+	// The duplicate guard (no silent re-run of a successful id) lives in the
+	// delegate tool; Launch's callers (guarded tool, resume wave) cannot carry
+	// one — see delegate.go.
 	for _, t := range tasks {
 		pending[t.ID] = t
 	}
@@ -1414,18 +1044,14 @@ func (l *conductorLauncher) runWave(ctx context.Context, ready []tools.Delegatio
 }
 
 func (l *conductorLauncher) runBlocking(ctx context.Context, tasks []tools.DelegationTask, registry *tools.DelegationRegistry) []tools.DelegationResult {
-	// Split tasks into regular and redelegating. Redelegating tasks need
-	// per-task contexts (child registry + launcher), so they can't share
-	// the same ctx path through RunSubAgentsParallel.
+	// Redelegating tasks need per-task contexts (child registry + launcher),
+	// so they launch individually outside RunSubAgentsParallel.
 	var regularTasks []tools.DelegationTask
 	var redelegTasks []tools.DelegationTask
 	for _, t := range tasks {
-		// A profile's allow-redelegate only ever upgrades (never downgrades) —
-		// a profile with allow-redelegate: true wins over a false task flag, but
-		// a false profile value never revokes an explicitly-granted task flag
-		// (ADR-021 §5). The other profile fields (prompt/tools/max-steps/model)
-		// are applied in buildSubAgentTask; only allow-redelegate must be
-		// resolved here because it selects the dispatch path.
+		// A profile's allow-redelegate only ever upgrades (ADR-021 §5); resolved
+		// here because it selects the dispatch path (the other profile fields
+		// are applied in buildSubAgentTask).
 		if t.Agent != "" {
 			t.AllowRedelegate = l.resolveAgentAllowRedelegate(ctx, t.Agent, t.AllowRedelegate)
 		}
@@ -1451,15 +1077,9 @@ func (l *conductorLauncher) runBlocking(ctx context.Context, tasks []tools.Deleg
 	return results
 }
 
-// resolveAgentAllowRedelegate applies a profile's allow-redelegate override.
-// The override only ever upgrades (never downgrades): a profile that sets
-// AllowRedelegate=true wins over a false task flag, while a profile with false
-// preserves the task flag unchanged — the profile can grant nested delegation
-// but never revoke a delegation the caller explicitly granted (ADR-021 §5).
-// When the profile is not found (or no resolver), the task flag is preserved
-// unchanged — validateDelegationTasks already rejected unknown agents, so a
-// not-found here is a benign race (agent removed mid-run) that keeps the safer
-// (task) default.
+// resolveAgentAllowRedelegate applies a profile's allow-redelegate override —
+// upgrade-only (ADR-021 §5). A not-found profile (benign mid-run removal;
+// validation already rejected unknown names) keeps the task flag.
 func (l *conductorLauncher) resolveAgentAllowRedelegate(ctx context.Context, agentName string, taskFlag bool) bool {
 	resolver := tools.AgentResolverFrom(ctx)
 	if resolver == nil {
@@ -1475,35 +1095,9 @@ func (l *conductorLauncher) resolveAgentAllowRedelegate(ctx context.Context, age
 	return taskFlag
 }
 
-// subagentCtx strips the Conductor-only context values from ctx. It must be
-// used for any subagent that is NOT explicitly granted allow_redelegate.
-//
-// Three classes of values are cleared:
-//
-//  1. Delegation-machinery handles (DelegationRegistry, DelegationLauncher,
-//     PlanPublisher, ReflectionRunner, PlanChecker). resolveTaskTools already
-//     filters delegate/cancel_delegation/declare_plan/reflect out of the
-//     subagent's tool descriptor list, but that alone is not sufficient
-//     defense-in-depth since a subagent's tool set can also be influenced by
-//     explicit task.Tools lists — stripping the context values ensures those
-//     tools are inert (return "not running inside a Conductor") even if a
-//     descriptor for them ever reaches the subagent.
-//  2. The subagent roster (availableAgentsKey/userAgentsKey). Both roster
-//     sections ("Available Subagents" / "Requested Subagents") are
-//     Conductor-only by design (ADR-021 §4) and are rendered into the system
-//     prompt only when present in context. Without clearing them, a generic
-//     no-profile subagent — whose prompt is built via the normal
-//     buildSystemPrompt path — would inherit the Conductor's "you MUST
-//     delegate via delegate(agent:)" directive while having no delegate tool
-//     available, producing a contradictory prompt.
-//  3. The goal-loop state and sinks (GoalKey, goal status / verification
-//     sinks). The goal loop sets the state and the sink together on every
-//     turn (orchestrator_goal.go); without clearing them a delegated subagent
-//     would inherit the goal-turn completion directive (declare_goal_status
-//     ends the turn — a tool no subagent holds, stripped by
-//     StripGoalModeTools) plus the goal-mode static/volatile sections, losing
-//     the normal finish/plan-context completion semantics, and could write
-//     verdicts into the loop it serves under.
+// subagentCtx strips Conductor-only context values — required for any
+// non-redelegating subagent; rationale (three cleared classes + trajectory
+// detach) in delegation.md ("Subagent Context Narrowing").
 func subagentCtx(ctx context.Context) context.Context {
 	ctx = tools.WithDelegationRegistry(ctx, nil)
 	ctx = tools.WithDelegationLauncher(ctx, nil)
@@ -1511,48 +1105,22 @@ func subagentCtx(ctx context.Context) context.Context {
 	ctx = tools.WithReflectionRunner(ctx, nil)
 	ctx = tools.WithPlanChecker(ctx, nil)
 	ctx = orchestration.WithDelegationRegistry(ctx, nil)
-	// Clear the goal-loop sinks so no delegated subagent can write goal-status
-	// or verification verdicts into the loop it serves under: those channels
-	// belong to the goal-loop Conductor and the independent verifier only.
-	// resolveTaskTools already strips the goal tools from every subagent
-	// toolset; this nil-ing is defense in depth (a future GroupSystem tool
-	// or a hand-written toolset cannot reach the sinks either). The verifier
-	// itself does not run through subagentCtx — it is a direct RunConductor
-	// call with its own fresh sink (defaultGoalVerifier), and the re-derivation
-	// sub-agent it delegates SHOULD land here with the sink cleared.
+	// Goal-loop sinks: defense in depth behind resolveTaskTools (the verifier
+	// itself does not run through subagentCtx — its re-derivation subagent
+	// SHOULD land here with sinks cleared).
 	ctx = tools.WithGoalStatusSink(ctx, nil)
 	ctx = tools.WithVerificationSink(ctx, nil)
-	// Clear the goal-loop state (class 3 above): buildSystemPrompt reads
-	// GoalKey and, when present, replaces the completion directive with the
-	// goal-turn protocol and appends the goal-mode sections — none of which
-	// applies to a delegated subagent (see the function doc comment).
 	ctx = WithGoalState(ctx, nil)
-	// Clear the Conductor-only subagent roster so no subagent inherits the
-	// "Available Subagents"/"Requested Subagents" prompt sections (ADR-021 §4).
 	ctx = WithAvailableAgents(ctx, nil)
 	ctx = WithUserAgents(ctx, nil)
-	// Detach the trajectory store: the parent holder backs the task checkpoint
-	// (the persisted trajectory seeded into resumeSteps and the reflect tool's
-	// trajectory scope) and is synced by whichever executor holds the context
-	// — the sp4rk executor calls Sync(its own steps) at the top of every loop
-	// iteration. A subagent inheriting the parent holder would sync its own
-	// (unrelated) step list into it, and because Sync's guard is
-	// length-monotonic, a longer subagent run would REPLACE the parent's
-	// trajectory and suppress the parent's later syncs — corrupting the task
-	// checkpoint. Subagent steps are transient (never part of the parent task
-	// checkpoint), so every subagent executor gets a fresh in-memory holder it
-	// cannot clobber the parent's with.
+	// Detach the trajectory store: a foreign executor must never sync into the
+	// parent task checkpoint (see delegation.md "Subagent Context Narrowing").
 	ctx = agent.WithTrajectoryStore(ctx, &trajectoryHolder{})
 	return ctx
 }
 
-// isPaused reports whether err is a cooperative-pause sentinel. It handles
-// both the in-memory sentinel (agent.ErrPaused) and the string-reconstructed
-// error produced by a persistence round-trip: TaskPersistence.PersistStepResult
-// stores ErrorText and LoadTaskState rebuilds it via errors.New(ErrorText), so
-// a paused checkpoint must remain detectable after the task is restored on
-// resume. The ErrPaused message is a unique, stable sentinel string, so
-// equality is safe here.
+// isPaused reports the pause sentinel including its persistence-round-trip
+// string form (ErrPaused's message is unique and stable).
 func isPaused(err error) bool {
 	if err == nil {
 		return false
@@ -1560,12 +1128,9 @@ func isPaused(err error) bool {
 	return errors.Is(err, agent.ErrPaused) || err.Error() == agent.ErrPaused.Error()
 }
 
-// pausedRun reports whether the Conductor's run ended in a cooperative pause:
-// either the run returned the pause sentinel (agent.ErrPaused, including its
-// persistence-round-tripped string form) or the engine classified the result
-// as ExecutionStatusPaused. A paused run is a recoverable checkpoint, not a
-// terminal outcome — the finish fallback must not sweep plan steps into
-// terminal states; they stay pending/running for the Resume path.
+// pausedRun reports a cooperative pause (sentinel or ExecutionStatusPaused) —
+// a recoverable checkpoint, so the finish fallback must not sweep plan steps
+// into terminal states.
 func pausedRun(err error, result *orchestration.ExecutionResult) bool {
 	if isPaused(err) {
 		return true
@@ -1573,10 +1138,8 @@ func pausedRun(err error, result *orchestration.ExecutionResult) bool {
 	return result != nil && result.Status == orchestration.ExecutionStatusPaused
 }
 
-// pausedCheckpoint returns the blackboard's paused checkpoint for a step, if
-// one exists. A paused checkpoint is a StepResult whose Error is the
-// cooperative-pause sentinel and whose Steps hold the subagent's partial
-// trajectory — the seed used to resume that subagent from where it stopped.
+// pausedCheckpoint: the blackboard's pause checkpoint for a step — sentinel
+// error + partial trajectory seed (delegation.md).
 func (l *conductorLauncher) pausedCheckpoint(stepID string) (orchestration.StepResult, bool) {
 	if l.bb == nil {
 		return orchestration.StepResult{}, false
@@ -1588,18 +1151,9 @@ func (l *conductorLauncher) pausedCheckpoint(stepID string) (orchestration.StepR
 	return sr, true
 }
 
-// persistUnitOutcome mirrors a settled delegation/plan-step outcome onto the
-// run's blackboard (which stays the in-memory view read by read_step_output and
-// the resume path) and records it durably through the launcher's ledger.
-//
-// The blackboard write happens unconditionally, so the run's own
-// read_step_output and any in-run resume read keep working. The ledger write —
-// the resume checkpoint plus the terminal status (paused / failed / completed)
-// — is what makes a spawned delegation's pause checkpoint survive a restart: on
-// the mainline it lands in the blackboard-backed unit ledger; on an isolated run
-// (the goal verifier, whose throwaway seeded MapBlackboard is never persisted)
-// it lands in the ledger-bound unit sink instead. Both are best-effort: a
-// persistence failure is logged, never propagated.
+// persistUnitOutcome mirrors a settled outcome to the blackboard (behind
+// read_step_output and in-run resume) and records checkpoint + status in the
+// ledger — what makes a pause checkpoint survive restart (delegation.md).
 func (l *conductorLauncher) persistUnitOutcome(id, output string, execErr error, steps []agent.Step) {
 	l.bb.SetStepResult(id, output, execErr, steps)
 	l.recordUnitLedger(id, execErr, steps)
@@ -1651,17 +1205,9 @@ func (l *conductorLauncher) runRegularBlocking(ctx context.Context, tasks []tool
 	return out
 }
 
-// redelegTaskCtx builds the per-task context for a RE-delegating subagent.
-// This path bypasses subagentCtx (it must keep the delegation machinery the
-// child needs), so it must explicitly clear everything a subagent must not
-// inherit from the delegating executor: the Conductor-only subagent roster
-// (ADR-021 §4), the goal-loop state (buildSystemPrompt would otherwise replace
-// the normal completion directive with the goal-turn protocol naming
-// declare_goal_status — a tool resolveTaskTools strips from every subagent
-// toolset), the goal-loop sinks, and the parent's trajectory store (a foreign
-// executor must never sync into the parent task checkpoint — see subagentCtx).
-// The child delegation registry/launcher ARE injected: re-delegation is the
-// one capability this subagent keeps.
+// redelegTaskCtx: per-task context for a RE-delegating subagent — keeps the
+// delegation machinery, explicitly re-clears roster/goal/trajectory (see
+// delegation.md "Subagent Context Narrowing").
 func (l *conductorLauncher) redelegTaskCtx(ctx context.Context, childReg *tools.DelegationRegistry) context.Context {
 	taskCtx := tools.WithDelegationRegistry(ctx, childReg)
 	taskCtx = tools.WithDelegationLauncher(taskCtx, l)
@@ -1702,12 +1248,8 @@ func (l *conductorLauncher) runRedelegBlocking(ctx context.Context, t tools.Dele
 	// Create a child registry one level deeper and inject it + the launcher
 	// into a per-task context so the subagent can use delegate/cancel_delegation.
 	childReg := tools.NewDelegationRegistryWithDepth(registry.Depth() + 1)
-	// Persist sub-delegation specs with this subagent's step ID as the parent,
-	// so a resume wave can rebuild nested paused delegations and order
-	// children before their parents. Mirrors the root-registry wiring in
-	// RunConductor: an isolated run's ledger-bound unit sink wins (its
-	// blackboard carries no task id), otherwise resolve the task/store from the
-	// blackboard.
+	// Persist sub-delegation specs parented by this step's ID (nested resume
+	// ordering); unitSink wins for isolated runs, else blackboard task/store.
 	if l.deps.unitSink != nil {
 		l.deps.unitSink.wire(childReg, t.ID)
 	} else if pbb, ok := l.bb.(PersistableBlackboard); ok {
@@ -1727,13 +1269,8 @@ func (l *conductorLauncher) runRedelegBlocking(ctx context.Context, t tools.Dele
 		return tools.DelegationResult{ID: t.ID, Status: tools.DelegationStatusFailed, Error: err}
 	}
 
-	// Add delegate + cancel_delegation to the subagent's tool set, with their
-	// real schema (resolveTaskTools always strips these for the redelegating
-	// path too, so they must be re-added here explicitly). Looking them up
-	// from the shared registry — rather than constructing bare
-	// ToolDescriptor{} literals — ensures the subagent's LLM sees the actual
-	// input schema (e.g. delegate's "tasks" array), not an empty schema that
-	// providers would otherwise fall back to a generic object type for.
+	// Re-add delegate/cancel_delegation with their REAL schema (resolveTaskTools
+	// strips them on every path) — registry lookup, not bare descriptors.
 	redelegTools := make([]sdktools.ToolDescriptor, 0, len(st.TaskTools)+2)
 	redelegTools = append(redelegTools, st.TaskTools...)
 	for _, name := range []string{"delegate", "cancel_delegation"} {
@@ -1767,21 +1304,13 @@ func (l *conductorLauncher) runRedelegBlocking(ctx context.Context, t tools.Dele
 }
 
 func (l *conductorLauncher) launchAsync(ctx context.Context, t tools.DelegationTask, registry *tools.DelegationRegistry) tools.DelegationResult {
-	// Base the async delegation on the RUN context, not the transient tool-call
-	// context it was dispatched under: the delegate tool returns as soon as the
-	// task is launched, and the executor's per-tool watchdog cancels the
-	// tool-call context when the call returns — which would cancel the
-	// just-launched background subagent before it does any work. The run
-	// context outlives the call but is still cancelled with the task, so the
-	// async delegation keeps the lifetime it had before the watchdog existed
-	// (survives the delegate call and a pause, dies with a task cancel / the
-	// run). Nil under direct (test) construction — the dispatched ctx is used.
+	// Base the async delegation on the RUN context (asyncBaseCtx) — the per-tool
+	// watchdog would otherwise cancel the just-launched subagent (delegation.md).
 	if l.asyncBaseCtx != nil {
 		ctx = l.asyncBaseCtx
 	}
-	// Async delegations always take the non-redelegating path today (runWave
-	// dispatches all async tasks here regardless of AllowRedelegate), so the
-	// Conductor-only context values must always be stripped — see subagentCtx.
+	// Async delegations always take the non-redelegating path (runWave
+	// dispatches them here regardless of AllowRedelegate).
 	ctx = subagentCtx(ctx)
 	subTask, err := l.buildSubAgentTask(ctx, t, registry, l.scopeEvents(t.ID))
 	if err != nil {
@@ -1796,11 +1325,8 @@ func (l *conductorLauncher) launchAsync(ctx context.Context, t tools.DelegationT
 
 	go func() {
 		defer cancel()
-		// Bound the async fan-out by the launcher-wide limiter: acquire a
-		// running slot before the subagent starts and hold it until it settles,
-		// exactly as the blocking/plan-wave fan-out does. Without this an async
-		// delegate call (up to maxDelegationBatchSize tasks) would start every
-		// task at once, ignoring agents.max_parallel_subagents.
+		// Bound the async fan-out by the launcher-wide limiter, exactly as the
+		// blocking/plan-wave fan-out does (delegation.md).
 		l.acquireSubagentSlot()
 		defer l.releaseSubagentSlot()
 		ch := agent.RunSubAgent(asyncCtx, t.ID, subTask.Executor, subTask.CM, subTask.TaskTools, subTask.TaskDesc, subTask.Emitter, subTask.TodoUpdateFunc)
@@ -1827,11 +1353,9 @@ func (l *conductorLauncher) launchAsync(ctx context.Context, t tools.DelegationT
 }
 
 func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.DelegationTask, registry *tools.DelegationRegistry, scopedEvents agent.Events) (agent.SubAgentTask, error) {
-	// Resolve an agent profile if one is requested. A non-empty `agent` field
-	// was already validated for existence by validateDelegationTasks (when a
-	// resolver is present), but buildSubAgentTask resolves it again so a
-	// profile removed between validation and launch surfaces a clear error
-	// rather than launching a profile-less subagent.
+	// Resolve the requested agent profile again at launch (validation checked
+	// existence earlier): a profile removed mid-run surfaces a clear error
+	// instead of a profile-less subagent.
 	var profile *agents.Agent
 	if t.Agent != "" {
 		resolver := tools.AgentResolverFrom(ctx)
@@ -1843,37 +1367,27 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 		if !ok {
 			return agent.SubAgentTask{}, fmt.Errorf("delegation %q: unknown agent %q — no Subagent Profile with that name was found", t.ID, t.Agent)
 		}
-		// Capability gate (fail-closed, the delegation-side mirror of the MCP
-		// registry gate): an agent whose task snapshot reads "disabled" is
-		// refused even though the profile still resolves — the roster never
-		// advertised it and a /agent: mention of it was already dropped at
-		// task entry, so reaching this point means the model invented the
-		// name (or a mode changed mid-task; the snapshot is immutable, so it
-		// did not). Absent snapshot → nothing blocks (zero regression).
+		// Capability gate (fail-closed, mirrors the MCP registry gate): a
+		// "disabled" snapshot refuses the delegation; absent snapshot blocks
+		// nothing. See specs/domains/capabilities.md.
 		if agentDelegationBlocked(ctx, t.Agent) {
 			return agent.SubAgentTask{}, fmt.Errorf("delegation %q: agent %q is disabled by capabilities.agents and cannot be delegated to", t.ID, t.Agent)
 		}
 	}
 
 	maxSteps := t.MaxSteps
-	// A profile's max-steps (when >0) overrides both the task field and the
-	// complexity-derived default. The profile is the authoritative budget for
-	// a specialized subagent.
+	// A profile's max-steps (when >0) overrides the task field and the
+	// complexity-derived default (delegation.md, tools table).
 	if profile != nil && profile.Metadata.MaxSteps > 0 {
 		maxSteps = profile.Metadata.MaxSteps
 	}
 	if maxSteps <= 0 {
-		// Default budget derives from routing complexity (inherited via
-		// context), matching the Conductor's own limit.
+		// Default budget = complexity × stepsPerComplexity (the Conductor's own limit).
 		maxSteps = ComplexityFromContext(ctx) * stepsPerComplexity
 	}
 
-	// A profile's tool preference (when non-nil) overrides the task field. The
-	// profile is the authoritative tool grant for a specialized subagent;
-	// resolveTaskTools accepts ToolPreferenceWithError's []string group-token form
-	// directly (parseToolGroups handles both []string and []any). An invalid
-	// `tools` field (unknown/duplicate group token) fails the delegation —
-	// never silently widened to the full toolset.
+	// A profile's tool preference (when non-nil) overrides the task field; an
+	// invalid tools field fails the delegation — never silently widened.
 	if profile != nil {
 		pref, err := profile.ToolPreferenceWithError()
 		if err != nil {
@@ -1889,34 +1403,23 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 	}
 	taskDesc := l.buildTaskDescription(t, registry, maxSteps)
 
-	// Resume a paused subagent from its checkpoint: the partial trajectory
-	// (Steps) persisted on the blackboard is seeded into both the executor and
-	// the ContextManager so the subagent continues from where it stopped
-	// instead of restarting. Only a cooperative-pause checkpoint is resumed; a
-	// failed step is re-run fresh.
+	// Seed a cooperative-pause checkpoint (blackboard Steps) into executor and
+	// ContextManager so the subagent continues where it stopped; failed steps
+	// re-run fresh (delegation.md, "Cooperative Subagent Pause and Resume").
 	var resumeSteps []agent.Step
 	if cp, ok := l.pausedCheckpoint(t.ID); ok {
 		resumeSteps = append([]agent.Step(nil), cp.Steps...)
 	}
 
-	// Derive compaction strategy from the Conductor's routing domain +
-	// complexity (inherited via context). Subagents inherit the same
-	// domain/complexity as the Conductor unless the task overrides it.
+	// Subagents inherit the Conductor's routing domain/complexity → compaction strategy.
 	domain := DomainFromContext(ctx)
 	complexity := ComplexityFromContext(ctx)
 	compactionStrategy := compactionStrategyForDomain(domain, complexity)
 
 	modelMeta := l.resolveModelMeta(ctx)
 
-	// Activate the profile's required skills (AGENT.md `skills:`) for this
-	// subagent, merged after any skills already active in the inherited
-	// context (router-matched + user /skill for the parent task): inherited
-	// first, deduped by name. Resolution is fail-closed — an unknown skill
-	// name, or a required list with no skill resolver configured, fails the
-	// delegation rather than launching the subagent without the skills its
-	// profile mandates. The merged set drives both the subagent's system
-	// prompt ("## Active Skills", verbatim bodies) and its read_skill_resource
-	// resolver (see activeSkillsToolExec).
+	// Activate the profile's required skills (AGENT.md `skills:`), merged
+	// inherited-first, fail-closed (delegation.md).
 	var profileSkills []*skills.Skill
 	if profile != nil {
 		required, err := profile.RequiredSkills()
@@ -1941,10 +1444,8 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 		}
 	}
 
-	// System prompt: a profile's body REPLACES the OrchestratorSystem core
-	// directive while preserving the shared project-context prefix (workspace,
-	// AGENTS.md, env, active skills, ...) via buildSpecializedSystemPrompt.
-	// Without a profile, the standard orchestrator prompt is assembled.
+	// A profile's body REPLACES the orchestrator core directive, preserving
+	// the shared project-context prefix (buildSpecializedSystemPrompt).
 	systemPrompt := buildSystemPrompt(ctx, t.Task, modelMeta)
 	if profile != nil && profile.Body != "" {
 		systemPrompt = buildSpecializedSystemPrompt(ctx, t.Task, modelMeta, profile.Body)
@@ -1968,9 +1469,8 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 	}
 
 	caller := l.callerForStep(cm, t.ID)
-	// A profile's per-agent model override forces req.Model on every call.
-	// NewModelOverrideCaller is a no-op (returns inner unchanged) when the
-	// model string is empty, so this is safe unconditionally.
+	// A profile's model override forces req.Model on every call (no-op when
+	// empty, so unconditional).
 	if profile != nil {
 		caller = agent.NewModelOverrideCaller(caller, profile.Metadata.Model)
 	}
@@ -1985,12 +1485,9 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 		execOpts = append(execOpts, agent.WithResumeSteps(resumeSteps))
 	}
 	toolExec := l.deps.toolExec
-	// The merged active skills must reach the subagent's TOOL execution context
-	// too, not just its system prompt: read_skill_resource resolves a skill by
-	// consulting ActiveSkillsFromContext(ctx). buildSubAgentTask cannot mutate
-	// the caller's context (parallel waves share one context across subagents),
-	// so the profile skills travel on a per-subagent ToolExecutor decorator
-	// that injects them into every tool call's context.
+	// The merged skills must also reach the TOOL execution context
+	// (read_skill_resource resolves from the context); the per-subagent
+	// decorator below carries them (delegation.md, "Tool addressability").
 	if len(profileSkills) > 0 && toolExec != nil {
 		toolExec = &activeSkillsToolExec{inner: toolExec, skills: &ActiveSkills{Skills: profileSkills}}
 	}
@@ -2009,10 +1506,8 @@ func (l *conductorLauncher) buildSubAgentTask(ctx context.Context, t tools.Deleg
 	}, nil
 }
 
-// conductorOnlyToolNames are tools that must never be handed to a regular
-// (non-redelegating) subagent: delegate/cancel_delegation would let it spawn
-// further subagents outside the allow_redelegate/depth-cap machinery, and
-// declare_plan/reflect operate on the Conductor's own blackboard/trajectory.
+// conductorOnlyToolNames must never reach a regular subagent: delegation
+// machinery and the Conductor's plan/reflect workflow (delegation.md).
 var conductorOnlyToolNames = map[string]struct{}{
 	"delegate":          {},
 	"cancel_delegation": {},
@@ -2021,10 +1516,8 @@ var conductorOnlyToolNames = map[string]struct{}{
 	"reflect":           {},
 }
 
-// coreNonCacheableToolNames are c0wrk-specific meta-tools whose results should
-// not be cached. These are registered by core/tools and extend the sp4rk-provided
-// defaultNonCacheableTools set via Executor.AddNonCacheableTools. They produce
-// tiny or stateful outputs where caching adds overhead.
+// coreNonCacheableToolNames extend the sp4rk default non-cacheable set via
+// Executor.AddNonCacheableTools (specs/domains/orchestration/executor.md).
 var coreNonCacheableToolNames = []string{
 	"delegate",
 	"cancel_delegation",
@@ -2046,55 +1539,18 @@ func stripConductorOnlyTools(descs []sdktools.ToolDescriptor) []sdktools.ToolDes
 	return out
 }
 
-// stripSubagentTools removes everything a delegated task agent must never
-// hold, layered on the mode-disabled filter the caller already applied: the
-// Conductor-only orchestration tools (delegate, declare_plan, reflect, ...)
-// and the goal-loop actor tools (propose_goal, declare_goal_status,
-// declare_verification). The goal tools are GroupSystem, so without this
-// strip they would ride the always-granted system group into every subagent —
-// but only the goal-loop Conductor and the independent verifier may ever call
-// them (the verifier's toolset is built by verifierToolFilter from the raw
-// registry list, not via resolveTaskTools, and keeps declare_verification).
-// A task subagent that declared a goal status or verification verdict would
-// forge the goal loop's state-machine inputs; subagentCtx additionally clears
-// the goal/verification sinks as a second layer.
+// stripSubagentTools removes what a task subagent must never hold: the
+// Conductor-only tools plus the GroupSystem goal-loop actor tools, which
+// would otherwise ride the system group (conductor-tools.md).
 func stripSubagentTools(descs []sdktools.ToolDescriptor) []sdktools.ToolDescriptor {
 	return tools.StripGoalModeTools(stripConductorOnlyTools(descs))
 }
 
-// resolveTaskTools computes a delegation task's toolset from the capability
-// groups carried by DelegationTask.Tools:
-//
-//   - nil (or the strings ""/"all"): everything, minus Conductor-only and
-//     mode-disabled tools — the default full grant.
-//   - "read-only": the read-only preset = system ∪ local_read ∪ remote_read.
-//     MCP tools are NOT part of the preset — installing an MCP server must
-//     never silently widen a read-only delegation (see the regression test in
-//     conductor_tools_test.go).
-//   - a non-empty array of group tokens (kebab "local-read" or underscore
-//     "local_read" spelling): system ∪ the granted groups. The system group
-//     (finish, fact memory, checklist, meta tools) is always granted — a
-//     subagent that cannot finish or record facts is unusable — and nothing
-//     else is added: the grant is exactly what was requested. An empty array
-//     is an error, not a valid way to request a system-only subagent (that is
-//     ["system"]): the resolver fails closed instead of silently stripping
-//     every working tool.
-//
-// Anything else fails the delegation with a comprehensible error (fail-closed
-// rather than silently degrading to a minimal set). A tool whose capability
-// group is not declared (zero ToolGroup) matches no grant. Conductor-only
-// tools AND the goal-loop actor tools are stripped in every branch (see
-// stripSubagentTools) — the latter ride the always-granted system group but
-// belong to the goal-loop Conductor and the independent verifier only; the
-// redelegating path re-adds delegate and cancel_delegation explicitly (see
-// runRedelegBlocking).
-//
-// The base list is additionally filtered by the task's per-server MCP mode
-// gating (stripGatedMCPTools): the launcher builds from the RAW registry
-// list, so without this filter a gated-off manual/disabled server's tools
-// would ride the "all"/group grants straight back into every subagent —
-// defeating the orchestrator-level filter. The gated set arrives via ctx
-// (attached once per task, inherited by every delegation).
+// resolveTaskTools computes a task's toolset from DelegationTask.Tools:
+// nil/""/"all" = full grant minus conductor-only/mode-disabled; "read-only" =
+// system ∪ local/remote_read (no MCP); a group-token array = system ∪ granted
+// (an empty array errors). Fail-closed otherwise; MCP-mode gated via
+// stripGatedMCPTools. Contract: delegation.md + mcp-gateway.md.
 func (l *conductorLauncher) resolveTaskTools(ctx context.Context, t tools.DelegationTask) ([]sdktools.ToolDescriptor, error) {
 	all := stripGatedMCPTools(ctx, l.stripDisabled(l.allToolDescriptors()))
 
@@ -2129,10 +1585,8 @@ func (l *conductorLauncher) resolveTaskTools(ctx context.Context, t tools.Delega
 	}
 }
 
-// toolsByGroups returns the descriptors whose capability group is in grants,
-// deduplicated by name (duplicates make LLM providers reject the request).
-// Descriptors with an undeclared (zero) group never match — fail-closed for
-// tools that forgot to declare their group.
+// toolsByGroups filters descriptors by granted group, deduped by name;
+// zero-group tools never match (ADR-024 fail-closed).
 func (l *conductorLauncher) toolsByGroups(all []sdktools.ToolDescriptor, grants map[sdktools.ToolGroup]struct{}) []sdktools.ToolDescriptor {
 	out := make([]sdktools.ToolDescriptor, 0, len(all))
 	seen := make(map[string]struct{}, len(all))
@@ -2149,14 +1603,8 @@ func (l *conductorLauncher) toolsByGroups(all []sdktools.ToolDescriptor, grants 
 	return out
 }
 
-// parseToolGroups parses DelegationTask.Tools' array form — either []any from
-// the delegate tool's JSON input or []string from an agent profile's
-// ToolPreference — into a set of capability groups. Accepts kebab and
-// underscore spellings; unknown tokens fail with the list of valid groups.
-// An empty token list fails too: it would otherwise resolve to a grant of
-// only the always-added system group — a subagent stripped of every working
-// tool (validateDelegationTools rejects the JSON form up front; this guards
-// programmatic DelegationTask construction).
+// parseToolGroups parses the array form of DelegationTask.Tools into groups
+// (kebab/underscore); unknown or empty token lists fail.
 func parseToolGroups(v any) (map[sdktools.ToolGroup]struct{}, error) {
 	var tokens []string
 	switch arr := v.(type) {
@@ -2205,11 +1653,8 @@ func (l *conductorLauncher) allToolDescriptors() []sdktools.ToolDescriptor {
 	return nil
 }
 
-// stripDisabled removes tools disabled for the current mode (e.g. CHAT /
-// No-Project mode) from the descriptor list. Disabled tools must never be
-// advertised to a subagent's LLM even though runtime Execute() would block
-// them too — advertising dead tools wastes the tool-call budget and misleads
-// the model.
+// stripDisabled drops mode-disabled tools — never advertised to a subagent's
+// LLM (dead tools waste the tool-call budget and mislead the model).
 func (l *conductorLauncher) stripDisabled(descs []sdktools.ToolDescriptor) []sdktools.ToolDescriptor {
 	if len(l.deps.disabledTools) == 0 {
 		return descs
@@ -2292,10 +1737,8 @@ func (l *conductorLauncher) buildTaskDescription(t tools.DelegationTask, registr
 }
 
 func (l *conductorLauncher) resolveModelMeta(ctx context.Context) llm.ModelMetadata {
-	// Resolve always returns usable metadata — the ok flag indicates whether
-	// the model was found in a known source, but the fallback
-	// (ContextWindow=128000, OutputLimit=32768) is always usable. A zero
-	// ContextWindow disables compaction, causing unbounded conversation growth.
+	// Resolve always returns usable metadata; the fallback window (128000)
+	// keeps compaction alive — a zero ContextWindow means unbounded growth.
 	if l.deps.modelRegistry != nil && l.deps.model != "" {
 		if meta, _ := l.deps.modelRegistry.Resolve(ctx, l.deps.model); meta.ContextWindow > 0 {
 			return meta
@@ -2323,10 +1766,8 @@ func (l *conductorLauncher) callerForStep(cm agent.ContextManager, stepID string
 	}); ok {
 		caller = l.deps.trackingCaller.WithContextTracker(ctm.ContextTracker())
 	}
-	// Logging is independent of step dumps: it must remain active whenever a
-	// provider name and logger are available (mirroring callerForConductor),
-	// so that step/subagent LLM calls are logged even when step dumps are
-	// disabled. Step dumps are still gated on stepDumpTracker below.
+	// Logging stays independent of step dumps: active whenever provider+logger
+	// exist, so LLM calls are logged even when dumps are disabled.
 	if l.deps.providerName != "" && l.deps.logger != nil {
 		caller = agent.NewLoggingLLMCaller(caller, l.deps.providerName, l.deps.logger)
 	}
@@ -2347,22 +1788,11 @@ func (l *conductorLauncher) scopeEvents(stepID string) agent.Events {
 	return &agent.NoopEvents{}
 }
 
-// planStepEventTranslator wraps a scoped emitter and translates the sp4rk
-// subagent lifecycle events (SubAgentLaunch/SubAgentComplete/SubAgentPaused —
-// which are hard-coded inside RunSubAgent) into plan-step lifecycle events
-// (PlanStepStart/PlanStepComplete/PlanStepPaused). This lets plan steps reuse
-// the same subagent machinery (RunSubAgentsParallel, isolated context,
-// parallel waves) while appearing in the UI as plan steps, not delegations.
-//
-// The translator holds TWO emitter references:
-//   - scoped (embedded): the WithPlanStepID copy — child events (ToolCall,
-//     Thought, AssistantChunk, etc.) carry plan_step_id so they nest under
-//     the step block in the frontend.
-//   - root: the session-root emitter — PlanStepStart/PlanStepComplete/
-//     PlanStepPaused are called here because the scoped copy does NOT share
-//     planStartedSet / planCompletedSet / planTotalSteps (WithPlanStepID
-//     creates a shallow copy without those fields). Calling on root ensures
-//     correct progress tracking and duplicate suppression.
+// planStepEventTranslator translates sp4rk subagent lifecycle events into
+// plan-step events, so plan steps reuse the subagent machinery while appearing
+// as plan steps in the UI. Plan-step events go to the ROOT emitter (the
+// WithPlanStepID copy does not share the plan progress sets); child events
+// carry plan_step_id via the embedded scoped copy.
 type planStepEventTranslator struct {
 	Emitter         // scoped copy (child events with plan_step_id)
 	root    Emitter // session-root emitter (plan-step lifecycle + progress)
@@ -2381,10 +1811,8 @@ func (t *planStepEventTranslator) SubAgentPaused(stepID string, duration time.Du
 	t.root.PlanStepPaused(stepID, duration, "")
 }
 
-// scopePlanStepEvents returns an agent.Events suitable for plan-step execution:
-// a planStepEventTranslator wrapping the WithPlanStepID-scoped emitter (for
-// child events) and the session-root emitter (for plan-step lifecycle events).
-// If the emitter does not support WithPlanStepID, returns NoopEvents.
+// scopePlanStepEvents: a planStepEventTranslator over the WithPlanStepID-scoped
+// emitter + root; NoopEvents when the emitter cannot scope.
 func (l *conductorLauncher) scopePlanStepEvents(stepID, summary string) agent.Events {
 	sc, ok := l.deps.emitter.(interface {
 		WithPlanStepID(string) Emitter
@@ -2401,11 +1829,8 @@ func (l *conductorLauncher) scopePlanStepEvents(stepID, summary string) agent.Ev
 }
 
 func (l *conductorLauncher) configureExecutor(executor *agent.Executor) {
-	// Cooperative pause signal: subagent executors must observe the same
-	// universal pause signal as the Conductor so a PauseSession pauses them at
-	// their own step boundary (mid-task) instead of letting them run to
-	// natural completion. Nil disables pausing (default) — mirrors the
-	// Conductor's ConductorConfig.PauseChecker wiring.
+	// Subagents observe the same universal pause signal as the Conductor —
+	// a PauseSession pauses them at their own step boundary.
 	if l.deps.pauseChecker != nil {
 		executor.SetPauseChecker(l.deps.pauseChecker)
 	}
@@ -2430,35 +1855,22 @@ func (l *conductorLauncher) configureExecutor(executor *agent.Executor) {
 	if l.deps.toolCallTimeout > 0 {
 		executor.SetToolCallTimeout(l.deps.toolCallTimeout)
 	}
-	// The ceiling's exempt tool-name set: a nil slice keeps sp4rk's built-in
-	// default exempt set; a configured slice replaces it wholesale, so a
-	// host-exempted long-running tool (e.g. an MCP-backed tool with no
-	// internal timeout) survives the ceiling here too.
+	// Exempt tool-name set: nil keeps sp4rk's defaults, configured replaces
+	// wholesale (host-exempted long-running tools survive here too).
 	if l.deps.toolCallTimeoutExempt != nil {
 		executor.SetToolCallTimeoutExempt(l.deps.toolCallTimeoutExempt...)
 	}
-	// Mechanical edit verification (executor.verify_on_edit): subagent
-	// executors that perform file edits get the same hook as the main
-	// executor. RunConductor nils deps.verifyOnEdit for specialized goal
-	// passes before the launcher is built, so this is automatically inert
-	// there.
+	// Subagents that edit files get the same verify-on-edit hook; inert for
+	// specialized passes (RunConductor nils it before the launcher is built).
 	if l.deps.verifyOnEdit != nil {
 		executor.SetVerifyOnEdit(l.deps.verifyOnEdit, l.deps.verifyOnEditMaxOutputChars)
 	}
 	executor.AddNonCacheableTools(coreNonCacheableToolNames...)
 }
 
-// resolveProfileSkills resolves a Subagent Profile's required skill names
-// (AGENT.md `skills:`, already validated by agents.Agent.RequiredSkills)
-// against the skill catalog and merges the resolved skills with any skills
-// already active in ctx. Inherited skills come first, then the profile's own
-// requirements; duplicates are dropped by name (first occurrence wins), so a
-// skill named by both the parent task and the profile is emitted once.
-//
-// Resolution is fail-closed: a nil skillResolver with a non-empty requirement
-// list, or a required name with no matching skill, returns an error naming both
-// the skill and the profile — the delegation must not proceed without the
-// skills the profile mandates.
+// resolveProfileSkills resolves a profile's required skills against the
+// catalog, fail-closed (error names skill + profile), and merges them
+// inherited-first (delegation.md, "Profile Required Skills").
 func (l *conductorLauncher) resolveProfileSkills(ctx context.Context, t tools.DelegationTask, required []string) ([]*skills.Skill, error) {
 	resolved := make([]*skills.Skill, 0, len(required))
 	for _, name := range required {
@@ -2474,11 +1886,8 @@ func (l *conductorLauncher) resolveProfileSkills(ctx context.Context, t tools.De
 	return mergeActiveSkills(ActiveSkillsFromContext(ctx), resolved), nil
 }
 
-// mergeActiveSkills merges the skills already active in the context (inherited)
-// with a profile's resolved required skills. Inherited skills keep their
-// position and come first; later duplicates (by skill name) are dropped, and
-// nil entries are skipped. The result preserves activation order so the
-// rendered "## Active Skills" section stays stable.
+// mergeActiveSkills merges inherited + required skills, inherited first,
+// deduped by name (first wins) — stable activation order.
 func mergeActiveSkills(inherited *ActiveSkills, add []*skills.Skill) []*skills.Skill {
 	var out []*skills.Skill
 	seen := make(map[string]struct{})
@@ -2503,15 +1912,8 @@ func mergeActiveSkills(inherited *ActiveSkills, add []*skills.Skill) []*skills.S
 	return out
 }
 
-// activeSkillsToolExec decorates an agent.ToolExecutor, injecting a
-// subagent's merged Active Skills into every tool call's context. It is what
-// makes a profile's required skills resolvable inside the subagent:
-// read_skill_resource resolves a skill from the context (core's
-// activeSkillPathResolver reads ActiveSkillsFromContext), and buildSubAgentTask
-// cannot mutate the context a caller passes to agent.RunSubAgent — parallel
-// waves share one context across subagents. A per-subagent decorator keeps the
-// injection correct even when a wave carries several profiles with different
-// skill sets. All other ToolExecutor methods delegate unchanged.
+// activeSkillsToolExec injects the subagent's merged skills into every tool
+// call's context (read_skill_resource resolves from ctx; delegation.md).
 type activeSkillsToolExec struct {
 	inner  agent.ToolExecutor
 	skills *ActiveSkills
@@ -2541,10 +1943,8 @@ type conductorPublisher struct {
 func (p *conductorPublisher) Publish(ctx context.Context, tasks []tools.PlanTaskInput) (string, error) {
 	plan := &orchestration.Plan{}
 	for _, t := range tasks {
-		// Normalize ids/dependencies exactly as validatePlanTasks matched
-		// them (TrimSpace): a padded id or depends_on entry that passed
-		// validation would otherwise be published verbatim and never match
-		// the registered step id at execution time.
+		// Normalize ids/deps (TrimSpace) exactly as validation matched them, so
+		// published steps match registered ids at execution time.
 		deps := make([]string, 0, len(t.DependsOn))
 		for _, d := range t.DependsOn {
 			if trimmed := strings.TrimSpace(d); trimmed != "" {
@@ -2563,13 +1963,9 @@ func (p *conductorPublisher) Publish(ctx context.Context, tasks []tools.PlanTask
 	if p.plansDir == "" {
 		return "", errors.New("declare_plan: session plans directory not configured")
 	}
-	// MkdirAllRealWithin creates the plans directory as real directories and
-	// REFUSES any pre-existing link in the path that resolves OUTSIDE the
-	// session directory (the plans dir's parent): a planted
-	// …/<sid>/plans → <outside> link fails closed instead of redirecting the
-	// plan write out of ~/.c0wrk (review finding #47). Links resolving
-	// inside the session tree — and a symlinked session dir itself — remain
-	// operator intent; a dangling or swapped-in link still fails as before.
+	// Refuse any pre-existing link resolving outside the session directory —
+	// a planted …/<sid>/plans → <outside> link fails closed instead of
+	// redirecting the plan write (review finding #47).
 	if err := safeio.MkdirAllRealWithin(filepath.Dir(p.plansDir), p.plansDir, 0o755); err != nil {
 		return "", fmt.Errorf("declare_plan: failed to create plans directory: %w", err)
 	}
@@ -2577,26 +1973,22 @@ func (p *conductorPublisher) Publish(ctx context.Context, tasks []tools.PlanTask
 	p.lastMD = md
 	suffix := RandomSuffix()
 	path := filepath.Join(p.plansDir, fmt.Sprintf("plan_%s.md", suffix))
-	// WriteFileAtomic writes via a same-directory temp + rename and refuses
-	// following a symlink planted at the final name, so the random plan file
-	// can never land outside the (already real) plans directory.
+	// Atomic temp+rename that refuses a planted symlink at the final name.
 	if err := safeio.WriteFileAtomic(path, []byte(md), 0o644); err != nil {
 		return "", fmt.Errorf("declare_plan: failed to write plan file: %w", err)
 	}
 
-	// Emit plan events and set plan on blackboard only after the file is
-	// persisted — if the write fails, the UI should not show a plan that
-	// can't be reviewed or approved.
+	// Emit events / set the blackboard plan only after the file is persisted —
+	// the UI must not show a plan that cannot be reviewed.
 	planEvents := make([]orchestration.PlanStepEvent, len(plan.Steps))
 	for i, s := range plan.Steps {
 		planEvents[i] = orchestration.PlanStepEvent{ID: s.ID, Summary: s.Summary, Description: s.Description, Status: "pending", DependsOn: s.DependsOn}
 	}
 	p.emitter.PlanGenerated(len(plan.Steps), planEvents)
 	p.bb.SetPlan(plan)
-	// Record that a plan was declared in THIS Conductor run. This is what
-	// activates the ChecklistGuard / delegate guard — a restored plan from a
-	// previous (completed) task never reaches here, so continuations stay free
-	// to act plan-less, declare a new plan, or delegate.
+	// Marks the plan workflow active in THIS run (the guards' trigger) — a
+	// restored plan never reaches here. See conductor.md plan-workflow
+	// invariants.
 	if p.planState != nil {
 		p.planState.markDeclared()
 	}
@@ -2612,24 +2004,9 @@ func (p *conductorPublisher) LastPlanMarkdown() string {
 	return p.lastMD
 }
 
-// AbandonPlan implements the optional tools.planAbandoner capability.
-// declare_plan calls it when the user abandons a plan at the approval prompt.
-// It does two things:
-//
-//  1. Clears the plan-workflow lock Publish acquired (planState.declared), so
-//     the run can act plan-less again: delegate is re-enabled, a standalone
-//     checklist is accepted, and execute_plan refuses the now-inactive plan.
-//  2. Settles the abandoned plan's steps as terminal, so the plan panel does
-//     not leave them "pending" forever. The run is no longer plan-active, so
-//     the finish-fallback completeAll (gated on planDeclaredInRun) will no
-//     longer sweep them — without this the abandoned plan would hang in the
-//     panel with unreached steps.
-//
-// Only planState.declared is cleared — the continuable flag is a run-start
-// seed abandon can never reach (a continuable resume returns the soft "already
-// approved" hint before the approval prompt). A nil planState (direct test
-// construction) makes the flag clear a no-op. The plan itself is NOT cleared
-// from the blackboard — it stays a historical artifact.
+// AbandonPlan (declare_plan abandon): clears planState.declared — the run
+// regains plan-less behavior — and settles the abandoned steps (completeAll
+// is gated on planDeclaredInRun). Full invariant: conductor.md.
 func (p *conductorPublisher) AbandonPlan() {
 	if p.planState != nil {
 		p.planState.unmarkDeclared()
@@ -2637,13 +2014,9 @@ func (p *conductorPublisher) AbandonPlan() {
 	p.settleAbandonedPlanSteps()
 }
 
-// settleAbandonedPlanSteps emits one terminal PlanStepComplete per step of the
-// plan currently on the blackboard, marking them settled-not-completed with the
-// "plan abandoned" reason. Approval precedes any step execution, so no step
-// was started (no PlanStepStart is emitted — that would mis-tag the run as
-// "executing a step") and none can be double-completed by completeAll (the run
-// is no longer plan-active). Best-effort UI hygiene: a no-op without an emitter
-// or a plan.
+// settleAbandonedPlanSteps emits one terminal PlanStepComplete per step
+// ("plan abandoned") — no PlanStepStart, since approval precedes any
+// execution. Best-effort UI hygiene; no-op without an emitter or a plan.
 func (p *conductorPublisher) settleAbandonedPlanSteps() {
 	if p.emitter == nil || p.bb == nil {
 		return
@@ -2711,20 +2084,12 @@ func (r *conductorReflectionRunner) Reflect(ctx context.Context, scope, delegati
 	}, nil
 }
 
-// stepsPerComplexity is the multiplier that derives the ReAct iteration
-// limit from the routing complexity: limit = complexity × stepsPerComplexity.
-// It applies uniformly to the Conductor's own loop and to every subagent
-// (delegates and plan-step executors) unless a delegation overrides it via
-// its per-task max_steps.
+// stepsPerComplexity derives the ReAct limit (complexity × 30) uniformly for
+// the Conductor and subagents unless a delegation overrides max_steps.
 const stepsPerComplexity = 30
 
-// compactionStrategyForDomain maps a routing domain + complexity to the
-// compaction strategy per ADR-012 / specs/domains/orchestration/router.md:
-//
-//	code     → sliding_window (keep recent edits visible)
-//	research → summarization (condense findings)
-//	general  → sliding_window, or hierarchical if complexity >= 4
-//	mixed    → sliding_window
+// compactionStrategyForDomain maps routing domain + complexity to the
+// compaction strategy (table: specs/domains/orchestration/conductor.md).
 func compactionStrategyForDomain(domain string, complexity int) string {
 	switch domain {
 	case "research":
@@ -2739,31 +2104,12 @@ func compactionStrategyForDomain(domain string, complexity int) string {
 	}
 }
 
-// conductorGuidanceForComplexity returns a system-prompt section that guides
-// the Conductor on when to plan, delegate, or handle inline, based on the
-// routing complexity.
-//
-// Planning and delegation are ORTHOGONAL mechanisms:
-//   - Planning (declare_plan + execute_plan) is for managing task COMPLEXITY.
-//     declare_plan publishes a roadmap to the USER and optionally blocks for
-//     approval. execute_plan runs ALL plan steps in DAG order with parallelism.
-//   - Delegation (delegate) is for optimizing Conductor context usage and
-//     session time. It is for plan-less tasks only — once a plan is declared,
-//     delegate is disabled and execute_plan is the only execution path for
-//     plan steps.
-//
-// These two mechanisms must never be mixed: once a plan is declared, use
-// execute_plan, never delegate, to execute plan steps.
+// conductorGuidanceForComplexity renders the Conductor Guidance section;
+// band semantics + orthogonality are specified in router.md / delegation.md.
 func conductorGuidanceForComplexity(complexity int) string {
-	// Skill-prescribed planning is a GLOBAL clause emitted once, above the
-	// complexity bands, so a future edit to an individual band cannot silently
-	// drop it. Dropping it is exactly the regression that made the `explore`
-	// skill stop entering Plan Mode: the band text said "do NOT call
-	// declare_plan" and there was no overriding clause. The clause is
-	// instruction-level ("soft by form") enforcement — c0wrk skills are pure
-	// markdown with no agent-specific metadata (see ADR-012), and their bodies
-	// are already injected into the system prompt, so the Conductor reads the
-	// approval-gate language directly from the active skill.
+	// Emitted once above the bands so a band edit cannot silently drop it (the
+	// regression that broke the `explore` skill's Plan Mode entry). See
+	// specs/domains/orchestration/router.md.
 	skillClause := "## Skill-prescribed planning — overrides the bands below\n" +
 		"If any active skill's instructions mandate presenting a plan or roadmap and obtaining user approval before implementation — e.g. an approval gate, a sign-off step, or an explicit \"do not proceed without an approved roadmap\" rule — you MUST call declare_plan with mode=await_approval before starting implementation, regardless of complexity. This supersedes any \"do not plan\" guidance in the bands below.\n\n"
 
@@ -2777,10 +2123,8 @@ func conductorGuidanceForComplexity(complexity int) string {
 		return skillClause +
 			"## Conductor Guidance\nYou are the Conductor: you own this task end-to-end. This is a simple task — handle it inline (read files, search, answer, call finish). No checklist, delegate, or plan needed.\n"
 	default:
-		// complexity >= 2: the Conductor decides for itself whether to plan.
-		// Planning is recommended (not required) above complexity 3 or when the
-		// task decomposes into ordered steps; the only mandatory trigger is the
-		// skill clause above.
+		// complexity >= 2: planning is recommended, never mandatory (the
+		// skill clause above is the only mandatory trigger).
 		return skillClause +
 			"## Conductor Guidance\n" +
 			"You are the Conductor: you own this task end-to-end. You decide whether this task needs a plan.\n\n" +
@@ -2793,23 +2137,9 @@ func conductorGuidanceForComplexity(complexity int) string {
 	}
 }
 
-// RunConductor builds and launches the Conductor: a single Executor.Run that
-// owns the task end-to-end. The Conductor's tool set includes the standard
-// file/search/internal tools plus the Conductor tools (delegate, declare_plan,
-// reflect, cancel_delegation), wired via context-injected implementations.
-//
-// The core layer is responsible for:
-//   - Injecting Conductor tools (DelegationRegistry, DelegationLauncher,
-//     PlanPublisher, ReflectionRunner, TrajectoryStore) into the context
-//   - Appending the Conductor Guidance section to the system prompt
-//
-// The sp4rk-level orchestration.Conductor handles:
-//   - Model metadata resolution and system prompt construction
-//   - ContextManager creation
-//   - Executor construction and configuration
-//   - finish guard via executor.SetFinishGuard (rejects finish with a nudge while async delegations are pending)
-//   - StepOutputStore and FactStore injection
-//   - ExecutionResult assembly
+// RunConductor builds and launches the Conductor: one Executor.Run owning the
+// task end-to-end, Conductor tools/context injected here, loop internals owned
+// by the sp4rk Conductor (conductor.md).
 func RunConductor(
 	ctx context.Context,
 	message string,
@@ -2818,49 +2148,29 @@ func RunConductor(
 	deps conductorDeps,
 	plansDir string,
 ) (*orchestration.ExecutionResult, error) {
-	// planRunState is shared between the publisher (marks it on declare_plan),
-	// the launcher (HasDeclaredPlan reads it), and the inline-step lifecycle
-	// (completeAll gates plan-step synthesis on it). One instance per Conductor
-	// run. It starts continuable when this run RESUMES a task whose approved
-	// plan still has unreached steps (deps.resumedWithPlan, computed by
-	// Orchestrator.Resume): the plan workflow stays active for the run —
-	// execute_plan continues the remaining steps without a re-declare, delegate
-	// stays disabled, declare_plan soft-hints. A plan merely restored from a
-	// previous (completed) task sets no flag: such a continuation stays free to
-	// act plan-less, declare a new plan, or delegate, and execute_plan refuses
-	// to re-run the restored steps.
+	// planRunState is shared by publisher/launcher/lifecycle; continuable when
+	// resuming a plan with unreached steps (restored plans set nothing).
 	planState := newPlanRunState(deps.resumedWithPlan)
 
-	// Build the inline-step lifecycle up front so it can be threaded into deps
-	// (consumed by Execute) rather than wired by post-construction field
-	// mutation. It is shared with update_checklist / declare_step_complete via
-	// the context callbacks below. planState is wired in so completeAll does
-	// not synthesize terminal events for a restored plan on a continuation.
+	// Built up front and threaded into deps (no post-construction mutation);
+	// shared with update_checklist / declare_step_complete via the context
+	// callbacks below.
 	inlineLifecycle := newInlineStepLifecycle(deps.emitter, bb)
 	inlineLifecycle.planState = planState
 	deps.lifecycle = inlineLifecycle
 
 	registry := tools.NewDelegationRegistry()
-	// verify-on-edit is suppressed for specialized passes (goal derivation /
-	// goal verification / ask-user) — those override the system prompt and run
-	// with model-specific budgets; mechanical edit verification belongs to
-	// ordinary CODE-task execution only. This MUST happen before the launcher
-	// below is built: conductorLauncher holds deps by VALUE, so a suppression
-	// after the copy would disarm only the main executor's config and leave
-	// launcher.deps.verifyOnEdit armed — every subagent executor the launcher
-	// builds (configureExecutor) would still run the user-configured
-	// verification command during a specialized pass.
+	// verify-on-edit is suppressed for specialized passes (verify-on-edit.md).
+	// MUST precede the launcher: deps are held by VALUE, so a later suppression
+	// would leave subagent executors armed.
 	if deps.systemPromptOverride != nil {
 		deps.verifyOnEdit = nil
 	}
 	launcher := &conductorLauncher{deps: deps, bb: bb, planState: planState}
 	publisher := &conductorPublisher{emitter: deps.emitter, bb: bb, plansDir: plansDir, logger: deps.logger, planState: planState}
 
-	// Build the trajectory store. The in-memory holder feeds the reflect tool
-	// synchronously; the composite layer additionally persists the full
-	// trajectory to the DB (best-effort) so it survives app restart. The task
-	// ID is only available on a PersistableBlackboard — without it the store
-	// degrades to purely in-memory.
+	// Composite trajectory store (see compositeTrajectoryStore): persists the
+	// task checkpoint best-effort when a PersistableBlackboard carries a task ID.
 	trajHolder := &trajectoryHolder{}
 	taskID := ""
 	if pbb, ok := bb.(PersistableBlackboard); ok {
@@ -2869,18 +2179,8 @@ func RunConductor(
 	trajStore := newCompositeTrajectoryStore(trajHolder, taskID, deps.taskStore, deps.logger)
 	runner := &conductorReflectionRunner{reflector: deps.reflector, bb: bb, emitter: deps.emitter, logger: deps.logger, traj: trajStore}
 
-	// Persist every delegation spec registered in this run's registry so a
-	// paused delegation survives the end of the run and the Resume
-	// auto-resume wave can rebuild it — without any LLM decision. Best-effort
-	// (mirrors the trajectory store): a persistence failure is logged, never
-	// propagated.
-	//
-	// An isolated run (the goal verifier) carries a ledger-bound unit sink
-	// instead: its blackboard is a throwaway seeded MapBlackboard with no task
-	// id, so the blackboard-derived wiring below would silently persist
-	// nothing. When the sink is present it WINS — the run's delegations are
-	// recorded as durable, namespaced, parent-linked units, while the run's own
-	// blackboard stays non-persistent (the isolation guarantee).
+	// Durable delegation-spec persistence for the Resume wave; an isolated run
+	// wires unitSink instead — it wins over the blackboard (delegation.md).
 	if deps.unitSink != nil {
 		deps.unitSink.wire(registry, deps.unitSink.parentID)
 	} else if taskID != "" && deps.taskStore != nil {
@@ -2891,15 +2191,8 @@ func RunConductor(
 	domain := DomainFromContext(ctx)
 	complexity := ComplexityFromContext(ctx)
 	compactionStrategy := compactionStrategyForDomain(domain, complexity)
-	// One-shot manual-compaction override (resume with a user-selected
-	// strategy): replace the routing-derived strategy for the WHOLE run and
-	// force a start-of-run compaction pass. The override intentionally spans
-	// the entire run, not just the forced pass: the user picked the strategy
-	// for this resumed task, so reactive threshold-driven compactions later in
-	// the run must use it too rather than switching back to the routing
-	// default mid-run. CompactOnStart makes the sp4rk engine compact the
-	// merged trajectory (seeded resumeSteps + this run) exactly once, before
-	// the first LLM call; Compact is a no-op when there is nothing to compact.
+	// One-shot manual-compaction override: replaces the routing strategy for
+	// the WHOLE run + forces the start-of-run pass (memory/compaction.md).
 	if deps.forceCompactionStrategy != "" {
 		compactionStrategy = deps.forceCompactionStrategy
 	}
@@ -2912,34 +2205,21 @@ func RunConductor(
 	ctx = tools.WithPlanPublisher(ctx, publisher)
 	ctx = tools.WithReflectionRunner(ctx, runner)
 	ctx = tools.WithPlanChecker(ctx, launcher)
-	// The agent resolver is inherited by subagent contexts (subagentCtx does
-	// NOT strip it), so a redelegating subagent can itself delegate to a named
-	// agent profile. Nil resolver = profiles unavailable (delegate validation
-	// rejects a non-empty `agent` field).
+	// The agent resolver survives subagentCtx so a redelegating subagent can
+	// delegate to a named profile; nil = profiles unavailable.
 	ctx = tools.WithAgentResolver(ctx, deps.agentResolver)
 	ctx = agent.WithTrajectoryStore(ctx, trajStore)
 	ctx = orchestration.WithDelegationRegistry(ctx, registry)
 
-	// Inject the inline-step lifecycle so update_checklist can emit
-	// StepTodoUpdate + inferred PlanStepStart, and declare_step_complete can
-	// emit PlanStepComplete. Subagents get their own (observation-only)
-	// callback via buildSubAgentTask.TodoUpdateFunc. The lifecycle was created
-	// above and is shared with the launcher via deps.lifecycle.
+	// Inline-step lifecycle for update_checklist / declare_step_complete;
+	// subagents get their own observation-only callback (buildSubAgentTask).
 	ctx = agent.WithStepTodoUpdateFunc(ctx, inlineLifecycle.onChecklistUpdate)
 	ctx = tools.WithStepCompleteFunc(ctx, inlineLifecycle.completeStep)
 	ctx = tools.WithPlanStepExecutor(ctx, launcher)
 
-	// Checklist guard: once a plan is active IN THIS RUN, reject standalone
-	// (empty step_id) checklists — UNLESS the run already emitted one before the
-	// plan was declared. A standalone checklist is only valid for plan-less
-	// tasks; with a plan, every update_checklist must target a specific step.
-	// The exception covers a run that laid out a standalone checklist first and
-	// only then declared a plan (refining the work into plan steps): the earlier
-	// standalone update stays valid rather than being retroactively rejected.
-	// This consults planRunState (via newChecklistGuard) rather than the raw
-	// blackboard plan, so a plan restored from a previous (completed) task does
-	// NOT trip the guard on a continuation — the continuation is free to act
-	// plan-less, declare its own plan, or delegate.
+	// Checklist guard: reject standalone checklists once a plan is active in
+	// THIS run, unless one was emitted earlier in the run (conductor.md,
+	// "Checklist Guard" — the monotone-flag exception).
 	ctx = agent.WithChecklistGuard(ctx, newChecklistGuard(planState))
 
 	// Build the system prompt with complexity-based Conductor Guidance.
@@ -2948,20 +2228,15 @@ func RunConductor(
 		prompt += "\n\n" + guidance
 		return prompt
 	}
-	// Goal derivation (and other specialized runs) override the standard
-	// system prompt. The override is expected to build on the shared
-	// project-context prefix (via buildSpecializedSystemPrompt) rather than
-	// return a bare directive, so the specialized agent keeps the same
-	// project context as a normal run. All other conductor wiring is reused.
+	// Specialized runs (goal derivation) override the prompt factory; the
+	// override keeps the shared project-context prefix (goal-mode.md).
 	if deps.systemPromptOverride != nil {
 		systemPromptFactory = deps.systemPromptOverride
 	}
 
-	// maxSteps bounds the ReAct loop. It derives from routing complexity:
-	// limit = complexity × stepsPerComplexity. This applies uniformly to
-	// normal runs and specialized passes (including the goal-verification
-	// pass), so the verifier is never more limited than the executor it
-	// checks — it is bounded exactly like a normal executor run.
+	// maxSteps = complexity × stepsPerComplexity — uniform for normal runs and
+	// specialized passes, so the verifier is bounded exactly like the executor
+	// it checks (conductor.md, "Step Limit").
 	maxSteps := complexity * stepsPerComplexity
 
 	cfg := orchestration.ConductorConfig{
@@ -3001,25 +2276,15 @@ func RunConductor(
 		events = deps.emitter
 	}
 
-	// Bind the launcher to the run-scoped context NOW that every Conductor
-	// context value the tools (and thus subagents) rely on is injected: async
-	// delegations base their lifetime on this instead of the transient
-	// tool-call context — see conductorLauncher.asyncBaseCtx.
+	// Bind the launcher's async base ctx AFTER all context values are injected
+	// (async delegation lifetime — see asyncBaseCtx).
 	launcher.asyncBaseCtx = ctx
 
 	conductor := orchestration.NewConductor(cfg)
 	result, err := conductor.Run(ctx, message, bb, availableTools, events, compactionStrategy)
-	// Finish fallback: auto-complete any inline steps that were started but
-	// not explicitly completed via declare_step_complete. This prevents
-	// steps from being stuck in "running" state if the Conductor forgot to
-	// call declare_step_complete before finishing. On failure, propagate the
-	// conductor error so the UI can show why each pending step failed.
-	//
-	// A cooperative pause is NOT a terminal outcome: the fallback is skipped
-	// so the plan is not swept into terminal states. Never-started steps stay
-	// "pending" and started ones stay "running" — a later Resume re-enters
-	// them (the paused step's partial trajectory was already checkpointed on
-	// the blackboard).
+	// Finish fallback: complete inline steps the Conductor never closed via
+	// declare_step_complete. A cooperative pause is NOT terminal — the
+	// fallback is skipped so the plan stays resumable (checkpointed).
 	if !pausedRun(err, result) {
 		success := err == nil && result != nil && result.Status == orchestration.ExecutionStatusSuccess
 		errMsg := ""
@@ -3029,47 +2294,23 @@ func RunConductor(
 		inlineLifecycle.completeAll(success, errMsg)
 	}
 
-	// Final trajectory flush: the ReAct loop has ended, so no more Syncs will
-	// arrive. This drains any in-flight async write and persists the freshest
-	// snapshot synchronously, guaranteeing an interrupted task's checkpoint
-	// reflects its final steps (the last Sync is the most likely to be dropped
-	// by the non-blocking semaphore).
+	// Final flush: the loop has ended, so drain in-flight writes and persist
+	// the checkpoint synchronously (the last Sync is likeliest dropped).
 	trajStore.Flush()
 	return result, err
 }
 
-// callerForConductor returns the LLMCaller used by the Conductor's main ReAct
-// loop — the loop that carries the task message (and any image/content blocks).
-//
-// It returns deps.llm directly rather than rebuilding the caller stack from
-// deps.trackingCaller. deps.llm (== o.llm) already carries the full stack
-// assembled in the orchestrator builder:
-//
-//	NewDumpCaller(NewLoggingLLMCaller(trackingCaller, provider, logger),
-//	              sessionDumpWriter, logger)
-//
-// The previous implementation rebuilt logging(trackingCaller) WITHOUT the
-// dump wrapper, so the session-level dump writer was silently dropped: a
-// failed LLM call in the main ReAct loop never produced a request+response
-// dump record (even though subagent steps, which use callerForStep with their
-// own per-step dump, were recorded fine). Returning deps.llm restores the
-// session dump for the main loop.
-//
-// Reasoning effort is unaffected: it is applied to the executor via
-// executor.SetReasoningEffort (see the Conductor in sp4rk), independent of the
-// caller. Likewise the Conductor's optional context-tracker injection relies
-// on a WithContextTracker capability that NEITHER loggingCaller nor dumpCaller
-// implements, so wrapping the outermost layer in dumpCaller changes nothing
-// there (the type assertion fails identically either way).
+// callerForConductor returns the main loop's LLMCaller: deps.llm as-is — the
+// builder's stack already carries logging + session-dump wrappers. Rebuilding
+// logging(trackingCaller) here would silently drop the session dump writer
+// (the bug this replaced). Reasoning effort and context tracking are
+// independent of this caller (executor-level / capability assertion).
 func callerForConductor(deps conductorDeps) agent.LLMCaller {
 	return deps.llm
 }
 
-// adaptContextFactory converts a core ContextManagerFactory (which returns
-// core.ContextManager and takes variadic PruningOverride) to the sp4rk
-// ContextManagerFactory signature (which returns agent.ContextManager and
-// takes variadic PruningOverride). The core ContextManager embeds
-// agent.ContextManager, so the return type is compatible.
+// adaptContextFactory converts the core ContextManagerFactory to the sp4rk
+// signature (core.ContextManager embeds agent.ContextManager).
 func adaptContextFactory(cf ContextManagerFactory) orchestration.ContextManagerFactory {
 	if cf == nil {
 		return nil
@@ -3081,26 +2322,10 @@ func adaptContextFactory(cf ContextManagerFactory) orchestration.ContextManagerF
 	}
 }
 
-// (o *Orchestrator) runConductor assembles a conductorDeps from the
-// orchestrator's stored fields and delegates to RunConductor. Used by
-// HandleMessage and Resume.
-//
-// conversationHistory is the prior dialogue to inject into the Conductor's
-// context. For HandleMessage, pass o.conversationHistory so the agent sees
-// previous exchanges. For Resume, pass nil — the Conductor continues the
-// same task and the original request is already the task message.
-//
-// forceCompactionStrategy threads the one-shot resume-compaction request
-// (RequestResumeCompaction) into the Conductor run: non-empty overrides the
-// routing-derived compaction strategy and forces a start-of-run compaction
-// (CompactOnStart) of the merged trajectory. Empty ("" — the HandleMessage
-// default and an unarmed Resume) preserves the normal behavior.
-//
-// resumedWithPlan marks a resume of a task whose approved plan still has
-// unreached steps (computed by Resume via planHasUnreachedSteps). RunConductor
-// seeds it into the per-run planRunState so the plan workflow stays active:
-// execute_plan continues the remaining steps without a re-declare, delegate
-// stays disabled, and declare_plan soft-hints. HandleMessage passes false.
+// runConductor assembles conductorDeps from the orchestrator's fields and
+// delegates to RunConductor (HandleMessage + Resume). conversationHistory is
+// the prior dialogue (nil on Resume); forceCompactionStrategy and
+// resumedWithPlan thread the one-shot resume requests (see their deps docs).
 func (o *Orchestrator) runConductor(ctx context.Context, message string, bb orchestration.Blackboard, availableTools []sdktools.ToolDescriptor, plansDir string, conversationHistory []llm.Message, resumeSteps []agent.Step, contentBlocks []llm.ContentBlock, nudge, forceCompactionStrategy string, resumedWithPlan bool) (*orchestration.ExecutionResult, error) {
 	deps := o.buildConductorDeps(conversationHistory, resumeSteps)
 	deps.contentBlocks = contentBlocks
@@ -3110,14 +2335,9 @@ func (o *Orchestrator) runConductor(ctx context.Context, message string, bb orch
 	return RunConductor(ctx, message, bb, availableTools, deps, plansDir)
 }
 
-// buildConductorDeps assembles the conductorDeps struct from the
-// orchestrator's stored fields, so a goal loop turn can build deps, swap in
-// counting wrappers (tool exec + LLM caller) and a goal-proposer override,
-// and then call RunConductor directly — without re-reading every stored field.
-// conversationHistory is the prior dialogue to inject into the Conductor's
-// context; resumeSteps holds pre-existing ReAct steps for resume (nil/empty =
-// fresh start). goalProposer, when non-nil, is injected into deps so the
-// propose_goal tool can reach the desktop approval flow during derivation.
+// buildConductorDeps assembles conductorDeps from the orchestrator's stored
+// fields so a goal-loop turn can swap in counting wrappers and a proposer and
+// call RunConductor directly. resumeSteps nil = fresh start.
 func (o *Orchestrator) buildConductorDeps(conversationHistory []llm.Message, resumeSteps []agent.Step) conductorDeps {
 	return conductorDeps{
 		contextFactory:        o.contextFactory,
@@ -3150,21 +2370,14 @@ func (o *Orchestrator) buildConductorDeps(conversationHistory []llm.Message, res
 		taskStore:             o.taskStore,
 		resumeSteps:           resumeSteps,
 		goalProposer:          o.goalProposer,
-		// agentResolver exposes the discovered Subagent Profiles to the
-		// Conductor context so buildSubAgentTask can apply a requested
-		// profile. Built from the agentManager; nil-safe when none configured
-		// (delegate validation then rejects a non-empty `agent` field).
+		// Profiles for buildSubAgentTask; nil-safe (delegate validation rejects `agent`).
 		agentResolver: func(name string) (*agents.Agent, bool) {
 			if o.agentManager == nil {
 				return nil, false
 			}
 			return o.agentManager.Get(name)
 		},
-		// skillResolver exposes the discovered Agent Skills to the launcher so
-		// buildSubAgentTask can activate a profile's required skills (AGENT.md
-		// `skills:`). Built from the skillManager; nil-safe when none is
-		// configured (a profile with a non-empty skill requirement then fails
-		// the delegation — fail-closed).
+		// Skills for profile requirements; fail-closed when the manager is nil.
 		skillResolver: func(name string) (*skills.Skill, bool) {
 			if o.skillManager == nil {
 				return nil, false
@@ -3175,10 +2388,7 @@ func (o *Orchestrator) buildConductorDeps(conversationHistory []llm.Message, res
 		// run (normal path + every goal-loop turn). It reads o.activePause
 		// live; nil-safe when no request is in flight.
 		pauseChecker: o.newPauseChecker(),
-		// userMessageSource wires the live user-message queue into every
-		// conductor run (normal path + every goal-loop turn). The executor
-		// drains one message per step boundary; nil-safe when the queue is
-		// empty (returns "").
+		// Live-message queue drained one per step boundary; nil-safe when empty.
 		userMessageSource: func(context.Context) string { return o.DrainLiveUserMessages() },
 		// verify-on-edit: suppressed in No Project (CHAT) mode — CHAT exposes
 		// no file-edit tools, so verification there is never meaningful. The
@@ -3188,28 +2398,16 @@ func (o *Orchestrator) buildConductorDeps(conversationHistory []llm.Message, res
 	}
 }
 
-// inlineStepLifecycle manages the lifecycle of plan steps that the Conductor
-// executes inline (without delegating to subagents). It decouples checklist
-// updates from plan-step lifecycle: update_checklist emits only StepTodoUpdate
-// (observational progress); PlanStepStart is inferred from the first checklist
-// update for a step; PlanStepComplete is emitted by declare_step_complete or
-// the finish fallback.
-//
-// Invariants:
-//   - started holds step IDs that received PlanStepStart but not yet
-//     PlanStepComplete.
-//   - completed holds step IDs that have reached a terminal PlanStepComplete
-//     (via completeStep or completeAll). It prevents double-completion and
-//     re-Start from a late checklist update after completion.
+// inlineStepLifecycle manages inline plan steps: Start inferred from the
+// first checklist update, Complete from declare_step_complete or the finish
+// fallback (conductor.md, "Inline Step Lifecycle").
 type inlineStepLifecycle struct {
 	emitter Emitter
 	scoper  CurrentStepScopable // nil if emitter doesn't support dynamic scoping
 	bb      orchestration.Blackboard
-	// planState tracks whether a plan was declared in THIS Conductor run,
-	// shared with the conductorPublisher and conductorLauncher. Used by
-	// completeAll to avoid synthesizing terminal events for a restored plan
-	// from a previous (completed) task on a plan-less continuation. Nil only
-	// under direct (test) construction — see planDeclaredInRun fallback.
+	// Shared planRunState: completeAll must not synthesize terminal events for
+	// a restored plan on a plan-less continuation; nil only in direct test
+	// construction (planDeclaredInRun fallback).
 	planState *planRunState
 	mu        sync.Mutex
 	started   map[string]bool      // stepIDs that received PlanStepStart but not PlanStepComplete
@@ -3229,28 +2427,17 @@ func newInlineStepLifecycle(emitter Emitter, bb orchestration.Blackboard) *inlin
 	}
 }
 
-// onChecklistUpdate is the StepTodoUpdateFunc for the Conductor. It emits
-// StepTodoUpdate (always — even for a standalone checklist with empty stepID)
-// and infers PlanStepStart on the first checklist update for a given step.
-// It never emits PlanStepComplete — that is the responsibility of
-// declare_step_complete or the finish fallback.
-//
-// For step-associated checklists, PlanStepStart is emitted BEFORE
-// StepTodoUpdate so the frontend opens the plan-step container before the
-// checklist arrives, allowing the checklist to nest inside the step block.
+// onChecklistUpdate emits StepTodoUpdate and infers PlanStepStart on the
+// first update (BEFORE it, so the UI nests the checklist under the step).
 func (l *inlineStepLifecycle) onChecklistUpdate(stepID string, items []agent.TodoItem) {
 	if l == nil || l.emitter == nil {
 		return
 	}
 
 	if stepID == "" {
-		// Standalone checklist (Conductor without an active plan) — no step lifecycle.
-		// Record that one was emitted so the ChecklistGuard keeps accepting an
-		// empty-step_id checklist if a plan becomes active later in this same run.
-		// The guard rejects empty-step_id calls while the plan is active and the
-		// flag is false, so this can only run while the plan is inactive (before
-		// declare, or after an abandon) — the live flag is exactly "a standalone
-		// checklist already exists earlier in this run".
+		// Standalone checklist — record it so the ChecklistGuard keeps accepting
+		// it if a plan activates later in this run (the monotone flag,
+		// conductor.md "Checklist Guard").
 		if l.planState != nil {
 			l.planState.markStandaloneChecklist()
 		}
@@ -3267,19 +2454,13 @@ func (l *inlineStepLifecycle) onChecklistUpdate(stepID string, items []agent.Tod
 	}
 	l.mu.Unlock()
 
-	// Set the dynamic plan-step scope BEFORE emitting PlanStepStart so that
-	// all subsequent executor events (tool_call, thought, assistant, etc.)
-	// carry plan_step_id and nest under the step block in the frontend. This
-	// mirrors the static scoping that subagent copies get via WithPlanStepID.
-	// A step that was already completed is not re-started (defensive against
-	// a late checklist update after declare_step_complete).
+	// Scope events to the step before PlanStepStart so they nest under the
+	// step block (mirrors subagents' WithPlanStepID); a completed step is not
+	// re-started.
 	if first {
 		if l.scoper != nil {
 			l.scoper.SetCurrentStepID(stepID)
 		}
-		// Emit PlanStepStart before StepTodoUpdate so the frontend's openSteps
-		// map contains the step when the checklist update arrives, enabling
-		// nesting inside the plan-step block.
 		desc, summary := lookupStepDesc(l.bb, stepID)
 		l.emitter.PlanStepStart(stepID, desc, summary)
 	}
@@ -3287,16 +2468,8 @@ func (l *inlineStepLifecycle) onChecklistUpdate(stepID string, items []agent.Tod
 	l.emitter.StepTodoUpdate(stepID, items)
 }
 
-// completeStep is the StepCompleteFunc for declare_step_complete. It emits
-// PlanStepComplete and moves the step to the completed set so that completeAll
-// does not double-complete it.
-//
-// If the Conductor skipped update_checklist for this step (so PlanStepStart
-// was never inferred), a PlanStepStart is synthesized first — but only for
-// steps that are in the declared plan, so that the step transitions
-// pending→running→completed in the plan panel instead of being stuck in
-// pending. For plan-less/unknown IDs there is no plan panel entry to update,
-// so the call is a no-op.
+// completeStep (declare_step_complete): emits PlanStepComplete, records
+// completion; synthesizes a start for never-started declared-plan steps.
 func (l *inlineStepLifecycle) completeStep(stepID string, success bool, errMsg string) {
 	if l == nil || l.emitter == nil || stepID == "" {
 		return
@@ -3318,26 +2491,20 @@ func (l *inlineStepLifecycle) completeStep(stepID string, success bool, errMsg s
 		if !planStepExists(l.bb, stepID) {
 			return
 		}
-		// Synthesized start: the Conductor completed the step without an
-		// inferred PlanStepStart, so the real start time is unknown — duration
-		// stays 0 (mirrors the pre-fix behavior for this edge case).
+		// Synthesized start — real start time unknown, duration stays 0.
 		desc, summary := lookupStepDesc(l.bb, stepID)
 		l.emitter.PlanStepStart(stepID, desc, summary)
 	}
 	l.emitter.PlanStepComplete(stepID, success, duration, errMsg)
-	// Clear the dynamic step scope so events after completion (delegation,
-	// planning, the next step's update_checklist ToolCall) are not mis-tagged
-	// with the completed step's plan_step_id.
+	// Clear the step scope so post-completion events are not mis-tagged.
 	if l.scoper != nil {
 		l.scoper.SetCurrentStepID("")
 	}
 }
 
-// markCompleted records a plan step as completed WITHOUT emitting any event.
-// Used by execute_plan after each step's SubAgentComplete has already emitted
-// PlanStepComplete via the planStepEventTranslator. This prevents completeAll
-// (the finish fallback) from double-completing steps that execute_plan already
-// drove to a terminal state through the emitter adapter.
+// markCompleted records completion WITHOUT events — execute_plan's translator
+// already emitted the terminal pair; this stops finish-fallback completeAll
+// from double-completing.
 func (l *inlineStepLifecycle) markCompleted(stepID string) {
 	if l == nil || stepID == "" {
 		return
@@ -3349,10 +2516,8 @@ func (l *inlineStepLifecycle) markCompleted(stepID string) {
 	l.mu.Unlock()
 }
 
-// isCompleted reports whether the step already reached a terminal state in this
-// run's lifecycle. Used by the execute_plan resume path to decide whether a
-// skipped (already-successful) step needs a synthesized terminal pair: on a
-// same-run retry it is already recorded, on a re-declared continuation it is not.
+// isCompleted reports a terminal state in this run's lifecycle (the
+// execute_plan resume path uses it to decide on synthesized pairs).
 func (l *inlineStepLifecycle) isCompleted(stepID string) bool {
 	if l == nil || stepID == "" {
 		return false
@@ -3362,15 +2527,8 @@ func (l *inlineStepLifecycle) isCompleted(stepID string) bool {
 	return l.completed[stepID]
 }
 
-// planDeclaredInRun reports whether the plan workflow is active in the CURRENT
-// Conductor run. Mirrors conductorLauncher.HasDeclaredPlan: when planState is
-// wired (production path via RunConductor), it reflects plans declared via
-// declare_plan AND continuable resumes (paused task whose approved plan still
-// has unreached steps) — on both, completeAll must sweep the plan's remaining
-// steps to a terminal state. A plan restored from a previous (completed) task
-// does NOT count. When planState is nil (direct construction in tests), it
-// falls back to the raw blackboard plan so existing direct-construction tests
-// keep working.
+// planDeclaredInRun mirrors HasDeclaredPlan (declared | continuable; restored
+// plans don't count; blackboard fallback under nil planState).
 func (l *inlineStepLifecycle) planDeclaredInRun() bool {
 	if l == nil {
 		return false
@@ -3381,21 +2539,8 @@ func (l *inlineStepLifecycle) planDeclaredInRun() bool {
 	return l.bb != nil && l.bb.GetPlan() != nil
 }
 
-// planDeclaredThisRun reports whether the plan on the blackboard was declared
-// in THIS Conductor run via declare_plan. Unlike planDeclaredInRun it EXCLUDES
-// the continuable-resume activation: a resumed run continues the approved plan
-// without a re-declare, and its skipped-step bookkeeping must stay silent —
-// the terminal events for the already-executed steps were emitted by the run
-// that ran them (issue #99). Used to gate synthesized terminal pairs for
-// steps that are merely replayed from a previous run's durable results:
-//   - plan re-declared in this run: the plan panel was reset to pending, so
-//     the synthesized pair is what marks the replayed step completed;
-//   - continuation resume: the pair would duplicate history — record the
-//     terminal state without events instead.
-//
-// When planState is nil (direct construction in tests), it falls back to the
-// raw blackboard plan so existing direct-construction tests keep working
-// (mirrors planDeclaredInRun).
+// planDeclaredThisRun: declared only (no continuable) — replayed steps stay
+// silent on continuations (issue #99).
 func (l *inlineStepLifecycle) planDeclaredThisRun() bool {
 	if l == nil {
 		return false
@@ -3406,10 +2551,8 @@ func (l *inlineStepLifecycle) planDeclaredThisRun() bool {
 	return l.bb != nil && l.bb.GetPlan() != nil
 }
 
-// stepSucceededPreviously reports whether the step already has a SUCCESSFUL
-// (error-free) StepResult on the blackboard — possibly restored from a
-// previous run of this task (pause/resume or restart). Used by completeAll to
-// never repaint an actually-succeeded step with this run's terminal failure.
+// stepSucceededPreviously: the step has an error-free blackboard StepResult
+// (possibly restored) — completeAll must not repaint it with this run's failure.
 func (l *inlineStepLifecycle) stepSucceededPreviously(stepID string) bool {
 	if l == nil || l.bb == nil {
 		return false
@@ -3418,14 +2561,8 @@ func (l *inlineStepLifecycle) stepSucceededPreviously(stepID string) bool {
 	return ok && sr.Error == nil
 }
 
-// seedCompletedFromBlackboard silently records every plan step that already
-// has a successful (error-free) StepResult on the blackboard as completed in
-// this run's lifecycle — WITHOUT emitting any event. Called on the resume
-// path (Orchestrator.resumePausedWork) right after the fresh lifecycle is
-// built: the restored steps' terminal events were emitted by the run that
-// executed them, so the resumed run must treat them as settled from the start
-// (issue #99) — a late checklist update must not re-Start them, the launcher's
-// skip branch and the finish-fallback completeAll must not re-announce them.
+// seedCompletedFromBlackboard silently marks blackboard-successful steps
+// completed on resume — their events came from the executing run (issue #99).
 func (l *inlineStepLifecycle) seedCompletedFromBlackboard() {
 	if l == nil || l.bb == nil {
 		return
@@ -3445,37 +2582,17 @@ func (l *inlineStepLifecycle) seedCompletedFromBlackboard() {
 	l.mu.Unlock()
 }
 
-// completeAll auto-completes any plan steps that have not reached a terminal
-// state. Called as a finish fallback after the Conductor's executor.Run
-// returns. errMsg is propagated to each auto-completed step's PlanStepComplete
-// so the UI can show why the step failed (empty string on success).
-//
-// It sweeps every step in the declared plan that is not in the completed set:
-//   - steps that were started (running) get a PlanStepComplete directly;
-//   - steps that were never started (the Conductor forgot update_checklist or
-//     the step was delegated and not marked inline) get a synthesized
-//     PlanStepStart followed by PlanStepComplete.
-//
-// This guarantees no plan step is left stuck in "pending" or "running" once
-// the Conductor finishes. For plan-less tasks (no plan declared in this run,
-// including continuations whose blackboard carries a restored plan from a
-// previous task) it only completes steps currently in the started set,
-// matching prior behavior.
+// completeAll (finish fallback) sweeps declared plan steps to a terminal
+// state — started complete directly, never-started get a synthesized start;
+// plan-less runs complete only the started set.
 func (l *inlineStepLifecycle) completeAll(success bool, errMsg string) {
 	if l == nil || l.emitter == nil {
 		return
 	}
 
-	// Collect declared plan step IDs (if any). Read outside the lifecycle
-	// lock — the blackboard is independently synchronized.
-	//
-	// This is gated on planDeclaredInRun() (not the raw blackboard plan) so
-	// that a plan-less continuation — whose blackboard carries a restored
-	// plan from a previous (completed) task — does NOT synthesize terminal
-	// events for those restored steps. The fresh lifecycle has empty
-	// started/completed sets, so without this gate every restored step would
-	// fall into neverStarted and re-emit PlanStepComplete (PlanStepStart is
-	// deduped by the emitter, but PlanStepComplete is not).
+	// Collect declared plan step IDs (blackboard read outside the lifecycle
+	// lock). Gated on planDeclaredInRun() so a plan-less continuation with a
+	// restored plan does not re-emit terminal events for those steps.
 	var planStepIDs []string
 	if l.planDeclaredInRun() {
 		if plan := l.bb.GetPlan(); plan != nil {
@@ -3516,15 +2633,9 @@ func (l *inlineStepLifecycle) completeAll(success bool, errMsg string) {
 		l.emitter.PlanStepComplete(id, success, time.Since(startTimes[id]), errMsg)
 	}
 	for _, id := range neverStarted {
-		// A step with a successful StepResult restored from a previous run
-		// must NOT be repainted with this run's terminal failure. When the
-		// plan was re-declared in THIS run the panel was reset to pending, so
-		// replay its success (mirrors the launcher's emitSkippedStepCompleted).
-		// When the plan was NOT declared in this run (continuation resume) the
-		// terminal events came from the run that executed the step and history
-		// already shows it completed (issue #99) — emit nothing. The resume
-		// path seeds such steps into the completed set before the run starts,
-		// so reaching this branch unseeded is a defensive fallback.
+		// A previously-succeeded step must not be repainted with this run's
+		// failure: re-declared → replay success; continuation → silent
+		// (issue #99); unseeded = defensive fallback.
 		if l.stepSucceededPreviously(id) {
 			if l.planDeclaredThisRun() {
 				desc, summary := lookupStepDesc(l.bb, id)
@@ -3537,9 +2648,7 @@ func (l *inlineStepLifecycle) completeAll(success bool, errMsg string) {
 		l.emitter.PlanStepStart(id, desc, summary)
 		l.emitter.PlanStepComplete(id, success, 0, errMsg)
 	}
-	// Clear the dynamic step scope after all steps are completed so any
-	// post-finish events (e.g. Conductor's final assistant message) are not
-	// mis-tagged with the last step's plan_step_id.
+	// Clear the step scope so post-finish events are not mis-tagged.
 	if l.scoper != nil {
 		l.scoper.SetCurrentStepID("")
 	}
