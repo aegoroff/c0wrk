@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted — amended by [ADR-100](./100-blocking-first-run-tool-install.md), which replaces decision point 1's background-pass scheduling and decision point 5's blanket non-fatality for tools positively known to be missing (blocking network pass inside startup; failure is fatal). Decision points 2–4 remain in force.
 
 Amends [ADR-010](./010-tool-manager.md): every ADR-010 decision remains in force except decision point 8 (fatal modal on tool-install failure), which this ADR replaces.
 

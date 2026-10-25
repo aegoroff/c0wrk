@@ -821,7 +821,7 @@ func TestManager_EnsureCriticalTools_PerToolIsolation(t *testing.T) {
 			rgStatus.Ready, rgStatus.Installed, rgStatus.Err)
 	}
 	mdStatus := findStatus(t, statuses, markitdown.Name)
-	if mdStatus.Ready || mdStatus.Err == nil || !errors.Is(mdStatus.Err, errDeferredToBackground) {
+	if mdStatus.Ready || mdStatus.Err == nil || !errors.Is(mdStatus.Err, errNeedsNetwork) {
 		t.Errorf("markitdown: Ready=%v Err=%v; want deferred status", mdStatus.Ready, mdStatus.Err)
 	}
 
@@ -869,8 +869,8 @@ func TestManager_EnsureCriticalTools_OfflineDefersPython(t *testing.T) {
 	if status.Ready {
 		t.Fatal("markitdown must not be Ready in the offline pass")
 	}
-	if status.Err == nil || !errors.Is(status.Err, errDeferredToBackground) {
-		t.Fatalf("markitdown status error = %v; want errDeferredToBackground", status.Err)
+	if status.Err == nil || !errors.Is(status.Err, errNeedsNetwork) {
+		t.Fatalf("markitdown status error = %v; want errNeedsNetwork", status.Err)
 	}
 	// The venv must not have been touched or created by the offline pass.
 	if _, statErr := os.Stat(filepath.Join(pythonDir, "venv")); !os.IsNotExist(statErr) {

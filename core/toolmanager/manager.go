@@ -30,9 +30,10 @@ type ProgressCallback func(toolName, stage string, bytesDone, bytesTotal int64)
 //
 // Manager is not safe for concurrent use. The startup layer runs a first
 // EnsureCriticalTools pass with AllowNetwork=false during synchronous startup
-// and, when tools are left not Ready, a second pass with AllowNetwork=true
-// from a background goroutine. The two runs must be sequenced (the offline
-// pass completes before the background pass starts) — they must never overlap.
+// and, when tools are left not Ready, a second blocking pass with
+// AllowNetwork=true under the tool-install splash (ADR-100). The two runs
+// must be sequenced (the offline pass completes before the network pass
+// starts) — they must never overlap.
 type Manager struct {
 	ToolsDir  string // e.g. ~/.c0wrk/tools/
 	BinDir    string // e.g. ~/.c0wrk/tools/bin/
@@ -96,21 +97,22 @@ type ToolStatus struct {
 	Err       error // why the tool is not Ready; nil iff Ready
 }
 
-// errDeferredToBackground marks a tool that needs network access and was
-// therefore skipped by an offline (AllowNetwork=false) run; the startup layer
-// re-runs EnsureCriticalTools with AllowNetwork=true in the background.
-var errDeferredToBackground = errors.New("requires network access; deferred to background install")
+// errNeedsNetwork marks a tool that needs network access and was therefore
+// skipped by an offline (AllowNetwork=false) run; the startup layer re-runs
+// EnsureCriticalTools with AllowNetwork=true in a second, blocking pass.
+var errNeedsNetwork = errors.New("requires network access; deferred to the network reconciliation pass")
 
 // EnsureCriticalTools reconciles the managed tool registry against the local
-// install. It never blocks or fails app startup over the network: per-tool
-// failures are isolated in the returned statuses instead of aborting the run,
-// so one unavailable tool never prevents the others from being installed.
+// install. Per-tool failures are isolated in the returned statuses instead of
+// aborting the run, so one unavailable tool never prevents the others from
+// being installed.
 //
 // The startup layer calls it twice: first with AllowNetwork=false during
 // synchronous startup (local disk work only — existing binaries are probed,
 // cached archives are installed), then, if any tool is left not Ready, with
-// AllowNetwork=true from a background goroutine that completes installation
-// while the app is already usable.
+// AllowNetwork=true in a second synchronous pass under the tool-install
+// splash (ADR-100). The method itself carries no startup policy — whether a
+// failed network pass is fatal to the app is the startup layer's decision.
 //
 // Structural failures (directory creation, disk-space guard, registry
 // resolution) are returned as the error; per-tool outcomes come back as
@@ -316,7 +318,7 @@ func (m *Manager) installOne(ctx context.Context, tool ToolSpec, cacheDir string
 		if !opts.AllowNetwork {
 			// The uv bootstrap and pip install require the network; nothing
 			// local can satisfy a missing or outdated Python package.
-			return fmt.Errorf("tool %q: %w", tool.Name, errDeferredToBackground)
+			return fmt.Errorf("tool %q: %w", tool.Name, errNeedsNetwork)
 		}
 		return m.installPython(ctx, tool)
 	default:
