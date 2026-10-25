@@ -11,16 +11,18 @@ import { Input } from '@/components/ui/input'
 import { Toggle } from './ModelProfilesControls'
 
 /**
- * Settings → Web Access — the HTTPS (TLS) block (ADR-102), in its own file so
- * the parent WebAccessSettings.tsx stays under the 200-line target; the
- * parent owns the single `info` state this block renders from. Write
- * discipline: optimistic with a rollback on rejection, authoritative state
- * re-read after every applied write. The cert and key paths are independent
- * self-committing fields (Enter or focus loss; unchanged saves nothing) —
- * each threads the OTHER FIELD'S DRAFT through (trimmed, empty falling back
- * to the persisted path; the backend loads the pair as a unit and refuses a
- * half-set one), so replacing both halves of a pair commits the complete new
- * pair on the first blur. Generate mints and persists the pair.
+ * Settings → Web Access — the HTTPS (TLS) block (ADR-102), one of the three
+ * per-block files the section is split into (the address field and the token
+ * field live in their own files the same way); the parent
+ * WebAccessSettings.tsx composes the section and owns the single `info`
+ * state this block renders from. Write discipline: optimistic with a
+ * rollback on rejection, authoritative state re-read after every applied
+ * write. The cert and key paths are independent self-committing fields
+ * (Enter or focus loss; unchanged saves nothing) — each threads the OTHER
+ * FIELD'S DRAFT through (trimmed, empty falling back to the persisted path;
+ * the backend loads the pair as a unit and refuses a half-set one), so
+ * replacing both halves of a pair commits the complete new pair on the
+ * first blur. Generate mints and persists the pair.
  */
 
 interface WebAccessTLSSettingsProps {

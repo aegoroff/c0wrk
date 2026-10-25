@@ -43,7 +43,7 @@ vi.mock('@/lib/reload', () => ({
 }))
 
 import { WebAccessGate } from './WebAccessGate'
-import { useUIStore } from '@/stores/uiStore'
+import { useUIStore, selectEffectiveTabsEnabled } from '@/stores/uiStore'
 
 function findInput(): HTMLInputElement {
   const input = document.querySelector<HTMLInputElement>('input[aria-label="Access token"]')
@@ -88,7 +88,7 @@ describe('WebAccessGate', () => {
     document.body.replaceChildren(container)
     root = createRoot(container)
     authListeners.clear()
-    useUIStore.setState({ tabsEnabled: false })
+    useUIStore.setState({ tabsEnabled: false, webTransport: false })
     webAuthRequiredMock.mockReset().mockResolvedValue(false)
     // Default: probe unresolved — the gate must hold the app on the spinner
     // (the load-bearing 'checking' state) until webAuthRequired settles.
@@ -219,21 +219,28 @@ describe('WebAccessGate', () => {
     expect(findInput()).not.toBeNull()
   })
 
-  it('forces the workspace tab bar off when the transport is web', async () => {
-    // The browser owns the tabs: the gate flips uiStore.tabsEnabled to false
+  it('latches webTransport on the web transport without touching the persisted tabsEnabled', async () => {
+    // The browser owns the tabs: the gate latches uiStore.webTransport
     // before the app mounts (the 'checking' hold guarantees the order), so
-    // the tab layer degenerates to its single-tab special case.
+    // every tabsEnabled READER derives the off value through
+    // selectEffectiveTabsEnabled — while the durable tabsEnabled preference
+    // keeps the desktop user's value verbatim (a web visit must not turn
+    // the forced value into the persisted truth).
     transportSnapshotMock.mockReturnValue('web')
     useUIStore.setState({ tabsEnabled: true })
     await render(<div data-testid="app">app</div>)
-    expect(useUIStore.getState().tabsEnabled).toBe(false)
+    expect(useUIStore.getState().webTransport).toBe(true)
+    expect(useUIStore.getState().tabsEnabled).toBe(true)
+    expect(selectEffectiveTabsEnabled(useUIStore.getState())).toBe(false)
     expect(document.querySelector('[data-testid="app"]')).not.toBeNull()
   })
 
-  it('leaves tabsEnabled alone for non-web transports', async () => {
+  it('leaves tabsEnabled and webTransport alone for non-web transports', async () => {
     transportSnapshotMock.mockReturnValue('none')
     useUIStore.setState({ tabsEnabled: true })
     await render(<div data-testid="app">app</div>)
+    expect(useUIStore.getState().webTransport).toBe(false)
     expect(useUIStore.getState().tabsEnabled).toBe(true)
+    expect(selectEffectiveTabsEnabled(useUIStore.getState())).toBe(true)
   })
 })

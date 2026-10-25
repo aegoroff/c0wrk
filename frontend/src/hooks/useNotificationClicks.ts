@@ -5,7 +5,7 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useProjectSwitchState } from '@/hooks/useProjectSwitchState'
 import { useTabStore, type Tab } from '@/stores/tabStore'
-import { useUIStore } from '@/stores/uiStore'
+import { useUIStore, selectEffectiveTabsEnabled } from '@/stores/uiStore'
 import { createTabEngine } from '@/lib/tabEngine'
 import { logger } from '@/lib/logger'
 import type { SessionInfo } from '@/types/models'
@@ -97,8 +97,9 @@ export function useNotificationClicks(): void {
         }
 
         // Click-time flag read: toggling tabs on/off applies to the next
-        // click without remounting the hook.
-        if (useUIStore.getState().tabsEnabled) {
+        // click without remounting the hook. Effective value: the web
+        // transport reads as off without touching the persisted preference.
+        if (selectEffectiveTabsEnabled(useUIStore.getState())) {
           const tabLayer = useTabStore.getState()
           const existing = findSessionTab(tabLayer.tabs, projectId, data.session_id)
           if (existing !== undefined) {

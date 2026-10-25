@@ -262,11 +262,23 @@ const webAppMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>(
 /**
  * Shared bound for the web-sidecar fetches (transport probe, RPC, login): a
  * sidecar that accepts TCP but stalls must not hold a call — or the boot
- * barrier — pending until the browser stack's own long timeout. Generous
- * enough for a full 32 MiB attachment upload on a normal link; the desktop
- * Wails transport stays unbounded (behavior parity).
+ * barrier — pending until the browser stack's own long timeout. Presumes a
+ * ~23 Mbps sustained path for the largest RPC bodies; the attachment upload
+ * RPC carries its own payload-scaled bound (see webUploadTimeoutSignal), and
+ * the desktop Wails transport stays unbounded (behavior parity).
  */
 export const WEB_FETCH_TIMEOUT_MS = 15_000
+
+/** Per-MiB extension of the upload bound for the attachment RPC: 32 MiB of
+ *  file (≈43 MiB base64 on the wire) gets 15 s + 32×8 s ≈ 4.7 min — a floor
+ *  of roughly ~1 Mbps sustained, so a slow remote link cannot abort a
+ *  legitimate upload mid-flight while a stalled sidecar still can't hold
+ *  the caller forever. */
+export const WEB_UPLOAD_MS_PER_MIB = 8_000
+
+/** The one RPC whose bound scales with its payload (the web transport's
+ *  in-memory attachment upload — no other call carries megabyte bodies). */
+const WEB_ATTACHMENT_RPC = 'AttachFileContent'
 
 /** Abort signal bounding a web-sidecar fetch, or undefined on engines without
  *  `AbortSignal.timeout` (the hardening is best-effort there, like the
@@ -274,6 +286,19 @@ export const WEB_FETCH_TIMEOUT_MS = 15_000
 export function webFetchTimeoutSignal(): AbortSignal | undefined {
   try {
     return AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS)
+  } catch {
+    return undefined
+ }
+}
+
+/** Payload-scaled variant for the attachment upload: the fixed bound would
+ *  abort a full 32 MiB upload on any link under ~23 Mbps. `encodedBytes` is
+ *  the serialized JSON body length (the wire cost includes the base64
+ *  payload and JSON escaping), so the extension tracks the real transfer. */
+export function webUploadTimeoutSignal(encodedBytes: number): AbortSignal | undefined {
+  const mib = encodedBytes / (1024 * 1024)
+  try {
+    return AbortSignal.timeout(WEB_FETCH_TIMEOUT_MS + Math.ceil(mib) * WEB_UPLOAD_MS_PER_MIB)
   } catch {
     return undefined
   }
@@ -296,19 +321,33 @@ function getWebApp(): unknown {
 
 /** Dispatch one RPC over the sidecar's reflection endpoint. */
 async function webRpc(method: string, args: unknown[]): Promise<unknown> {
+  const body = JSON.stringify(args)
   let res: Response
   try {
     res = await fetch(`/api/rpc/${encodeURIComponent(method)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(args),
-      signal: webFetchTimeoutSignal(),
+      body,
+      // The attachment upload is the one megabyte-body call: its bound
+      // scales with the encoded payload (the fixed bound would abort a
+      // full 32 MiB upload on a slow remote link mid-transfer).
+      signal:
+        method === WEB_ATTACHMENT_RPC ? webUploadTimeoutSignal(body.length) : webFetchTimeoutSignal(),
     })
   } catch (err) {
     logger.warn(`[rpc] ${method} transport error`, err)
     throw new Error(`RPC ${method} failed: transport unreachable`)
   }
-  const text = await res.text()
+  let text: string
+  try {
+    text = await res.text()
+  } catch (err) {
+    // A connection drop while the response body streams is the same
+    // transport failure as a dropped fetch — the callers' generic handlers
+    // key on the wrapped shape, never on a raw TypeError.
+    logger.warn(`[rpc] ${method} transport error mid-body`, err)
+    throw new Error(`RPC ${method} failed: transport unreachable`)
+  }
   let payload: unknown
   if (text !== '') {
     try {

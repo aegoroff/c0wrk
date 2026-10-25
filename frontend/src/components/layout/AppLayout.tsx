@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useUIStore, SIDEBAR_MIN, SIDEBAR_MAX } from '@/stores/uiStore'
+import { useUIStore, selectEffectiveTabsEnabled, SIDEBAR_MIN, SIDEBAR_MAX } from '@/stores/uiStore'
 import { useFileViewerStore } from '@/stores/fileViewerStore'
 import { useResize } from '@/hooks/useResize'
 import { useTabController } from '@/hooks/useTabController'
@@ -35,7 +35,7 @@ export function AppLayout() {
   const toggleSidebar = useUIStore((s) => s.toggleSidebarCollapsed)
   const sidebarWidth = useUIStore((s) => s.sidebarWidth)
   const setSidebarWidth = useUIStore((s) => s.setSidebarWidth)
-  const tabsEnabled = useUIStore((s) => s.tabsEnabled)
+  const tabsEnabled = useUIStore(selectEffectiveTabsEnabled)
 
   const viewerWidth = useFileViewerStore((s) => s.width)
   const viewerCollapsed = useFileViewerStore((s) => s.collapsed)

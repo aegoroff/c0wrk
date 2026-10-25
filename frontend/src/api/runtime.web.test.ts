@@ -798,8 +798,15 @@ describe('web capability helpers', () => {
 
   it('logError lands in the browser console', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-    runtime.logError('crash diagnostics')
-    expect(error).toHaveBeenCalledWith('crash diagnostics')
+    // Restored inline right after the assertion: no afterEach covers this
+    // file, and a leaked silencing mock would swallow (and hide) an
+    // unexpected console.error from every later test.
+    try {
+      runtime.logError('crash diagnostics')
+      expect(error).toHaveBeenCalledWith('crash diagnostics')
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('emit sends a {name, args} frame once the socket is open and warns-once while not', () => {

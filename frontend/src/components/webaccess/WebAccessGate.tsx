@@ -20,12 +20,15 @@
 // has to learn about "auth arrived late".
 //
 // Web-mode workspace adaptation: a browser tab lives in the BROWSER's tab
-// strip, so the app's own workspace tab bar is forced off (uiStore.tabsEnabled
-// → false) before the app mounts — the tab layer degenerates to its documented
-// "exactly one tab" special case, and every reader (the bar, the hotkeys, the
-// notification-click routing) agrees because they all read the store. The
-// Settings switch is hidden in the web transport too, so the forced value
-// cannot be fought mid-session; the persisted copy heals on the next boot.
+// strip, so the page latches uiStore.webTransport before the app mounts and
+// every tabsEnabled READER derives the effective value through
+// selectEffectiveTabsEnabled (`!webTransport && tabsEnabled`) — the tab
+// layer degenerates to its documented "exactly one tab" special case, every
+// reader agrees, and the durable tabsEnabled preference is never written
+// (a single web visit must not clobber the desktop user's persisted choice;
+// the gate's old setTabsEnabled(false) write turned the forced value into
+// the persisted truth). The Settings switch is hidden in the web transport
+// too, so the preference could not be fought mid-session either way.
 
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { onWebAuthRequired, transportSnapshot, webAuthRequired } from '@/api/runtime'
@@ -64,12 +67,13 @@ export function WebAccessGate({ children }: { children: ReactNode }) {
     let cancelled = false
     void webAuthRequired().then((required) => {
       if (cancelled) return
-      // Web transport ⇒ no in-app tab bar (the browser owns the tabs). Runs
-      // BEFORE the app mounts: webAuthRequired only resolves once the
-      // transport probe settled, and the 'checking' hold keeps the app from
-      // mounting until this handler ran — so every tabsEnabled reader boots
-      // with the forced value.
-      if (transportSnapshot() === 'web') useUIStore.getState().setTabsEnabled(false)
+      // Web transport ⇒ the in-app tab bar reads as off (the browser owns
+      // the tabs). Runs BEFORE the app mounts: webAuthRequired only resolves
+      // once the transport probe settled, and the 'checking' hold keeps the
+      // app from mounting until this handler ran — so every tabsEnabled
+      // reader boots with the effective value. The latch is runtime-only:
+      // the durable tabsEnabled preference stays untouched.
+      if (transportSnapshot() === 'web') useUIStore.getState().setWebTransport(true)
       setState(required ? 'locked' : 'open')
     })
     // A mid-session 401 (rotated per-launch token) locks the screen no
