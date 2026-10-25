@@ -40,12 +40,12 @@ export function createChatEditorTheme(isDark: boolean = true): Extension {
     },
     '.cm-placeholder': {
       // The prompt-suggestion hint (buildSuggestionPlaceholderNode) is a
-      // DOM-node placeholder: the previewed row, a blank line, and the italic
-      // usage block whose two hint lines are '\n'-separated text. The base
-      // theme leaves white-space at its default — those '\n's would collapse
-      // and the hints would render as one long line. pre-line preserves the
-      // explicit newlines while still letting a long suggestion text wrap
-      // naturally.
+      // DOM-node placeholder: the previewed row with its muted position
+      // marker, a blank line, and the italic usage block whose two hint
+      // lines are '\n'-separated text. The base theme leaves white-space at
+      // its default — those '\n's would collapse and the hints would render
+      // as one long line. pre-line preserves the explicit newlines while
+      // still letting a long suggestion text wrap naturally.
       whiteSpace: 'pre-line',
     },
     '.cm-gutters': {

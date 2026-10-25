@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/v0lka/c0wrk/core"
 )
 
 // Fixed RFC3339 pass timestamps: lexicographic TEXT order matches
@@ -16,6 +19,17 @@ const (
 	suggTs2 = "2025-06-01T10:00:05Z"
 	suggTs3 = "2025-06-01T10:00:10Z"
 )
+
+// suggTime parses one of the fixed pass timestamps into the time.Time the
+// core row shape carries.
+func suggTime(t *testing.T, ts string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatalf("invalid fixed timestamp %q: %v", ts, err)
+	}
+	return parsed
+}
 
 // createSuggestionSession saves a minimal session row the suggestion FKs and
 // the fork test can hang off.
@@ -34,16 +48,17 @@ func createSuggestionSession(t *testing.T, store *SQLiteSessionStore, id string)
 
 // saveSuggestionPass persists one generation pass of texts for (sessionID,
 // kind) at the given timestamp and returns the rows as persisted.
-func saveSuggestionPass(t *testing.T, store *SQLiteSessionStore, sessionID, taskID, kind, createdAt string, texts ...string) []PromptSuggestion {
+func saveSuggestionPass(t *testing.T, store *SQLiteSessionStore, sessionID, taskID string, kind core.SuggestionKind, createdAt string, texts ...string) []core.PromptSuggestion {
 	t.Helper()
-	suggs := make([]PromptSuggestion, 0, len(texts))
+	ts := suggTime(t, createdAt)
+	suggs := make([]core.PromptSuggestion, 0, len(texts))
 	for _, text := range texts {
-		suggs = append(suggs, PromptSuggestion{
+		suggs = append(suggs, core.PromptSuggestion{
 			SessionID: sessionID,
 			TaskID:    taskID,
 			Kind:      kind,
 			Text:      text,
-			CreatedAt: createdAt,
+			CreatedAt: ts,
 		})
 	}
 	saved, err := store.SavePromptSuggestions(context.Background(), suggs)
@@ -53,7 +68,7 @@ func saveSuggestionPass(t *testing.T, store *SQLiteSessionStore, sessionID, task
 	return saved
 }
 
-func suggestionTexts(suggs []PromptSuggestion) []string {
+func suggestionTexts(suggs []core.PromptSuggestion) []string {
 	texts := make([]string, 0, len(suggs))
 	for _, sg := range suggs {
 		texts = append(texts, sg.Text)
@@ -61,7 +76,7 @@ func suggestionTexts(suggs []PromptSuggestion) []string {
 	return texts
 }
 
-func listSuggestions(t *testing.T, store *SQLiteSessionStore, sessionID string) []PromptSuggestion {
+func listSuggestions(t *testing.T, store *SQLiteSessionStore, sessionID string) []core.PromptSuggestion {
 	t.Helper()
 	suggs, err := store.ListPromptSuggestions(context.Background(), sessionID)
 	if err != nil {
@@ -124,7 +139,7 @@ func TestPromptSuggestions_SaveAndListRoundTrip(t *testing.T) {
 	createSuggestionSession(t, store, "sugg-rt")
 
 	// Caller-set IDs must never leak in and rows get unique uuids.
-	p1 := saveSuggestionPass(t, store, "sugg-rt", "task-1", SuggestionKindNextTask, suggTs1, "next A", "next B")
+	p1 := saveSuggestionPass(t, store, "sugg-rt", "task-1", core.SuggestionKindNextTask, suggTs1, "next A", "next B")
 	if len(p1) != 2 {
 		t.Fatalf("saved %d rows, want 2", len(p1))
 	}
@@ -137,23 +152,23 @@ func TestPromptSuggestions_SaveAndListRoundTrip(t *testing.T) {
 			t.Errorf("row %d: SessionID = %q, want %q", i, sg.SessionID, "sugg-rt")
 		case sg.TaskID != "task-1":
 			t.Errorf("row %d: TaskID = %q, want %q", i, sg.TaskID, "task-1")
-		case sg.Kind != SuggestionKindNextTask:
-			t.Errorf("row %d: Kind = %q, want %q", i, sg.Kind, SuggestionKindNextTask)
+		case sg.Kind != core.SuggestionKindNextTask:
+			t.Errorf("row %d: Kind = %q, want %q", i, sg.Kind, core.SuggestionKindNextTask)
 		case sg.Status != SuggestionStatusActive:
 			t.Errorf("row %d: Status = %q, want %q", i, sg.Status, SuggestionStatusActive)
-		case sg.CreatedAt != suggTs1:
-			t.Errorf("row %d: CreatedAt = %q, want the uniform pass timestamp %q", i, sg.CreatedAt, suggTs1)
+		case !sg.CreatedAt.Equal(suggTime(t, suggTs1)):
+			t.Errorf("row %d: CreatedAt = %s, want the uniform pass timestamp %q", i, sg.CreatedAt.Format(time.RFC3339), suggTs1)
 		}
 	}
 
-	p2 := saveSuggestionPass(t, store, "sugg-rt", "task-2", SuggestionKindGoalAdvance, suggTs2, "goal G")
+	p2 := saveSuggestionPass(t, store, "sugg-rt", "task-2", core.SuggestionKindGoalAdvance, suggTs2, "goal G")
 
 	got := listSuggestions(t, store, "sugg-rt")
 	// Newest generation first (goal pass @ts2), insertion order within a pass.
 	if want := []string{"goal G", "next A", "next B"}; !slices.Equal(suggestionTexts(got), want) {
 		t.Fatalf("ListPromptSuggestions texts = %v, want %v", suggestionTexts(got), want)
 	}
-	if got[0].Kind != SuggestionKindGoalAdvance || got[0].ID != p2[0].ID {
+	if got[0].Kind != core.SuggestionKindGoalAdvance || got[0].ID != p2[0].ID {
 		t.Errorf("first row = {%s %s}, want the persisted goal_advance row", got[0].Kind, got[0].ID)
 	}
 	if got[1].ID != p1[0].ID || got[2].ID != p1[1].ID {
@@ -167,18 +182,18 @@ func TestPromptSuggestions_AtomicReplacePerKind(t *testing.T) {
 
 	createSuggestionSession(t, store, "sugg-repl")
 
-	p1 := saveSuggestionPass(t, store, "sugg-repl", "task-1", SuggestionKindNextTask, suggTs1, "A", "B", "C")
+	p1 := saveSuggestionPass(t, store, "sugg-repl", "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B", "C")
 	if got := suggestionTexts(listSuggestions(t, store, "sugg-repl")); !slices.Equal(got, []string{"A", "B", "C"}) {
 		t.Fatalf("after pass 1: texts = %v, want [A B C]", got)
 	}
 
 	// A fresh pass for the same (session, kind) replaces the active set.
-	saveSuggestionPass(t, store, "sugg-repl", "task-1", SuggestionKindNextTask, suggTs2, "D", "E")
+	saveSuggestionPass(t, store, "sugg-repl", "task-1", core.SuggestionKindNextTask, suggTs2, "D", "E")
 	if got := suggestionTexts(listSuggestions(t, store, "sugg-repl")); !slices.Equal(got, []string{"D", "E"}) {
 		t.Fatalf("after pass 2: texts = %v, want [D E]", got)
 	}
 	if n := countSuggestions(t, store,
-		`session_id = ? AND kind = ? AND status = ?`, "sugg-repl", SuggestionKindNextTask, SuggestionStatusStale); n != len(p1) {
+		`session_id = ? AND kind = ? AND status = ?`, "sugg-repl", core.SuggestionKindNextTask, SuggestionStatusStale); n != len(p1) {
 		t.Errorf("stale rows after replace = %d, want %d", n, len(p1))
 	}
 	if status := suggestionStatus(t, store, p1[0].ID); status != SuggestionStatusStale {
@@ -186,16 +201,16 @@ func TestPromptSuggestions_AtomicReplacePerKind(t *testing.T) {
 	}
 
 	// The other kind is untouched by next_task replaces.
-	saveSuggestionPass(t, store, "sugg-repl", "task-2", SuggestionKindGoalAdvance, suggTs1, "G")
+	saveSuggestionPass(t, store, "sugg-repl", "task-2", core.SuggestionKindGoalAdvance, suggTs1, "G")
 	if got := suggestionTexts(listSuggestions(t, store, "sugg-repl")); !slices.Equal(got, []string{"D", "E", "G"}) {
 		t.Fatalf("after goal pass 1: texts = %v, want [D E G]", got)
 	}
-	saveSuggestionPass(t, store, "sugg-repl", "task-2", SuggestionKindGoalAdvance, suggTs2, "H")
+	saveSuggestionPass(t, store, "sugg-repl", "task-2", core.SuggestionKindGoalAdvance, suggTs2, "H")
 	if got := suggestionTexts(listSuggestions(t, store, "sugg-repl")); !slices.Equal(got, []string{"D", "E", "H"}) {
 		t.Fatalf("after goal pass 2: texts = %v, want [D E H]", got)
 	}
 	if n := countSuggestions(t, store,
-		`session_id = ? AND kind = ? AND status = ?`, "sugg-repl", SuggestionKindGoalAdvance, SuggestionStatusStale); n != 1 {
+		`session_id = ? AND kind = ? AND status = ?`, "sugg-repl", core.SuggestionKindGoalAdvance, SuggestionStatusStale); n != 1 {
 		t.Errorf("stale goal_advance rows = %d, want 1", n)
 	}
 }
@@ -206,19 +221,19 @@ func TestPromptSuggestions_StaleGenerationPruned(t *testing.T) {
 
 	createSuggestionSession(t, store, "sugg-prune")
 
-	p1 := saveSuggestionPass(t, store, "sugg-prune", "task-1", SuggestionKindNextTask, suggTs1, "A", "B", "C")
+	p1 := saveSuggestionPass(t, store, "sugg-prune", "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B", "C")
 	// Terminal outcomes survive replaces: accept B before it is ever replaced.
 	if err := store.SetPromptSuggestionStatus(context.Background(), p1[1].ID, SuggestionStatusAccepted); err != nil {
 		t.Fatalf("accept B: %v", err)
 	}
 
-	saveSuggestionPass(t, store, "sugg-prune", "task-1", SuggestionKindNextTask, suggTs2, "D")
-	saveSuggestionPass(t, store, "sugg-prune", "task-1", SuggestionKindNextTask, suggTs3, "E", "F")
+	saveSuggestionPass(t, store, "sugg-prune", "task-1", core.SuggestionKindNextTask, suggTs2, "D")
+	saveSuggestionPass(t, store, "sugg-prune", "task-1", core.SuggestionKindNextTask, suggTs3, "E", "F")
 
 	// The replace prunes the dead stale generation: only pass 2's D stays
 	// stale; pass 1's A and C are gone; B keeps its accepted outcome.
 	if n := countSuggestions(t, store,
-		`session_id = ? AND kind = ? AND status = ?`, "sugg-prune", SuggestionKindNextTask, SuggestionStatusStale); n != 1 {
+		`session_id = ? AND kind = ? AND status = ?`, "sugg-prune", core.SuggestionKindNextTask, SuggestionStatusStale); n != 1 {
 		t.Errorf("stale rows after two replaces = %d, want 1 (only the previous generation)", n)
 	}
 	if n := countSuggestions(t, store, `session_id = ?`, "sugg-prune"); n != 4 {
@@ -237,7 +252,7 @@ func TestPromptSuggestions_SetStatus(t *testing.T) {
 	defer cleanup()
 
 	createSuggestionSession(t, store, "sugg-status")
-	p := saveSuggestionPass(t, store, "sugg-status", "task-1", SuggestionKindNextTask, suggTs1, "A", "B")
+	p := saveSuggestionPass(t, store, "sugg-status", "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B")
 
 	// Accept: leaves the active set, persists per row (D8).
 	if err := store.SetPromptSuggestionStatus(context.Background(), p[0].ID, SuggestionStatusAccepted); err != nil {
@@ -278,8 +293,8 @@ func TestPromptSuggestions_SetStatus(t *testing.T) {
 
 	// A report racing a fresher pass — the row is already stale — is a no-op:
 	// it must neither error nor resurrect the row into the active set.
-	replaced := saveSuggestionPass(t, store, "sugg-status", "task-1", SuggestionKindNextTask, suggTs2, "C")
-	saveSuggestionPass(t, store, "sugg-status", "task-1", SuggestionKindNextTask, suggTs3, "D")
+	replaced := saveSuggestionPass(t, store, "sugg-status", "task-1", core.SuggestionKindNextTask, suggTs2, "C")
+	saveSuggestionPass(t, store, "sugg-status", "task-1", core.SuggestionKindNextTask, suggTs3, "D")
 	if status := suggestionStatus(t, store, replaced[0].ID); status != SuggestionStatusStale {
 		t.Fatalf("replaced row status = %q, want %q", status, SuggestionStatusStale)
 	}
@@ -299,8 +314,8 @@ func TestPromptSuggestions_DeleteSessionCascades(t *testing.T) {
 	defer cleanup()
 
 	createSuggestionSession(t, store, "sugg-cascade")
-	saveSuggestionPass(t, store, "sugg-cascade", "task-1", SuggestionKindNextTask, suggTs1, "A", "B", "C")
-	saveSuggestionPass(t, store, "sugg-cascade", "task-2", SuggestionKindGoalAdvance, suggTs2, "G", "H")
+	saveSuggestionPass(t, store, "sugg-cascade", "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B", "C")
+	saveSuggestionPass(t, store, "sugg-cascade", "task-2", core.SuggestionKindGoalAdvance, suggTs2, "G", "H")
 	if n := countSuggestions(t, store, `session_id = ?`, "sugg-cascade"); n != 5 {
 		t.Fatalf("rows before delete = %d, want 5", n)
 	}
@@ -314,11 +329,11 @@ func TestPromptSuggestions_DeleteSessionCascades(t *testing.T) {
 
 	// The FK floor is real: suggestions for a nonexistent session are
 	// rejected on insert.
-	_, err := store.SavePromptSuggestions(context.Background(), []PromptSuggestion{{
+	_, err := store.SavePromptSuggestions(context.Background(), []core.PromptSuggestion{{
 		SessionID: "sugg-ghost-session",
-		Kind:      SuggestionKindNextTask,
+		Kind:      core.SuggestionKindNextTask,
 		Text:      "orphan",
-		CreatedAt: suggTs1,
+		CreatedAt: suggTime(t, suggTs1),
 	}})
 	if err == nil {
 		t.Error("SavePromptSuggestions for a nonexistent session = nil error, want an FK violation")
@@ -331,11 +346,11 @@ func TestPromptSuggestions_ForkDoesNotCopy(t *testing.T) {
 
 	src := "sugg-fork-src"
 	createSuggestionSession(t, store, src)
-	p := saveSuggestionPass(t, store, src, "task-1", SuggestionKindNextTask, suggTs1, "A", "B")
+	p := saveSuggestionPass(t, store, src, "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B")
 	if err := store.SetPromptSuggestionStatus(context.Background(), p[0].ID, SuggestionStatusAccepted); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	saveSuggestionPass(t, store, src, "task-2", SuggestionKindGoalAdvance, suggTs2, "G")
+	saveSuggestionPass(t, store, src, "task-2", core.SuggestionKindGoalAdvance, suggTs2, "G")
 
 	forked, err := store.ForkSession(context.Background(), src, nil)
 	if err != nil {
@@ -374,7 +389,7 @@ func TestPromptSuggestions_MigrationIdempotent(t *testing.T) {
 		t.Fatalf("failed to create store: %v", err)
 	}
 	createSuggestionSession(t, store, "sugg-mig")
-	p := saveSuggestionPass(t, store, "sugg-mig", "task-1", SuggestionKindNextTask, suggTs1, "A", "B")
+	p := saveSuggestionPass(t, store, "sugg-mig", "task-1", core.SuggestionKindNextTask, suggTs1, "A", "B")
 	assertSuggestionSchema(t, db)
 	var indexes int
 	if err := db.QueryRowContext(context.Background(),
@@ -413,22 +428,23 @@ func TestPromptSuggestions_Validation(t *testing.T) {
 
 	createSuggestionSession(t, store, "sugg-valid")
 
+	ts := suggTime(t, suggTs1)
 	cases := []struct {
 		name  string
-		suggs []PromptSuggestion
+		suggs []core.PromptSuggestion
 	}{
 		{"empty set", nil},
-		{"empty session id", []PromptSuggestion{{Kind: SuggestionKindNextTask, Text: "x", CreatedAt: suggTs1}}},
-		{"unknown kind", []PromptSuggestion{{SessionID: "sugg-valid", Kind: "daily_hint", Text: "x", CreatedAt: suggTs1}}},
-		{"empty text", []PromptSuggestion{{SessionID: "sugg-valid", Kind: SuggestionKindNextTask, Text: "", CreatedAt: suggTs1}}},
-		{"whitespace-only text", []PromptSuggestion{{SessionID: "sugg-valid", Kind: SuggestionKindNextTask, Text: "   ", CreatedAt: suggTs1}}},
-		{"mixed sessions", []PromptSuggestion{
-			{SessionID: "sugg-valid", Kind: SuggestionKindNextTask, Text: "x", CreatedAt: suggTs1},
-			{SessionID: "other-session", Kind: SuggestionKindNextTask, Text: "y", CreatedAt: suggTs1},
+		{"empty session id", []core.PromptSuggestion{{Kind: core.SuggestionKindNextTask, Text: "x", CreatedAt: ts}}},
+		{"unknown kind", []core.PromptSuggestion{{SessionID: "sugg-valid", Kind: "daily_hint", Text: "x", CreatedAt: ts}}},
+		{"empty text", []core.PromptSuggestion{{SessionID: "sugg-valid", Kind: core.SuggestionKindNextTask, Text: "", CreatedAt: ts}}},
+		{"whitespace-only text", []core.PromptSuggestion{{SessionID: "sugg-valid", Kind: core.SuggestionKindNextTask, Text: "   ", CreatedAt: ts}}},
+		{"mixed sessions", []core.PromptSuggestion{
+			{SessionID: "sugg-valid", Kind: core.SuggestionKindNextTask, Text: "x", CreatedAt: ts},
+			{SessionID: "other-session", Kind: core.SuggestionKindNextTask, Text: "y", CreatedAt: ts},
 		}},
-		{"mixed kinds", []PromptSuggestion{
-			{SessionID: "sugg-valid", Kind: SuggestionKindNextTask, Text: "x", CreatedAt: suggTs1},
-			{SessionID: "sugg-valid", Kind: SuggestionKindGoalAdvance, Text: "y", CreatedAt: suggTs1},
+		{"mixed kinds", []core.PromptSuggestion{
+			{SessionID: "sugg-valid", Kind: core.SuggestionKindNextTask, Text: "x", CreatedAt: ts},
+			{SessionID: "sugg-valid", Kind: core.SuggestionKindGoalAdvance, Text: "y", CreatedAt: ts},
 		}},
 	}
 	for _, tc := range cases {
@@ -451,12 +467,12 @@ func TestPromptSuggestions_Validation(t *testing.T) {
 	}
 
 	// Caller-set IDs are ignored — the store always regenerates them.
-	saved, err := store.SavePromptSuggestions(context.Background(), []PromptSuggestion{{
+	saved, err := store.SavePromptSuggestions(context.Background(), []core.PromptSuggestion{{
 		ID:        "caller-id",
 		SessionID: "sugg-valid",
-		Kind:      SuggestionKindNextTask,
+		Kind:      core.SuggestionKindNextTask,
 		Text:      "keep",
-		CreatedAt: suggTs1,
+		CreatedAt: ts,
 	}})
 	if err != nil {
 		t.Fatalf("save with caller-set id: %v", err)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/v0lka/c0wrk/backend/project"
+	"github.com/v0lka/c0wrk/core"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -151,8 +152,8 @@ type SessionStore interface {
 
 	// Prompt suggestions (ADR-088: generated follow-up prompts offered in the
 	// chat input; one active set per (session, kind))
-	SavePromptSuggestions(ctx context.Context, suggs []PromptSuggestion) ([]PromptSuggestion, error)
-	ListPromptSuggestions(ctx context.Context, sessionID string) ([]PromptSuggestion, error)
+	SavePromptSuggestions(ctx context.Context, suggs []core.PromptSuggestion) ([]core.PromptSuggestion, error)
+	ListPromptSuggestions(ctx context.Context, sessionID string) ([]core.PromptSuggestion, error)
 	SetPromptSuggestionStatus(ctx context.Context, id, status string) error
 
 	// Lifecycle
@@ -1363,27 +1364,14 @@ func (s *SQLiteSessionStore) RenameBookmark(ctx context.Context, sessionID, id, 
 	return nil
 }
 
-// PromptSuggestion represents one generated follow-up prompt (ADR-088) the
-// chat input can offer after a task finishes with outcome full or partial.
-// Rows hang off their session: deleting the session deletes its suggestions
-// (ON DELETE CASCADE) and a fork does not copy them.
-type PromptSuggestion struct {
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
-	TaskID    string `json:"task_id"` // triggering task; "" for session-level rows
-	Kind      string `json:"kind"`    // SuggestionKindNextTask or SuggestionKindGoalAdvance
-	Text      string `json:"text"`
-	Status    string `json:"status"`     // SuggestionStatus* value
-	CreatedAt string `json:"created_at"` // RFC 3339 formatted timestamp
-}
-
-// Suggestion kinds of a prompt suggestion row (ADR-088 D1): next_task offers
-// follow-up prompts after a completed task, goal_advance offers prompts for
-// advancing an active goal.
-const (
-	SuggestionKindNextTask    = "next_task"
-	SuggestionKindGoalAdvance = "goal_advance"
-)
+// PromptSuggestion rows (core.PromptSuggestion, ADR-088 D7) represent one
+// generated follow-up prompt the chat input can offer after a task finishes
+// with outcome full or partial. Rows hang off their session: deleting the
+// session deletes its suggestions (ON DELETE CASCADE) and a fork does not
+// copy them. This store is the persistence boundary: SQLite keeps kind,
+// status and created_at as TEXT (RFC 3339 for the timestamp), so the save
+// path formats and the list path parses — the in-memory rows the callers
+// see always carry the core types.
 
 // Lifecycle statuses of a prompt suggestion row (ADR-088 D7). active rows are
 // the set the chat input offers; accepted/dismissed are terminal per-row
@@ -1399,8 +1387,8 @@ const (
 
 // isValidSuggestionKind reports whether kind is one of the two suggestion
 // kinds (ADR-088 D1).
-func isValidSuggestionKind(kind string) bool {
-	return kind == SuggestionKindNextTask || kind == SuggestionKindGoalAdvance
+func isValidSuggestionKind(kind core.SuggestionKind) bool {
+	return kind == core.SuggestionKindNextTask || kind == core.SuggestionKindGoalAdvance
 }
 
 // SavePromptSuggestions atomically replaces the active suggestion set of one
@@ -1419,12 +1407,13 @@ func isValidSuggestionKind(kind string) bool {
 // size cap (D7, maxSuggestionsPerPass) is the caller's contract, not the
 // store's. Row IDs are always regenerated and Status forced to active;
 // CreatedAt is normalized to one timestamp for the whole pass — the first
-// row's non-empty value, else now (UTC, RFC 3339) — keeping the
-// ListPromptSuggestions order deterministic.
+// row's non-zero value, else now (UTC) — keeping the ListPromptSuggestions
+// order deterministic. The normalized time is persisted as an RFC 3339
+// string; the returned rows carry it as a time.Time.
 //
 // The returned slice holds the rows as persisted (fresh IDs, the pass
 // timestamp, active status), in the given order.
-func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []PromptSuggestion) ([]PromptSuggestion, error) {
+func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []core.PromptSuggestion) ([]core.PromptSuggestion, error) {
 	if len(suggs) == 0 {
 		return nil, errors.New("prompt suggestion set is empty")
 	}
@@ -1434,27 +1423,27 @@ func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []
 	}
 	kind := suggs[0].Kind
 	if !isValidSuggestionKind(kind) {
-		return nil, fmt.Errorf("invalid prompt suggestion kind %q", kind)
+		return nil, fmt.Errorf("invalid prompt suggestion kind %q", string(kind))
 	}
 	createdAt := suggs[0].CreatedAt
-	if createdAt == "" {
-		createdAt = time.Now().UTC().Format(time.RFC3339)
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
 	}
 	for i := range suggs {
 		if suggs[i].SessionID != sessionID {
 			return nil, fmt.Errorf("prompt suggestion set spans sessions: %q vs %q", sessionID, suggs[i].SessionID)
 		}
 		if suggs[i].Kind != kind {
-			return nil, fmt.Errorf("prompt suggestion set spans kinds: %q vs %q", kind, suggs[i].Kind)
+			return nil, fmt.Errorf("prompt suggestion set spans kinds: %q vs %q", string(kind), string(suggs[i].Kind))
 		}
 		if strings.TrimSpace(suggs[i].Text) == "" {
 			return nil, fmt.Errorf("prompt suggestion %d has empty text", i)
 		}
 	}
 
-	persisted := make([]PromptSuggestion, 0, len(suggs))
+	persisted := make([]core.PromptSuggestion, 0, len(suggs))
 	for i := range suggs {
-		persisted = append(persisted, PromptSuggestion{
+		persisted = append(persisted, core.PromptSuggestion{
 			ID:        uuid.NewString(),
 			SessionID: sessionID,
 			TaskID:    suggs[i].TaskID,
@@ -1492,7 +1481,7 @@ func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO prompt_suggestions (id, session_id, task_id, kind, text, status, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			persisted[i].ID, persisted[i].SessionID, persisted[i].TaskID, persisted[i].Kind, persisted[i].Text, persisted[i].Status, persisted[i].CreatedAt,
+			persisted[i].ID, persisted[i].SessionID, persisted[i].TaskID, string(persisted[i].Kind), persisted[i].Text, persisted[i].Status, persisted[i].CreatedAt.UTC().Format(time.RFC3339),
 		); err != nil {
 			return nil, fmt.Errorf("failed to insert prompt suggestion: %w", err)
 		}
@@ -1508,8 +1497,11 @@ func (s *SQLiteSessionStore) SavePromptSuggestions(ctx context.Context, suggs []
 // kinds, ADR-088 D7 — newest generation first and in insertion order within a
 // generation, the order the chat input's cycle keys assume. Accepted,
 // dismissed and stale rows are never returned. Returns an empty (non-nil)
-// slice when the session has no active suggestions.
-func (s *SQLiteSessionStore) ListPromptSuggestions(ctx context.Context, sessionID string) ([]PromptSuggestion, error) {
+// slice when the session has no active suggestions. The persisted RFC 3339
+// created_at strings are parsed back into time.Time; a row with an
+// unparseable timestamp fails the whole read (the subsystem's fail-open
+// callers degrade to no suggestions).
+func (s *SQLiteSessionStore) ListPromptSuggestions(ctx context.Context, sessionID string) ([]core.PromptSuggestion, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_id, kind, text, status, created_at
 		FROM prompt_suggestions
@@ -1524,19 +1516,25 @@ func (s *SQLiteSessionStore) ListPromptSuggestions(ctx context.Context, sessionI
 		}
 	}()
 
-	var suggestions []PromptSuggestion
+	var suggestions []core.PromptSuggestion
 	for rows.Next() {
-		var sg PromptSuggestion
-		if err := rows.Scan(&sg.ID, &sg.SessionID, &sg.TaskID, &sg.Kind, &sg.Text, &sg.Status, &sg.CreatedAt); err != nil {
+		var sg core.PromptSuggestion
+		var createdAt string
+		if err := rows.Scan(&sg.ID, &sg.SessionID, &sg.TaskID, &sg.Kind, &sg.Text, &sg.Status, &createdAt); err != nil {
 			return nil, fmt.Errorf("failed to scan prompt suggestion: %w", err)
 		}
+		parsed, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse prompt suggestion created_at %q: %w", createdAt, err)
+		}
+		sg.CreatedAt = parsed
 		suggestions = append(suggestions, sg)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating prompt suggestions: %w", err)
 	}
 	if suggestions == nil {
-		suggestions = []PromptSuggestion{}
+		suggestions = []core.PromptSuggestion{}
 	}
 	return suggestions, nil
 }

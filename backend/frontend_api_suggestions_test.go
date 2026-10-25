@@ -13,6 +13,7 @@ import (
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
 	"github.com/v0lka/c0wrk/backend/session"
+	"github.com/v0lka/c0wrk/core"
 )
 
 // suggAPITs renders the i-th deterministic hour stamp (2025-06-01T00:00:00Z
@@ -97,11 +98,11 @@ func (h *suggestionsAPIHarness) mustMessage(t *testing.T, sessionID, role, conte
 
 // mustSuggestionPass persists one generation pass (one kind, active status)
 // for the session — the store-level shape the manager's passes produce.
-func (h *suggestionsAPIHarness) mustSuggestionPass(t *testing.T, sessionID, kind string, texts ...string) {
+func (h *suggestionsAPIHarness) mustSuggestionPass(t *testing.T, sessionID string, kind core.SuggestionKind, texts ...string) {
 	t.Helper()
-	rows := make([]session.PromptSuggestion, 0, len(texts))
+	rows := make([]core.PromptSuggestion, 0, len(texts))
 	for _, text := range texts {
-		rows = append(rows, session.PromptSuggestion{
+		rows = append(rows, core.PromptSuggestion{
 			SessionID: sessionID,
 			Kind:      kind,
 			Text:      text,
@@ -112,7 +113,7 @@ func (h *suggestionsAPIHarness) mustSuggestionPass(t *testing.T, sessionID, kind
 	}
 }
 
-func suggestionTextsOf(rows []session.PromptSuggestion) []string {
+func suggestionTextsOf(rows []core.PromptSuggestion) []string {
 	texts := make([]string, 0, len(rows))
 	for _, row := range rows {
 		texts = append(texts, row.Text)
@@ -147,8 +148,8 @@ func TestGetPromptSuggestions_ContinuationForSessionWithContent(t *testing.T) {
 	h.mustSession(t, "s-live", projID, 0)
 	h.mustMessage(t, "s-live", "user", "почини тесты")
 	h.mustMessage(t, "s-live", "assistant", "готово")
-	h.mustSuggestionPass(t, "s-live", session.SuggestionKindGoalAdvance, "добавь регрессионный тест", "обнови README")
-	h.mustSuggestionPass(t, "s-live", session.SuggestionKindNextTask, "не смешивать виды")
+	h.mustSuggestionPass(t, "s-live", core.SuggestionKindGoalAdvance, "добавь регрессионный тест", "обнови README")
+	h.mustSuggestionPass(t, "s-live", core.SuggestionKindNextTask, "не смешивать виды")
 
 	resp := h.f.GetPromptSuggestions("s-live", projID)
 	if resp.Source != promptSuggestionsSourceContinuation {
@@ -159,8 +160,8 @@ func TestGetPromptSuggestions_ContinuationForSessionWithContent(t *testing.T) {
 		t.Errorf("texts = %v, want %v", got, want)
 	}
 	for _, row := range resp.Suggestions {
-		if row.Kind != session.SuggestionKindGoalAdvance {
-			t.Errorf("row kind = %q, want only %q", row.Kind, session.SuggestionKindGoalAdvance)
+		if row.Kind != core.SuggestionKindGoalAdvance {
+			t.Errorf("row kind = %q, want only %q", row.Kind, core.SuggestionKindGoalAdvance)
 		}
 		if row.Status != session.SuggestionStatusActive {
 			t.Errorf("row status = %q, want active", row.Status)
@@ -184,8 +185,8 @@ func TestGetPromptSuggestions_EmptySessionGetsProjectNextTask(t *testing.T) {
 	h.mustSession(t, "s-old", projID, 0)
 	h.mustMessage(t, "s-old", "user", "сделай дашборд")
 	h.mustMessage(t, "s-old", "assistant", "готово")
-	h.mustSuggestionPass(t, "s-old", session.SuggestionKindNextTask, "добавь фильтры", "настрой алерты")
-	h.mustSuggestionPass(t, "s-old", session.SuggestionKindGoalAdvance, "не Leak")
+	h.mustSuggestionPass(t, "s-old", core.SuggestionKindNextTask, "добавь фильтры", "настрой алерты")
+	h.mustSuggestionPass(t, "s-old", core.SuggestionKindGoalAdvance, "не Leak")
 
 	h.mustSession(t, "s-new", projID, 1)
 
@@ -201,8 +202,8 @@ func TestGetPromptSuggestions_EmptySessionGetsProjectNextTask(t *testing.T) {
 		if row.SessionID != "s-old" {
 			t.Errorf("row session = %q, want the originating s-old", row.SessionID)
 		}
-		if row.Kind != session.SuggestionKindNextTask {
-			t.Errorf("row kind = %q, want only %q", row.Kind, session.SuggestionKindNextTask)
+		if row.Kind != core.SuggestionKindNextTask {
+			t.Errorf("row kind = %q, want only %q", row.Kind, core.SuggestionKindNextTask)
 		}
 	}
 }
@@ -216,9 +217,9 @@ func TestGetPromptSuggestions_NewestActiveSetWins(t *testing.T) {
 	h := newSuggestionsAPIHarness(t)
 	projID := h.mustProject(t, "Newest")
 	h.mustSession(t, "s-a", projID, 0)
-	h.mustSuggestionPass(t, "s-a", session.SuggestionKindNextTask, "старый набор")
+	h.mustSuggestionPass(t, "s-a", core.SuggestionKindNextTask, "старый набор")
 	h.mustSession(t, "s-b", projID, 1)
-	h.mustSuggestionPass(t, "s-b", session.SuggestionKindNextTask, "свежий набор")
+	h.mustSuggestionPass(t, "s-b", core.SuggestionKindNextTask, "свежий набор")
 	h.mustSession(t, "s-new", projID, 2)
 	// Pin the OLDEST carrier: ListSessionsByProject now returns s-a first,
 	// and only a recency-ordered scan serves the genuinely newest set.
@@ -244,7 +245,7 @@ func TestGetPromptSuggestions_ProjectWindowBoundsScan(t *testing.T) {
 	// The oldest session carries the only active set but sits outside the
 	// window: s-deep plus s-01..s-10 fill the scan, s-new is the newest.
 	h.mustSession(t, "s-deep", projID, 0)
-	h.mustSuggestionPass(t, "s-deep", session.SuggestionKindNextTask, "вне окна")
+	h.mustSuggestionPass(t, "s-deep", core.SuggestionKindNextTask, "вне окна")
 	for i := 1; i <= 10; i++ {
 		h.mustSession(t, fmt.Sprintf("s-%02d", i), projID, i)
 	}
@@ -268,7 +269,7 @@ func TestGetPromptSuggestions_ChatContentKeepsContinuation(t *testing.T) {
 	h.mustSession(t, "s-chat", chatID, 0)
 	h.mustMessage(t, "s-chat", "user", "объясни миграции")
 	h.mustMessage(t, "s-chat", "assistant", "миграции — это")
-	h.mustSuggestionPass(t, "s-chat", session.SuggestionKindGoalAdvance, "покажи пример вниз")
+	h.mustSuggestionPass(t, "s-chat", core.SuggestionKindGoalAdvance, "покажи пример вниз")
 
 	resp := h.f.GetPromptSuggestions("s-chat", project.NoProjectID)
 	if resp.Source != promptSuggestionsSourceContinuation {
@@ -315,7 +316,7 @@ func TestGetPromptSuggestions_ContentSessionStaysOnContinuationBranch(t *testing
 	h.mustSession(t, "s-old", projID, 0)
 	h.mustMessage(t, "s-old", "user", "работа")
 	h.mustMessage(t, "s-old", "assistant", "сделано")
-	h.mustSuggestionPass(t, "s-old", session.SuggestionKindNextTask, "проектные строки")
+	h.mustSuggestionPass(t, "s-old", core.SuggestionKindNextTask, "проектные строки")
 	h.mustSession(t, "s-live", projID, 1)
 	h.mustMessage(t, "s-live", "user", "продолжи")
 
@@ -339,8 +340,8 @@ func TestGetPromptSuggestions_DraftSurfaceServesProjectNextTask(t *testing.T) {
 	h.mustSession(t, "s-origin", projID, 0)
 	h.mustMessage(t, "s-origin", "user", "сделай дашборд")
 	h.mustMessage(t, "s-origin", "assistant", "готово")
-	h.mustSuggestionPass(t, "s-origin", session.SuggestionKindNextTask, "добавь фильтры", "настрой алерты")
-	h.mustSuggestionPass(t, "s-origin", session.SuggestionKindGoalAdvance, "не смешивать ветки")
+	h.mustSuggestionPass(t, "s-origin", core.SuggestionKindNextTask, "добавь фильтры", "настрой алерты")
+	h.mustSuggestionPass(t, "s-origin", core.SuggestionKindGoalAdvance, "не смешивать ветки")
 
 	resp := h.f.GetPromptSuggestions("", projID)
 	if resp.Source != promptSuggestionsSourceNewSession {
@@ -351,8 +352,8 @@ func TestGetPromptSuggestions_DraftSurfaceServesProjectNextTask(t *testing.T) {
 		t.Errorf("texts = %v, want %v", got, want)
 	}
 	for _, row := range resp.Suggestions {
-		if row.Kind != session.SuggestionKindNextTask {
-			t.Errorf("row kind = %q, want only %q", row.Kind, session.SuggestionKindNextTask)
+		if row.Kind != core.SuggestionKindNextTask {
+			t.Errorf("row kind = %q, want only %q", row.Kind, core.SuggestionKindNextTask)
 		}
 		if row.SessionID != "s-origin" {
 			t.Errorf("row session = %q, want the originating s-origin", row.SessionID)
@@ -371,7 +372,7 @@ func TestGetPromptSuggestions_DraftSurfaceChatOffersNothing(t *testing.T) {
 	h := newSuggestionsAPIHarness(t)
 	chatID := h.mustNoProject(t)
 	h.mustSession(t, "s-chat", chatID, 0)
-	h.mustSuggestionPass(t, "s-chat", session.SuggestionKindNextTask, "не для чата")
+	h.mustSuggestionPass(t, "s-chat", core.SuggestionKindNextTask, "не для чата")
 
 	resp := h.f.GetPromptSuggestions("", project.NoProjectID)
 	if resp.Source != promptSuggestionsSourceNone {

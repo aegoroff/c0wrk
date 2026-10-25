@@ -233,57 +233,37 @@ func (m *Manager) runPromptSuggestPass(
 	kind core.SuggestionKind,
 	window func() ([]core.PromptSuggestSession, error),
 ) {
-	rowKind := suggestionRowKind(kind)
-	if rowKind == "" {
-		logger.Debug("prompt suggestions: unknown kind, skipping pass",
-			"session", sessionID, "kind", string(kind))
-		return
-	}
 	sessions, err := window()
 	if err != nil {
 		logger.Debug("prompt suggestion window unavailable",
-			"session", sessionID, "kind", rowKind, "error", err)
+			"session", sessionID, "kind", string(kind), "error", err)
 		return
 	}
 	texts, err := gen.Generate(ctx, kind, core.PromptSuggestInput{Sessions: sessions})
 	if err != nil {
 		logger.Debug("prompt suggestion generation failed",
-			"session", sessionID, "kind", rowKind, "error", err)
+			"session", sessionID, "kind", string(kind), "error", err)
 		return
 	}
 	if len(texts) == 0 {
 		return
 	}
-	rows := make([]PromptSuggestion, 0, len(texts))
+	rows := make([]core.PromptSuggestion, 0, len(texts))
 	for _, text := range texts {
-		rows = append(rows, PromptSuggestion{
+		rows = append(rows, core.PromptSuggestion{
 			SessionID: sessionID,
 			TaskID:    taskID,
-			Kind:      rowKind,
+			Kind:      kind,
 			Text:      text,
 		})
 	}
 	saved, err := store.SavePromptSuggestions(ctx, rows)
 	if err != nil {
 		logger.Debug("failed to persist prompt suggestions",
-			"session", sessionID, "kind", rowKind, "error", err)
+			"session", sessionID, "kind", string(kind), "error", err)
 		return
 	}
 	m.emitPromptSuggestionsEvent(ctx, sessionID, saved)
-}
-
-// suggestionRowKind maps a core suggestion kind onto the backend row-kind
-// constant the store validates against. An empty result means the kind is
-// unknown and the pass is skipped.
-func suggestionRowKind(kind core.SuggestionKind) string {
-	switch kind {
-	case core.SuggestionKindNextTask:
-		return SuggestionKindNextTask
-	case core.SuggestionKindGoalAdvance:
-		return SuggestionKindGoalAdvance
-	default:
-		return ""
-	}
 }
 
 // PromptSuggestSessionsNewestFirst re-orders a project's session list into
@@ -431,7 +411,7 @@ func chatMessageIsNudge(msg ChatMessage) bool {
 // FULL active set (both kinds) — the frontend replaces its set outright; a
 // failed re-read degrades to the just-saved pass rather than dropping the
 // event.
-func (m *Manager) emitPromptSuggestionsEvent(ctx context.Context, sessionID string, justSaved []PromptSuggestion) {
+func (m *Manager) emitPromptSuggestionsEvent(ctx context.Context, sessionID string, justSaved []core.PromptSuggestion) {
 	active := justSaved
 	m.mu.RLock()
 	store := m.sessionStore

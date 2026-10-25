@@ -182,6 +182,7 @@ func newWTHarness(t *testing.T, factory session.OrchestratorFactory) *wtHarness 
 		store:           h.store,
 		reviewStore:     reviewStore,
 		projectManager:  projectManager,
+		projStore:       projectStore,
 		agentDir:        h.agentDir,
 		terminalManager: h.terminal,
 	}

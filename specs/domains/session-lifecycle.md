@@ -434,6 +434,15 @@ identifier, not an OS path.
 
 Rules:
 
+- **The session workspace follows the session's binding.** The workspace a
+  relative input joins is the session's OWN execution workspace: a
+  `managed_worktree` session joins against its tree, a `local` session
+  against the project checkout (the ADR-080/ADR-091 bindings) — the
+  checkout is only the fallback for unbound sessions. The frontend
+  click-resolution root (`resolveChatWorkspaceRoot()`) applies the same
+  session-first rule to markdown links and tool-card paths (see
+  [ADR-095](../decisions/095-chat-file-reference-path-semantics.md),
+  Decision 6).
 - **Canonical form is forward-slash.** Drive/UNC inputs pass through
   `core.NormalizeAbsPath`: backslashes become `/`, dot segments are
   removed, and `..` is clamped at the anchored root (filesystem root /
@@ -609,6 +618,23 @@ User clicks "Resume" (after task_failed_resumable)
           └─ Conductor continues toward completion (no plan required)
 ```
 
+**Error semantics.** `orchestration.ErrExecutionIncomplete` carrying a non-nil
+`ExecutionResult` returns a valid `*HandleResult` alongside the error (partial
+success — e.g. a step limit): callers `errors.Is`-check and still consume the
+result's partial output, plan state and blackboard. Any other error is a complete
+failure: the task is marked failed and a nil result is returned. A cooperative
+pause (`agent.ErrPaused`) is a clean checkpoint: the task persists as paused
+(resumable), `session_paused` is emitted, and `Resume` returns a nil error with
+`Status` = `ExecutionStatusPaused`.
+
+#### Task trajectory persistence
+
+`RunConductor` (`core/conductor.go`) wraps the in-memory `trajectoryHolder` in `compositeTrajectoryStore`: the holder serves the reflect tool synchronously, and every `Sync` additionally persists a full-snapshot upsert of the trajectory to the task DB — best-effort and non-blocking (at most one write outstanding; a `Sync` landing while a write is in flight is dropped, the next completed `Sync` carries a fresher snapshot, so the persisted trajectory never goes backwards; a final synchronous `Flush` after the ReAct loop stops persists the last state even when the final `Sync` was dropped).
+
+The holder's sync guard is **length-monotonic**: any sync shorter than what is already held is ignored. Subagent executors get their own holders (`subagentCtx` detaches the parent's — see [delegation.md](orchestration/delegation.md#subagent-context-narrowing)), so under normal wiring only the parent conductor syncs here; the guard is defense in depth against a mis-wired foreign executor (a resumed seed narrower than the held trajectory) erasing the task checkpoint — guarding empty syncs alone would not suffice, since a first non-empty single-step foreign sync would still shrink it.
+
+The per-Sync defensive copy is a shallow copy, safe for the async writer because the executor appends steps but never mutates an already-published step in place (the sp4rk executor's trajectory lock); the shared slice/byte backing arrays are never written after publication. If that executor invariant ever changes, the snapshot must deep-copy the backing arrays.
+
 #### Task-scoped MCP authorization
 
 `prepareTaskMCP` (`core/orchestrator_mcp_prepare.go`) is shared by
@@ -679,6 +705,14 @@ verifier's units survive a restart. The same ledger is surfaced to the UI as the
 `work_units` field of `GetSessionRuntimeStatus` (below). See
 [ADR-048](../decisions/048-unified-recovery-ledger.md) and
 [delegation.md](orchestration/delegation.md#durable-unit-ledger-and-resume-relaunch).
+
+The wave is the system-driven half of the pause invariant: everything paused
+settles formally before the resumed task's first LLM call, with no model
+decision involved. Its outcome contract (see `resumePausedWork`): a pause
+signal re-tripped mid-wave checkpoints cleanly (`pausedAgain=true`, no LLM
+call); wave wiring failures return as errors and the caller falls through;
+subagent failures surface in their results — the wave summary is factual data
+for the resumed task, never instructions.
 
 `recordResumeOutcome` appends **only the assistant side** of the resumed
 execution to the in-memory conversation history — no user/assistant pair is
@@ -900,7 +934,7 @@ User clicks "Resume" (optionally with model/reasoning-effort overrides)
           └─ orchestrator.Resume → resumeGoalLoop (goal task) or plain Conductor
 ```
 
-`ResumeSession(sessionID, modelOverride, reasoningEffort, nudge)` delegates to `ResumeTask`. The optional `nudge` is injected as a trailing user message into the first resumed turn (one-shot). An empty nudge resumes silently from the checkpoint. `session_resumed` clears the UI's paused state (complementary to `session_paused`).
+`ResumeSession(sessionID, modelOverride, reasoningEffort, nudge)` delegates to `ResumeTask`. The optional `nudge` is injected as a trailing user message into the first resumed turn (one-shot). An empty nudge resumes silently from the checkpoint. On the Conductor path the nudge rides on the reconstructed task message — under the "User follow-up on resume" heading, ahead of the auto-resume wave summary — and threads into every subagent the wave relaunches BEFORE wave work (the Conductor itself sees it only at its first LLM call, after the wave). On the goal-loop path it lands as the final user message next to the pending tool result (`PendingUserInterjection`). `session_resumed` clears the UI's paused state (complementary to `session_paused`).
 
 **Nudge-resume (sending a message into a paused session):**
 

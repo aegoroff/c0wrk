@@ -168,22 +168,30 @@ Phase 1: shell env + logger (<50ms)
 Phase 2: config + tools (parallel, up to 3-10 min on first run)
   │
   ├─ config.ResolveAndLoad() — YAML parse + env expansion + defaults
-  └─ initTools()
+  └─ initTools()  (reconcileToolsWithSplash — ADR-100)
       ├─ a.showWindow(ctx) — idempotent safety net; the window is already
       │   visible, so this only matters if something else hid it
       ├─ Manager.NeedsInstall() — quick check (.versions + binary existence)
-      ├─ if tools needed: emit tool_manager:start(tools)  → frontend shows splash
-      ├─ EnsureCriticalTools(AllowNetwork:false)  (always runs; strictly local:
-      │   │   probes + installs from cached verified archives, no network I/O)
-      │   └─ per-tool statuses; failures never abort startup
-      ├─ if tools not Ready: background goroutine
-      │     EnsureCriticalTools(AllowNetwork:true)
-      │     ├─ download → emit tool_manager:progress(bytes_done, bytes_total)
-      │     └─ extract / python_bootstrap; never emits tool_manager:start
-      │        still-failing tools → single runtime_error toast
-      └─ emit tool_manager:done()  (always; after each pass — emitted in both
-          the needed and up-to-date paths so the frontend can transition
-          splash → waiting_ready)
+      ├─ if tools needed (or the check errored — unknown counts as missing):
+      │     emit tool_manager:start(tools)  → frontend shows splash
+      ├─ PASS 1 EnsureCriticalTools(AllowNetwork:false)  (always runs;
+      │     strictly local: probes + installs from cached verified archives,
+      │     no network I/O)
+      ├─ all Ready → emit tool_manager:done(counts) → splash resolves;
+      │     startup continues (offline steady state: zero network I/O)
+      ├─ structural failure over a COMPLETE install (nothing positively
+      │     missing) → emit tool_manager:done(0,0) + single runtime_error
+      │     toast; no network pass, no blocking
+      └─ tools not Ready / positively missing → PASS 2: BLOCKING network
+            EnsureCriticalTools(AllowNetwork:true) under the splash
+            ├─ download → emit tool_manager:progress(bytes_done, bytes_total)
+            ├─ extract / python_bootstrap
+            ├─ emit tool_manager:done(counts) — exactly once per launch, on
+            │   the deciding pass, before any fatal modal
+            ├─ structural network failure → native fatal modal (error text)
+            │   + quit; startup aborts
+            └─ tools still not Ready → native fatal modal naming the failed
+                tools + quit; startup aborts
   ↓
 Phase 3: database + terminal (parallel, ~100ms)
 Phase 4: stores + preload (~100ms)

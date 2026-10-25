@@ -30,6 +30,8 @@ import (
 	"github.com/v0lka/sp4rk/embedding"
 	"github.com/v0lka/sp4rk/safeio"
 	sdktools "github.com/v0lka/sp4rk/tools"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // initLogger initializes the session logger with a temporary INFO level so any
@@ -105,15 +107,16 @@ func safeGo(log *slog.Logger, label string, fn func()) {
 }
 
 // initConfigAndDeps loads the config file and reconciles managed tools
-// (rg, uv, markitdown) — all in parallel. Tool work never aborts startup:
-// the offline pass does local work only and anything missing is completed in
-// the background (see initTools). Only a panic during config resolution
-// (toolsOK=false, resolved nil) aborts startup.
+// (rg, uv, markitdown) — all in parallel. Tool reconciliation aborts startup
+// only through the fatal no-tools path (see initTools); a panic during config
+// resolution (toolsOK=false, resolved nil) aborts as well.
 //
-// Returns the resolved config, the tools/bin/ directory path (always
-// non-empty), whether any tools were installed during the synchronous pass,
-// and toolsOK=false only when config resolution panicked.
-// The caller must prepend toolsBinPath to PATH before subsequent phases.
+// Returns the resolved config, the tools/bin/ directory path (empty only on
+// the two abort paths: config-resolution panic or the fatal tool-install
+// exit), whether any tool was newly installed during startup, and
+// toolsOK=false on those same abort paths.
+// The caller must prepend a non-empty toolsBinPath to PATH before subsequent
+// phases.
 func (a *App) initConfigAndDeps(ctx context.Context, log *slog.Logger) (resolved *config.ResolvedConfig, toolsBinPath string, toolsInstalled, toolsOK bool) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -141,16 +144,14 @@ func (a *App) initConfigAndDeps(ctx context.Context, log *slog.Logger) (resolved
 }
 
 // initTools ensures managed tools (rg, uv, markitdown) are available in
-// <agentDir>/tools/. Startup never depends on the network — offline operation
-// is a fully supported steady state, so the synchronous pass runs with network
-// access disabled: existing binaries are version-probed and cached archives
-// are installed (pure local work). Tools left not Ready are retried with
-// network access from a background goroutine that completes while the app is
-// already usable; a runtime_error toast fires only if tools remain unavailable
-// after that final attempt. Nothing here aborts startup: the function always
-// returns the tools/bin/ directory path (PATH prepending happens even when
-// tools are unavailable — late installs are picked up per-exec via PATH) and
-// whether any tool was installed during the synchronous pass.
+// <agentDir>/tools/ before the app becomes usable. The first pass is offline
+// (version-probe existing binaries, install from cache); tools it cannot
+// satisfy are completed by a blocking network pass under the tool-manager
+// splash (reconcileToolsWithSplash). A network pass that still cannot deliver
+// the tools is fatal (toolFatalActions: modal + quit) — the managed tools are
+// a startup prerequisite. Returns the tools/bin/ directory path and whether
+// any tool was newly installed; ("", false) on the fatal path so the caller's
+// toolsOK=false abort holds.
 func (a *App) initTools(ctx context.Context, log *slog.Logger) (toolsBinPath string, toolsInstalled bool) {
 	agentDir := config.AgentDir()
 
@@ -181,16 +182,77 @@ func (a *App) initTools(ctx context.Context, log *slog.Logger) (toolsBinPath str
 	// showWindow is idempotent; emitBackendReady calls it again harmlessly.
 	a.showWindow(ctx)
 
-	// Early detection: check which tools need installing BEFORE doing any work.
+	installed, ok := a.reconcileToolsWithSplash(ctx, log, mgr, a.buildToolFatalActions())
+	if !ok {
+		// Fatal path already showed the modal and quit; the empty bin path
+		// makes initConfigAndDeps report toolsOK=false so Startup aborts.
+		return "", false
+	}
+	return mgr.PrependToPATH(), installed
+}
+
+// toolEnsurer is the manager seam of the startup tool orchestration:
+// production binds a *toolmanager.Manager, tests bind a fake, so the
+// two-pass flow is exercisable without the filesystem or the network.
+type toolEnsurer interface {
+	NeedsInstall() ([]toolmanager.ToolSpec, error)
+	EnsureCriticalTools(ctx context.Context, opts toolmanager.EnsureOptions) ([]toolmanager.ToolStatus, error)
+}
+
+// toolFatalActions carries the fatal-exit seam of the tool-install flow.
+type toolFatalActions struct {
+	dialog func(ctx context.Context, message string)
+	quit   func(ctx context.Context)
+}
+
+// buildToolFatalActions returns the production fatal actions: the native
+// blocking "Tool Installation Failed" modal followed by Quit — parity with
+// the pre-ADR-032 exit. Tests inject recorders via a hand-built
+// toolFatalActions.
+func (a *App) buildToolFatalActions() toolFatalActions {
+	return toolFatalActions{
+		dialog: func(ctx context.Context, message string) {
+			_, _ = wailsRuntime.MessageDialog(ctx, wailsRuntime.MessageDialogOptions{
+				Type:          wailsRuntime.ErrorDialog,
+				Title:         "Tool Installation Failed",
+				Message:       message + "\n\nCheck your internet connection and disk space, then restart c0wrk.",
+				Buttons:       []string{"Exit"},
+				DefaultButton: "Exit",
+			})
+		},
+		quit: func(ctx context.Context) {
+			wailsRuntime.Quit(ctx)
+		},
+	}
+}
+
+// reconcileToolsWithSplash runs the two-pass managed-tool reconciliation and
+// owns the splash lifecycle: tool_manager:start before work that may install,
+// tool_manager:done exactly once when the deciding pass ends.
+//
+// Pass one is offline (AllowNetwork=false). When tools remain not Ready
+// afterwards — or the offline pass fails structurally while tools are known
+// or suspected missing — the retry is a BLOCKING network pass under the
+// splash: the app must not come up without its managed tools. A network pass
+// that still fails (structural error, or residual not-Ready tools) is fatal:
+// the modal is shown, the app quits, and ok=false tells the caller to abort
+// startup. The single non-fatal degradation is the offline structural
+// failure over an already-complete install — a runtime_error toast, no
+// network pass, no blocking.
+func (a *App) reconcileToolsWithSplash(ctx context.Context, log *slog.Logger, mgr toolEnsurer, fatal toolFatalActions) (installed, ok bool) {
+	// Early detection: show the splash before any work whenever tools are
+	// (or may be) missing.
 	needed, needsErr := mgr.NeedsInstall()
+	toolsMissing := needsErr != nil // unknown counts as missing until probed
+	startEmitted := false
 	if needsErr != nil {
-		log.Warn("failed to check tool install status, showing window as fallback", "error", needsErr)
-		// ManagedTools() or ReadVersions() failed — we can't determine which tools
-		// need installing, but EnsureCriticalTools will run regardless.
+		log.Warn("failed to check tool install status, showing splash as fallback", "error", needsErr)
 		a.emit(backend.EventToolManagerStart, map[string]any{
 			"tools": []map[string]string{},
 		})
+		startEmitted = true
 	} else if len(needed) > 0 {
+		toolsMissing = true
 		toolNames := make([]map[string]string, len(needed))
 		for i, t := range needed {
 			toolNames[i] = map[string]string{"name": t.Name, "version": t.Version}
@@ -198,112 +260,116 @@ func (a *App) initTools(ctx context.Context, log *slog.Logger) (toolsBinPath str
 		a.emit(backend.EventToolManagerStart, map[string]any{
 			"tools": toolNames,
 		})
+		startEmitted = true
 	}
 
-	// Synchronous pass: strictly local work. Failures are isolated per tool
-	// and never block startup.
+	// Pass one: strictly local work. Per-tool failures surface as not-Ready
+	// statuses; only structural failures (directories, disk space, registry)
+	// come back as an error.
 	statuses, ensureErr := mgr.EnsureCriticalTools(ctx, toolmanager.EnsureOptions{AllowNetwork: false})
-	if ensureErr != nil {
-		// Structural failure (directories, disk space, registry). The splash
-		// must still resolve (done) and the user must still learn why the
-		// tools are missing — but the app starts.
+	if ensureErr == nil {
+		offlineInstalled := 0
+		var notReady []toolmanager.ToolStatus
+		for _, s := range statuses {
+			if s.Installed {
+				offlineInstalled++
+			}
+			if !s.Ready {
+				notReady = append(notReady, s)
+			}
+		}
+		if len(notReady) == 0 {
+			a.emit(backend.EventToolManagerDone, map[string]any{
+				"installed_count": offlineInstalled,
+				"skipped_count":   len(statuses) - offlineInstalled,
+			})
+			return offlineInstalled > 0, true
+		}
+		if !startEmitted {
+			// NeedsInstall saw a complete install but probing disagrees
+			// (e.g. a stale binary behind a matching .versions entry) —
+			// the blocking network pass needs its splash after all.
+			toolNames := make([]map[string]string, len(notReady))
+			for i, s := range notReady {
+				toolNames[i] = map[string]string{"name": s.Tool.Name, "version": s.Tool.Version}
+			}
+			a.emit(backend.EventToolManagerStart, map[string]any{
+				"tools": toolNames,
+			})
+		}
+	} else if !toolsMissing {
+		// Structural failure over a complete install: nothing is missing, so
+		// degrade to a toast instead of blocking or quitting.
 		log.Error("tool reconciliation failed structurally", "error", ensureErr)
 		a.emit(backend.EventToolManagerDone, map[string]any{
 			"installed_count": 0,
 			"skipped_count":   0,
 		})
 		a.emitToolRuntimeError(ctx, "Tool initialization failed: "+ensureErr.Error())
-		return mgr.PrependToPATH(), false
+		return false, true
 	}
 
-	installed := 0
-	var notReady []toolmanager.ToolStatus
-	for _, s := range statuses {
-		if s.Installed {
-			installed++
+	// Pass two: blocking network retry. The splash is up by now and done is
+	// emitted exactly once after this pass — the frontend leaves the splash
+	// on it.
+	pendingNames := make([]string, 0, len(needed))
+	if ensureErr == nil {
+		for _, s := range statuses {
+			if !s.Ready {
+				pendingNames = append(pendingNames, s.Tool.Name)
+			}
 		}
-		if !s.Ready {
-			notReady = append(notReady, s)
+	} else {
+		for _, t := range needed {
+			pendingNames = append(pendingNames, t.Name)
 		}
 	}
+	log.Info("retrying tool install with network access (blocking)", "tools", pendingNames)
 
-	a.emit(backend.EventToolManagerDone, map[string]any{
-		"installed_count": installed,
-		"skipped_count":   len(statuses) - installed,
-	})
-
-	if len(notReady) > 0 {
-		// Background pass: complete the missing installs with network access
-		// while the app is already usable. It must NOT emit
-		// tool_manager:start — the frontend transitions splash →
-		// waiting_ready on that event, and the app is past the splash by
-		// now; progress and the final done event are harmless anywhere.
-		safeGo(log, "tools-background", func() {
-			a.finishToolInstallInBackground(ctx, log, mgr, notReady)
-		})
-	}
-
-	return mgr.PrependToPATH(), installed > 0
-}
-
-// finishToolInstallInBackground retries the tools the offline startup pass
-// could not satisfy, this time with network access. It emits the closing
-// tool_manager:done event and, when tools are still unavailable afterwards
-// (genuinely offline, or a broken mirror), a single runtime_error toast —
-// the only user-facing signal; startup itself is never re-blocked.
-func (a *App) finishToolInstallInBackground(ctx context.Context, log *slog.Logger, mgr *toolmanager.Manager, pending []toolmanager.ToolStatus) {
-	pendingNames := make([]string, 0, len(pending))
-	for _, s := range pending {
-		pendingNames = append(pendingNames, s.Tool.Name)
-	}
-	log.Info("retrying tool install with network access in background", "tools", pendingNames)
-
-	statuses, err := mgr.EnsureCriticalTools(ctx, toolmanager.EnsureOptions{AllowNetwork: true})
-	if err != nil {
-		log.Error("background tool reconciliation failed structurally", "error", err)
+	netStatuses, netErr := mgr.EnsureCriticalTools(ctx, toolmanager.EnsureOptions{AllowNetwork: true})
+	if netErr != nil {
+		log.Error("network tool reconciliation failed structurally", "error", netErr)
 		a.emit(backend.EventToolManagerDone, map[string]any{
 			"installed_count": 0,
 			"skipped_count":   0,
 		})
-		a.emitToolRuntimeError(ctx, "Tool installation failed: "+err.Error())
-		return
+		fatal.dialog(ctx, "c0wrk was unable to download required tools:\n\n"+netErr.Error())
+		fatal.quit(ctx)
+		return false, false
 	}
 
-	installed := 0
+	netInstalled := 0
 	var failed []toolmanager.ToolStatus
-	for _, s := range statuses {
+	for _, s := range netStatuses {
 		if s.Installed {
-			installed++
+			netInstalled++
 		}
 		if !s.Ready {
 			failed = append(failed, s)
 		}
 	}
-
 	a.emit(backend.EventToolManagerDone, map[string]any{
-		"installed_count": installed,
-		"skipped_count":   len(statuses) - installed,
+		"installed_count": netInstalled,
+		"skipped_count":   len(netStatuses) - netInstalled,
 	})
-
 	if len(failed) == 0 {
-		log.Info("background tool install complete", "installed", installed)
-		return
+		return netInstalled > 0, true
 	}
 
 	failedNames := make([]string, 0, len(failed))
 	for _, s := range failed {
 		failedNames = append(failedNames, s.Tool.Name)
-		log.Error("managed tool unavailable after background install", "tool", s.Tool.Name, "error", s.Err)
+		log.Error("managed tool unavailable after network install", "tool", s.Tool.Name, "error", s.Err)
 	}
-	a.emitToolRuntimeError(ctx,
-		"c0wrk could not install managed tools ("+strings.Join(failedNames, ", ")+"). "+
-			"Features that rely on them are unavailable this session. "+
-			"Restart c0wrk with network access to retry.")
+	fatal.dialog(ctx, "c0wrk was unable to install required tools:\n\n"+strings.Join(failedNames, ", "))
+	fatal.quit(ctx)
+	return false, false
 }
 
 // emitToolRuntimeError raises a non-fatal, user-visible toast about the
-// managed tools. Tool problems must never escalate to a fatal startup path —
-// this is the deliberate inverse of the pre-offline-support Exit modal.
+// managed tools — the degradation path for a structurally failed offline
+// pass over an already-complete install. Fatal tool outcomes go through the
+// toolFatalActions seam (modal + quit) instead.
 func (a *App) emitToolRuntimeError(ctx context.Context, message string) {
 	a.emit(backend.EventRuntimeError, map[string]string{
 		"id":         uuid.New().String(),

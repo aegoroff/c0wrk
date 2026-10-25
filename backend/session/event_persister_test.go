@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/v0lka/c0wrk/backend/project"
+	"github.com/v0lka/c0wrk/core"
 )
 
 // captureStore is a minimal SessionStore that records every saved message so
@@ -99,10 +100,10 @@ func (s *captureStore) DeleteBookmark(_ context.Context, _, _ string) error { re
 func (s *captureStore) RenameBookmark(_ context.Context, _, _, _ string) error {
 	return nil
 }
-func (s *captureStore) SavePromptSuggestions(_ context.Context, _ []PromptSuggestion) ([]PromptSuggestion, error) {
+func (s *captureStore) SavePromptSuggestions(_ context.Context, _ []core.PromptSuggestion) ([]core.PromptSuggestion, error) {
 	return nil, nil
 }
-func (s *captureStore) ListPromptSuggestions(_ context.Context, _ string) ([]PromptSuggestion, error) {
+func (s *captureStore) ListPromptSuggestions(_ context.Context, _ string) ([]core.PromptSuggestion, error) {
 	return nil, nil
 }
 func (s *captureStore) SetPromptSuggestionStatus(_ context.Context, _, _ string) error {

@@ -13,6 +13,7 @@ Specifications provide AI coding agents with deterministic context about system 
 3. **Living documents** — updated by agents on user request. Never silently drifting.
 4. **Domain-based** — organized by conceptual domains, NOT by file/directory structure.
 5. **Contracts are first-class** — cross-boundary interfaces deserve their own documents.
+6. **Full-scope passes** — a declared cleanup or remediation pass (comments, specs, debt ledgers) covers its entire declared scope; a sweep over a subset of that scope is a spot-fix and is never billed as a pass.
 
 ## File Organization
 

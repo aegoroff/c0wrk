@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/v0lka/c0wrk/core/prompts"
@@ -39,6 +40,24 @@ const (
 	SuggestionKindGoalAdvance SuggestionKind = "goal_advance"
 )
 
+// PromptSuggestion is one persisted follow-up prompt row (ADR-088 D7): the
+// chat input offers it after a task finishes with outcome full or partial.
+// Rows hang off their session: deleting the session deletes its suggestions
+// (ON DELETE CASCADE) and a fork does not copy them. This is the canonical
+// in-memory shape the whole pipeline shares; the backend session store
+// persists it in SQLite with CreatedAt as an RFC 3339 string, and the wire
+// (GetPromptSuggestions, the prompt_suggestions event) marshals it with the
+// same snake_case keys — a time.Time always renders as RFC 3339 there.
+type PromptSuggestion struct {
+	ID        string         `json:"id"`
+	SessionID string         `json:"session_id"`
+	TaskID    string         `json:"task_id"` // triggering task; "" for kind-less/session-level rows
+	Kind      SuggestionKind `json:"kind"`    // SuggestionKindNextTask or SuggestionKindGoalAdvance
+	Text      string         `json:"text"`
+	Status    string         `json:"status"`     // "active" | "accepted" | "dismissed" | "stale"
+	CreatedAt time.Time      `json:"created_at"` // zero until the store normalizes it per pass
+}
+
 // Compile-time generation limits. v1 has no config surface (ADR-088 D9):
 // these are the windows (D3/D4), the per-pass cap (D7), and the transcript
 // budgets that keep the generation input bounded.
@@ -57,9 +76,6 @@ const (
 	// promptSuggestTranscriptBudget is the whole-transcript budget across the
 	// window, in bytes of rendered text.
 	promptSuggestTranscriptBudget = 12000
-	// promptSuggestMaxSuggestionChars caps one suggested prompt, in runes —
-	// the hint chip renders it on one line.
-	promptSuggestMaxSuggestionChars = 200
 	// promptSuggestMaxTokens is the generation ceiling. Suggestions are short
 	// lines; a generous ceiling only bounds a runaway answer.
 	promptSuggestMaxTokens = 600
@@ -293,10 +309,10 @@ var suggestionMarkerRe = regexp.MustCompile(`^[ \t]*(?:[-*+•·]|\d{1,3}[.)])[ 
 // parsePromptSuggestions recovers up to maxSuggestionsPerPass one-line
 // suggestions from the response. Fail-safe by construction: fence and
 // preamble stripping (oneshot.Text), per-line decoration stripping (list
-// markers, ordinals, quotes, markdown emphasis), exact-duplicate dropping,
-// and the per-line length cap mean every returned string is clean and
-// bounded — or the parse error engages the client's nudge loop and, when
-// every attempt fails, the fail-safe fallback (no suggestions, nil error).
+// markers, ordinals, quotes, markdown emphasis), and exact-duplicate
+// dropping mean every returned string is clean — or the parse error engages
+// the client's nudge loop and, when every attempt fails, the fail-safe
+// fallback (no suggestions, nil error).
 func parsePromptSuggestions(resp *llm.ChatResponse) ([]string, error) {
 	text := oneshot.Text(resp)
 	if text == "" {
@@ -326,8 +342,9 @@ func parsePromptSuggestions(resp *llm.ChatResponse) ([]string, error) {
 
 // parseSuggestionLine normalizes one response line into a suggestion:
 // a leading list marker or ordinal, surrounding whitespace, and one layer of
-// decorative quotes or markdown emphasis are stripped; the result is capped
-// to promptSuggestMaxSuggestionChars runes. Decoration-only lines
+// decorative quotes or markdown emphasis are stripped; the cleaned line is
+// returned verbatim — no length cap truncates an already-formed suggestion
+// (the prompt bounds the answer's shape instead). Decoration-only lines
 // (markers, dashes, fences, ellipses — anything without a letter or digit)
 // and colon-terminated header/preamble lines ("Here are three suggestions:")
 // normalize to "".
@@ -343,7 +360,10 @@ func parseSuggestionLine(line string) string {
 	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
 		return ""
 	}
-	return promptSuggestTruncate(s, promptSuggestMaxSuggestionChars)
+	// The cleaned line IS the suggestion — verbatim, no post-hoc length
+	// cap. The prompt bounds the answer's shape; truncating here would
+	// cut off an already-formed suggestion mid-sentence.
+	return s
 }
 
 // promptSuggestRetryHint restates the output contract inside the oneshot

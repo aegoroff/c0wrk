@@ -55,13 +55,13 @@ export function isChatSessionIdle(s: ChatInputLockInput): boolean {
 
 // Prompt-suggestion hint (ADR-088): while the input is empty and the session
 // is idle, the placeholder itself becomes the suggestions surface — the
-// previewed row's text, a BLANK line, and the italic usage-hint block. The
-// surface is a DOM node (buildSuggestionPlaceholderNode) because a flat
-// placeholder string can express neither: under cmChatTheme's
-// `.cm-placeholder` white-space: pre-line rule a '\n\n' text run collapses to
-// a single break (no empty line), and CSS cannot italicize part of a text
-// node. The pre-line rule is what still turns the hints' internal '\n' into a
-// real second line.
+// previewed row's text with its position marker ("2/3"), a BLANK line, and
+// the italic usage-hint block. The surface is a DOM node
+// (buildSuggestionPlaceholderNode) because a flat placeholder string can
+// express neither: under cmChatTheme's `.cm-placeholder` white-space:
+// pre-line rule a '\n\n' text run collapses to a single break (no empty
+// line), and CSS cannot italicize part of a text node. The pre-line rule is
+// what still turns the hints' internal '\n' into a real second line.
 export const SUGGESTION_BROWSE_HINT = '↑↓ browse · → insert'
 export const SUGGESTION_TYPE_HINT = 'Or just type a message... (Enter to send, Shift+Enter for new line)'
 
@@ -77,6 +77,17 @@ export function suggestionPreviewText(
   if (suggestions.length === 0) return undefined
   const idx = Math.max(0, Math.min(selectedIndex, suggestions.length - 1))
   return suggestions[idx]?.text
+}
+
+/** The previewed row's position label for the hint chip (ADR-088 D8:
+ *  "current suggestion text + position") — "2/3" names the row the
+ *  placeholder previews. Applies the same clamp as suggestionPreviewText, so
+ *  the label and the previewed text always name the same row; an empty set
+ *  has no position. */
+export function suggestionPositionLabel(selectedIndex: number, total: number): string {
+  if (total <= 0) return ''
+  const idx = Math.max(0, Math.min(selectedIndex, total - 1))
+  return `${idx + 1}/${total}`
 }
 
 /**
@@ -102,19 +113,22 @@ export function isSuggestionPlaceholderActive(
  * `placeholder()` (it accepts a string or an HTMLElement and clones the node
  * into its `.cm-placeholder` wrap; cmChatTheme keeps the white-space rule):
  *
- *   <previewed suggestion text>
+ *   <previewed suggestion text> 2/3   ← the position marker is muted
  *   (blank line)
  *   ↑↓ browse · → insert            ← italic ┐ the whole usage block after
  *   Or just type a message... (...) ← italic ┘ the separator is italic
  *
- * The blank line between the suggestion and the usage hints is built from two
- * explicit <br> elements: under the wrap's `white-space: pre-line` a '\n\n'
- * text sequence collapses to a single break, so text alone cannot render an
- * empty line there. The hints' own internal '\n' stays plain text — pre-line
- * preserves it. The italic rides an inline style because no stylesheet is
- * loaded in the unit-test environment (the style survives cloneNode).
+ * The position marker (when given) rides the preview line as a muted suffix
+ * span — the D8 chip is "current suggestion text + position", one visual
+ * unit. The blank line between the suggestion and the usage hints is built
+ * from two explicit <br> elements: under the wrap's `white-space: pre-line`
+ * a '\n\n' text sequence collapses to a single break, so text alone cannot
+ * render an empty line there. The hints' own internal '\n' stays plain text
+ * — pre-line preserves it. The italic and the muted marker ride inline
+ * styles because no stylesheet is loaded in the unit-test environment (the
+ * styles survive cloneNode).
  */
-export function buildSuggestionPlaceholderNode(preview: string): HTMLElement {
+export function buildSuggestionPlaceholderNode(preview: string, position?: string): HTMLElement {
   const root = document.createElement('span')
   root.className = 'cm-suggestion-placeholder'
   if (preview !== '') {
@@ -122,6 +136,14 @@ export function buildSuggestionPlaceholderNode(preview: string): HTMLElement {
     previewLine.className = 'cm-suggestion-preview'
     previewLine.textContent = preview
     root.appendChild(previewLine)
+    if (position && position !== '') {
+      const marker = document.createElement('span')
+      marker.className = 'cm-suggestion-position'
+      marker.style.opacity = '0.6'
+      marker.style.marginLeft = '0.5em'
+      marker.textContent = position
+      root.appendChild(marker)
+    }
     // One BLANK line: the first <br> closes the preview row, the second is
     // the empty line — explicit elements never collapse.
     root.appendChild(document.createElement('br'))

@@ -17,10 +17,10 @@ const askUserUnavailableContent = "ask_user is not available in this mode"
 
 const toolAskUserDescription = `Purpose: ask the user one or more questions with selectable answer options — the sole channel for user-directed questions.
 Use when: requirements are ambiguous, several valid approaches compete, or a decision genuinely belongs to the user. Batch related questions into a single call instead of drip-feeding them.
-Inputs: questions — an array of {id (unique non-empty), question, options: [{label, value}] (values unique within the question), multi_select (default false = exclusive choice), recommended (optional array of option values)}.
+Inputs: questions — an array of {id (unique non-empty), question, options: [{label, value}] — exactly these two keys per option, no others; option values unique within the question; multi_select (default false = exclusive choice) and recommended (optional array of option values) live on the question, not inside an option}.
 Outputs: the user's selections — predefined values or custom free text — keyed by question id.
 Example: one question with options "REST" and "GraphQL", recommended ["REST"].
-Anti-example: unavailable in non-interactive (CLI) mode; not for progress reports or rhetorical questions (say it in your reply); do not ask what the codebase itself answers — search first.`
+Anti-example: unavailable in non-interactive (CLI) mode; not for progress reports or rhetorical questions (say it in your reply); do not ask what the codebase itself answers — search first; options[0].description / options[0].recommended are rejected; put recommended at question level.`
 
 // AskUserTool asks the user a question and returns their answer.
 type AskUserTool struct {

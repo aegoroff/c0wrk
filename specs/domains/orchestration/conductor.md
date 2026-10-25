@@ -162,6 +162,15 @@ re-routes a continuation. The flag is consumed once at `Resume` entry
 are unaffected: `resumeGoalLoop` keeps its own routing handling and E2S never
 routes by design.
 
+Known limitation: an explicit `/`-mention ref is **not re-applied** by a
+re-route. The frontend strips `/`-mention refs from the stored request text
+(`PreprocessMessageText`), so the stored original request carries neither
+skills nor agents, and the requested `UserSkills`/`UserAgents` (threaded
+through `HandleOptions` on the fresh path) are unavailable on resume —
+`TaskState` carries no field for them and `Resume`/`ResumeTask` receive no
+`HandleOptions`. Closing the gap requires a persistence-schema change; the
+re-routed run still gets the classifier-matched skills.
+
 ### Step Limit and Circuit Breakers
 
 The Conductor's ReAct iteration limit is derived from routing complexity, not configured: `complexity × stepsPerComplexity` (constant 30 in `core/conductor.go`), giving a budget of 30 (complexity 1) to 150 (complexity 5). The complexity is read from the routing context (`ComplexityFromContext`). The Conductor is subject to the same circuit breakers as any `Executor.Run` instance (repeat, truncation, parse error, fruitless, same tool). On step-limit or circuit-breaker abort, `HITLHandler.OnStepLimit` is called with the same three options (AllowOnce, AllowAlways, Deny) as the prior executor. See [executor.md](executor.md) for circuit breaker details.
