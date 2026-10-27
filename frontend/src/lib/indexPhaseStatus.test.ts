@@ -57,4 +57,12 @@ describe('deriveDotStatus', () => {
       bothReady: false,
     })
   })
+
+  it('stays idle while indexing is disabled by the master switch (ADR-103)', () => {
+    expect(deriveDotStatus('disabled', undefined)).toEqual({
+      vectorDot: 'idle',
+      lexicalDot: 'idle',
+      bothReady: false,
+    })
+  })
 })

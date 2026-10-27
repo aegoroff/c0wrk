@@ -2,6 +2,7 @@ package vectorindex
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -368,4 +369,79 @@ func fixtureBranchArtifacts(t *testing.T, root, branch string) {
 	pruneMkdir(t, filepath.Join(root, lexicalDirName, lexicalBranchDirName(branch)))
 	pruneWrite(t, filepath.Join(root, "file_hashes_"+collection+".json"), "{}")
 	pruneWrite(t, filepath.Join(root, "contentless_"+collection+".done"), "")
+}
+
+// pruneFSLogger is the discard logger the manager-free FS-form tests run with.
+func pruneFSLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
+
+// TestPruneMissingBranchDataFS_MatchesServiceForm pins the manager-free sweep
+// (the disabled-registry path): the same artifact set is removed and the same
+// identities (existing branches, synthetic default, orphan root, embedding
+// cache) survive as under the Service form, and a missing storage root is a
+// fail-soft no-op.
+func TestPruneMissingBranchDataFS_MatchesServiceForm(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vi")
+	fixtureBranchArtifacts(t, root, "main")
+	fixtureBranchArtifacts(t, root, "old")
+	// Protected identities and the branch-independent cache survive.
+	pruneMkdir(t, filepath.Join(root, "branches", "_orphan"))
+	pruneMkdir(t, filepath.Join(root, lexicalDirName, "default"))
+	pruneWrite(t, filepath.Join(root, "embedding_cache", "chunk.bin"), "x")
+
+	removed := PruneMissingBranchDataFS(pruneFSLogger(), root, []string{"main"})
+	if removed != 4 {
+		t.Fatalf("removed = %d, want 4 (branch root + lexical dir + sidecar + marker)", removed)
+	}
+	pruneMustNotExist(t, filepath.Join(root, "branches", "branch_old"))
+	pruneMustNotExist(t, filepath.Join(root, lexicalDirName, "old"))
+	pruneMustNotExist(t, filepath.Join(root, "file_hashes_branch_old.json"))
+	pruneMustNotExist(t, filepath.Join(root, "contentless_branch_old.done"))
+	pruneMustExist(t, filepath.Join(root, "branches", "branch_main"))
+	pruneMustExist(t, filepath.Join(root, lexicalDirName, "main"))
+	pruneMustExist(t, filepath.Join(root, "file_hashes_branch_main.json"))
+	pruneMustExist(t, filepath.Join(root, "contentless_branch_main.done"))
+	pruneMustExist(t, filepath.Join(root, "branches", "_orphan"))
+	pruneMustExist(t, filepath.Join(root, lexicalDirName, "default"))
+	pruneMustExist(t, filepath.Join(root, "embedding_cache", "chunk.bin"))
+
+	// Missing storage root: silent no-op.
+	if removed := PruneMissingBranchDataFS(pruneFSLogger(), filepath.Join(t.TempDir(), "missing"), []string{"main"}); removed != 0 {
+		t.Fatalf("missing root: removed = %d, want 0", removed)
+	}
+}
+
+// TestDeleteBranchDataFS_MatchesServiceForm pins the manager-free targeted
+// purge (the disabled-registry path): the deleted branch loses its artifact
+// set, a collision-shared artifact stays (the lossy-name rule), and a missing
+// storage root is a fail-soft no-op.
+func TestDeleteBranchDataFS_MatchesServiceForm(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vi")
+	fixtureBranchArtifacts(t, root, "main")
+	fixtureBranchArtifacts(t, root, "retracted")
+
+	removed := DeleteBranchDataFS(pruneFSLogger(), root, "retracted", []string{"main"})
+	if removed != 4 {
+		t.Fatalf("removed = %d, want 4 (branch root + sidecar pair + lexical dir)", removed)
+	}
+	pruneMustNotExist(t, filepath.Join(root, "branches", "branch_retracted"))
+	pruneMustNotExist(t, filepath.Join(root, lexicalDirName, "retracted"))
+	pruneMustNotExist(t, filepath.Join(root, "file_hashes_branch_retracted.json"))
+	pruneMustNotExist(t, filepath.Join(root, "contentless_branch_retracted.done"))
+	pruneMustExist(t, filepath.Join(root, "branches", "branch_main"))
+
+	// Collision: deleting feature/foo while feature_foo survives keeps the
+	// shared artifacts on disk (same sanitized identity, both halves).
+	colRoot := filepath.Join(t.TempDir(), "vi-col")
+	fixtureBranchArtifacts(t, colRoot, "feature_foo")
+	if removed := DeleteBranchDataFS(pruneFSLogger(), colRoot, "feature/foo", []string{"feature_foo"}); removed != 0 {
+		t.Fatalf("collision purge removed %d artifacts, want 0", removed)
+	}
+	pruneMustExist(t, filepath.Join(colRoot, "branches", "branch_feature_foo"))
+
+	// Missing storage root: silent no-op.
+	if removed := DeleteBranchDataFS(pruneFSLogger(), filepath.Join(t.TempDir(), "missing"), "gone", []string{"main"}); removed != 0 {
+		t.Fatalf("missing root: removed = %d, want 0", removed)
+	}
 }

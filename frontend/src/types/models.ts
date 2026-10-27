@@ -291,7 +291,12 @@ export type IndexPhase = 'both' | 'embedding' | 'lexical' | 'open'
 export type ExecutionProvider = 'auto' | 'cpu' | 'cuda' | 'openvino'
 
 export interface VectorIndexStatus {
-  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading'
+  /**
+   * "disabled" (ADR-103): indexing is off via the master switch — the
+   * registry is parked, no collection exists, and the gated search surfaces
+   * stay hidden until a re-enable finishes the background embedder init.
+   */
+  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading' | 'disabled'
   progress: number
   files_indexed: number
   total_files: number

@@ -97,4 +97,15 @@ describe('IndexingStatus — progress bar', () => {
     expect(container.textContent).not.toContain('Indexing')
     expect(() => fillElement(container)).toThrow()
   })
+
+  it('renders an explicit "Indexing off" pill for the disabled state (ADR-103, no fake bar)', () => {
+    // The master switch is off: an explicit off state with idle dots — never
+    // the "Indexing…" 0% bar, and never a stale pre-disable state.
+    state.status = { state: 'disabled', progress: 0, files_indexed: 0, total_files: 0 }
+    render()
+    expect(container.textContent).toContain('Indexing off')
+    expect(container.textContent).not.toContain('Indexing...')
+    expect(container.textContent).not.toContain('ready')
+    expect(() => fillElement(container)).toThrow()
+  })
 })

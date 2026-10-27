@@ -100,6 +100,25 @@ export function IndexingStatus() {
     )
   }
 
+  if (status.state === 'disabled') {
+    // ADR-103: indexing is off via the master switch. Render the explicit off
+    // state — idle dots and a plain label, no bar — distinct from
+    // `unavailable` (a failed backend) and from hiding entirely (the user
+    // turned this off on purpose; the pill says why search is gone).
+    return (
+      <div
+        className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"
+        title={tooltip}
+      >
+        <div className="flex items-center gap-1">
+          <Dot state={derived.vectorDot} label={vectorLabel} />
+          <Dot state={derived.lexicalDot} label={lexicalLabel} />
+        </div>
+        <span>Indexing off</span>
+      </div>
+    )
+  }
+
   const isReindexing = status.state === 'reindexing'
   const pct = Math.round(status.progress * 100)
   const phaseLabel =

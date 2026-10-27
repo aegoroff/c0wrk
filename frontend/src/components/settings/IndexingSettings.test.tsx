@@ -387,3 +387,127 @@ describe('IndexingSettings — app-wide gate sync (indexingSettingsStore)', () =
     expect(useIndexingSettingsStore.getState().enabled).toBe(true)
   })
 })
+
+describe('IndexingSettings — commit sequencing and identity guard', () => {
+  /** Deferred handle for one queued RPC (resolved in test order). */
+  type Deferred = { resolve: () => void; reject: (err: unknown) => void }
+
+  /** Route every RPC into a queue the test settles explicitly. */
+  function rpcQueue(): Deferred[] {
+    const queue: Deferred[] = []
+    spies.updateIndexingSettings.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          queue.push({ resolve, reject })
+        }),
+    )
+    return queue
+  }
+
+  /** The i-th (0-based) queued RPC; fails the test when not yet dispatched. */
+  function deferredAt(queue: Deferred[], i: number): Deferred {
+    const d = queue[i]
+    if (!d) throw new Error(`RPC #${i + 1} was not dispatched`)
+    return d
+  }
+
+  it('serializes commits through the tail: arrival order matches policy evolution, and a stale failure never clobbers a newer optimistic state', async () => {
+    await renderIndexing({
+      execution_provider: 'cpu',
+      device_id: 0,
+      enabled: true,
+      exclude_patterns: ['keep/'],
+      index_submodules: false,
+      respect_gitignore: true,
+      respect_aiignore: true,
+    })
+    const queue = rpcQueue()
+
+    // Commit A: add a pattern the backend will reject.
+    typeInto(patternInput(), 'bad/')
+    pressEnter(patternInput())
+    await act(async () => {})
+
+    // Commit B while A is in flight: flip a toggle. The optimistic flip is
+    // immediate, but B's RPC must stay parked behind A (the tail).
+    await act(async () => {
+      toggleByLabel('Index Git submodules').click()
+    })
+
+    expect(queue.length).toBe(1)
+    expect(chips()).toEqual(['keep/', 'bad/'])
+    expect(toggleByLabel('Index Git submodules').checked).toBe(true)
+
+    await act(async () => {
+      deferredAt(queue, 0).reject(new Error('pattern rejected by backend'))
+    })
+
+    // A is stale (B is newer): no revert snap-back — the form keeps B's
+    // optimistic state while B's RPC takes its turn, and no error for the
+    // superseded failure.
+    expect(queue.length).toBe(2)
+    expect(chips()).toEqual(['keep/', 'bad/'])
+    expect(toggleByLabel('Index Git submodules').checked).toBe(true)
+    expect(container.textContent).not.toContain('pattern rejected by backend')
+    // The wire saw A before B — the backend's saveMu can no longer apply an
+    // older full replacement last.
+    expect(spies.updateIndexingSettings).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ exclude_patterns: ['keep/', 'bad/'], index_submodules: false }),
+    )
+    expect(spies.updateIndexingSettings).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ exclude_patterns: ['keep/', 'bad/'], index_submodules: true }),
+    )
+
+    await act(async () => {
+      deferredAt(queue, 1).resolve()
+    })
+
+    // B (a full replacement of A's content) settles the form: success, no
+    // error, gate synced.
+    expect(container.textContent).not.toContain('pattern rejected by backend')
+    expect(useIndexingSettingsStore.getState().enabled).toBe(true)
+    expect(chips()).toEqual(['keep/', 'bad/'])
+    expect(toggleByLabel('Index Git submodules').checked).toBe(true)
+  })
+
+  it('reverts the LATEST failed commit to the last confirmed policy, not to its own predecessor', async () => {
+    await renderIndexing({
+      execution_provider: 'cpu',
+      device_id: 0,
+      enabled: true,
+      exclude_patterns: ['base/'],
+      index_submodules: false,
+      respect_gitignore: true,
+      respect_aiignore: true,
+    })
+    const queue = rpcQueue()
+
+    // A adds a rejected pattern; B (a superset of A) is also rejected.
+    typeInto(patternInput(), 'bad/')
+    pressEnter(patternInput())
+    await act(async () => {})
+    await act(async () => {
+      toggleByLabel('Index Git submodules').click()
+    })
+
+    await act(async () => {
+      deferredAt(queue, 0).reject(new Error('pattern rejected by backend'))
+    })
+    // A is stale (B optimistic newer): nothing reverts yet.
+    expect(chips()).toEqual(['base/', 'bad/'])
+
+    await act(async () => {
+      deferredAt(queue, 1).reject(new Error('pattern rejected by backend'))
+    })
+
+    // B is the latest failure: the form reverts to the last CONFIRMED
+    // policy (pre-A) — not to B's own predecessor (A's optimistic state,
+    // which holds the rejected pattern). The UI converges on what the
+    // backend actually holds.
+    expect(chips()).toEqual(['base/'])
+    expect(toggleByLabel('Index Git submodules').checked).toBe(false)
+    expect(container.textContent).toContain('pattern rejected by backend')
+  })
+})

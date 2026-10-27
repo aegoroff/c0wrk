@@ -31,8 +31,13 @@ const DEFAULT_POLICY: IndexingSettingsRequest = {
  * Every interaction is a discrete commit that sends the FULL policy
  * (UpdateIndexingSettings is a full replacement — flipping the master
  * switch must not drop the stored patterns) and is applied live by the
- * backend, so saves are immediate with no debounce. A failed save reverts
- * the control to the persisted state and surfaces the error.
+ * backend, so saves are immediate with no debounce. Commits are serialized
+ * through a promise tail (the Wails bridge gives concurrent RPCs no
+ * ordering guarantee, while the backend's saveMu applies them in arrival
+ * order) and identity-guarded on settle: only the latest commit may revert
+ * the form, so a late failure cannot clobber a newer optimistic state —
+ * the form converges on the last backend-confirmed policy instead. A
+ * failed save surfaces the error.
  */
 export function IndexingSettings() {
   const [policy, setPolicy] = useState<IndexingSettingsRequest>(DEFAULT_POLICY)
@@ -41,6 +46,15 @@ export function IndexingSettings() {
   // The committed-policy ref lets `commit` build the next full request from
   // the latest state without a stale-closure dependency on `policy`.
   const policyRef = useRef(policy)
+  // The last backend-confirmed policy: updated by every settled success, it
+  // is what a failed commit reverts the form to (its own optimistic
+  // predecessor may itself have been rejected — `persisted` is the state
+  // the backend actually holds).
+  const persistedRef = useRef(policy)
+  // Serialization tail: each commit's RPC dispatch awaits the previous
+  // commit's settle, so arrival order at the backend matches the policy's
+  // evolution and an older full-replacement can never be applied last.
+  const commitTailRef = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     let cancelled = false
@@ -57,6 +71,7 @@ export function IndexingSettings() {
             respect_gitignore: vi.respect_gitignore ?? true,
             respect_aiignore: vi.respect_aiignore ?? true,
           }
+          persistedRef.current = policyRef.current
           setPolicy(policyRef.current)
         }
       } catch (err) {
@@ -76,23 +91,36 @@ export function IndexingSettings() {
     const next = { ...prev, ...patch }
     policyRef.current = next
     setPolicy(next)
-    updateIndexingSettings(next)
-      .then(() => {
+    const run = async (): Promise<void> => {
+      try {
+        await updateIndexingSettings(next)
+        persistedRef.current = next
         setSaveError(null)
         // Keep the app-wide indexing gate in sync — Settings is the store's
         // direct writer after hydration (useIndexingSettings only fetches
         // once; see the store's doc comment). Only a confirmed save flips
         // the gated surfaces, never the optimistic control state.
         useIndexingSettingsStore.getState().setEnabled(next.enabled)
-      })
-      .catch((err) => {
+      } catch (err) {
         logger.error('Failed to save indexing settings:', err)
-        // The backend rejects before writing, so the persisted policy is
-        // still `prev` — put the control back and say why.
-        policyRef.current = prev
-        setPolicy(prev)
-        setSaveError(err instanceof Error ? err.message : 'Failed to save indexing settings')
-      })
+        // Identity guard: only the LATEST commit may settle the form. A
+        // stale failure must not clobber a newer optimistic state — that
+        // commit is a full replacement of this one's content, and its own
+        // settle (success, or its own guarded failure) converges the form
+        // with the backend. The store is deliberately untouched here: it
+        // mirrors the last confirmed save, which is exactly what the revert
+        // restores.
+        if (policyRef.current === next) {
+          const persisted = persistedRef.current
+          policyRef.current = persisted
+          setPolicy(persisted)
+          setSaveError(err instanceof Error ? err.message : 'Failed to save indexing settings')
+        }
+      }
+    }
+    // Queue behind the previous commit; swallow its outcome so one rejection
+    // cannot strand the tail (the failure was already handled in `run`).
+    commitTailRef.current = commitTailRef.current.then(run, run)
   }, [])
 
   if (isLoading) {

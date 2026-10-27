@@ -1819,7 +1819,11 @@ export function isNotificationClickedData(d: unknown): d is NotificationClickedD
     typeof d.project_id === 'string'
 }
 
-const VALID_VECTOR_STATES: ReadonlySet<string> = new Set(['idle', 'indexing', 'ready', 'reindexing', 'unavailable', 'loading'])
+// Must stay in sync with the backend's status literals and the
+// VectorIndexStatus['state'] union (models.ts): "disabled" (ADR-103) is the
+// master-switch off state — dropping it here would silently discard the
+// payload at every ingestion point and strand a stale pre-disable state.
+const VALID_VECTOR_STATES: ReadonlySet<string> = new Set(['idle', 'indexing', 'ready', 'reindexing', 'unavailable', 'loading', 'disabled'])
 
 export function isVectorIndexPayload(d: unknown): d is VectorIndexStatus {
   if (!isObjLocal(d)) return false
