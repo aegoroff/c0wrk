@@ -151,4 +151,23 @@ describe('useVectorIndexStatus — push + backend:ready', () => {
 
     expect(useVectorIndexStore.getState().status.state).toBe('ready')
   })
+
+  it('accepts the disabled (ADR-103) status on every ingestion path', async () => {
+    // The master switch emits `state: "disabled"`; the guard must let it
+    // through or the store keeps a stale pre-disable state and a
+    // disable→re-enable cycle runs on a stale `ready`.
+    getStatusSpy.mockResolvedValue(statusOf('disabled'))
+    await render()
+    expect(useVectorIndexStore.getState().status.state).toBe('disabled')
+
+    await act(async () => {
+      emit('vector_index:status', statusOf('ready'))
+    })
+    expect(useVectorIndexStore.getState().status.state).toBe('ready')
+
+    await act(async () => {
+      emit('vector_index:status', statusOf('disabled'))
+    })
+    expect(useVectorIndexStore.getState().status.state).toBe('disabled')
+  })
 })

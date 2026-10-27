@@ -520,6 +520,11 @@ export namespace backend {
 	export class VectorIndexSettingsResponse {
 	    execution_provider: string;
 	    device_id: number;
+	    enabled: boolean;
+	    exclude_patterns: string[];
+	    index_submodules: boolean;
+	    respect_gitignore: boolean;
+	    respect_aiignore: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new VectorIndexSettingsResponse(source);
@@ -529,6 +534,11 @@ export namespace backend {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.execution_provider = source["execution_provider"];
 	        this.device_id = source["device_id"];
+	        this.enabled = source["enabled"];
+	        this.exclude_patterns = source["exclude_patterns"];
+	        this.index_submodules = source["index_submodules"];
+	        this.respect_gitignore = source["respect_gitignore"];
+	        this.respect_aiignore = source["respect_aiignore"];
 	    }
 	}
 	export class PromptSuggestionsSettingsResponse {
@@ -1237,6 +1247,26 @@ export namespace backend {
 	        this.verification_criterion = source["verification_criterion"];
 	        this.experiment_notes = source["experiment_notes"];
 	        this.parents = source["parents"];
+	    }
+	}
+	export class IndexingSettingsRequest {
+	    enabled: boolean;
+	    exclude_patterns: string[];
+	    index_submodules: boolean;
+	    respect_gitignore: boolean;
+	    respect_aiignore: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new IndexingSettingsRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.exclude_patterns = source["exclude_patterns"];
+	        this.index_submodules = source["index_submodules"];
+	        this.respect_gitignore = source["respect_gitignore"];
+	        this.respect_aiignore = source["respect_aiignore"];
 	    }
 	}
 	export class ProviderConfigRequest {

@@ -92,6 +92,11 @@ type mockBuilder struct {
 	// just-saved capability modes to the live builder.
 	updateCapabilitiesLastCfg *core.BuilderConfig
 
+	// setVectorSearchEnabledCalls records the enabled flags passed to
+	// SetVectorSearchEnabled (UpdateIndexingSettings transitions), in call
+	// order (guarded by m.mu).
+	setVectorSearchEnabledCalls []bool
+
 	// Configurable return values for methods that have them.
 	rebuildRouterErr        error
 	rebuildProxyErr         error
@@ -239,6 +244,19 @@ func (m *mockBuilder) UpdateCapabilities(cfg *core.BuilderConfig) {
 	m.updateCapabilitiesCalls++
 	m.updateCapabilitiesLastCfg = cfg
 	m.mu.Unlock()
+}
+func (m *mockBuilder) SetVectorSearchEnabled(enabled bool) {
+	m.mu.Lock()
+	m.setVectorSearchEnabledCalls = append(m.setVectorSearchEnabledCalls, enabled)
+	m.mu.Unlock()
+}
+
+// setVectorSearchEnabledSnapshot returns the recorded SetVectorSearchEnabled
+// calls in order. Safe for concurrent use.
+func (m *mockBuilder) setVectorSearchEnabledSnapshot() []bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.setVectorSearchEnabledCalls)
 }
 func (m *mockBuilder) UpdateShellBlocklist(_ *core.BuilderConfig) error {
 	m.mu.Lock()

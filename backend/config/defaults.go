@@ -625,6 +625,30 @@ func ApplyDefaults(cfg *Config) {
 		cfg.VectorIndex.ExecutionProvider = VectorIndexProviderAuto
 	}
 
+	// Indexing-policy pointer-bools are materialized so the resolved config
+	// (which the frontend can inspect) shows the effective policy: enabled
+	// defaults to true (the historical always-on behaviour), submodules to
+	// false (separate repositories stay out of the index unless explicitly
+	// opted in), and both ignore-file channels to true (the historical
+	// .gitignore/.aiignore-respecting walk). Explicit user values —
+	// including explicit false — are preserved.
+	if cfg.VectorIndex.Enabled == nil {
+		v := true
+		cfg.VectorIndex.Enabled = &v
+	}
+	if cfg.VectorIndex.IndexSubmodules == nil {
+		v := false
+		cfg.VectorIndex.IndexSubmodules = &v
+	}
+	if cfg.VectorIndex.RespectGitIgnore == nil {
+		v := true
+		cfg.VectorIndex.RespectGitIgnore = &v
+	}
+	if cfg.VectorIndex.RespectAIIgnore == nil {
+		v := true
+		cfg.VectorIndex.RespectAIIgnore = &v
+	}
+
 	// Proxy defaults
 	if cfg.Proxy.BypassList == nil {
 		cfg.Proxy.BypassList = []string{"localhost", "127.0.0.1"}

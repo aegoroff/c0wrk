@@ -13,13 +13,15 @@ export interface DerivedStatus {
 }
 
 export function deriveDotStatus(
-  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading',
+  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading' | 'disabled',
   phase: IndexPhase | undefined,
 ): DerivedStatus {
   // `loading` (ADR-064): the branch-scoped DB is being opened; neither index is
   // built or being built yet, so both dots stay idle — never a "building"
   // claim for what is only an open.
-  if (state === 'idle' || state === 'unavailable' || state === 'loading') {
+  // `disabled` (ADR-103): indexing is off via the master switch — nothing is
+  // built or building either; idle dots, like every other non-running state.
+  if (state === 'idle' || state === 'unavailable' || state === 'loading' || state === 'disabled') {
     return { vectorDot: 'idle', lexicalDot: 'idle', bothReady: false }
   }
   if (state === 'ready') {

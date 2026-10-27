@@ -1716,7 +1716,49 @@ orchestration:
 #                            # Raising it significantly risks producing chunks
 #                            # the model cannot embed in a single pass.
 #
+# Indexing policy (master switch, extra excludes, submodules, ignore files):
+#
+#   enabled: true            # Master switch for the whole vector-index
+#                            # subsystem (default true). When false no index
+#                            # pass runs (initial, incremental or manual
+#                            # reindex), the workspace watcher does not feed
+#                            # the indexer, and search reports an absent index
+#                            # rather than stale results.
+#
+#   exclude_patterns: []     # Additional gitignore-style globs (doublestar
+#                            # syntax: *, **, ?, [...], {a,b}) matched against
+#                            # workspace-RELATIVE slash-separated paths —
+#                            # e.g. "vendor/**", "docs/**/*.md", "*.snap".
+#                            # They layer ON TOP of .gitignore/.aiignore
+#                            # (when those are respected) and are subtractive
+#                            # only: they exclude more, never un-ignore a
+#                            # file. Use them for workspace-level excludes
+#                            # that do not belong in the project's committed
+#                            # ignore files. Every pattern is validated at
+#                            # load: malformed globs, empty entries and
+#                            # '!'-prefixed entries (negation is not
+#                            # supported) fail fast, as do lists longer than
+#                            # 256 entries or single patterns over 512 bytes.
+#
+#   index_submodules: false  # Whether git submodules under the workspace root
+#                            # are walked and indexed (default FALSE).
+#                            # Submodules are separate repositories with their
+#                            # own ignore files and often their own scale, so
+#                            # they stay out of the index unless explicitly
+#                            # opted in.
+#
+#   respect_gitignore: true  # Whether .gitignore rules exclude files from the
+#                            # index walk (default true — the historical
+#                            # behaviour). Both ignore-file channels, the
+#                            # exclude_patterns above and the hard
+#                            # size/chunk limits always apply on top.
+#
+#   respect_aiignore: true   # Whether .aiignore rules exclude files from the
+#                            # index walk (default true — the historical
+#                            # behaviour). See ADR-016 for .aiignore's role.
+#
 # vector_index:
+#   enabled: true
 #   hybrid: true
 #   hybrid_rrf_k: 60
 #   hybrid_fanout_multiplier: 4
@@ -1738,6 +1780,10 @@ orchestration:
 #   max_file_size: 4194304
 #   max_chunk_size: 1500
 #   max_chunks_per_file: 4000
+#   exclude_patterns: []
+#   index_submodules: false
+#   respect_gitignore: true
+#   respect_aiignore: true
 #   content_filter:
 #     enabled: true
 #     detect_generated: true

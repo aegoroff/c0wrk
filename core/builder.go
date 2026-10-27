@@ -106,6 +106,13 @@ type OrchestratorBuilder struct {
 	// waiting never double-spends the knob. Set alongside vectorSearchFunc
 	// by RegisterVectorSearch. Guarded by b.mu.
 	vectorSearchWaitFunc builtins.VectorSearchWaitFunc
+	// vectorSearchFuncStash / vectorSearchWaitFuncStash hold the closures
+	// cleared by SetVectorSearchEnabled(false) so the matching enable
+	// re-registers the SAME call-time-resolving closures (they late-bind
+	// the per-root registry, so a rebuild would also work, but the stash
+	// keeps the enable path self-contained on the builder). Guarded by b.mu.
+	vectorSearchFuncStash     builtins.VectorSearchFunc
+	vectorSearchWaitFuncStash builtins.VectorSearchWaitFunc
 	// vectorSearchWaitTimeout bounds the RAG-hint wait in per-session
 	// orchestrators (OrchestratorDeps.VectorSearchWaitTimeout), set alongside
 	// vectorSearchFunc by RegisterVectorSearch. Guarded by b.mu.
@@ -1683,6 +1690,51 @@ func (b *OrchestratorBuilder) RegisterVectorSearch(searchFunc builtins.VectorSea
 	if b.logger != nil {
 		b.logger.Info("registered semantic_search tool")
 	}
+}
+
+// SetVectorSearchEnabled live-applies the vector_index.enabled gate
+// (UpdateIndexingSettings / a config that boots with indexing off).
+//
+// enabled=false unregisters the semantic_search tool from the shared
+// registry — the sp4rk registry underneath is shared by every per-session
+// clone, so live sessions lose the tool too, not just future ones — and
+// clears vectorSearchFunc/vectorSearchWaitFunc, which Build() forwards as
+// nil OrchestratorDeps fields, disabling the RAG-hint injection for every
+// session built afterwards. The cleared closures are stashed so a later
+// enable restores the SAME call-time-resolving closures.
+//
+// enabled=true re-registers the tool from that stash and restores the RAG
+// closures. With an empty stash (vector search never registered) it is a
+// no-op. Both directions are idempotent.
+func (b *OrchestratorBuilder) SetVectorSearchEnabled(enabled bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if enabled {
+		if b.vectorSearchFuncStash == nil {
+			return
+		}
+		b.vectorSearchFunc = b.vectorSearchFuncStash
+		b.vectorSearchWaitFunc = b.vectorSearchWaitFuncStash
+		b.vectorSearchFuncStash = nil
+		b.vectorSearchWaitFuncStash = nil
+		b.registry.Register(builtins.NewVectorSearchTool(b.vectorSearchFunc, b.vectorSearchWaitFunc))
+		if b.logger != nil {
+			b.logger.Info("registered semantic_search tool")
+		}
+		return
+	}
+	// Unregister even when nothing was stashed (a startup-disabled builder
+	// has no closures to stash, but the tool — if any third party
+	// registered one — still comes off): sp4rk's Unregister is a no-op for
+	// an absent name.
+	b.registry.Unregister("semantic_search")
+	if b.vectorSearchFunc == nil {
+		return
+	}
+	b.vectorSearchFuncStash = b.vectorSearchFunc
+	b.vectorSearchWaitFuncStash = b.vectorSearchWaitFunc
+	b.vectorSearchFunc = nil
+	b.vectorSearchWaitFunc = nil
 }
 
 // SetSkillDirs sets the base (shared) skill discovery directories, applied to

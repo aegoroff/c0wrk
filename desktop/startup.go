@@ -377,8 +377,6 @@ func (a *App) Startup(ctx context.Context) {
 	confirmFunc := a.buildConfirmCallback(uiEmitFunc)
 	hitlHandler := a.buildStepLimitCallback(uiEmitFunc)
 
-	vectorReady := make(chan struct{})
-	var vectorOnce sync.Once
 	// Bound for vector-search readiness waits (vector_index.search_wait_
 	// timeout_ms; unset → 3000 via config defaults, explicit 0 = fail fast).
 	// Governs both the semantic_search tool callbacks and the RAG-hint wait.
@@ -490,6 +488,14 @@ func (a *App) Startup(ctx context.Context) {
 	// for agent-side calls, the Git-panel focus for user-facing search.
 	application.SetVectorRoots(a.frontendAPI().Lifecycle().VectorRoots())
 
+	// Vector-index launcher (restartable background ONNX init): the startup
+	// launch fires in Phase 6 below; UpdateIndexingSettings's enabled
+	// transitions reach the same launcher through the backend hook —
+	// enabled=false invalidates an in-flight init before the registry is
+	// parked, enabled=true relaunches a fresh embedder + factory.
+	vectorLauncher := newVectorIndexLauncher(a, agentDir, log)
+	a.frontendAPI().Lifecycle().SetVectorIndexEnabledHook(vectorLauncher.applyEnabledChange)
+
 	// ── Embedded local model: restore only ──────────────────────────
 	// Reads manifest.json into the supervisor and emits the initial
 	// embedded_llm:state snapshot. No download, no network, no probe and no
@@ -598,7 +604,10 @@ func (a *App) Startup(ctx context.Context) {
 	a.startMCPReadyNotifier(a.wailsCtx(), log)
 
 	// ── Background: Vector Index ─────────────────────────────────────
-	a.startVectorIndexBackground(agentDir, cfg, vectorReady, &vectorOnce, startTime, log)
+	// The launcher owns the epochal guard and a per-launch ready channel;
+	// with vector_index.enabled: false at boot, the launch parks the
+	// registry and skips the ONNX load entirely.
+	vectorLauncher.launch()
 
 	// ── Background: Update check ────────────────────────────────────
 	// Runs a single best-effort "check for updates" after the backend is

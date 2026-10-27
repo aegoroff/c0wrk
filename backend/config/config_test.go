@@ -2078,6 +2078,288 @@ vector_index:
 	}
 }
 
+// TestVectorIndexConfig_IndexingPolicy_Defaults pins the indexing-policy
+// compatibility contract: a config without a vector_index block (or one
+// written before the knobs existed) resolves to enabled=true,
+// submodules=false, respect_gitignore=true, respect_aiignore=true — the
+// historical always-on, submodule-free, ignore-respecting walk. The
+// predicates must resolve those defaults from nil WITHOUT ApplyDefaults
+// (callers may hold a raw struct), and ApplyDefaults materializes the same
+// values into the pointers the resolved config exposes.
+func TestVectorIndexConfig_IndexingPolicy_Defaults(t *testing.T) {
+	// Raw zero-value struct: nil pointers resolve through the predicates.
+	raw := VectorIndexConfig{}
+	if !raw.IndexingEnabled() {
+		t.Error("IndexingEnabled(nil Enabled) = false, want true")
+	}
+	if raw.ShouldIndexSubmodules() {
+		t.Error("ShouldIndexSubmodules(nil IndexSubmodules) = true, want false (submodules are NOT indexed by default)")
+	}
+	if !raw.ShouldRespectGitIgnore() {
+		t.Error("ShouldRespectGitIgnore(nil RespectGitIgnore) = false, want true")
+	}
+	if !raw.ShouldRespectAIIgnore() {
+		t.Error("ShouldRespectAIIgnore(nil RespectAIIgnore) = false, want true")
+	}
+
+	// ApplyDefaults materializes the same resolution into the pointers.
+	cfg := &Config{}
+	ApplyDefaults(cfg)
+	if cfg.VectorIndex.Enabled == nil || !*cfg.VectorIndex.Enabled {
+		t.Errorf("default enabled = %v, want pointer to true", cfg.VectorIndex.Enabled)
+	}
+	if cfg.VectorIndex.IndexSubmodules == nil || *cfg.VectorIndex.IndexSubmodules {
+		t.Errorf("default index_submodules = %v, want pointer to false", cfg.VectorIndex.IndexSubmodules)
+	}
+	if cfg.VectorIndex.RespectGitIgnore == nil || !*cfg.VectorIndex.RespectGitIgnore {
+		t.Errorf("default respect_gitignore = %v, want pointer to true", cfg.VectorIndex.RespectGitIgnore)
+	}
+	if cfg.VectorIndex.RespectAIIgnore == nil || !*cfg.VectorIndex.RespectAIIgnore {
+		t.Errorf("default respect_aiignore = %v, want pointer to true", cfg.VectorIndex.RespectAIIgnore)
+	}
+
+	// The full Load path (defaults + validation) resolves identically for a
+	// config with no vector_index block at all.
+	loaded, err := Load(writeTestConfig(t, securityGroupsTestBase))
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if !loaded.VectorIndex.IndexingEnabled() {
+		t.Error("loaded IndexingEnabled() = false, want true")
+	}
+	if loaded.VectorIndex.ShouldIndexSubmodules() {
+		t.Error("loaded ShouldIndexSubmodules() = true, want false")
+	}
+	if !loaded.VectorIndex.ShouldRespectGitIgnore() || !loaded.VectorIndex.ShouldRespectAIIgnore() {
+		t.Error("loaded ignore-file predicates must both resolve to true")
+	}
+}
+
+// TestVectorIndexConfig_IndexingPolicy_YAMLRoundTrip covers YAML parsing of
+// the indexing-policy knobs: explicit values parse verbatim (including
+// explicit false), survive ApplyDefaults, and round-trip through
+// marshal/unmarshal unchanged.
+func TestVectorIndexConfig_IndexingPolicy_YAMLRoundTrip(t *testing.T) {
+	const src = `
+vector_index:
+  enabled: false
+  index_submodules: true
+  respect_gitignore: false
+  respect_aiignore: false
+  exclude_patterns:
+    - "vendor/**"
+    - "docs/**/*.md"
+    - "*.{snap,log}"
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(securityGroupsTestBase+src), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal() failed: %v", err)
+	}
+	boolPtr := func(v *bool) string {
+		if v == nil {
+			return "nil"
+		}
+		if *v {
+			return "true"
+		}
+		return "false"
+	}
+	if got := boolPtr(cfg.VectorIndex.Enabled); got != "false" {
+		t.Errorf("enabled = %s, want explicit false", got)
+	}
+	if got := boolPtr(cfg.VectorIndex.IndexSubmodules); got != "true" {
+		t.Errorf("index_submodules = %s, want explicit true", got)
+	}
+	if got := boolPtr(cfg.VectorIndex.RespectGitIgnore); got != "false" {
+		t.Errorf("respect_gitignore = %s, want explicit false", got)
+	}
+	if got := boolPtr(cfg.VectorIndex.RespectAIIgnore); got != "false" {
+		t.Errorf("respect_aiignore = %s, want explicit false", got)
+	}
+	wantPatterns := []string{"vendor/**", "docs/**/*.md", "*.{snap,log}"}
+	if !reflect.DeepEqual(cfg.VectorIndex.ExcludePatterns, wantPatterns) {
+		t.Errorf("exclude_patterns = %v, want %v", cfg.VectorIndex.ExcludePatterns, wantPatterns)
+	}
+
+	// Predicates honour the explicit values.
+	if cfg.VectorIndex.IndexingEnabled() {
+		t.Error("IndexingEnabled() with explicit false = true, want false")
+	}
+	if !cfg.VectorIndex.ShouldIndexSubmodules() {
+		t.Error("ShouldIndexSubmodules() with explicit true = false, want true")
+	}
+	if cfg.VectorIndex.ShouldRespectGitIgnore() {
+		t.Error("ShouldRespectGitIgnore() with explicit false = true, want false")
+	}
+	if cfg.VectorIndex.ShouldRespectAIIgnore() {
+		t.Error("ShouldRespectAIIgnore() with explicit false = true, want false")
+	}
+
+	// ApplyDefaults must preserve every explicit value.
+	ApplyDefaults(&cfg)
+	if cfg.VectorIndex.Enabled == nil || *cfg.VectorIndex.Enabled {
+		t.Error("ApplyDefaults clobbered explicit enabled: false")
+	}
+	if cfg.VectorIndex.IndexSubmodules == nil || !*cfg.VectorIndex.IndexSubmodules {
+		t.Error("ApplyDefaults clobbered explicit index_submodules: true")
+	}
+	if cfg.VectorIndex.RespectGitIgnore == nil || *cfg.VectorIndex.RespectGitIgnore {
+		t.Error("ApplyDefaults clobbered explicit respect_gitignore: false")
+	}
+	if cfg.VectorIndex.RespectAIIgnore == nil || *cfg.VectorIndex.RespectAIIgnore {
+		t.Error("ApplyDefaults clobbered explicit respect_aiignore: false")
+	}
+
+	// The full Load path accepts the same section and preserves it.
+	loaded, err := Load(writeTestConfig(t, securityGroupsTestBase+src))
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if loaded.VectorIndex.IndexingEnabled() {
+		t.Error("loaded IndexingEnabled() with explicit false = true, want false")
+	}
+	if !loaded.VectorIndex.ShouldIndexSubmodules() {
+		t.Error("loaded ShouldIndexSubmodules() with explicit true = false, want true")
+	}
+	if !reflect.DeepEqual(loaded.VectorIndex.ExcludePatterns, wantPatterns) {
+		t.Errorf("loaded exclude_patterns = %v, want %v", loaded.VectorIndex.ExcludePatterns, wantPatterns)
+	}
+
+	// Marshal → unmarshal round-trip preserves every knob verbatim.
+	data, err := yaml.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() failed: %v", err)
+	}
+	var restored Config
+	if err := yaml.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("round-trip yaml.Unmarshal() failed: %v", err)
+	}
+	if restored.VectorIndex.Enabled == nil || *restored.VectorIndex.Enabled {
+		t.Errorf("round-tripped enabled = %v, want false", restored.VectorIndex.Enabled)
+	}
+	if restored.VectorIndex.IndexSubmodules == nil || !*restored.VectorIndex.IndexSubmodules {
+		t.Errorf("round-tripped index_submodules = %v, want true", restored.VectorIndex.IndexSubmodules)
+	}
+	if restored.VectorIndex.RespectGitIgnore == nil || *restored.VectorIndex.RespectGitIgnore {
+		t.Errorf("round-tripped respect_gitignore = %v, want false", restored.VectorIndex.RespectGitIgnore)
+	}
+	if restored.VectorIndex.RespectAIIgnore == nil || *restored.VectorIndex.RespectAIIgnore {
+		t.Errorf("round-tripped respect_aiignore = %v, want false", restored.VectorIndex.RespectAIIgnore)
+	}
+	if !reflect.DeepEqual(restored.VectorIndex.ExcludePatterns, wantPatterns) {
+		t.Errorf("round-tripped exclude_patterns = %v, want %v", restored.VectorIndex.ExcludePatterns, wantPatterns)
+	}
+}
+
+// TestVectorIndexConfig_ExcludePatterns_Validation verifies that the full
+// Load path rejects malformed globs (fail fast at load instead of silently
+// never matching at walk time), empty entries, gitignore-style negations,
+// and the count/length limits — and accepts a realistic valid list.
+func TestVectorIndexConfig_ExcludePatterns_Validation(t *testing.T) {
+	valid := `vector_index:
+  exclude_patterns:
+    - "vendor/**"
+    - "docs/**/*.md"
+    - "*.{snap,log}"
+    - "third_party/?ncubed"
+    - "[a-z]enerated_*.go"
+`
+	cfg, err := Load(writeTestConfig(t, securityGroupsTestBase+valid))
+	if err != nil {
+		t.Fatalf("Load() with valid exclude_patterns failed: %v", err)
+	}
+	if got := cfg.VectorIndex.ExcludePatterns; len(got) != 5 {
+		t.Errorf("valid exclude_patterns = %v, want 5 entries", got)
+	}
+
+	invalid := []struct {
+		name     string
+		yaml     string
+		wantPart string
+	}{
+		{
+			name:     "unclosed character class",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"[a-\"\n",
+			wantPart: "vector_index.exclude_patterns[0]",
+		},
+		{
+			name:     "unclosed brace expansion",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"*.{snap\"\n",
+			wantPart: "vector_index.exclude_patterns[0]",
+		},
+		{
+			name:     "trailing escape",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"foo\\\\\"\n",
+			wantPart: "vector_index.exclude_patterns[0]",
+		},
+		{
+			name:     "empty entry",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"\"\n    - \"vendor/**\"\n",
+			wantPart: "must be a non-empty glob pattern",
+		},
+		{
+			name:     "whitespace-only entry",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"   \"\n",
+			wantPart: "must be a non-empty glob pattern",
+		},
+		{
+			name:     "gitignore negation",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"!keep_me/**\"\n",
+			wantPart: "negation is not supported",
+		},
+		{
+			name:     "pattern over the length cap (literal, otherwise valid)",
+			yaml:     "vector_index:\n  exclude_patterns:\n    - \"" + strings.Repeat("a", VectorIndexMaxExcludePatternLength+1) + "\"\n",
+			wantPart: "the maximum is",
+		},
+	}
+	for _, tt := range invalid {
+		t.Run("invalid/"+tt.name, func(t *testing.T) {
+			_, err := Load(writeTestConfig(t, securityGroupsTestBase+tt.yaml))
+			if err == nil {
+				t.Fatalf("expected validation error, got nil")
+			}
+			if !contains(err.Error(), tt.wantPart) {
+				t.Errorf("expected error to mention %q, got: %v", tt.wantPart, err)
+			}
+		})
+	}
+
+	// Over the count cap: VectorIndexMaxExcludePatterns + 1 minimal valid
+	// globs must be rejected.
+	t.Run("invalid/over the count cap", func(t *testing.T) {
+		var sb strings.Builder
+		sb.WriteString("vector_index:\n  exclude_patterns:\n")
+		for i := 0; i <= VectorIndexMaxExcludePatterns; i++ {
+			fmt.Fprintf(&sb, "    - \"dir%d/*\"\n", i)
+		}
+		_, err := Load(writeTestConfig(t, securityGroupsTestBase+sb.String()))
+		if err == nil {
+			t.Fatalf("expected validation error for %d patterns, got nil", VectorIndexMaxExcludePatterns+1)
+		}
+		if !contains(err.Error(), "vector_index.exclude_patterns") {
+			t.Errorf("expected error to mention vector_index.exclude_patterns, got: %v", err)
+		}
+	})
+
+	// Exactly at the caps is still valid (a boundary pattern: length cap,
+	// all-wildcard-free literal is a valid doublestar pattern).
+	t.Run("valid/at the caps", func(t *testing.T) {
+		lengthCap := strings.Repeat("a", VectorIndexMaxExcludePatternLength)
+		var sb strings.Builder
+		sb.WriteString("vector_index:\n  exclude_patterns:\n")
+		// VectorIndexMaxExcludePatterns-1 short globs plus the one
+		// length-cap pattern = exactly VectorIndexMaxExcludePatterns entries.
+		for i := 0; i < VectorIndexMaxExcludePatterns-1; i++ {
+			fmt.Fprintf(&sb, "    - \"dir%d/*\"\n", i)
+		}
+		fmt.Fprintf(&sb, "    - %q\n", lengthCap)
+		if _, err := Load(writeTestConfig(t, securityGroupsTestBase+sb.String())); err != nil {
+			t.Fatalf("Load() with exactly the caps must pass, got: %v", err)
+		}
+	})
+}
+
 // TestGoalLoopConfig_DefaultsToIndependent verifies that goal_loop.verification
 // defaults to "independent" when not specified in the config.
 func TestGoalLoopConfig_DefaultsToIndependent(t *testing.T) {

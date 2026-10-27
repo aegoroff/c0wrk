@@ -188,7 +188,7 @@ func TestValidateCollection_ContentFilterExcludedAndDeleted(t *testing.T) {
 	// stale for re-chunking — its identical chunks then hit the
 	// content-addressed embedding cache — while the now-excluded generated
 	// file is reported deleted because validation does not mark it seen.
-	stale, newFiles, deleted, valErr := svc.ValidateCollection(context.Background(), ws, testIgnoreChecker(t, ws))
+	stale, newFiles, deleted, valErr := svc.ValidateCollection(context.Background(), ws, testIgnoreChecker(t, ws), false)
 	if valErr != nil {
 		t.Fatalf("ValidateCollection: %v", valErr)
 	}
@@ -210,7 +210,7 @@ func TestValidateCollection_ContentFilterExcludedAndDeleted(t *testing.T) {
 		t.Fatalf("IndexIncremental: %v", err)
 	}
 
-	stale, newFiles, deleted, valErr = svc.ValidateCollection(context.Background(), ws, testIgnoreChecker(t, ws))
+	stale, newFiles, deleted, valErr = svc.ValidateCollection(context.Background(), ws, testIgnoreChecker(t, ws), false)
 	if valErr != nil {
 		t.Fatalf("follow-up ValidateCollection: %v", valErr)
 	}

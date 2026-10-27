@@ -76,6 +76,13 @@ vi.mock('./GoalStatusIndicator', () => ({ GoalStatusIndicator: () => null }))
 // without an embedded-LLM status read.
 vi.mock('./EmbeddedModelStatus', () => ({ EmbeddedModelStatus: () => <span>EMB</span> }))
 
+// Indexing master switch double — driven directly per test; the real hook
+// (GetConfig hydration + retries) is covered by useIndexingSettings.test.ts.
+const indexingGate = vi.hoisted(() => ({ enabled: true }))
+vi.mock('@/hooks/useIndexingSettings', () => ({
+  useIndexingSettings: () => indexingGate.enabled,
+}))
+
 import { StatusBar } from './StatusBar'
 
 let container: HTMLElement
@@ -87,6 +94,7 @@ const render = () =>
   })
 
 beforeEach(() => {
+  indexingGate.enabled = true
   projectStoreState.projects = [{ id: 'p1', is_no_project: false }]
   projectStoreState.activeProjectId = 'p1'
   processMemoryState.rss = 1_234_567_896
@@ -146,5 +154,32 @@ describe('StatusBar process-memory placement', () => {
     expect(container.querySelectorAll('[data-testid="sep"]')).toHaveLength(1)
     const bar = container.firstElementChild as HTMLElement
     expect(bar.lastElementChild?.textContent).toBe('EMB')
+  })
+
+  it('hides the whole index block — separator included — while indexing is disabled', () => {
+    indexingGate.enabled = false
+
+    render()
+
+    const text = container.textContent ?? ''
+    expect(text).not.toContain('IDX')
+    expect(text).toContain('MiB')
+    expect(text).toContain('EMB')
+    // Only the process-memory indicator's separator remains: the index
+    // block's leading separator hides WITH the indicator, leaving no stray
+    // separator at the right edge.
+    expect(container.querySelectorAll('[data-testid="sep"]')).toHaveLength(1)
+  })
+
+  it('shows the index block again once indexing is (re-)enabled', () => {
+    indexingGate.enabled = false
+    render()
+    expect(container.textContent ?? '').not.toContain('IDX')
+
+    indexingGate.enabled = true
+    render()
+
+    expect(container.textContent ?? '').toContain('IDX')
+    expect(container.querySelectorAll('[data-testid="sep"]')).toHaveLength(2)
   })
 })

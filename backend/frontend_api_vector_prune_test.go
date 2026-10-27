@@ -261,3 +261,94 @@ func TestDeleteWorktree_WipesManagedTreeIndexStorage(t *testing.T) {
 	pruneAssertExists(t, filepath.Join(viRoot, "branches", "branch_main"))
 	pruneAssertExists(t, filepath.Join(viRoot, "lexical", "main"))
 }
+
+// TestPruneAbsentBranchIndexes_RunsWhileDisabled pins the disabled-period
+// fix: with the registry parked by the master switch (every manager shut
+// down, factory dropped — ManagerForCleanup reports nothing), the sweep is
+// NOT blocked for the whole disabled period. It runs the manager-free FS
+// forms instead, removing absent branches' artifacts across the checkout AND
+// managed-tree storage roots while surviving branches keep theirs.
+func TestPruneAbsentBranchIndexes_RunsWhileDisabled(t *testing.T) {
+	h := newVectorWorktreeHarness(t)
+	h.addManagedWorktree(t, "tree-d", "feature/topic")
+	viRoot := config.ProjectVectorIndexPath(h.agentDir, h.proj.ID)
+	wtRoot := filepath.Join(viRoot, "worktrees", "tree-d")
+
+	pruneFixtureBranch(t, viRoot, "branch_main", "main")
+	pruneFixtureBranch(t, viRoot, "branch_gone", "gone")
+	pruneFixtureBranch(t, wtRoot, "branch_feature_topic", "feature_topic")
+	pruneFixtureBranch(t, wtRoot, "branch_gone", "gone")
+
+	h.roots.Disable()
+
+	h.api.pruneAbsentBranchVectorIndexes(h.proj)
+
+	for _, root := range []string{viRoot, wtRoot} {
+		pruneAssertGone(t, filepath.Join(root, "branches", "branch_gone"))
+		pruneAssertGone(t, filepath.Join(root, "lexical", "gone"))
+		pruneAssertGone(t, filepath.Join(root, "file_hashes_branch_gone.json"))
+		pruneAssertGone(t, filepath.Join(root, "contentless_branch_gone.done"))
+	}
+	pruneAssertExists(t, filepath.Join(viRoot, "branches", "branch_main"))
+	pruneAssertExists(t, filepath.Join(viRoot, "lexical", "main"))
+	pruneAssertExists(t, filepath.Join(wtRoot, "branches", "branch_feature_topic"))
+	pruneAssertExists(t, filepath.Join(wtRoot, "lexical", "feature_topic"))
+}
+
+// TestPurgeBranchIndexData_RunsWhileDisabled pins the delete-triggered purge
+// under the disabled registry: the branch's artifacts are purged immediately
+// through the manager-free FS form in both storage roots, surviving branches
+// keep theirs.
+func TestPurgeBranchIndexData_RunsWhileDisabled(t *testing.T) {
+	h := newVectorWorktreeHarness(t)
+	h.addManagedWorktree(t, "tree-p", "feature/topic")
+	viRoot := config.ProjectVectorIndexPath(h.agentDir, h.proj.ID)
+	wtRoot := filepath.Join(viRoot, "worktrees", "tree-p")
+
+	pruneFixtureBranch(t, viRoot, "branch_retracted", "retracted")
+	pruneFixtureBranch(t, viRoot, "branch_main", "main")
+	pruneFixtureBranch(t, wtRoot, "branch_retracted", "retracted")
+	pruneFixtureBranch(t, wtRoot, "branch_main", "main")
+
+	h.roots.Disable()
+
+	h.api.purgeBranchIndexData(h.proj, "retracted")
+
+	for _, root := range []string{viRoot, wtRoot} {
+		pruneAssertGone(t, filepath.Join(root, "branches", "branch_retracted"))
+		pruneAssertGone(t, filepath.Join(root, "lexical", "retracted"))
+		pruneAssertGone(t, filepath.Join(root, "file_hashes_branch_retracted.json"))
+		pruneAssertGone(t, filepath.Join(root, "contentless_branch_retracted.done"))
+
+		pruneAssertExists(t, filepath.Join(root, "branches", "branch_main"))
+		pruneAssertExists(t, filepath.Join(root, "file_hashes_branch_main.json"))
+	}
+}
+
+// TestDeleteWorktree_WipesManagedTreeIndexStorageWhileDisabled pins the
+// worktree half under the disabled registry: deleting a managed tree while
+// indexing is off still removes the tree's whole index storage (the plain fs
+// fallback — no manager is needed, and no live or parked state holds
+// handles), so a disabled period cannot strand deleted trees' storage until
+// the whole project is deleted.
+func TestDeleteWorktree_WipesManagedTreeIndexStorageWhileDisabled(t *testing.T) {
+	h := newVectorWorktreeHarness(t)
+	tree := h.addManagedWorktree(t, "tree-off", "feature/off")
+	viRoot := config.ProjectVectorIndexPath(h.agentDir, h.proj.ID)
+	wtRoot := filepath.Join(viRoot, "worktrees", "tree-off")
+
+	pruneFixtureBranch(t, wtRoot, "branch_feature_off", "feature_off")
+	pruneFixtureBranch(t, viRoot, "branch_main", "main")
+
+	h.roots.Disable()
+
+	if err := h.api.DeleteWorktree(tree, false, false); err != nil {
+		t.Fatalf("DeleteWorktree(managed, disabled): %v", err)
+	}
+
+	if _, err := os.Stat(wtRoot); !os.IsNotExist(err) {
+		t.Fatalf("deleted tree's index storage still present while disabled (err=%v)", err)
+	}
+	// The checkout keeps its own data — only the tree's root goes.
+	pruneAssertExists(t, filepath.Join(viRoot, "branches", "branch_main"))
+}

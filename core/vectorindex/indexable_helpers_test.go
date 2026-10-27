@@ -1,5 +1,7 @@
 package vectorindex
 
+import "github.com/v0lka/sp4rk/ignore"
+
 // NOTE: IsIndexablePath and IsAnyIndexablePath (package-level) used to live in
 // indexer.go, where their doc comments claimed they were "intended for the
 // workspace watcher". That was misleading: production uses the cached method
@@ -17,8 +19,8 @@ package vectorindex
 // TEST ONLY: it rebuilds the ignore resolver (walking root) on every call. Do
 // not use on a hot path; prefer the cached *Indexer.IsAnyIndexablePath.
 func IsIndexablePath(absPath, root string) bool {
-	c, _ := buildIgnoreChecker(root)
-	return isIndexablePath(absPath, root, c)
+	c, _ := buildIgnoreChecker(root, ignore.Options{})
+	return isIndexablePath(absPath, root, c, false)
 }
 
 // IsAnyIndexablePath reports whether at least one of paths is indexable under
@@ -28,9 +30,9 @@ func IsIndexablePath(absPath, root string) bool {
 // TEST ONLY: it rebuilds the ignore resolver (walking root) on every call. Do
 // not use on a hot path; prefer the cached *Indexer.IsAnyIndexablePath.
 func IsAnyIndexablePath(paths []string, root string) bool {
-	c, _ := buildIgnoreChecker(root)
+	c, _ := buildIgnoreChecker(root, ignore.Options{})
 	for _, p := range paths {
-		if isIndexablePath(p, root, c) {
+		if isIndexablePath(p, root, c, false) {
 			return true
 		}
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/v0lka/c0wrk/backend/config"
 	"github.com/v0lka/c0wrk/backend/project"
+	"github.com/v0lka/c0wrk/core/vectorindex"
 )
 
 // Background stale-branch index cleanup. Every git branch a repository ever
@@ -51,9 +52,26 @@ func (f *FrontendAPI) pruneAbsentBranchVectorIndexes(p *project.ProjectInfo) {
 
 	// The registry accessor lazily creates (the same entry every vector
 	// path uses), so it never returns nil; on a not-yet-wired factory
-	// ManagerForCleanup reports no manager and the sweep is skipped below.
+	// ManagerForCleanup reports no manager and the sweep is skipped below —
+	// unless the registry is DISABLED: that is a user preference, not a
+	// transient state, so the sweep runs the manager-free FS forms instead
+	// of skipping for the whole disabled period (Disable shut every manager
+	// down before dropping the factory, so no live or parked state holds
+	// handles and the branch surgery is pure fs).
 	mgr, disposable := f.vectorRootsRegistry().ManagerForCleanup()
 	if mgr == nil {
+		vr := f.vectorRootsRegistry()
+		if vr.Disabled() {
+			removed := 0
+			for _, root := range append([]string{viRoot}, worktreeStorageNames(viRoot)...) {
+				removed += vectorindex.PruneMissingBranchDataFS(f.log(), root, branches)
+			}
+			if removed > 0 {
+				f.log().Debug("vector index: pruned index data of branches absent from the local clone (indexing disabled)",
+					"project", p.ID, "artifacts_removed", removed)
+			}
+			return
+		}
 		// Embedder still loading or unavailable: nothing is readable right
 		// now. The next switch retries; the stale data is disk garbage
 		// until then, not a correctness problem.
@@ -148,11 +166,28 @@ func (f *FrontendAPI) purgeBranchIndexData(p *project.ProjectInfo, branch string
 		return
 	}
 
+	viRoot := config.ProjectVectorIndexPath(f.agentDir, p.ID)
+
 	// The registry accessor lazily creates (the same entry every vector
 	// path uses), so it never returns nil; on a not-yet-wired factory
-	// ManagerForCleanup reports no manager and the purge is skipped below.
+	// ManagerForCleanup reports no manager and the purge is skipped below —
+	// unless the registry is DISABLED: that is a user preference, not a
+	// transient state, so the purge runs the manager-free FS form instead
+	// of skipping for the whole disabled period (see the sweep above).
 	mgr, disposable := f.vectorRootsRegistry().ManagerForCleanup()
 	if mgr == nil {
+		vr := f.vectorRootsRegistry()
+		if vr.Disabled() {
+			removed := 0
+			for _, root := range append([]string{viRoot}, worktreeStorageNames(viRoot)...) {
+				removed += vectorindex.DeleteBranchDataFS(f.log(), root, branch, remaining)
+			}
+			if removed > 0 {
+				f.log().Debug("vector index: purged index data of the deleted branch (indexing disabled)",
+					"project", p.ID, "branch", branch, "artifacts_removed", removed)
+			}
+			return
+		}
 		f.log().Debug("vector index: deleted-branch purge skipped: no vector manager available",
 			"project", p.ID, "branch", branch)
 		return
@@ -161,7 +196,6 @@ func (f *FrontendAPI) purgeBranchIndexData(p *project.ProjectInfo, branch string
 		defer mgr.Shutdown()
 	}
 
-	viRoot := config.ProjectVectorIndexPath(f.agentDir, p.ID)
 	roots := make([]string, 0, 8)
 	roots = append(roots, viRoot)
 	roots = append(roots, worktreeStorageNames(viRoot)...)

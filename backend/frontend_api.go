@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -358,6 +359,16 @@ type FrontendAPI struct {
 	// read by every VectorIndexStatus producer; guarded by vectorRootsMu to
 	// avoid a third lock for the same lifecycle.
 	vectorEmbedderInfo VectorEmbedderInfo
+
+	// vectorIndexEnabledHook is the desktop-side seam behind
+	// UpdateIndexingSettings: enabled=false must invalidate any in-flight
+	// ONNX init BEFORE VectorRoots.Disable runs (a late SetFactory would
+	// resurrect a factory after Disable unwound it), and enabled=true must
+	// RELAUNCH that init (a new embedder + factory + ready channel — the
+	// embedder is created once per launch, not once per process). Set once
+	// by desktop startup via SetVectorIndexEnabledHook; nil in tests, where
+	// the RPC skips the desktop leg.
+	vectorIndexEnabledHook atomic.Pointer[func(enabled bool)]
 
 	// Self-update state. updateMu guards lastCheckResult and
 	// downloadedArchivePath, which carry data across the stateful
@@ -1120,6 +1131,47 @@ func (f *FrontendAPI) vectorRootsRegistry() *VectorRoots {
 // Moved to FrontendAPILifecycle to avoid exposure on the Wails RPC surface.
 func (l *FrontendAPILifecycle) SetVectorRootsFactory(factory func() (*vectorindex.Manager, error), ready <-chan struct{}, closeEmbedder func() error) {
 	l.f.vectorRootsRegistry().SetFactory(factory, ready, closeEmbedder)
+}
+
+// SetVectorIndexEnabledHook wires the desktop-side seam behind
+// UpdateIndexingSettings's enabled transitions: the hook receives false to
+// invalidate any in-flight background ONNX init (it must run BEFORE the RPC
+// calls VectorRoots.Disable) and true to relaunch that init (fresh embedder,
+// factory, and ready channel, ending in SetVectorRootsFactory +
+// InitVectorIndexForActiveProject). Registered once by desktop startup; nil
+// (a no-op RPC leg) in tests.
+// Moved to FrontendAPILifecycle to avoid exposure on the Wails RPC surface.
+func (l *FrontendAPILifecycle) SetVectorIndexEnabledHook(fn func(enabled bool)) {
+	l.f.vectorIndexEnabledHook.Store(&fn)
+}
+
+// VectorIndexConfigSnapshot returns a copy of the live vector_index config
+// section, read under configMu. The restartable desktop init (startup launch
+// and every UpdateIndexingSettings enabled=true relaunch) reads its knobs
+// through here so it never races a Settings save mutating the shared config
+// in place. The exclude list is cloned for the same reason.
+// Moved to FrontendAPILifecycle to avoid exposure on the Wails RPC surface.
+func (l *FrontendAPILifecycle) VectorIndexConfigSnapshot() config.VectorIndexConfig {
+	l.f.configMu.RLock()
+	defer l.f.configMu.RUnlock()
+	if l.f.config == nil {
+		return config.VectorIndexConfig{}
+	}
+	vi := l.f.config.VectorIndex
+	vi.ExcludePatterns = slices.Clone(vi.ExcludePatterns)
+	return vi
+}
+
+// VectorIndexingPolicySnapshot returns the resolved indexing policy (honoured
+// ignore files, exclude patterns, submodule walking) from the LIVE config,
+// under configMu. The desktop manager factory calls this per manager build,
+// so managers created after an UpdateIndexingSettings save carry the new
+// policy without an app restart.
+// Moved to FrontendAPILifecycle to avoid exposure on the Wails RPC surface.
+func (l *FrontendAPILifecycle) VectorIndexingPolicySnapshot() VectorIndexingPolicy {
+	l.f.configMu.RLock()
+	defer l.f.configMu.RUnlock()
+	return l.f.indexingPolicySnapshotLocked()
 }
 
 // VectorRoots exposes the per-root registry for desktop-side wiring (the

@@ -13,6 +13,7 @@ import { CompactContextButton } from "./CompactContextButton";
 import { GoalStatusIndicator } from "./GoalStatusIndicator";
 import { ProcessMemoryStatus } from "./ProcessMemoryStatus";
 import { EmbeddedModelStatus } from "./EmbeddedModelStatus";
+import { useIndexingSettings } from "@/hooks/useIndexingSettings";
 
 function Sep() {
   return <Separator orientation="vertical" className="mx-1 h-4" />;
@@ -27,6 +28,10 @@ export function StatusBar() {
   });
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed);
   const viewerCollapsed = useFileViewerStore((s) => s.collapsed);
+  // Indexing master switch: with indexing off there is no index to report
+  // on, so the whole block — separator included — hides (the status-bar
+  // pill is one of the index surfaces gated on the switch).
+  const indexingEnabled = useIndexingSettings();
 
   return (
     <div
@@ -77,8 +82,10 @@ export function StatusBar() {
         </>
       )}
 
-      {/* Vector index status (hidden for No Project) */}
-      {!isNoProject && (
+      {/* Vector index status (hidden for No Project and while indexing is
+          disabled — the separator hides with the indicator so a hidden
+          block never leaves a stray separator at the right edge) */}
+      {!isNoProject && indexingEnabled && (
         <>
           <Sep />
           <IndexingStatus />

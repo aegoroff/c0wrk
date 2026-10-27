@@ -45,8 +45,9 @@ interface SavedConfig {
 const DEFAULT_CONFIG: SavedConfig = { execution_provider: 'auto', device_id: 0 }
 
 /**
- * General-tab section for the vector-index embedder's ONNX Runtime execution
- * provider and GPU device. Saves are validated client-side, then validated
+ * Embedder half of the Search tab's Indexing section: the vector-index
+ * embedder's ONNX Runtime execution provider and GPU device. Saves are
+ * validated client-side, then validated
  * and persisted by the backend with no hot application — the embedder is
  * created once per process, so a changed provider/device only takes effect
  * after an app restart. The restart hint and diagnostics block make that

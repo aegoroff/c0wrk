@@ -174,7 +174,8 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		// remove it (DeleteProjectData is a plain fs + park-slot operation).
 		clean, disposable = vr.ManagerForCleanup()
 	}
-	if clean != nil {
+	switch {
+	case clean != nil:
 		if err := clean.DeleteProjectData(storage); err != nil {
 			f.log().Warn("vector index: failed to remove released worktree index data",
 				"project", projectID, "worktree", name, "error", err)
@@ -182,6 +183,23 @@ func (f *FrontendAPI) deleteWorktreeVectorIndex(repoRoot, projectID, name string
 		if disposable {
 			clean.Shutdown()
 		}
+	case vr.Disabled():
+		// The registry is parked by vector_index.enabled: false — a user
+		// preference, not a transient state, so the skip below must not
+		// apply (it would strand the tree's index storage until the whole
+		// project is deleted). Disable shut every manager down before
+		// dropping the factory, so no live or parked state holds handles
+		// and DeleteProjectData's park-slot fixup is vacuous: the removal
+		// is the plain fs operation, best-effort like the manager path.
+		if err := os.RemoveAll(storage); err != nil {
+			f.log().Warn("vector index: failed to remove released worktree index data",
+				"project", projectID, "worktree", name, "error", err)
+		}
+	default:
+		// Still loading or embedder unavailable: transient — the next
+		// tree/branch switch (or deletion) retries the cleanup.
+		f.log().Debug("vector index: worktree index cleanup skipped: no vector manager available",
+			"project", projectID, "worktree", name)
 	}
 
 	// The per-tree embedding cache lives INSIDE the tree's storage root
@@ -468,7 +486,14 @@ func (f *FrontendAPI) GetVectorIndexStatus() VectorIndexStatus {
 
 	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
-		result := VectorIndexStatus{State: "unavailable", Indices: []string{}}
+		// A disabled registry (vector_index.enabled: false) is a user state,
+		// not a failure: render the explicit off state instead of
+		// "unavailable".
+		state := "unavailable"
+		if errors.Is(err, errVectorDisabled) {
+			state = vectorStateDisabled
+		}
+		result := VectorIndexStatus{State: state, Indices: []string{}}
 		f.applyEmbedderInfo(&result)
 		return result
 	}

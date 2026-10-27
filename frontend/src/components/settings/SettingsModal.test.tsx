@@ -26,7 +26,9 @@ vi.mock('@/api/config', () => ({
   hasDefaultModel: mocks.hasDefaultModel,
 }))
 
-// VectorIndexSettings (General tab) probes the GPU list on mount.
+// The Search tab's IndexingSettings embeds VectorIndexSettings, which
+// probes the GPU list on mount (on Linux hosts). The General tab no longer
+// mounts it — the Vector Index section moved to Search.
 vi.mock('@/api/vector', () => ({
   listVectorIndexGPUs: mocks.listVectorIndexGPUs,
 }))
@@ -344,13 +346,17 @@ describe('SettingsModal General tab: web access experimental gate', () => {
     expect(document.body.querySelector('[data-testid="web-access-settings"]')).toBeNull()
 
     // The sections the block sits between must now be adjacent: no empty
-    // border wrapper left behind where the section used to be.
+    // border wrapper left behind where the section used to be. With Web
+    // Access hidden, HTTP Proxy is the FINAL General section — and the
+    // Vector Index section no longer lives here at all (it moved to the
+    // Search tab with the rest of the indexing controls).
     const h3s = Array.from(document.body.querySelectorAll('h3'))
     const proxy = h3s.find((h) => h.textContent === 'HTTP Proxy')
-    const vector = h3s.find((h) => h.textContent === 'Vector Index')
     expect(proxy).toBeDefined()
-    expect(vector).toBeDefined()
-    expect(proxy!.closest('div.border-t')!.nextElementSibling).toBe(vector!.closest('div.border-t'))
+    expect(h3s.find((h) => h.textContent === 'Vector Index')).toBeUndefined()
+    const stack = proxy!.closest('div.space-y-6')
+    expect(stack).not.toBeNull()
+    expect(stack!.lastElementChild).toBe(proxy!.closest('div.border-t'))
   })
 
   it('shows the Web Access block when the gate is on, and hides/shows it reactively without a remount', async () => {

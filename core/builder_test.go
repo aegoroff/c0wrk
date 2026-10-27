@@ -1292,3 +1292,135 @@ func TestRegisterVectorSearch_StoresWaitTimeout(t *testing.T) {
 		t.Error("nil searchFunc must not clear a previously registered search func")
 	}
 }
+
+// TestSetVectorSearchEnabled_UnregistersAndRestores pins the live
+// vector_index.enabled gate on the builder: disable strips the
+// semantic_search tool from the shared registry (which every per-session
+// clone shares, so live sessions lose it too) and clears the RAG closures
+// into a stash; enable re-registers the tool and restores the SAME closures.
+// Both directions are idempotent, and a builder that never registered vector
+// search is unaffected.
+func TestSetVectorSearchEnabled_UnregistersAndRestores(t *testing.T) {
+	cfg := &BuilderConfig{
+		Security:      BuilderSecurityConfig{},
+		ExpandEnvVars: func(string) string { return "" },
+	}
+	b, err := NewOrchestratorBuilder(cfg, nil, nil, expectedCoreLogger(t, expectedStartupDiagnostic(), expectedCoreDiagnostic{"WARN", "rebuildJudge: failed to build LLM router for judge", map[string]string{"error": "no providers configured"}}, expectedCoreDiagnostic{"WARN", "tool judge rebuild failed: judge will not be available for on-demand evaluation", nil}))
+	if err != nil {
+		t.Fatalf("NewOrchestratorBuilder: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := b.waitReady(ctx); err != nil {
+			t.Errorf("waitReady(empty providers) = %v, want completed init", err)
+		}
+		if err := b.waitMCPReady(ctx); err != nil {
+			t.Errorf("waitMCPReady(empty config) = %v, want completed init", err)
+		}
+	})
+
+	search := builtins.VectorSearchFunc(func(ctx context.Context, opts builtins.VectorSearchOptions) ([]builtins.VectorSearchResult, error) {
+		return nil, nil
+	})
+	wait := builtins.VectorSearchWaitFunc(func(context.Context) error { return nil })
+	b.RegisterVectorSearch(search, wait, 2*time.Second, false)
+
+	if _, ok := b.registry.Get("semantic_search"); !ok {
+		t.Fatal("precondition: semantic_search registered")
+	}
+	// A session clone shares the embedded sp4rk registry — what the
+	// unregister must reach for live sessions, not just future builds.
+	clone := b.registry.Clone()
+	if _, ok := clone.Get("semantic_search"); !ok {
+		t.Fatal("precondition: session clone sees semantic_search")
+	}
+
+	// Disable: the tool leaves BOTH registries and the RAG closures move to
+	// the stash.
+	b.SetVectorSearchEnabled(false)
+	if _, ok := b.registry.Get("semantic_search"); ok {
+		t.Error("shared registry must drop semantic_search on disable")
+	}
+	if _, ok := clone.Get("semantic_search"); ok {
+		t.Error("session clones share the embedded registry; the tool must drop there too")
+	}
+	b.mu.RLock()
+	cleared := b.vectorSearchFunc == nil
+	stashed := b.vectorSearchFuncStash != nil && b.vectorSearchWaitFuncStash != nil
+	b.mu.RUnlock()
+	if !cleared {
+		t.Error("vectorSearchFunc must be cleared on disable (nil OrchestratorDeps → RAG off for new sessions)")
+	}
+	if !stashed {
+		t.Error("the cleared closures must be stashed for the matching enable")
+	}
+
+	// Enable: the tool returns and the SAME closures are restored.
+	b.SetVectorSearchEnabled(true)
+	if _, ok := b.registry.Get("semantic_search"); !ok {
+		t.Error("enable must re-register semantic_search")
+	}
+	if _, ok := clone.Get("semantic_search"); !ok {
+		t.Error("session clones must see the re-registered tool")
+	}
+	b.mu.RLock()
+	restored := b.vectorSearchFunc != nil && b.vectorSearchWaitFunc != nil
+	stashEmpty := b.vectorSearchFuncStash == nil && b.vectorSearchWaitFuncStash == nil
+	b.mu.RUnlock()
+	if !restored {
+		t.Error("enable must restore the RAG closures")
+	}
+	if !stashEmpty {
+		t.Error("the stash must be drained by the matching enable")
+	}
+
+	// Idempotency: repeated toggles converge to the same states.
+	b.SetVectorSearchEnabled(false)
+	b.SetVectorSearchEnabled(false)
+	if _, ok := b.registry.Get("semantic_search"); ok {
+		t.Error("double disable must leave the tool unregistered")
+	}
+	b.SetVectorSearchEnabled(true)
+	b.SetVectorSearchEnabled(true)
+	if _, ok := b.registry.Get("semantic_search"); !ok {
+		t.Error("double enable must leave the tool registered exactly once")
+	}
+}
+
+// TestSetVectorSearchEnabled_NeverRegisteredIsNoOp pins the never-registered
+// corner: enable with an empty stash and disable without a prior registration
+// are quiet no-ops (no panic, no phantom tool).
+func TestSetVectorSearchEnabled_NeverRegisteredIsNoOp(t *testing.T) {
+	cfg := &BuilderConfig{
+		Security:      BuilderSecurityConfig{},
+		ExpandEnvVars: func(string) string { return "" },
+	}
+	b, err := NewOrchestratorBuilder(cfg, nil, nil, expectedCoreLogger(t, expectedStartupDiagnostic(), expectedCoreDiagnostic{"WARN", "rebuildJudge: failed to build LLM router for judge", map[string]string{"error": "no providers configured"}}, expectedCoreDiagnostic{"WARN", "tool judge rebuild failed: judge will not be available for on-demand evaluation", nil}))
+	if err != nil {
+		t.Fatalf("NewOrchestratorBuilder: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := b.waitReady(ctx); err != nil {
+			t.Errorf("waitReady(empty providers) = %v, want completed init", err)
+		}
+		if err := b.waitMCPReady(ctx); err != nil {
+			t.Errorf("waitMCPReady(empty config) = %v, want completed init", err)
+		}
+	})
+
+	b.SetVectorSearchEnabled(true) // empty stash: no-op
+	b.SetVectorSearchEnabled(false)
+	if _, ok := b.registry.Get("semantic_search"); ok {
+		t.Error("nothing was ever registered; the tool must not appear")
+	}
+	b.mu.RLock()
+	funcNil := b.vectorSearchFunc == nil
+	stashNil := b.vectorSearchFuncStash == nil
+	b.mu.RUnlock()
+	if !funcNil || !stashNil {
+		t.Error("no registration: disable must not populate closures or a stash")
+	}
+}

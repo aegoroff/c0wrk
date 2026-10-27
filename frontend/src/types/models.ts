@@ -291,7 +291,12 @@ export type IndexPhase = 'both' | 'embedding' | 'lexical' | 'open'
 export type ExecutionProvider = 'auto' | 'cpu' | 'cuda' | 'openvino'
 
 export interface VectorIndexStatus {
-  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading'
+  /**
+   * "disabled" (ADR-103): indexing is off via the master switch — the
+   * registry is parked, no collection exists, and the gated search surfaces
+   * stay hidden until a re-enable finishes the background embedder init.
+   */
+  state: 'idle' | 'indexing' | 'ready' | 'reindexing' | 'unavailable' | 'loading' | 'disabled'
   progress: number
   files_indexed: number
   total_files: number
@@ -532,16 +537,43 @@ export interface ConfigSearchResp {
 }
 
 /**
- * vector_index embedding settings block in ConfigResponse: which ONNX
- * Runtime execution provider the embedder runs on ("auto" | "cpu" |
- * "cuda") and the GPU device index used when the provider resolves to
- * CUDA. Changing these requires an app restart to take effect (the
- * embedder is created once per process); the update path only validates
- * and persists them.
+ * vector_index settings block in ConfigResponse. The embedding half
+ * (execution provider "auto" | "cpu" | "cuda" | "openvino" and the GPU
+ * device index) requires an app restart to take effect (the embedder is
+ * created once per process); its update path only validates and persists.
+ *
+ * The indexing-policy half (enabled / exclude_patterns / index_submodules /
+ * respect_gitignore / respect_aiignore) is served RESOLVED (pointer-bool
+ * defaults applied) and is live-applied by UpdateIndexingSettings. Its
+ * fields are optional so older payloads/typed mocks that predate the knobs
+ * stay compatible — read absence as the resolved default (enabled/git/ai
+ * true, submodules false, no patterns).
  */
 export interface VectorIndexSettingsResponse {
   execution_provider: ExecutionProvider
   device_id: number
+  enabled?: boolean
+  exclude_patterns?: string[]
+  index_submodules?: boolean
+  respect_gitignore?: boolean
+  respect_aiignore?: boolean
+}
+
+/**
+ * Full-replacement payload of the UpdateIndexingSettings RPC: the
+ * vector-index indexing policy (vector_index.enabled / exclude_patterns /
+ * index_submodules / respect_gitignore / respect_aiignore). The backend
+ * validates the pattern list, persists the change, and applies it live —
+ * a request carries ALL five fields, so a client keeps the values it is
+ * not changing (e.g. flipping the master toggle must not drop the stored
+ * exclude patterns).
+ */
+export interface IndexingSettingsRequest {
+  enabled: boolean
+  exclude_patterns: string[]
+  index_submodules: boolean
+  respect_gitignore: boolean
+  respect_aiignore: boolean
 }
 
 export interface ConfigResponse {

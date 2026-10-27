@@ -1124,7 +1124,8 @@ func (a *App) emitBackendReady(cachedProjects []project.ProjectInfo, projectMgr 
 // and then emits EventMCPReady so the MCP settings dialog can refresh its
 // transient "Starting…" placeholder into the real per-server status without
 // manual polling. It runs in a goroutine spawned after EventBackendReady,
-// mirroring startVectorIndexBackground: MCP startup (runMCPInit) is decoupled
+// mirroring the vector-index background init (vectorIndexLauncher.launch):
+// MCP startup (runMCPInit) is decoupled
 // from initDone and may still be in flight (discovering remote servers) when
 // the app is otherwise ready.
 //
@@ -1156,255 +1157,353 @@ func (a *App) startMCPReadyNotifier(ctx context.Context, log *slog.Logger) {
 	}()
 }
 
-// startVectorIndexBackground launches the ONNX-backed vector index in a
-// goroutine after EventBackendReady so it never blocks the critical path.
-// The vectorReady channel is closed exactly once on completion (success or
-// known-unavailable) so callers waiting on it always unblock.
-func (a *App) startVectorIndexBackground(
-	agentDir string,
-	cfg *config.Config,
-	vectorReady chan struct{},
-	vectorOnce *sync.Once,
-	startTime time.Time,
-	log *slog.Logger,
-) {
+// vectorIndexLauncher drives the restartable background ONNX init behind
+// vector_index.enabled. The startup launch and every UpdateIndexingSettings
+// enabled=true restart go through launch(); an epochal guard under mu makes
+// every state change — a newer launch or the disable-side invalidation —
+// invalidate all older launches, whose late wiring attempt then fails
+// atomically and closes its own embedder instead of resurrecting a factory
+// after VectorRoots.Disable unwound the registry. The live enable/disable
+// lifecycle is specified in specs/domains/workspace.md (the
+// "live-applied by UpdateIndexingSettings" invariant) and ADR-103.
+type vectorIndexLauncher struct {
+	app      *App
+	agentDir string
+	log      *slog.Logger
+
+	mu    sync.Mutex
+	epoch uint64
+}
+
+func newVectorIndexLauncher(a *App, agentDir string, log *slog.Logger) *vectorIndexLauncher {
+	return &vectorIndexLauncher{app: a, agentDir: agentDir, log: log}
+}
+
+// applyEnabledChange is the backend hook (SetVectorIndexEnabledHook) behind
+// UpdateIndexingSettings's enabled transitions. enabled=false only
+// invalidates in-flight launches — the RPC parks the registry itself
+// (VectorRoots.Disable) immediately after the hook returns, so the ordering
+// contract is hook-first-then-disable; enabled=true starts a fresh
+// background init.
+func (l *vectorIndexLauncher) applyEnabledChange(enabled bool) {
+	if !enabled {
+		l.mu.Lock()
+		l.epoch++
+		l.mu.Unlock()
+		return
+	}
+	l.launch()
+}
+
+// launch starts one background init under a fresh epoch and a fresh ready
+// channel (closed exactly once when that init settles, success or
+// known-unavailable) — the per-launch replacement of the old process-wide
+// vectorOnce/vectorReady pair, which could fire only once per app run.
+func (l *vectorIndexLauncher) launch() {
+	l.mu.Lock()
+	l.epoch++
+	epoch := l.epoch
+	l.mu.Unlock()
+	ready := make(chan struct{})
+	var once sync.Once
 	go func() {
-		defer vectorOnce.Do(func() { close(vectorReady) })
-		// Recover from a CGO/ONNX panic (version mismatch, malformed model
-		// file, …) so the app survives with vector search disabled rather than
-		// crashing after EventBackendReady has already been emitted.
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("vector index background init panicked", "panic", r)
-				a.emit("vector_index:status", map[string]any{"available": false, "reason": fmt.Sprint(r)})
-			}
-		}()
-
-		modelPath := resolveModelPath("jina-v2-small.onnx", agentDir)
-		tokenizerPath := resolveModelPath("jina-v2-small-tokenizer.json", agentDir)
-		libraryPath := resolveONNXLibPath()
-
-		// Create embedder directly via github.com/v0lka/sp4rk/embedding.
-		if modelPath == "" || tokenizerPath == "" || libraryPath == "" {
-			log.Info("vector search disabled (model files not found)")
-			a.emit("vector_index:status", map[string]any{"available": false, "reason": "model files not found"})
-			return
-		}
-		const (
-			maxSeqLength = embedding.DefaultMaxSeqLength
-			hiddenDim    = embedding.DefaultHiddenDim
-		)
-		cacheFingerprint, fingerprintErr := vectorindex.EmbeddingFingerprint(modelPath, tokenizerPath, vectorindex.EmbeddingFingerprintParams{
-			MaxSeqLength:           maxSeqLength,
-			Dimension:              hiddenDim,
-			NormalizationAlgorithm: vectorindex.EmbeddingNormalizationAlgorithm,
-		})
-		if fingerprintErr != nil {
-			// Cache is an optimization: fingerprint I/O failure must not disable
-			// vector search or indexing.
-			log.Warn("embedding cache disabled: artifact fingerprint failed", "error", fingerprintErr)
-			cacheFingerprint = ""
-		}
-
-		// ONNX execution provider, driven by config
-		// (vector_index.execution_provider / device_id) — the former
-		// environment-only proof-of-concept knobs are gone. The provider is
-		// resolved exactly ONCE here and the embedder (plus its ONNX session)
-		// is created once per process and never re-created: changing either
-		// knob therefore requires an app restart. All four values pass
-		// through to sp4rk verbatim — "auto" walks the hardware ladder
-		// (CUDA, then OpenVINO) and falls back to CPU with a WARN inside
-		// NewEmbedder, "cpu" forces the CPU provider, "cuda" demands the
-		// NVIDIA GPU, "openvino" demands Intel hardware.
-		requestedProvider := cfg.VectorIndex.ExecutionProvider
-		if requestedProvider == "" {
-			requestedProvider = config.VectorIndexProviderAuto
-		}
-		onnxDevice := cfg.VectorIndex.DeviceID
-		embCfg := embedding.EmbedderConfig{
-			ModelPath:         modelPath,
-			TokenizerPath:     tokenizerPath,
-			LibraryPath:       libraryPath,
-			MaxSeqLength:      maxSeqLength,
-			HiddenDim:         hiddenDim,
-			BatchSize:         cfg.VectorIndex.EmbeddingBatchSize,
-			IntraOpThreads:    cfg.VectorIndex.EmbeddingThreads,
-			ExecutionProvider: requestedProvider,
-			DeviceID:          onnxDevice,
-			Logger:            log,
-		}
-		emb, embErr := embedding.NewEmbedder(embCfg)
-		// embedderInfo feeds the execution-provider facts into every
-		// vector-index status payload; the explicit-cuda/openvino→cpu
-		// fallback (the only true fallback — an "auto" request always
-		// resolves to a winner, so auto→cuda and auto→openvino are
-		// successes and auto→cpu is Auto's expected degradation) is what
-		// the settings UI renders from the requested/effective pair
-		// (ADR-045 observability contract).
-		embedderInfo := backend.VectorEmbedderInfo{RequestedProvider: requestedProvider, DeviceID: onnxDevice}
-		if embErr != nil && (requestedProvider == config.VectorIndexProviderCUDA || requestedProvider == config.VectorIndexProviderOpenVINO) {
-			// Explicit "cuda"/"openvino" that cannot come up must not
-			// silently kill vector search: continue on the CPU provider so
-			// search stays available — but the user explicitly asked for a
-			// hardware provider, so the fallback is made unmissable: WARN
-			// log + runtime_error toast + the requested/effective mismatch
-			// recorded in every status.
-			providerLabel, errorCode, fixHint := "CUDA", "vector_cuda_fallback",
-				"Fix the GPU setup (make fetch-onnx-gpu + CUDA driver) or set vector_index.execution_provider: auto|cpu."
-			if requestedProvider == config.VectorIndexProviderOpenVINO {
-				providerLabel, errorCode, fixHint = "OpenVINO", "vector_openvino_fallback",
-					"Fix the Intel setup (make fetch-onnx-openvino installs the OpenVINO execution-provider plugin next to the ONNX Runtime library, Linux x64 only) or set vector_index.execution_provider: auto|cpu."
-			}
-			log.Warn(providerLabel+" execution provider unavailable, falling back to CPU",
-				"error", embErr,
-				"deviceID", onnxDevice,
-				"library", libraryPath)
-			a.emit(backend.EventRuntimeError, map[string]string{
-				"id":         uuid.New().String(),
-				"message":    "Vector index: " + providerLabel + " execution provider is unavailable — running on the CPU, embeddings will be slower. Cause: " + embErr.Error() + " " + fixHint,
-				"error_code": errorCode,
-			})
-			embedderInfo.FallbackReason = embErr.Error()
-			embCfg.ExecutionProvider = embedding.ExecutionProviderCPU
-			emb, embErr = embedding.NewEmbedder(embCfg)
-		}
-		if embErr != nil {
-			log.Warn("vector search unavailable",
-				"error", embErr,
-				"executionProvider", requestedProvider,
-				"deviceID", onnxDevice,
-				"library", libraryPath)
-			embedderInfo.FallbackReason = embErr.Error()
-			a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)
-			a.emit("vector_index:status", map[string]any{
-				"available":                    false,
-				"reason":                       embErr.Error(),
-				"requested_execution_provider": requestedProvider,
-			})
-			return
-		}
-		embedderInfo.EffectiveProvider = emb.ExecutionProvider()
-		if embedderInfo.EffectiveProvider == requestedProvider && embedderInfo.FallbackReason != "" {
-			// Unreachable combination today (reason set ⇒ divergence); guard
-			// keeps the invariant explicit for future editors.
-			embedderInfo.FallbackReason = ""
-		}
-		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderCPU &&
-			requestedProvider == config.VectorIndexProviderAuto {
-			// "auto" degraded to the CPU provider inside sp4rk (the WARN with
-			// the concrete cause is logged there); keep one app-level line
-			// tying the divergence to vector search. The status payload
-			// carries requested vs effective for the same reason. An "auto"
-			// request that WON with CUDA (effective=cuda) is not a fallback —
-			// only effective=cpu under an auto request is.
-			log.Warn("vector index embedder running on CPU provider",
-				"requestedExecutionProvider", requestedProvider,
-				"effectiveExecutionProvider", embedderInfo.EffectiveProvider,
-				"hint", "no usable hardware execution provider; see the WARN above for the per-provider causes")
-		}
-		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderCUDA {
-			// External verification that the process really runs on the GPU —
-			// diagnostics only, never blocks or fails startup.
-			verified := a.verifyEmbedderGPU(emb, log)
-			embedderInfo.CUDAVerified = &verified
-		}
-		if embedderInfo.EffectiveProvider == embedding.ExecutionProviderOpenVINO {
-			// External verification of the device class the OpenVINO
-			// provider actually drives ("gpu" | "cpu" | "" unverified) —
-			// sp4rk resolves the concrete device inside the rung (the plugin
-			// uses only the first appended device, so a device it cannot
-			// compile — an Intel NPU — is skipped for the next one), which
-			// means only an external probe can tell GPU from CPU. Diagnostics
-			// only, never blocks or fails startup.
-			embedderInfo.OVDevice = vectorindex.VerifyEmbedderOvDevice(context.Background(), emb, log)
-		}
-		a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)
-
-		// Content filter: deterministic early rejection of generated /
-		// minified / pathological files before chunking. Resolved from
-		// vector_index.content_filter (defaults materialized by
-		// ApplyDefaults); the resolved policy participates in the chunker
-		// fingerprint, so policy changes re-validate sidecars.
-		contentFilter := cfg.VectorIndex.ContentFilter.ResolveContentFilter()
-		// The per-root registry (ADR-080) builds managers on demand through
-		// this factory. CloseFn stays nil on every per-root manager: the
-		// ONNX runtime is process-global and shared, so an LRU eviction must
-		// never close it — the registry's ShutdownAll closes the embedder
-		// exactly once after every manager is down.
-		factory := func() (*vectorindex.Manager, error) {
-			return vectorindex.NewManager(vectorindex.ManagerConfig{
-				EmbeddingFunc: emb.EmbeddingFunc(),
-				// BatchEmbedder enables the batched document-embedding path in
-				// Service.AddDocuments: chunk contents are embedded via the
-				// embedder's batch ONNX session BEFORE the chromem commit, so
-				// chromem skips its one-inference-per-chunk calls entirely.
-				// *embedding.Embedder satisfies the interface directly.
-				BatchEmbedder: emb,
-				HybridConfig: vectorindex.HybridConfig{
-					RRFK:              cfg.VectorIndex.HybridRRFK,
-					FanoutMultiplier:  cfg.VectorIndex.HybridFanoutMultiplier,
-					FanoutMin:         cfg.VectorIndex.HybridFanoutMin,
-					VectorScoreFloor:  derefFloat(cfg.VectorIndex.HybridVectorScoreFloor),
-					VectorScoreRatio:  derefFloat(cfg.VectorIndex.HybridVectorScoreRatio),
-					LexicalScoreRatio: derefFloat(cfg.VectorIndex.HybridLexicalScoreRatio),
-				},
-				MaxFileSize:      cfg.VectorIndex.MaxFileSize,
-				MaxChunkSize:     cfg.VectorIndex.MaxChunkSize,
-				MaxChunksPerFile: cfg.VectorIndex.MaxChunksPerFile,
-				ContentFilter:    &contentFilter,
-				// Indexing/search tuning knobs (vector_index.*). The config is
-				// resolved (ApplyDefaults ran), so every value carries an
-				// explicit default here; EmbeddingBatchSize must match the
-				// EmbedderConfig value above — the Manager stores it for the
-				// batched-embedding path, the embedder uses it as its ONNX
-				// batch session capacity.
-				EmbeddingBatchSize:        cfg.VectorIndex.EmbeddingBatchSize,
-				EmbeddingCacheFingerprint: cacheFingerprint,
-				EmbeddingDimension:        hiddenDim,
-				EmbeddingCacheMaxBytes:    cfg.VectorIndex.EmbeddingCacheMaxBytes,
-				PrepWorkers:               cfg.VectorIndex.PrepWorkers,
-				Debounce:                  time.Duration(cfg.VectorIndex.DebounceMs) * time.Millisecond,
-				ChunkOverlap:              cfg.VectorIndex.ChunkOverlap,
-				// SearchWaitTimeout: 0 = "fail fast" (explicit sentinel from
-				// config, never defaulted); stored on the Manager for the
-				// search-path wiring.
-				SearchWaitTimeout: time.Duration(derefInt(cfg.VectorIndex.SearchWaitTimeoutMs)) * time.Millisecond,
-				// ParkCapacity: how many recently-closed projects keep their
-				// vector-index state resident (vector_index.park_capacity;
-				// resolved default 3, explicit 0 disables parking).
-				ParkCapacity: derefInt(cfg.VectorIndex.ParkCapacity),
-				// ParkBudgetBytes: cumulative resident-memory budget for the
-				// park LRU (vector_index.park_budget_mb → bytes; resolved
-				// default 1024 MiB, explicit -1 disables the byte budget
-				// — park_capacity alone). A nil pointer (should not happen:
-				// ApplyDefaults always resolves it) still yields the 1024 MiB
-				// default rather than a fail-open zero budget.
-				ParkBudgetBytes: derefParkBudgetBytes(cfg.VectorIndex.ParkBudgetMb),
-				Logger:          log,
-			})
-		}
-
-		// Abort registration if Shutdown has already run Cleanup — the
-		// registry is closed and will never build a manager, so nobody would
-		// release the embedder; close it here instead (quitting during init
-		// must not leak the ONNX runtime).
-		if a.wailsCtx() != nil && a.wailsCtx().Err() != nil {
-			log.Info("vector search init aborted: app shutting down")
-			_ = emb.Close()
-			return
-		}
-		// Hand the factory + readiness to the backend registry. From this
-		// point managers are built per workspace root on demand; the deferred
-		// project setup (the startup SwitchProject that arrived before the
-		// factory was wired) is applied right after.
-		a.frontendAPI().Lifecycle().SetVectorRootsFactory(factory, vectorReady, emb.Close)
-		// The frontend's first SwitchProject (fired on backend:ready) almost
-		// certainly ran before the line above and skipped vector setup because
-		// the factory was not wired yet. Apply that deferred setup now, so the
-		// startup project is indexed without a manual project switch.
-		a.frontendAPI().Lifecycle().InitVectorIndexForActiveProject()
-		log.Info("background init complete", "phase", "vector_index", "elapsed_ms", time.Since(startTime).Milliseconds())
+		defer once.Do(func() { close(ready) })
+		l.runVectorIndexInit(epoch, ready)
 	}()
+}
+
+// wireIfCurrent hands the factory + readiness to the per-root registry only
+// while epoch is still current. The epoch comparison and the wiring are one
+// atomic step under mu: a disable (or a newer launch) that raced in between
+// has already bumped the epoch, so the stale init loses here, closes its own
+// embedder, and leaves the registry untouched.
+func (l *vectorIndexLauncher) wireIfCurrent(epoch uint64, factory func() (*vectorindex.Manager, error), ready <-chan struct{}, closeEmbedder func() error) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.epoch != epoch {
+		return false
+	}
+	l.app.frontendAPI().Lifecycle().SetVectorRootsFactory(factory, ready, closeEmbedder)
+	return true
+}
+
+// runVectorIndexInit is the background ONNX-backed vector-index init, run in
+// a goroutine after EventBackendReady so it never blocks the critical path.
+// Every config knob is read through the LIVE snapshot accessor
+// (configMu-guarded), never through the startup config pointer: a restart
+// triggered by UpdateIndexingSettings must see the just-persisted values.
+func (l *vectorIndexLauncher) runVectorIndexInit(epoch uint64, ready chan struct{}) {
+	a := l.app
+	log := l.log
+	startTime := time.Now()
+	vi := a.frontendAPI().Lifecycle().VectorIndexConfigSnapshot()
+
+	// Recover from a CGO/ONNX panic (version mismatch, malformed model
+	// file, …) so the app survives with vector search disabled rather than
+	// crashing after EventBackendReady has already been emitted.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("vector index background init panicked", "panic", r)
+			a.emit("vector_index:status", map[string]any{"available": false, "reason": fmt.Sprint(r)})
+		}
+	}()
+
+	// vector_index.enabled gate: with indexing off (the config booted that
+	// way — the disable RPC invalidates in-flight launches through the hook
+	// instead of reaching this arm) the ONNX runtime is never loaded. Park
+	// the registry so every routing path fails fast with the disabled error
+	// (not the still-loading one) and surface the off state to the UI.
+	if !vi.IndexingEnabled() {
+		log.Info("vector search disabled by config (vector_index.enabled: false); skipping ONNX init")
+		a.frontendAPI().Lifecycle().VectorRoots().Disable()
+		a.emit(backend.EventVectorIndexStatus, backend.VectorIndexStatus{State: "disabled", Indices: []string{}})
+		return
+	}
+
+	modelPath := resolveModelPath("jina-v2-small.onnx", l.agentDir)
+	tokenizerPath := resolveModelPath("jina-v2-small-tokenizer.json", l.agentDir)
+	libraryPath := resolveONNXLibPath()
+
+	// Create embedder directly via github.com/v0lka/sp4rk/embedding.
+	if modelPath == "" || tokenizerPath == "" || libraryPath == "" {
+		log.Info("vector search disabled (model files not found)")
+		a.emit("vector_index:status", map[string]any{"available": false, "reason": "model files not found"})
+		return
+	}
+	const (
+		maxSeqLength = embedding.DefaultMaxSeqLength
+		hiddenDim    = embedding.DefaultHiddenDim
+	)
+	cacheFingerprint, fingerprintErr := vectorindex.EmbeddingFingerprint(modelPath, tokenizerPath, vectorindex.EmbeddingFingerprintParams{
+		MaxSeqLength:           maxSeqLength,
+		Dimension:              hiddenDim,
+		NormalizationAlgorithm: vectorindex.EmbeddingNormalizationAlgorithm,
+	})
+	if fingerprintErr != nil {
+		// Cache is an optimization: fingerprint I/O failure must not disable
+		// vector search or indexing.
+		log.Warn("embedding cache disabled: artifact fingerprint failed", "error", fingerprintErr)
+		cacheFingerprint = ""
+	}
+
+	// ONNX execution provider, driven by config
+	// (vector_index.execution_provider / device_id) — the former
+	// environment-only proof-of-concept knobs are gone. The provider is
+	// resolved exactly ONCE per launch here and the embedder (plus its ONNX
+	// session) is created once per launch (startup or an enabled=true
+	// restart) and never re-created mid-launch: changing either knob
+	// therefore requires an app restart. All four values pass through to
+	// sp4rk verbatim — "auto" walks the hardware ladder (CUDA, then
+	// OpenVINO) and falls back to CPU with a WARN inside NewEmbedder, "cpu"
+	// forces the CPU provider, "cuda" demands the NVIDIA GPU, "openvino"
+	// demands Intel hardware.
+	requestedProvider := vi.ExecutionProvider
+	if requestedProvider == "" {
+		requestedProvider = config.VectorIndexProviderAuto
+	}
+	onnxDevice := vi.DeviceID
+	embCfg := embedding.EmbedderConfig{
+		ModelPath:         modelPath,
+		TokenizerPath:     tokenizerPath,
+		LibraryPath:       libraryPath,
+		MaxSeqLength:      maxSeqLength,
+		HiddenDim:         hiddenDim,
+		BatchSize:         vi.EmbeddingBatchSize,
+		IntraOpThreads:    vi.EmbeddingThreads,
+		ExecutionProvider: requestedProvider,
+		DeviceID:          onnxDevice,
+		Logger:            log,
+	}
+	emb, embErr := embedding.NewEmbedder(embCfg)
+	// embedderInfo feeds the execution-provider facts into every
+	// vector-index status payload; the explicit-cuda/openvino→cpu
+	// fallback (the only true fallback — an "auto" request always
+	// resolves to a winner, so auto→cuda and auto→openvino are
+	// successes and auto→cpu is Auto's expected degradation) is what
+	// the settings UI renders from the requested/effective pair
+	// (ADR-045 observability contract).
+	embedderInfo := backend.VectorEmbedderInfo{RequestedProvider: requestedProvider, DeviceID: onnxDevice}
+	if embErr != nil && (requestedProvider == config.VectorIndexProviderCUDA || requestedProvider == config.VectorIndexProviderOpenVINO) {
+		// Explicit "cuda"/"openvino" that cannot come up must not
+		// silently kill vector search: continue on the CPU provider so
+		// search stays available — but the user explicitly asked for a
+		// hardware provider, so the fallback is made unmissable: WARN
+		// log + runtime_error toast + the requested/effective mismatch
+		// recorded in every status.
+		providerLabel, errorCode, fixHint := "CUDA", "vector_cuda_fallback",
+			"Fix the GPU setup (make fetch-onnx-gpu + CUDA driver) or set vector_index.execution_provider: auto|cpu."
+		if requestedProvider == config.VectorIndexProviderOpenVINO {
+			providerLabel, errorCode, fixHint = "OpenVINO", "vector_openvino_fallback",
+				"Fix the Intel setup (make fetch-onnx-openvino installs the OpenVINO execution-provider plugin next to the ONNX Runtime library, Linux x64 only) or set vector_index.execution_provider: auto|cpu."
+		}
+		log.Warn(providerLabel+" execution provider unavailable, falling back to CPU",
+			"error", embErr,
+			"deviceID", onnxDevice,
+			"library", libraryPath)
+		a.emit(backend.EventRuntimeError, map[string]string{
+			"id":         uuid.New().String(),
+			"message":    "Vector index: " + providerLabel + " execution provider is unavailable — running on the CPU, embeddings will be slower. Cause: " + embErr.Error() + " " + fixHint,
+			"error_code": errorCode,
+		})
+		embedderInfo.FallbackReason = embErr.Error()
+		embCfg.ExecutionProvider = embedding.ExecutionProviderCPU
+		emb, embErr = embedding.NewEmbedder(embCfg)
+	}
+	if embErr != nil {
+		log.Warn("vector search unavailable",
+			"error", embErr,
+			"executionProvider", requestedProvider,
+			"deviceID", onnxDevice,
+			"library", libraryPath)
+		embedderInfo.FallbackReason = embErr.Error()
+		a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)
+		a.emit("vector_index:status", map[string]any{
+			"available":                    false,
+			"reason":                       embErr.Error(),
+			"requested_execution_provider": requestedProvider,
+		})
+		return
+	}
+	embedderInfo.EffectiveProvider = emb.ExecutionProvider()
+	if embedderInfo.EffectiveProvider == requestedProvider && embedderInfo.FallbackReason != "" {
+		// Unreachable combination today (reason set ⇒ divergence); guard
+		// keeps the invariant explicit for future editors.
+		embedderInfo.FallbackReason = ""
+	}
+	if embedderInfo.EffectiveProvider == embedding.ExecutionProviderCPU &&
+		requestedProvider == config.VectorIndexProviderAuto {
+		// "auto" degraded to the CPU provider inside sp4rk (the WARN with
+		// the concrete cause is logged there); keep one app-level line
+		// tying the divergence to vector search. The status payload
+		// carries requested vs effective for the same reason. An "auto"
+		// request that WON with CUDA (effective=cuda) is not a fallback —
+		// only effective=cpu under an auto request is.
+		log.Warn("vector index embedder running on CPU provider",
+			"requestedExecutionProvider", requestedProvider,
+			"effectiveExecutionProvider", embedderInfo.EffectiveProvider,
+			"hint", "no usable hardware execution provider; see the WARN above for the per-provider causes")
+	}
+	if embedderInfo.EffectiveProvider == embedding.ExecutionProviderCUDA {
+		// External verification that the process really runs on the GPU —
+		// diagnostics only, never blocks or fails startup.
+		verified := a.verifyEmbedderGPU(emb, log)
+		embedderInfo.CUDAVerified = &verified
+	}
+	if embedderInfo.EffectiveProvider == embedding.ExecutionProviderOpenVINO {
+		// External verification of the device class the OpenVINO
+		// provider actually drives ("gpu" | "cpu" | "" unverified) —
+		// sp4rk resolves the concrete device inside the rung (the plugin
+		// uses only the first appended device, so a device it cannot
+		// compile — an Intel NPU — is skipped for the next one), which
+		// means only an external probe can tell GPU from CPU. Diagnostics
+		// only, never blocks or fails startup.
+		embedderInfo.OVDevice = vectorindex.VerifyEmbedderOvDevice(context.Background(), emb, log)
+	}
+	a.frontendAPI().Lifecycle().SetVectorEmbedderInfo(embedderInfo)
+
+	// The per-root registry (ADR-080) builds managers on demand through
+	// this factory. CloseFn stays nil on every per-root manager: the
+	// ONNX runtime is process-global and shared, so an LRU eviction must
+	// never close it — the registry's ShutdownAll closes the embedder
+	// exactly once after every manager is down.
+	//
+	// Every manager build re-snapshots the LIVE config (configMu-guarded
+	// accessors): an UpdateIndexingSettings save persists new values
+	// BEFORE any post-save manager build runs, so managers created after
+	// the save carry the new indexing policy (the RPC's reload path
+	// releases the pre-save managers and rebuilds the focus root through
+	// this same closure).
+	factory := func() (*vectorindex.Manager, error) {
+		viNow := a.frontendAPI().Lifecycle().VectorIndexConfigSnapshot()
+		pol := backend.ResolveVectorIndexingPolicy(viNow)
+		contentFilterNow := viNow.ContentFilter.ResolveContentFilter()
+		return vectorindex.NewManager(vectorindex.ManagerConfig{
+			EmbeddingFunc: emb.EmbeddingFunc(),
+			// BatchEmbedder enables the batched document-embedding path in
+			// Service.AddDocuments: chunk contents are embedded via the
+			// embedder's batch ONNX session BEFORE the chromem commit, so
+			// chromem skips its one-inference-per-chunk calls entirely.
+			// *embedding.Embedder satisfies the interface directly.
+			BatchEmbedder: emb,
+			HybridConfig: vectorindex.HybridConfig{
+				RRFK:              viNow.HybridRRFK,
+				FanoutMultiplier:  viNow.HybridFanoutMultiplier,
+				FanoutMin:         viNow.HybridFanoutMin,
+				VectorScoreFloor:  derefFloat(viNow.HybridVectorScoreFloor),
+				VectorScoreRatio:  derefFloat(viNow.HybridVectorScoreRatio),
+				LexicalScoreRatio: derefFloat(viNow.HybridLexicalScoreRatio),
+			},
+			MaxFileSize:      viNow.MaxFileSize,
+			MaxChunkSize:     viNow.MaxChunkSize,
+			MaxChunksPerFile: viNow.MaxChunksPerFile,
+			ContentFilter:    &contentFilterNow,
+			// Indexing policy (vector_index.respect_gitignore /
+			// respect_aiignore / exclude_patterns / index_submodules):
+			// resolved from the same live snapshot, so a policy save is
+			// picked up by the next manager build without a restart.
+			IgnoreFiles:       pol.IgnoreFiles,
+			ExcludePatterns:   pol.ExcludePatterns,
+			IncludeSubmodules: pol.IncludeSubmodules,
+			// Indexing/search tuning knobs (vector_index.*). The config is
+			// resolved (ApplyDefaults ran), so every value carries an
+			// explicit default here; EmbeddingBatchSize must match the
+			// EmbedderConfig value above — the Manager stores it for the
+			// batched-embedding path, the embedder uses it as its ONNX
+			// batch session capacity.
+			EmbeddingBatchSize:        viNow.EmbeddingBatchSize,
+			EmbeddingCacheFingerprint: cacheFingerprint,
+			EmbeddingDimension:        hiddenDim,
+			EmbeddingCacheMaxBytes:    viNow.EmbeddingCacheMaxBytes,
+			PrepWorkers:               viNow.PrepWorkers,
+			Debounce:                  time.Duration(viNow.DebounceMs) * time.Millisecond,
+			ChunkOverlap:              viNow.ChunkOverlap,
+			// SearchWaitTimeout: 0 = "fail fast" (explicit sentinel from
+			// config, never defaulted); stored on the Manager for the
+			// search-path wiring.
+			SearchWaitTimeout: time.Duration(derefInt(viNow.SearchWaitTimeoutMs)) * time.Millisecond,
+			// ParkCapacity: how many recently-closed projects keep their
+			// vector-index state resident (vector_index.park_capacity;
+			// resolved default 3, explicit 0 disables parking).
+			ParkCapacity: derefInt(viNow.ParkCapacity),
+			// ParkBudgetBytes: cumulative resident-memory budget for the
+			// park LRU (vector_index.park_budget_mb → bytes; resolved
+			// default 1024 MiB, explicit -1 disables the byte budget
+			// — park_capacity alone). A nil pointer (should not happen:
+			// ApplyDefaults always resolves it) still yields the 1024 MiB
+			// default rather than a fail-open zero budget.
+			ParkBudgetBytes: derefParkBudgetBytes(viNow.ParkBudgetMb),
+			Logger:          log,
+		})
+	}
+
+	// Abort registration if Shutdown has already run Cleanup — the
+	// registry is closed and will never build a manager, so nobody would
+	// release the embedder; close it here instead (quitting during init
+	// must not leak the ONNX runtime).
+	if a.wailsCtx() != nil && a.wailsCtx().Err() != nil {
+		log.Info("vector search init aborted: app shutting down")
+		_ = emb.Close()
+		return
+	}
+	// Hand the factory + readiness to the backend registry, gated on
+	// this launch's epoch: a disable (or a newer launch) that raced the
+	// init has bumped the epoch, and the stale launch then closes its
+	// own embedder and leaves the parked registry untouched instead of
+	// resurrecting a factory after VectorRoots.Disable unwound it.
+	if !l.wireIfCurrent(epoch, factory, ready, emb.Close) {
+		log.Info("vector search init superseded (disabled or restarted); closing the stale embedder")
+		_ = emb.Close()
+		return
+	}
+	// From this point managers are built per workspace root on demand.
+	// The frontend's first SwitchProject (fired on backend:ready) almost
+	// certainly ran before the wiring above and skipped vector setup
+	// because the factory was not wired yet — and while indexing was
+	// disabled, every switch deferred the same way. Apply the deferred
+	// setup now, so the active project is indexed without a manual
+	// project switch.
+	a.frontendAPI().Lifecycle().InitVectorIndexForActiveProject()
+	log.Info("background init complete", "phase", "vector_index", "elapsed_ms", time.Since(startTime).Milliseconds())
 }
 
 // verifyEmbedderGPU performs the one-shot external GPU verification after a

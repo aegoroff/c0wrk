@@ -472,10 +472,14 @@ func (info fileHashInfo) entry(chunkerFP, chunkSet string) string {
 // ValidateCollection checks stored file hashes against current files on disk.
 // It returns lists of stale (modified), new, and deleted file paths.
 // workspacePath is the root directory to walk for source files. checker is the
-// ignore resolver (over .gitignore + .aiignore) the caller already built for
-// this workspace; ValidateCollection reuses it so its walk applies exactly the
-// same filtering as the Indexer's IndexFull walk (preventing reindex loops).
-func (s *Service) ValidateCollection(ctx context.Context, workspacePath string, checker ignore.IgnoreChecker) (staleFiles, newFiles, deletedFiles []string, err error) {
+// ignore resolver (honoured ignore files + extra exclude patterns) the caller
+// already built for this workspace; ValidateCollection reuses it so its walk
+// applies exactly the same filtering as the Indexer's IndexFull walk
+// (preventing reindex loops). includeSubmodules mirrors walkProjectFiles'
+// submodule pruning: a file indexed while submodules were included is
+// reported deleted by a pass that no longer includes them, and vice versa a
+// newly-included submodule's files surface as new.
+func (s *Service) ValidateCollection(ctx context.Context, workspacePath string, checker ignore.IgnoreChecker, includeSubmodules bool) (staleFiles, newFiles, deletedFiles []string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -520,6 +524,9 @@ func (s *Service) ValidateCollection(ctx context.Context, workspacePath string, 
 
 		if d.IsDir() {
 			if isHiddenName(d.Name()) || checker.Ignored(path, true) {
+				return filepath.SkipDir
+			}
+			if !includeSubmodules && path != absRoot && isNestedRepoDir(path) {
 				return filepath.SkipDir
 			}
 			return nil

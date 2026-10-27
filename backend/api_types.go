@@ -152,15 +152,42 @@ type ConfigSearchResp struct {
 	BaseURL  string `json:"base_url"`
 }
 
-// VectorIndexSettingsResponse holds the vector-index embedding settings for
-// the frontend: which ONNX Runtime execution provider the embedder runs on
-// ("auto" | "cpu" | "cuda") and the GPU device index used when the provider
-// resolves to CUDA. Changing these requires an app restart to take effect —
-// the embedder is created once per process — so the update path only
-// validates and persists them; it never touches the vector manager.
+// VectorIndexSettingsResponse holds the vector-index settings for the
+// frontend. The embedding half (execution provider "auto" | "cpu" | "cuda" |
+// "openvino" and the GPU device index) requires an app restart to take
+// effect — the embedder is created once per process — so its update path
+// only validates and persists. The indexing-policy half (enabled /
+// exclude_patterns / index_submodules / respect_gitignore / respect_aiignore)
+// is served RESOLVED (pointer-bool defaults applied) and is live-applied by
+// UpdateIndexingSettings.
 type VectorIndexSettingsResponse struct {
 	ExecutionProvider string `json:"execution_provider"`
 	DeviceID          int    `json:"device_id"`
+	// Enabled is the resolved vector_index.enabled gate (nil = true).
+	Enabled bool `json:"enabled"`
+	// ExcludePatterns mirrors vector_index.exclude_patterns (nil = none).
+	ExcludePatterns []string `json:"exclude_patterns"`
+	// IndexSubmodules is the resolved vector_index.index_submodules gate
+	// (nil = false: submodules stay out of the index unless explicitly
+	// opted in).
+	IndexSubmodules bool `json:"index_submodules"`
+	// RespectGitIgnore / RespectAIIgnore are the resolved
+	// vector_index.respect_gitignore / respect_aiignore gates (nil = true).
+	RespectGitIgnore bool `json:"respect_gitignore"`
+	RespectAIIgnore  bool `json:"respect_aiignore"`
+}
+
+// IndexingSettingsRequest is the UpdateIndexingSettings payload: a full
+// replacement of the vector-index indexing policy
+// (vector_index.enabled / exclude_patterns / index_submodules /
+// respect_gitignore / respect_aiignore). The RPC validates the list,
+// persists the change, and applies it live (see UpdateIndexingSettings).
+type IndexingSettingsRequest struct {
+	Enabled          bool     `json:"enabled"`
+	ExcludePatterns  []string `json:"exclude_patterns"`
+	IndexSubmodules  bool     `json:"index_submodules"`
+	RespectGitIgnore bool     `json:"respect_gitignore"`
+	RespectAIIgnore  bool     `json:"respect_aiignore"`
 }
 
 // LLMSettingsRequest holds LLM settings from the frontend.

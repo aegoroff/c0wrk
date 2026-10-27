@@ -4,6 +4,7 @@ import { useInputModeStore } from '@/stores/inputModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useProjectStore } from '@/stores/projectStore'
 import { useVectorIndexStore } from '@/stores/vectorIndexStore'
+import { useIndexingSettings } from '@/hooks/useIndexingSettings'
 import { useCursorMenuPosition } from '@/lib/cursorMenuPosition'
 import { cn } from '@/lib/utils'
 
@@ -27,6 +28,10 @@ interface FileViewerContextMenuProps {
  * A contextual dropdown rendered at the pointer position offering "Add to chat"
  * and "Find similar" (vector search seeded from the selection).
  *
+ * "Find similar" is an index surface: while the indexing master switch is off
+ * (see useIndexingSettings) the entry — and its divider — hide, leaving only
+ * "Add to chat".
+ *
  * Handles its own dismissal on click outside, Escape key, and window scroll.
  * The parent controls visibility via the `position` prop — when `null`,
  * nothing is rendered.
@@ -34,6 +39,8 @@ interface FileViewerContextMenuProps {
 export function FileViewerContextMenu({ reference, selectedText, position, onClose }: FileViewerContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const insertTextIntoInput = useInputModeStore((s) => s.insertTextIntoInput)
+  // Indexing master switch: gates the "Find similar" entry (divider included).
+  const indexingEnabled = useIndexingSettings()
   // Primitive selector — referentially stable across renders. Subscribing
   // (rather than reading getState at click time) keeps the item's disabled
   // state live while the menu is open, e.g. when indexing finishes mid-hover.
@@ -141,30 +148,34 @@ export function FileViewerContextMenu({ reference, selectedText, position, onClo
         <MessageSquarePlus className="size-3.5" />
         Add to chat
       </button>
-      <div className="my-1 h-px bg-border" />
-      <button
-        role="menuitem"
-        aria-disabled={findSimilarReady ? undefined : true}
-        onClick={findSimilarReady ? handleFindSimilar : undefined}
-        // Informational hint on the disabled state (NOT an echo of the label):
-        // names the blocker — the live vector-index state — which the label
-        // cannot. Per specs/domains/frontend/button-tooltips.md a state-`
-        // title` on a menuitem is the blessed way to surface it.
-        title={
-          findSimilarReady
-            ? undefined
-            : `Find similar is unavailable — the vector index is ${indexState}`
-        }
-        className={cn(
-          'relative flex w-full select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
-          findSimilarReady && 'hover:bg-muted/50 focus:bg-muted/50',
-          !findSimilarReady && 'cursor-not-allowed opacity-50',
-          '[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:size-3.5 [&_svg]:text-muted-foreground',
-        )}
-      >
-        <Telescope className="size-3.5" />
-        Find similar
-      </button>
+      {indexingEnabled && (
+        <>
+          <div className="my-1 h-px bg-border" />
+          <button
+            role="menuitem"
+            aria-disabled={findSimilarReady ? undefined : true}
+            onClick={findSimilarReady ? handleFindSimilar : undefined}
+            // Informational hint on the disabled state (NOT an echo of the label):
+            // names the blocker — the live vector-index state — which the label
+            // cannot. Per specs/domains/frontend/button-tooltips.md a state-`
+            // title` on a menuitem is the blessed way to surface it.
+            title={
+              findSimilarReady
+                ? undefined
+                : `Find similar is unavailable — the vector index is ${indexState}`
+            }
+            className={cn(
+              'relative flex w-full select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
+              findSimilarReady && 'hover:bg-muted/50 focus:bg-muted/50',
+              !findSimilarReady && 'cursor-not-allowed opacity-50',
+              '[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg]:size-3.5 [&_svg]:text-muted-foreground',
+            )}
+          >
+            <Telescope className="size-3.5" />
+            Find similar
+          </button>
+        </>
+      )}
     </div>
   )
 }

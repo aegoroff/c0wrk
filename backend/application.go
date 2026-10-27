@@ -250,6 +250,17 @@ func NewApplication(cfg ApplicationConfig) (*Application, error) {
 		builder.RegisterVectorSearch(searchFunc, waitFunc, cfg.VectorSearchWaitTimeout, cfg.VectorSearchWaitDisabled)
 	}
 
+	// A config that boots with indexing off (vector_index.enabled: false)
+	// still registers the closures FIRST and flips the builder off right
+	// after: the disable stash is then populated, so a runtime enable
+	// (UpdateIndexingSettings enabled=true) restores them without the
+	// Application having to rebuild the router closures. The desktop init
+	// separately skips the ONNX load and parks the per-root registry for
+	// the same config.
+	if !cfg.Config.VectorIndex.IndexingEnabled() {
+		builder.SetVectorSearchEnabled(false)
+	}
+
 	// 3b. Skill discovery directories. The builder creates a per-session
 	// SkillManager on each Build() and always prepends the current project's
 	// `.agents/skills` directory (see core/builder.go). Here we only resolve

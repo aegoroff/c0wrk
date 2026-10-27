@@ -40,6 +40,10 @@ export function useVectorReindex() {
   // nothing is running — and the next branch change or project switch retries
   // the open.
   const isIndexUnavailable = indexState === 'unavailable'
+  // `disabled` (ADR-103) is terminal the same way: the master switch is off,
+  // the registry is parked (every reindex RPC fails fast), and only Settings
+  // can change it. Disabled without the spinner, with its own tooltip.
+  const isIndexDisabled = indexState === 'disabled'
   const isBusy = isPassRunning || isOpening
   const reindexUnavailable = isNoProject || !activeProjectId
 
@@ -52,8 +56,8 @@ export function useVectorReindex() {
   const [reindexRequested, setReindexRequested] = useState(false)
   const reindexBusy = isBusy || reindexRequested
   // The disabled set the button renders from: busy (a pass or the optimistic
-  // latch) OR the terminal unavailable state.
-  const reindexDisabled = reindexBusy || isIndexUnavailable
+  // latch) OR a terminal state (unavailable / disabled).
+  const reindexDisabled = reindexBusy || isIndexUnavailable || isIndexDisabled
 
   // The action's tooltip names the REAL reason it is disabled, so the open is
   // never labelled a reindex pass — the same honesty rule the status-bar pill
@@ -64,18 +68,20 @@ export function useVectorReindex() {
   // reopening the project retries the open).
   const reindexBusyTitle = isOpening && !reindexRequested ? 'Opening the index…' : 'Reindexing...'
   const reindexDisabledTitle =
-    isIndexUnavailable && !reindexBusy
-      ? 'Index unavailable — switch branch or reopen the project to retry'
-      : reindexBusyTitle
+    isIndexDisabled && !reindexBusy
+      ? 'Indexing is off — enable it in Settings → Search'
+      : isIndexUnavailable && !reindexBusy
+        ? 'Index unavailable — switch branch or reopen the project to retry'
+        : reindexBusyTitle
 
   useEffect(() => {
     // The backend emits a busy status (loading/indexing/reindexing) as the first
     // event of a project open or of a pass; once the store reflects it the latch
     // is redundant. A switch to an unavailable project (No Project / no active
-    // project) — or to a terminal unavailable index state — also invalidates a
-    // pending request.
-    if (isBusy || isIndexUnavailable || reindexUnavailable) setReindexRequested(false)
-  }, [isBusy, isIndexUnavailable, reindexUnavailable])
+    // project) — or to a terminal unavailable/disabled index state — also
+    // invalidates a pending request.
+    if (isBusy || isIndexUnavailable || isIndexDisabled || reindexUnavailable) setReindexRequested(false)
+  }, [isBusy, isIndexUnavailable, isIndexDisabled, reindexUnavailable])
 
   // Missed-status release: if the backend resolves the reindex RPC without
   // the store ever observing a busy state (a skipped/coalesced pass), the
@@ -93,15 +99,15 @@ export function useVectorReindex() {
     // Fire-and-forget: the pass runs in the background and reports progress via
     // vector_index:status. Guard against re-entry before the store has observed
     // the busy status (see reindexRequested above) and against the terminal
-    // unavailable state (a reindex cannot repair it).
-    if (isBusy || isIndexUnavailable || reindexRequested) return
+    // unavailable/disabled states (a reindex cannot repair either).
+    if (isBusy || isIndexUnavailable || isIndexDisabled || reindexRequested) return
     setReindexRequested(true)
     reindexVectorIndex().catch(() => {
       // The request never reached a running pass (No Project / no wired
       // manager / transient failure) — release the latch so a retry is possible.
       setReindexRequested(false)
     })
-  }, [isBusy, isIndexUnavailable, reindexRequested])
+  }, [isBusy, isIndexUnavailable, isIndexDisabled, reindexRequested])
 
   return {
     reindexBusy,

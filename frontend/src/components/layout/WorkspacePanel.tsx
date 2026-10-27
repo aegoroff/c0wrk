@@ -10,6 +10,7 @@ import { useProjectStore, selectIsNoProject } from "@/stores/projectStore";
 import { useGitPanelStore } from "@/stores/gitPanelStore";
 import { useUIStore, selectWorkspaceTab, type WorkspaceTab } from "@/stores/uiStore";
 import { useProjectGitRepo } from "@/hooks/useProjectGitRepo";
+import { useIndexingSettings } from "@/hooks/useIndexingSettings";
 import { focusFileExplorer } from "@/lib/workspaceLayout";
 import { FolderTree, GitBranch, Search, FlaskConical } from "lucide-react";
 
@@ -35,6 +36,11 @@ function tabItemProps(tab: WorkspaceTab) {
 export function WorkspacePanel() {
   const isNoProject = useProjectStore(selectIsNoProject);
   const activeProjectId = useProjectStore((s) => s.activeProjectId);
+  // Indexing master switch (config `vector_index.enabled`): the Search
+  // (semantics) tab is the vector-index surface and hides from BOTH tab
+  // layouts while indexing is off — there is no index to search. The hook
+  // must run before the CHAT early-return below (hooks are unconditional).
+  const indexingEnabled = useIndexingSettings();
   // Each project remembers its own workspace tab. Deriving (rather than
   // storing a scalar) means a project switch instantly yields the incoming
   // project's tab without any transient wrong-layout frame.
@@ -64,22 +70,27 @@ export function WorkspacePanel() {
 
   // Keep the per-project workspaceTab valid for the current layout: the
   // Explorer tab exists only for non-git projects (a git project hosts the
-  // explorer inside the Git panel's "files" section), and the Git tab only
-  // for git projects. Runs on layout flips and project switches — but ONLY
-  // once the active project's repo check has landed. Acting on the
-  // fail-closed `isGitRepo === false` while the check is still pending would
-  // clobber a freshly switched project's remembered tab (e.g. a git project
-  // whose memory is 'git' would be reset to 'explorer' before its own check
-  // confirms the repo). The inline effectiveTab remap below covers the
-  // pending window instead.
+  // explorer inside the Git panel's "files" section), the Git tab only
+  // for git projects, and the Search (semantics) tab only while indexing
+  // is enabled. Runs on layout flips, project switches and indexing
+  // toggles — but ONLY once the active project's repo check has landed.
+  // Acting on the fail-closed `isGitRepo === false` while the check is
+  // still pending would clobber a freshly switched project's remembered
+  // tab (e.g. a git project whose memory is 'git' would be reset to
+  // 'explorer' before its own check confirms the repo). The inline
+  // effectiveTab remap below covers the pending window instead.
   useEffect(() => {
     if (!repoKnown || activeProjectId === null) return;
     if (isGitRepo && workspaceTab === "explorer") {
       focusFileExplorer();
     } else if (!isGitRepo && workspaceTab === "git") {
       setWorkspaceTab(activeProjectId, "explorer");
+    } else if (!indexingEnabled && workspaceTab === "semantics") {
+      // Indexing off: the Search tab no longer exists — fall back to the
+      // layout's primary tab (Git for a repo, Explorer otherwise).
+      setWorkspaceTab(activeProjectId, isGitRepo ? "git" : "explorer");
     }
-  }, [repoKnown, isGitRepo, workspaceTab, activeProjectId, setWorkspaceTab]);
+  }, [repoKnown, isGitRepo, workspaceTab, activeProjectId, setWorkspaceTab, indexingEnabled]);
 
   // In CHAT (No Project) mode, hide the tab strip entirely — only show the file
   // explorer with file-name search. Git and Semantics are unavailable anyway.
@@ -97,60 +108,63 @@ export function WorkspacePanel() {
   // the store, a freshly switched project may still hold a tab value with
   // no trigger in the new layout (e.g. 'explorer' in a git project) — Radix
   // would render no content for it, so remap it inline for this render.
-  const effectiveTab = isGitRepo
+  // The same inline fallback covers a remembered 'semantics' while indexing
+  // is off (the effect persists the corrected value once the repo check has
+  // landed).
+  let effectiveTab = isGitRepo
     ? workspaceTab === "explorer"
       ? "git"
       : workspaceTab
     : workspaceTab === "git"
       ? "explorer"
       : workspaceTab;
+  if (!indexingEnabled && effectiveTab === "semantics") {
+    effectiveTab = isGitRepo ? "git" : "explorer";
+  }
+
+  // The Search (semantics) tab is the vector-index surface: it renders only
+  // while the indexing master switch is on, in BOTH layouts (git and
+  // non-git). With indexing off there is no index to search, so the entry
+  // point hides — exactly like the status-bar indexing indicator and the
+  // viewer's "Find similar" action.
+  const tabs: Array<SegmentedControlItem<WorkspaceTab>> = [
+    isGitRepo
+      ? {
+          value: "git",
+          icon: <GitBranch className="size-4" />,
+          label: "Git",
+          itemProps: tabItemProps("git"),
+        }
+      : {
+          value: "explorer",
+          icon: <FolderTree className="size-4" />,
+          label: "Explorer",
+          itemProps: tabItemProps("explorer"),
+        },
+    ...(indexingEnabled
+      ? [
+          {
+            value: "semantics" as const,
+            icon: <Search className="size-4" />,
+            label: "Search",
+            itemProps: tabItemProps("semantics"),
+          },
+        ]
+      : []),
+    {
+      value: "research",
+      icon: <FlaskConical className="size-4" />,
+      label: "Research",
+      itemProps: tabItemProps("research"),
+    },
+  ];
 
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col gap-0">
         <div className="@container shrink-0 pb-1 border-b border-border bg-secondary/20">
         <SegmentedControl
-          items={(isGitRepo
-            ? [
-                {
-                  value: 'git',
-                  icon: <GitBranch className="size-4" />,
-                  label: 'Git',
-                  itemProps: tabItemProps('git'),
-                },
-                {
-                  value: 'semantics',
-                  icon: <Search className="size-4" />,
-                  label: 'Search',
-                  itemProps: tabItemProps('semantics'),
-                },
-                {
-                  value: 'research',
-                  icon: <FlaskConical className="size-4" />,
-                  label: 'Research',
-                  itemProps: tabItemProps('research'),
-                },
-              ]
-            : [
-                {
-                  value: 'explorer',
-                  icon: <FolderTree className="size-4" />,
-                  label: 'Explorer',
-                  itemProps: tabItemProps('explorer'),
-                },
-                {
-                  value: 'semantics',
-                  icon: <Search className="size-4" />,
-                  label: 'Search',
-                  itemProps: tabItemProps('semantics'),
-                },
-                {
-                  value: 'research',
-                  icon: <FlaskConical className="size-4" />,
-                  label: 'Research',
-                  itemProps: tabItemProps('research'),
-                },
-              ]) as ReadonlyArray<SegmentedControlItem<WorkspaceTab>>}
+          items={tabs}
           value={effectiveTab}
           onValueChange={(v) => {
             if (activeProjectId !== null) {

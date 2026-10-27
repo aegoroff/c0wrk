@@ -108,6 +108,34 @@ type IndexerConfig struct {
 	// Nil selects DefaultContentFilterConfig; a non-nil config is exact.
 	ContentFilter *ContentFilterConfig
 
+	// IgnoreFiles selects which ignore files the indexing walks honour:
+	// nil (the zero value) = both .gitignore and .aiignore (the historical
+	// behaviour); a non-nil slice is the exact honoured set (each entry must
+	// be ".gitignore" or ".aiignore" — anything else fails the resolver
+	// build and the indexer falls open to the noop checker); an empty
+	// non-nil slice honours neither file, which combined with no
+	// ExcludePatterns selects the noop checker outright (vector_index.
+	// respect_gitignore / respect_aiignore).
+	IgnoreFiles []string
+
+	// ExcludePatterns are gitignore-style patterns layered on top of the
+	// honoured ignore files, scoped as if written in a root ignore file
+	// ("/dist" root-anchored, "*.log" any depth, "build/" dir-only). They
+	// are subtractive-only and validated at config load
+	// (vector_index.exclude_patterns); files they match never enter a walk,
+	// and a previously-indexed file that a new pattern covers is dropped by
+	// the next incremental pass (ValidateCollection reports it deleted).
+	ExcludePatterns []string
+
+	// IncludeSubmodules controls whether nested-repository directories — a
+	// directory whose .git is a regular gitdir-pointer file, the on-disk
+	// shape of a checked-out submodule — are indexed. false (the zero
+	// value, matching the vector_index.index_submodules default) prunes
+	// them from every walk and the watcher's indexability check; true
+	// indexes their files like ordinary workspace files (vector_index.
+	// index_submodules).
+	IncludeSubmodules bool
+
 	// PrepWorkers is the number of goroutines that run file preparation
 	// (read/hash/chunk — pure I/O+CPU work) in parallel with the embedding
 	// consumer, so one file's ONNX inference overlaps the next file's disk
@@ -139,6 +167,12 @@ type Indexer struct {
 	onProgress       ProgressCallback
 	logger           *slog.Logger
 	telemetry        *Telemetry
+	// ignoreOptions is the resolved ignore policy (honoured ignore files +
+	// extra exclude patterns) the checker is built from; includeSubmodules
+	// gates nested-repository directories in the walks and the watcher's
+	// indexability check. Both are fixed for the Indexer's lifetime.
+	ignoreOptions     ignore.Options
+	includeSubmodules bool
 
 	// ignoreMu guards ignoreRoot / ignoreChecker, a cache of the workspace's
 	// ignore.Resolver (.gitignore + .aiignore, root and nested) built once
@@ -198,6 +232,11 @@ func NewIndexer(cfg IndexerConfig) *Indexer {
 		onProgress:       onProgress,
 		logger:           logger,
 		telemetry:        cfg.Telemetry,
+		ignoreOptions: ignore.Options{
+			IgnoreFiles:   cfg.IgnoreFiles,
+			ExtraPatterns: cfg.ExcludePatterns,
+		},
+		includeSubmodules: cfg.IncludeSubmodules,
 	}
 }
 
@@ -232,7 +271,7 @@ func (idx *Indexer) IndexFull(ctx context.Context, workspacePath string) (err er
 	}()
 
 	walkStarted := time.Now()
-	files, err := walkProjectFiles(workspacePath, idx.resolverFor(workspacePath), idx.maxFileSize)
+	files, err := walkProjectFiles(workspacePath, idx.resolverFor(workspacePath), idx.maxFileSize, idx.includeSubmodules)
 	idx.telemetry.observe(StageWalkValidation, len(files), time.Since(walkStarted))
 	if err != nil {
 		return fmt.Errorf("walking project files: %w", err)
@@ -307,7 +346,7 @@ func (idx *Indexer) IndexIncremental(ctx context.Context, workspacePath string) 
 	}
 
 	validationStarted := time.Now()
-	stale, newFiles, deleted, err := idx.service.ValidateCollection(ctx, workspacePath, idx.resolverFor(workspacePath))
+	stale, newFiles, deleted, err := idx.service.ValidateCollection(ctx, workspacePath, idx.resolverFor(workspacePath), idx.includeSubmodules)
 	idx.telemetry.observe(StageWalkValidation, len(stale)+len(newFiles)+len(deleted), time.Since(validationStarted))
 	if err != nil {
 		return fmt.Errorf("validating collection: %w", err)
@@ -1436,10 +1475,14 @@ func (idx *Indexer) collectDocumentIDsViaQuery(ctx context.Context, filePaths []
 // walkProjectFiles walks the workspace and returns all indexable file paths.
 // checker must be pre-built by the caller (the Indexer caches it) so the walk
 // and the watcher filter share one source of truth. Files and directories
-// ignored by .gitignore or .aiignore (root and nested, resolved via checker)
-// are skipped, as are hidden (leading-dot) entries. Binary content is not
-// detected here — it is a read-time guard applied in processFile.
-func walkProjectFiles(root string, checker ignore.IgnoreChecker, maxFileSize int64) ([]string, error) {
+// ignored by the honoured ignore files plus extra exclude patterns (root and
+// nested, resolved via checker) are skipped, as are hidden (leading-dot)
+// entries. includeSubmodules=false additionally prunes nested-repository
+// directories (a checked-out submodule: .git is a regular gitdir-pointer
+// file); the walk root itself is always exempt, so a linked-worktree
+// workspace stays fully indexable. Binary content is not detected here — it
+// is a read-time guard applied in processFile.
+func walkProjectFiles(root string, checker ignore.IgnoreChecker, maxFileSize int64, includeSubmodules bool) ([]string, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolving root path: %w", err)
@@ -1453,6 +1496,9 @@ func walkProjectFiles(root string, checker ignore.IgnoreChecker, maxFileSize int
 
 		if d.IsDir() {
 			if isHiddenName(d.Name()) || checker.Ignored(path, true) {
+				return filepath.SkipDir
+			}
+			if !includeSubmodules && path != absRoot && isNestedRepoDir(path) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -1499,12 +1545,19 @@ type noopIgnoreChecker struct{}
 
 func (noopIgnoreChecker) Ignored(string, bool) bool { return false }
 
-// buildIgnoreChecker constructs an ignore resolver over .gitignore + .aiignore
-// (root and nested) for root. On failure it returns a fail-open
-// noopIgnoreChecker together with the error so callers can log once without
-// re-attempting on every debounce flush.
-func buildIgnoreChecker(root string) (ignore.IgnoreChecker, error) {
-	r, err := ignore.NewResolver(root)
+// buildIgnoreChecker constructs an ignore resolver over the honoured ignore
+// files (root and nested) plus the extra exclude patterns for root, per opts
+// (nil IgnoreFiles = both .gitignore and .aiignore, the historical default).
+// When no ignore file is honoured and there are no extra patterns, nothing can
+// ever be reported ignored, so the resolver's workspace walk is skipped
+// entirely and the fail-open noopIgnoreChecker is returned. On any other
+// failure it returns the noopIgnoreChecker together with the error so callers
+// can log once without re-attempting on every debounce flush.
+func buildIgnoreChecker(root string, opts ignore.Options) (ignore.IgnoreChecker, error) {
+	if opts.IgnoreFiles != nil && len(opts.IgnoreFiles) == 0 && len(opts.ExtraPatterns) == 0 {
+		return noopIgnoreChecker{}, nil
+	}
+	r, err := ignore.NewResolverWithOptions(root, opts)
 	if err != nil {
 		return noopIgnoreChecker{}, fmt.Errorf("building ignore resolver for %q: %w", root, err)
 	}
@@ -1527,7 +1580,7 @@ func (idx *Indexer) resolverFor(root string) ignore.IgnoreChecker {
 	}
 	idx.ignoreMu.RUnlock()
 
-	c, err := buildIgnoreChecker(root)
+	c, err := buildIgnoreChecker(root, idx.ignoreOptions)
 	if err != nil {
 		idx.logger.Warn("failed to build ignore resolver; indexing all non-hidden files", "root", root, "error", err)
 	}
@@ -1545,7 +1598,7 @@ func (idx *Indexer) resolverFor(root string) ignore.IgnoreChecker {
 func (idx *Indexer) IsAnyIndexablePath(changedPaths []string, root string) bool {
 	c := idx.resolverFor(root)
 	for _, p := range changedPaths {
-		if isIndexablePath(p, root, c) {
+		if isIndexablePath(p, root, c, idx.includeSubmodules) {
 			return true
 		}
 	}
@@ -1558,8 +1611,12 @@ func (idx *Indexer) IsAnyIndexablePath(changedPaths []string, root string) bool 
 // when any segment is hidden (leading dot) or when the resolver reports the
 // path (or an ancestor directory) as ignored — the resolver walks ancestor
 // directories with directory semantics, so "once a directory is ignored, so
-// are its contents" holds in a single call.
-func isIndexablePath(absPath, root string, checker ignore.IgnoreChecker) bool {
+// are its contents" holds in a single call. With includeSubmodules=false a
+// path is additionally not indexable when any directory from the first
+// segment below the root down to the path itself is a nested-repository root
+// (.git regular file — a submodule checkout); the walk root is never tested,
+// so a linked-worktree workspace keeps indexing its own tree.
+func isIndexablePath(absPath, root string, checker ignore.IgnoreChecker, includeSubmodules bool) bool {
 	relPath, err := filepath.Rel(root, absPath)
 	if err != nil {
 		return false
@@ -1571,16 +1628,51 @@ func isIndexablePath(absPath, root string, checker ignore.IgnoreChecker) bool {
 	}
 
 	// Any hidden segment (directory or file, leading dot) is not indexable.
-	for _, seg := range strings.Split(relPath, "/") {
+	segs := strings.Split(relPath, "/")
+	for _, seg := range segs {
 		if seg == "" || isHiddenName(seg) {
 			return false
 		}
 	}
 
-	// .gitignore / .aiignore, including directory-only rules via ancestor
-	// walking. The leaf is tested as a file (watcher events are predominantly
-	// file creates/modifies); ancestor dirs are treated as dirs by the resolver.
+	// Nested-repository roots (submodules) on the ancestor chain — including
+	// the path's own segment, so a watcher event naming the submodule
+	// directory itself also reports not-indexable. The Lstat on a file
+	// segment simply fails and costs nothing semantically.
+	if !includeSubmodules {
+		dir := root
+		for _, seg := range segs {
+			dir = filepath.Join(dir, seg)
+			if isNestedRepoDir(dir) {
+				return false
+			}
+		}
+	}
+
+	// Honoured ignore files + extra exclude patterns, including
+	// directory-only rules via ancestor walking. The leaf is tested as a
+	// file (watcher events are predominantly file creates/modifies);
+	// ancestor dirs are treated as dirs by the resolver.
 	return !checker.Ignored(absPath, false)
+}
+
+// isNestedRepoDir reports whether dir is the root of a nested repository
+// checkout whose .git entry is a regular file — the on-disk shape shared by
+// a checked-out submodule (a "gitdir: <path>" pointer into the
+// superproject's .git/modules tree) and a linked worktree. Detection is
+// deliberately stat-only: git itself treats any regular-file .git as a
+// gitdir pointer, so a content read would add per-directory I/O without
+// changing the verdict. Callers never apply it to the walk root itself — a
+// linked-worktree workspace legitimately carries a pointer .git at its own
+// root and is fully indexable (see
+// TestIsIndexablePath_ManagedSessionIndexesOwnTree). An unresolvable stat (missing .git, permissions) reports false:
+// an ordinary directory must never be mistaken for a nested repository.
+func isNestedRepoDir(dir string) bool {
+	info, err := os.Lstat(filepath.Join(dir, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular()
 }
 
 // isHiddenName reports whether name is a hidden entry — one whose base name
