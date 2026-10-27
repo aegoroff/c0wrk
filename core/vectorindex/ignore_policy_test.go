@@ -410,7 +410,9 @@ func realSubmoduleFixture(t *testing.T) string {
 
 func TestWalkProjectFiles_RealGitSubmodule(t *testing.T) {
 	root := realSubmoduleFixture(t)
-	subFile := filepath.Join("vendor", "dep", "file.txt")
+	// walkRelSet keys are ToSlash-normalized, so the expected key is spelled
+	// with literal slashes (filepath.Join would yield a backslash key on Windows).
+	subFile := "vendor/dep/file.txt"
 
 	got, err := walkProjectFiles(root, testIgnoreChecker(t, root), DefaultMaxIndexableFileSize, false)
 	if err != nil {
