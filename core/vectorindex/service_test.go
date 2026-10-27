@@ -538,7 +538,7 @@ func TestValidateCollection(t *testing.T) {
 	}
 	svc.ReleaseWriteLock()
 
-	stale, newFiles, deleted, valErr := svc.ValidateCollection(context.Background(), wsDir, testIgnoreChecker(t, wsDir))
+	stale, newFiles, deleted, valErr := svc.ValidateCollection(context.Background(), wsDir, testIgnoreChecker(t, wsDir), false)
 	if valErr != nil {
 		t.Fatalf("ValidateCollection failed: %v", valErr)
 	}

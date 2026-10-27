@@ -24,6 +24,7 @@ type appBuilder interface {
 	UpdateSearchTool(*core.BuilderConfig) error
 	UpdateSecurityPolicies(*core.BuilderConfig)
 	UpdateCapabilities(*core.BuilderConfig)
+	SetVectorSearchEnabled(enabled bool)
 	UpdateShellBlocklist(*core.BuilderConfig) error
 	ReconfigureMCP(context.Context, *core.BuilderConfig) error
 	ListProviderModels(context.Context, string, *core.BuilderConfig) ([]string, error)

@@ -18,6 +18,14 @@ vi.mock('./VectorStorePanel', () => ({ VectorStorePanel: () => null }))
 vi.mock('@/components/research', () => ({ ResearchPanel: () => null }))
 vi.mock('@/hooks/useProjectGitRepo', () => ({ useProjectGitRepo: vi.fn() }))
 
+// Indexing master switch double — the gate is driven directly per test; the
+// real hook (and its GetConfig hydration/retry lifecycle) is covered by
+// useIndexingSettings.test.ts.
+const indexingGate = vi.hoisted(() => ({ enabled: true }))
+vi.mock('@/hooks/useIndexingSettings', () => ({
+  useIndexingSettings: () => indexingGate.enabled,
+}))
+
 import { WorkspacePanel } from './WorkspacePanel'
 import { useProjectStore } from '@/stores/projectStore'
 import { useGitPanelStore, selectGitPanelTab } from '@/stores/gitPanelStore'
@@ -69,6 +77,7 @@ function has(testId: string): boolean {
 }
 
 beforeEach(() => {
+  indexingGate.enabled = true
   useProjectStore.setState({ projects: [P1, NO_PROJECT], activeProjectId: 'p1' })
   useGitPanelStore.getState().reset()
   useUIStore.setState({ workspaceTabByProject: {} })
@@ -287,5 +296,120 @@ describe('WorkspacePanel — ARIA tabs wiring', () => {
 
     expect(container!.querySelectorAll('[role="tab"]')).toHaveLength(0)
     expect(container!.querySelectorAll('[role="tabpanel"]')).toHaveLength(0)
+  })
+})
+
+describe('WorkspacePanel — indexing gate (Search tab)', () => {
+  /** Whether a tab trigger with the given segment value renders. */
+  function hasTab(value: string): boolean {
+    return container?.querySelector(`[data-segment-value="${value}"]`) != null
+  }
+
+  it('renders the Search tab in both layouts while indexing is enabled', async () => {
+    renderPanel()
+    await flush()
+
+    expect(hasTab('semantics')).toBe(true)
+    expect(tabCount()).toBe(3) // Explorer | Search | Research
+
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(true, 'p1')
+    })
+    await flush()
+
+    expect(hasTab('semantics')).toBe(true)
+    expect(tabCount()).toBe(3) // Git | Search | Research
+  })
+
+  it('hides the Search tab from the git layout while indexing is disabled', async () => {
+    indexingGate.enabled = false
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(true, 'p1')
+    })
+
+    renderPanel()
+    await flush()
+
+    expect(hasTab('semantics')).toBe(false)
+    expect(tabCount()).toBe(2) // Git | Research — no Search
+  })
+
+  it('hides the Search tab from the non-git layout while indexing is disabled', async () => {
+    indexingGate.enabled = false
+
+    renderPanel()
+    await flush()
+
+    expect(hasTab('semantics')).toBe(false)
+    expect(tabCount()).toBe(2) // Explorer | Research — no Search
+  })
+
+  it('remaps a remembered semantics tab to git (and persists it) when indexing is off', async () => {
+    indexingGate.enabled = false
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(true, 'p1')
+    })
+    useUIStore.setState({ workspaceTabByProject: { p1: 'semantics' } })
+
+    renderPanel()
+    await flush()
+
+    // The store is corrected to the layout's primary tab...
+    expect(selectWorkspaceTab(useUIStore.getState(), 'p1')).toBe('git')
+    // ...and the git panel (not the hidden semantics panel) mounts.
+    expect(has('git-panel')).toBe(true)
+    expect(container!.querySelector('[role="tabpanel"]')!.id).toBe('workspace-panel-git')
+  })
+
+  it('remaps a remembered semantics tab to explorer when indexing is off (non-git)', async () => {
+    indexingGate.enabled = false
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(false, 'p1')
+    })
+    useUIStore.setState({ workspaceTabByProject: { p1: 'semantics' } })
+
+    renderPanel()
+    await flush()
+
+    expect(selectWorkspaceTab(useUIStore.getState(), 'p1')).toBe('explorer')
+    expect(has('file-tree')).toBe(true)
+    expect(container!.querySelector('[role="tabpanel"]')!.id).toBe('workspace-panel-explorer')
+  })
+
+  it('inline-remaps semantics while the repo check is pending (store untouched until it lands)', async () => {
+    indexingGate.enabled = false
+    useUIStore.setState({ workspaceTabByProject: { p1: 'semantics' } })
+    // No completed repo check for p1 — repoKnown is false, so the
+    // normalization effect must not clobber the remembered tab yet.
+
+    renderPanel()
+    await flush()
+
+    // Fail-closed non-git layout: the explorer renders this frame via the
+    // INLINE remap, while the store still holds the remembered semantics.
+    expect(has('file-tree')).toBe(true)
+    expect(selectWorkspaceTab(useUIStore.getState(), 'p1')).toBe('semantics')
+
+    // Once the check lands (a repo), the effect persists the git fallback.
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(true, 'p1')
+    })
+    await flush()
+
+    expect(selectWorkspaceTab(useUIStore.getState(), 'p1')).toBe('git')
+    expect(has('git-panel')).toBe(true)
+  })
+
+  it('keeps a remembered semantics tab while indexing is enabled', async () => {
+    act(() => {
+      useGitPanelStore.getState().setGitRepo(true, 'p1')
+    })
+    useUIStore.setState({ workspaceTabByProject: { p1: 'semantics' } })
+
+    renderPanel()
+    await flush()
+
+    expect(selectWorkspaceTab(useUIStore.getState(), 'p1')).toBe('semantics')
+    expect(container!.querySelector('[role="tabpanel"]')!.id).toBe('workspace-panel-semantics')
   })
 })

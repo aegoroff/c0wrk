@@ -468,7 +468,14 @@ func (f *FrontendAPI) GetVectorIndexStatus() VectorIndexStatus {
 
 	vm, err := f.vectorRootsRegistry().FocusManager(f.ctx())
 	if err != nil {
-		result := VectorIndexStatus{State: "unavailable", Indices: []string{}}
+		// A disabled registry (vector_index.enabled: false) is a user state,
+		// not a failure: render the explicit off state instead of
+		// "unavailable".
+		state := "unavailable"
+		if errors.Is(err, errVectorDisabled) {
+			state = vectorStateDisabled
+		}
+		result := VectorIndexStatus{State: state, Indices: []string{}}
 		f.applyEmbedderInfo(&result)
 		return result
 	}

@@ -40,6 +40,13 @@ vi.mock('@/stores/inputModeStore', () => ({
     selector(inputMock),
 }))
 
+// Indexing master switch double — driven directly per test; the real hook
+// (GetConfig hydration + retries) is covered by useIndexingSettings.test.ts.
+const indexingGate = vi.hoisted(() => ({ enabled: true }))
+vi.mock('@/hooks/useIndexingSettings', () => ({
+  useIndexingSettings: () => indexingGate.enabled,
+}))
+
 import { FileViewerContextMenu } from './FileViewerContextMenu'
 
 describe('FileViewerContextMenu', () => {
@@ -49,6 +56,7 @@ describe('FileViewerContextMenu', () => {
 
   beforeEach(() => {
     onClose = vi.fn()
+    indexingGate.enabled = true
     vectorMock.status = { state: 'ready' }
     vectorMock.setQuery.mockClear()
     uiMock.setWorkspaceTab.mockClear()
@@ -161,5 +169,31 @@ describe('FileViewerContextMenu', () => {
     const item = menuItem('Find similar')
     expect(item.hasAttribute('aria-disabled')).toBe(false)
     expect(item.hasAttribute('title')).toBe(false)
+  })
+
+  it('hides Find similar (divider included) while indexing is disabled — only Add to chat remains', () => {
+    indexingGate.enabled = false
+    renderMenu('@foo.go#L1', 'func foo() {}')
+
+    // Exactly one menuitem renders — "Add to chat"...
+    const items = container.querySelectorAll('[role="menuitem"]')
+    expect(items).toHaveLength(1)
+    expect(items[0]?.textContent?.trim()).toBe('Add to chat')
+    // ...and no "Find similar" text or divider (the divider only separates
+    // the two entries, so it hides with the gated entry).
+    expect(container.textContent ?? '').not.toContain('Find similar')
+    expect(container.querySelector('.h-px.bg-border')).toBeNull()
+  })
+
+  it('shows Find similar again once indexing is (re-)enabled', () => {
+    indexingGate.enabled = false
+    renderMenu('@foo.go#L1', 'code')
+    expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(1)
+
+    indexingGate.enabled = true
+    renderMenu('@foo.go#L1', 'code')
+
+    expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(2)
+    expect(() => menuItem('Find similar')).not.toThrow()
   })
 })

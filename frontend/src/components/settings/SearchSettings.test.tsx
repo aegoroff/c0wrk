@@ -17,12 +17,20 @@ import { createRoot, type Root } from 'react-dom/client'
 const spies = vi.hoisted(() => ({
   getConfig: vi.fn(),
   updateSearchSettings: vi.fn<(req: unknown) => Promise<void>>(),
+  updateIndexingSettings: vi.fn<(req: unknown) => Promise<void>>(),
+  listVectorIndexGPUs: vi.fn<() => Promise<unknown[]>>(),
 }))
 
 vi.mock('@/api/config', () => ({
   getConfig: spies.getConfig,
   updateSearchSettings: spies.updateSearchSettings,
+  updateIndexingSettings: spies.updateIndexingSettings,
   MASKED_API_KEY: '***configured***',
+}))
+// IndexingSettings (rendered above the provider section) embeds
+// VectorIndexSettings, which probes the GPU list on mount on Linux hosts.
+vi.mock('@/api/vector', () => ({
+  listVectorIndexGPUs: spies.listVectorIndexGPUs,
 }))
 vi.mock('@/lib/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -37,6 +45,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.useFakeTimers()
   spies.updateSearchSettings.mockResolvedValue(undefined)
+  spies.updateIndexingSettings.mockResolvedValue(undefined)
+  spies.listVectorIndexGPUs.mockResolvedValue([])
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -332,5 +342,36 @@ describe('SearchSettings — section heading', () => {
     expect(heading!.className).toContain('flex items-center gap-2')
     expect(heading!.className).toContain('text-sm font-medium')
     expect(heading!.className).not.toContain('text-xs')
+  })
+})
+
+describe('SearchSettings — tab composition (indexing block first)', () => {
+  it('renders the Indexing section above the Web Search Provider section, separated by a divider', async () => {
+    await renderSearchSettings({ provider: 'tavily', api_key: '' })
+
+    // The Indexing section header (master toggle, exclude-glob editor,
+    // policy toggles, and the moved vector-index controls) renders first.
+    const indexingHeader = [...container.querySelectorAll('span')].find(
+      (s) => s.textContent === 'Indexing',
+    )
+    expect(indexingHeader).toBeDefined()
+
+    const providerHeading = [...container.querySelectorAll('label')].find((el) =>
+      (el.textContent ?? '').includes('Web Search Provider'),
+    )
+    expect(providerHeading).toBeDefined()
+
+    // DOM order pins the placement contract: indexing before the provider.
+    expect(
+      indexingHeader!.compareDocumentPosition(providerHeading!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+
+    // The provider section sits below a divider inside the same tab stack,
+    // mirroring how the General tab separates its sections.
+    const providerSection = providerHeading!.closest('div.border-t')
+    expect(providerSection).not.toBeNull()
+    expect(providerSection!.className).toContain('pt-4')
+    expect(providerSection!.parentElement).toBe(indexingHeader!.closest('div.space-y-6'))
   })
 })

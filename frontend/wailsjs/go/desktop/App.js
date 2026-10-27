@@ -974,6 +974,10 @@ export function UpdateHypothesis(arg1, arg2, arg3, arg4) {
   return window['go']['desktop']['App']['UpdateHypothesis'](arg1, arg2, arg3, arg4);
 }
 
+export function UpdateIndexingSettings(arg1) {
+  return window['go']['desktop']['App']['UpdateIndexingSettings'](arg1);
+}
+
 export function UpdateLLMConfig(arg1) {
   return window['go']['desktop']['App']['UpdateLLMConfig'](arg1);
 }

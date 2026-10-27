@@ -386,7 +386,7 @@ func TestWalkProjectFiles(t *testing.T) {
 		}
 	}
 
-	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize)
+	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestWalkProjectFiles_WithGitignore(t *testing.T) {
 		}
 	}
 
-	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize)
+	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestWalkProjectFiles_WithAiignore(t *testing.T) {
 		}
 	}
 
-	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize)
+	files, err := walkProjectFiles(dir, testIgnoreChecker(t, dir), DefaultMaxIndexableFileSize, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestWalkProjectFiles_SkipsOversized(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := walkProjectFiles(root, testIgnoreChecker(t, root), DefaultMaxIndexableFileSize)
+	files, err := walkProjectFiles(root, testIgnoreChecker(t, root), DefaultMaxIndexableFileSize, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles: %v", err)
 	}

@@ -41,7 +41,7 @@ func TestWalkProjectFiles_ExcludesNestedWorktreesContainer(t *testing.T) {
 		}
 	}
 
-	got, err := walkProjectFiles(root, noopIgnoreChecker{}, 1<<20)
+	got, err := walkProjectFiles(root, noopIgnoreChecker{}, 1<<20, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestIsIndexablePath_WorktreesContainerExcluded(t *testing.T) {
 		{filepath.Join(root, "sub", "f.go"), true},
 	}
 	for _, tc := range cases {
-		if got := isIndexablePath(tc.path, root, noopIgnoreChecker{}); got != tc.want {
+		if got := isIndexablePath(tc.path, root, noopIgnoreChecker{}, false); got != tc.want {
 			t.Errorf("isIndexablePath(%q) = %v, want %v", tc.path, got, tc.want)
 		}
 	}
@@ -85,10 +85,10 @@ func TestIsIndexablePath_WorktreesContainerExcluded(t *testing.T) {
 func TestIsIndexablePath_ManagedSessionIndexesOwnTree(t *testing.T) {
 	repo := t.TempDir()
 	wt := filepath.Join(repo, ".worktrees", "s1")
-	if !isIndexablePath(filepath.Join(wt, "src", "main.go"), wt, noopIgnoreChecker{}) {
+	if !isIndexablePath(filepath.Join(wt, "src", "main.go"), wt, noopIgnoreChecker{}, false) {
 		t.Error("files under a managed session's own tree root are not indexable; the hidden container segment is above the walk root and must not block indexing")
 	}
-	if isIndexablePath(filepath.Join(wt, ".git", "config"), wt, noopIgnoreChecker{}) {
+	if isIndexablePath(filepath.Join(wt, ".git", "config"), wt, noopIgnoreChecker{}, false) {
 		t.Error(".git inside a managed tree must stay non-indexable")
 	}
 }
@@ -113,7 +113,7 @@ func TestWalkProjectFiles_RealLinkedWorktreeInsideContainer(t *testing.T) {
 
 	// Walking the CHECKOUT excludes the whole managed container, exactly as
 	// the synthetic test pins — with the real worktree's files on disk.
-	got, err := walkProjectFiles(root, noopIgnoreChecker{}, 1<<20)
+	got, err := walkProjectFiles(root, noopIgnoreChecker{}, 1<<20, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles(checkout): %v", err)
 	}
@@ -135,7 +135,7 @@ func TestWalkProjectFiles_RealLinkedWorktreeInsideContainer(t *testing.T) {
 	// Walking the WORKTREE ITSELF (the managed session's own index root)
 	// indexes its regular files — including the initial-commit file.txt —
 	// while the `.git` pointer FILE stays excluded by name.
-	got, err = walkProjectFiles(wt, noopIgnoreChecker{}, 1<<20)
+	got, err = walkProjectFiles(wt, noopIgnoreChecker{}, 1<<20, false)
 	if err != nil {
 		t.Fatalf("walkProjectFiles(worktree): %v", err)
 	}

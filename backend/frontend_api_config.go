@@ -46,6 +46,14 @@ func (f *FrontendAPI) GetConfig() ConfigResponse {
 		VectorIndex: VectorIndexSettingsResponse{
 			ExecutionProvider: f.config.VectorIndex.ExecutionProvider,
 			DeviceID:          f.config.VectorIndex.DeviceID,
+			// Indexing-policy half, served RESOLVED (pointer-bool defaults
+			// applied through the predicates) — the same values the update
+			// path persists and the live factory consumes.
+			Enabled:          f.config.VectorIndex.IndexingEnabled(),
+			ExcludePatterns:  nonNilStringSlice(f.config.VectorIndex.ExcludePatterns),
+			IndexSubmodules:  f.config.VectorIndex.ShouldIndexSubmodules(),
+			RespectGitIgnore: f.config.VectorIndex.ShouldRespectGitIgnore(),
+			RespectAIIgnore:  f.config.VectorIndex.ShouldRespectAIIgnore(),
 		},
 		Proxy: ProxySettingsResponse{
 			Enabled:    f.config.Proxy.Enabled,
@@ -612,6 +620,131 @@ func (f *FrontendAPI) UpdateVectorIndexSettings(settings VectorIndexSettingsResp
 		return fmt.Errorf("failed to persist vector index settings: %w", err)
 	}
 
+	return nil
+}
+
+// vectorStateDisabled is the VectorIndexStatus.State value for the switched-
+// off subsystem (vector_index.enabled: false) — distinct from "unavailable"
+// (a failed backend) so the UI can render an explicit off state.
+const vectorStateDisabled = "disabled"
+
+// vectorPolicyChanged reports whether two resolved indexing policies differ
+// on any field the manager factory consumes (ignore-file selection, exclude
+// patterns, submodule walking). A save that changes nothing live skips the
+// manager release/rebuild. IgnoreFiles is compared nil-sensitively — nil
+// (both ignore files honoured) and empty (neither honoured) are DISTINCT
+// policies — while ExcludePatterns treats nil and empty as the same
+// "no excludes" policy, so clearing an unset list is not a spurious change.
+func vectorPolicyChanged(a, b VectorIndexingPolicy) bool {
+	if (a.IgnoreFiles == nil) != (b.IgnoreFiles == nil) {
+		return true
+	}
+	if !slices.Equal(a.IgnoreFiles, b.IgnoreFiles) {
+		return true
+	}
+	if !slices.Equal(a.ExcludePatterns, b.ExcludePatterns) {
+		return true
+	}
+	return a.IncludeSubmodules != b.IncludeSubmodules
+}
+
+// UpdateIndexingSettings updates the vector-index indexing policy
+// (vector_index.enabled / exclude_patterns / index_submodules /
+// respect_gitignore / respect_aiignore) and applies it LIVE; the
+// disable/enable/policy-only semantics are specified in
+// specs/domains/workspace.md (the "live-applied by UpdateIndexingSettings"
+// invariant) and ADR-103. Locking mirrors UpdateProxySettings: saveMu
+// serializes save sequences, configMu covers only validate/mutate/persist —
+// the live application (manager shutdowns, the desktop restart) runs
+// outside configMu so concurrent GetConfig readers stay responsive.
+func (f *FrontendAPI) UpdateIndexingSettings(req IndexingSettingsRequest) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+
+	f.configMu.Lock()
+	if f.config == nil {
+		f.configMu.Unlock()
+		return errors.New("config not initialized")
+	}
+
+	// Validate BEFORE any mutation: a rejected request must leave both the
+	// in-memory config and the YAML file untouched. This is the exact
+	// load-time rule set (config.ValidateVectorIndexExcludePatterns is the
+	// single source), so the settings UI surfaces the same errors a bad
+	// config file would.
+	if err := config.ValidateVectorIndexExcludePatterns(req.ExcludePatterns); err != nil {
+		f.configMu.Unlock()
+		return err
+	}
+
+	prev := f.config.VectorIndex
+	prevEnabled := prev.IndexingEnabled()
+	prevPolicy := ResolveVectorIndexingPolicy(prev)
+
+	enabled := req.Enabled
+	submodules := req.IndexSubmodules
+	respectGit := req.RespectGitIgnore
+	respectAI := req.RespectAIIgnore
+	f.config.VectorIndex.Enabled = &enabled
+	f.config.VectorIndex.ExcludePatterns = slices.Clone(req.ExcludePatterns)
+	f.config.VectorIndex.IndexSubmodules = &submodules
+	f.config.VectorIndex.RespectGitIgnore = &respectGit
+	f.config.VectorIndex.RespectAIIgnore = &respectAI
+
+	if err := f.persistConfig(); err != nil {
+		f.log().Warn("failed to persist indexing settings", "error", err)
+		f.configMu.Unlock()
+		return fmt.Errorf("failed to persist indexing settings: %w", err)
+	}
+
+	newPolicy := ResolveVectorIndexingPolicy(f.config.VectorIndex)
+	f.configMu.Unlock()
+
+	// --- Live application below runs OUTSIDE configMu ---
+
+	// Disable transition. The desktop hook must run BEFORE
+	// VectorRoots.Disable: it invalidates any in-flight background init, so
+	// that init's late SetFactory cannot resurrect a factory after Disable
+	// unwound it (the launcher's epochal guard makes the stale launch close
+	// its own embedder instead).
+	if prevEnabled && !req.Enabled {
+		if hook := f.vectorIndexEnabledHook.Load(); hook != nil {
+			(*hook)(false)
+		}
+		if b := f.builder(); b != nil {
+			b.SetVectorSearchEnabled(false)
+		}
+		f.vectorRootsRegistry().Disable()
+		st := VectorIndexStatus{State: vectorStateDisabled, Indices: []string{}}
+		f.applyEmbedderInfo(&st)
+		f.emitEvent(EventVectorIndexStatus, st)
+		f.log().Info("vector indexing disabled at runtime (vector_index.enabled: false)")
+		return nil
+	}
+
+	// Enable transition: restore the tool/RAG registration and launch the
+	// desktop-side restart. The registry stays parked (errVectorDisabled)
+	// until the fresh init lands its factory; the restart's
+	// InitVectorIndexForActiveProject then builds the focus root's manager
+	// with the just-persisted policy.
+	if req.Enabled && !prevEnabled {
+		if b := f.builder(); b != nil {
+			b.SetVectorSearchEnabled(true)
+		}
+		if hook := f.vectorIndexEnabledHook.Load(); hook != nil {
+			(*hook)(true)
+		}
+		f.log().Info("vector indexing re-enabled at runtime; background ONNX init restarting")
+		return nil
+	}
+
+	// Policy-only change while enabled: release the live managers (each
+	// baked the previous policy into its Indexer at SwitchProject) and
+	// rebuild the focus root. A save that resolves to the same policy skips
+	// the release — an unchanged policy must not force a full re-index.
+	if req.Enabled && vectorPolicyChanged(prevPolicy, newPolicy) {
+		f.vectorRootsRegistry().ReloadPolicy(f.ctx())
+	}
 	return nil
 }
 

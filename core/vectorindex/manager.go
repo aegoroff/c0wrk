@@ -106,6 +106,25 @@ type ManagerConfig struct {
 	// policy changes invalidate sidecar entries like chunk-size changes.
 	ContentFilter *ContentFilterConfig
 
+	// IgnoreFiles selects which ignore files the indexing walks honour:
+	// nil (the zero value) = both .gitignore and .aiignore; a non-nil slice
+	// is the exact honoured set (".gitignore"/".aiignore"); an empty
+	// non-nil slice honours neither file (vector_index.respect_gitignore /
+	// respect_aiignore). Forwarded to the per-project IndexerConfig.
+	IgnoreFiles []string
+
+	// ExcludePatterns are subtractive gitignore-style patterns layered on
+	// top of the honoured ignore files (vector_index.exclude_patterns);
+	// a previously-indexed file a new pattern covers is dropped by the next
+	// incremental pass. Forwarded to the per-project IndexerConfig.
+	ExcludePatterns []string
+
+	// IncludeSubmodules controls whether nested-repository directories
+	// (a checked-out submodule: .git is a regular gitdir-pointer file) are
+	// indexed (vector_index.index_submodules; default false). Forwarded to
+	// the per-project IndexerConfig.
+	IncludeSubmodules bool
+
 	// EmbeddingBatchSize is the fixed row capacity of the embedder's batch
 	// ONNX session (sp4rk embedding.EmbedderConfig.BatchSize). The embedder
 	// itself is constructed by the caller (desktop startup), which sets the
@@ -247,6 +266,15 @@ type Manager struct {
 	maxChunkSize     int
 	maxChunksPerFile int
 	contentFilter    ContentFilterConfig
+
+	// ignoreFiles / excludePatterns / includeSubmodules are the resolved
+	// ignore policy (ManagerConfig.IgnoreFiles / ExcludePatterns /
+	// IncludeSubmodules via vector_index.respect_gitignore /
+	// respect_aiignore / exclude_patterns / index_submodules), forwarded to
+	// the per-project IndexerConfig in initProject.
+	ignoreFiles       []string
+	excludePatterns   []string
+	includeSubmodules bool
 
 	// chunkOverlap is the resolved character overlap between adjacent chunks
 	// (ManagerConfig.ChunkOverlap via vector_index.chunk_overlap), passed
@@ -412,6 +440,9 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		debounce:           cfg.Debounce,
 		searchWaitTimeout:  cfg.SearchWaitTimeout,
 		closeFn:            cfg.CloseFn,
+		ignoreFiles:        cfg.IgnoreFiles,
+		excludePatterns:    cfg.ExcludePatterns,
+		includeSubmodules:  cfg.IncludeSubmodules,
 	}, nil
 }
 
@@ -701,18 +732,21 @@ func (m *Manager) initProject(ctx context.Context, projectID, workspacePath, vec
 	// callback below capture this local via closure, so they are unaffected.
 	m.setStatus(map[string]any{"branch": branch})
 	indexer := NewIndexer(IndexerConfig{
-		Service:          m.service,
-		ChunkFn:          m.chunkFn,
-		HashFn:           m.hashFn,
-		MaxFileSize:      m.maxFileSize,
-		MaxChunkSize:     m.maxChunkSize,
-		MaxChunksPerFile: m.maxChunksPerFile,
-		ContentFilter:    &m.contentFilter,
-		Overlap:          m.chunkOverlap,
-		PrepWorkers:      m.prepWorkers,
-		OnProgress:       m.wrapProgress(cbs.OnProgress),
-		Logger:           m.logger,
-		Telemetry:        m.telemetry,
+		Service:           m.service,
+		ChunkFn:           m.chunkFn,
+		HashFn:            m.hashFn,
+		MaxFileSize:       m.maxFileSize,
+		MaxChunkSize:      m.maxChunkSize,
+		MaxChunksPerFile:  m.maxChunksPerFile,
+		ContentFilter:     &m.contentFilter,
+		Overlap:           m.chunkOverlap,
+		PrepWorkers:       m.prepWorkers,
+		IgnoreFiles:       m.ignoreFiles,
+		ExcludePatterns:   m.excludePatterns,
+		IncludeSubmodules: m.includeSubmodules,
+		OnProgress:        m.wrapProgress(cbs.OnProgress),
+		Logger:            m.logger,
+		Telemetry:         m.telemetry,
 	})
 
 	// Switch to branch collection (opens the per-branch bleve index).

@@ -3,7 +3,7 @@
 import { getApp } from './runtime'
 import { logger } from '@/lib/logger'
 import { isConfigResponse, isSecuritySettingsResponse, isModelProfilesResponse, isShellExecSettingsResponse } from '@/types/guards'
-import type { ConfigResponse, SecuritySettingsResponse, ShellExecSettingsResponse, LLMFullConfigRequest, SearchSettingsRequest, ProxySettingsRequest, ModelConfigResponse, ModelConfigRequest, ModelProfilesResponse, ModelProfileUpdateRequest, VectorIndexSettingsResponse, GetProviderTLSCertificateRequest, TLSCertificateResponse } from '@/types/models'
+import type { ConfigResponse, SecuritySettingsResponse, ShellExecSettingsResponse, LLMFullConfigRequest, SearchSettingsRequest, ProxySettingsRequest, ModelConfigResponse, ModelConfigRequest, ModelProfilesResponse, ModelProfileUpdateRequest, VectorIndexSettingsResponse, IndexingSettingsRequest, GetProviderTLSCertificateRequest, TLSCertificateResponse } from '@/types/models'
 
 /** Sentinel value returned by backend when an API key is configured but should not be displayed */
 export const MASKED_API_KEY = '***configured***'
@@ -230,6 +230,27 @@ export async function updateVectorIndexSettings(settings: VectorIndexSettingsRes
     await app.UpdateVectorIndexSettings(settings)
   } catch (err) {
     logger.error('Failed to update vector index settings:', err)
+    throw err
+  }
+}
+
+/**
+ * Persist and LIVE-APPLY the vector-index indexing policy (enabled /
+ * exclude_patterns / index_submodules / respect_gitignore /
+ * respect_aiignore). Unlike the embedding half above, no restart is
+ * needed: the backend validates the pattern list, persists, then applies
+ * the policy to the running subsystem (enable/disable the semantic-search
+ * tool and RAG closures, reload live index managers on policy changes).
+ * The request is a full replacement — callers send all five fields and
+ * keep the values they are not changing. Callers should invalidate the
+ * config cache afterwards.
+ */
+export async function updateIndexingSettings(settings: IndexingSettingsRequest): Promise<void> {
+  try {
+    const app = getApp()
+    await app.UpdateIndexingSettings(settings)
+  } catch (err) {
+    logger.error('Failed to update indexing settings:', err)
     throw err
   }
 }

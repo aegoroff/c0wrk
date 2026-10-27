@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -64,6 +65,12 @@ var errVectorStillLoading = errors.New("vector search not ready (index backend s
 // errVectorUnavailable is the post-init surface when the embedder never came
 // up (model files missing, ONNX load failure) — no manager can ever be built.
 var errVectorUnavailable = errors.New("vector search unavailable (embedding backend failed to initialize; see vector_index:status events or the session log)")
+
+// errVectorDisabled is the switched-off surface: vector_index.enabled is
+// false, the registry was Disable()d, and every routing path (semantic_search
+// tool, RAG hints, user-facing search) fails fast with it until the
+// restartable init re-wires a factory (UpdateIndexingSettings enabled=true).
+var errVectorDisabled = errors.New("vector search is disabled (vector_index.enabled is false)")
 
 // errVectorNoTarget is the legacy "nothing to search with" surface: no
 // workspace in context and no focus root resolved.
@@ -107,6 +114,13 @@ type VectorRoots struct {
 	// an LRU eviction must never close the shared ONNX runtime.
 	closeEmbedder func() error
 
+	// disabled is the live off-switch set by Disable() (UpdateIndexingSettings
+	// enabled=false, or the startup skip when the config boots with
+	// vector_index.enabled: false). While set, every path returns
+	// errVectorDisabled and FactoryReady reports false; SetFactory (the
+	// restartable desktop init) clears it.
+	disabled bool
+
 	shutdown bool
 }
 
@@ -140,18 +154,27 @@ func (vr *VectorRoots) SetFactory(factory func() (*vectorindex.Manager, error), 
 	vr.factory = factory
 	vr.ready = ready
 	vr.closeEmbedder = closeEmbedder
+	// A factory landing here is the restartable init's success path
+	// (startup or an UpdateIndexingSettings enabled=true restart): the
+	// registry is back on, so a previous Disable() no longer applies.
+	vr.disabled = false
 }
 
 // FactoryReady reports whether the registry can build managers: the factory
 // is set, or the background init has settled (in which case creation fails
 // fast with errVectorUnavailable). The project-switch handshake uses this to
-// decide between applying and deferring a switch's vector setup.
+// decide between applying and deferring a switch's vector setup. A disabled
+// registry reports false: there is nothing to set up now, and the switch's
+// deferral is drained by the restart when the user re-enables indexing.
 func (vr *VectorRoots) FactoryReady() bool {
 	if vr == nil {
 		return false
 	}
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
+	if vr.disabled {
+		return false
+	}
 	return vr.factory != nil || vr.readySettledLocked()
 }
 
@@ -180,6 +203,68 @@ func canonicalRoot(root string) string {
 	return filepath.Clean(root)
 }
 
+// ---------------------------------------------------------------------------
+// Indexing policy: live-config snapshot for the manager factory
+// ---------------------------------------------------------------------------
+
+// VectorIndexingPolicy is the resolved indexing-policy half of
+// vector_index.* — the fields a manager factory must read from the LIVE
+// config (under configMu), never from the startup snapshot, because
+// UpdateIndexingSettings persists them at runtime:
+//
+//   - IgnoreFiles selects the honoured ignore files for the index walk
+//     (nil = both .gitignore and .aiignore; a non-nil slice is the exact
+//     honoured set; an empty non-nil slice honours neither).
+//   - ExcludePatterns are the subtractive exclude-only globs.
+//   - IncludeSubmodules toggles nested-repo (submodule) directories.
+//
+// It maps 1:1 onto vectorindex.ManagerConfig's IgnoreFiles /
+// ExcludePatterns / IncludeSubmodules.
+type VectorIndexingPolicy struct {
+	IgnoreFiles       []string
+	ExcludePatterns   []string
+	IncludeSubmodules bool
+}
+
+// ResolveVectorIndexingPolicy maps the config section's pointer-bool gates
+// onto the indexer's ignore-file selection: both respected → nil (the
+// historical default), either one off → the exact honoured set, both off →
+// the empty non-nil slice (the noop-ignore sentinel). The resolved values
+// are the ones ApplyDefaults would materialize, so this works on both the
+// live config and a freshly loaded one.
+func ResolveVectorIndexingPolicy(vi config.VectorIndexConfig) VectorIndexingPolicy {
+	git, ai := vi.ShouldRespectGitIgnore(), vi.ShouldRespectAIIgnore()
+	var ignoreFiles []string
+	switch {
+	case git && ai:
+		ignoreFiles = nil
+	case git:
+		ignoreFiles = []string{".gitignore"}
+	case ai:
+		ignoreFiles = []string{".aiignore"}
+	default:
+		ignoreFiles = []string{}
+	}
+	return VectorIndexingPolicy{
+		IgnoreFiles:       ignoreFiles,
+		ExcludePatterns:   vi.ExcludePatterns,
+		IncludeSubmodules: vi.ShouldIndexSubmodules(),
+	}
+}
+
+// indexingPolicySnapshotLocked reads the live indexing policy under
+// configMu. The exclude list is cloned so a later settings save that
+// replaces the config's slice cannot race a manager build reading the
+// snapshot.
+func (f *FrontendAPI) indexingPolicySnapshotLocked() VectorIndexingPolicy {
+	if f.config == nil {
+		return ResolveVectorIndexingPolicy(config.VectorIndexConfig{})
+	}
+	pol := ResolveVectorIndexingPolicy(f.config.VectorIndex)
+	pol.ExcludePatterns = slices.Clone(pol.ExcludePatterns)
+	return pol
+}
+
 // awaitReady gates on the background ONNX init: when block is set it waits
 // until the init settles or ctx expires (still-loading hint on expiry);
 // otherwise it checks readiness without ever blocking (the fail-fast
@@ -187,7 +272,11 @@ func canonicalRoot(root string) string {
 func (vr *VectorRoots) awaitReady(ctx context.Context, block bool) error {
 	vr.mu.Lock()
 	ready := vr.ready
+	disabled := vr.disabled
 	vr.mu.Unlock()
+	if disabled {
+		return errVectorDisabled
+	}
 	if ready == nil {
 		return errVectorStillLoading
 	}
@@ -282,6 +371,9 @@ func (vr *VectorRoots) ManagerForRoot(ctx context.Context, root string) (*vector
 	if vr.shutdown {
 		return nil, errors.New("vector search is shutting down")
 	}
+	if vr.disabled {
+		return nil, errVectorDisabled
+	}
 	if e, ok := vr.roots[root]; ok {
 		e.lastUsed = time.Now()
 		return e.mgr, nil
@@ -303,6 +395,9 @@ func (vr *VectorRoots) ManagerForRoot(ctx context.Context, root string) (*vector
 		// concurrent creator, a fresh eviction, or ShutdownAll.
 		if vr.shutdown {
 			return nil, errors.New("vector search is shutting down")
+		}
+		if vr.disabled {
+			return nil, errVectorDisabled
 		}
 		if e, ok := vr.roots[root]; ok {
 			e.lastUsed = time.Now()
@@ -671,6 +766,127 @@ func (vr *VectorRoots) ShutdownAll() {
 	if closeEmbedder != nil {
 		if err := closeEmbedder(); err != nil {
 			vr.f.log().Warn("failed to close vector embedder", "error", err)
+		}
+	}
+}
+
+// Disable is the live off-switch behind UpdateIndexingSettings enabled=false
+// (and the startup skip when the config boots with indexing off): it shuts
+// down every live manager, releases the process-global embedder, drops the
+// factory, and parks the registry so every routing path fails fast with
+// errVectorDisabled until the restartable init re-wires a factory
+// (SetFactory clears the flag). Unlike ShutdownAll it is NOT final — the
+// focus root is kept (it describes the Git panel, not a manager) and the
+// shutdown flag stays clear so a later enable works. Idempotent: a second
+// call on an already-disabled registry finds no managers and a nil
+// closeEmbedder and is a pure no-op. The desktop launcher hook must
+// invalidate any in-flight init BEFORE this runs (see
+// SetVectorIndexEnabledHook): a late SetFactory would otherwise resurrect a
+// factory after Disable unwound it.
+func (vr *VectorRoots) Disable() {
+	if vr == nil {
+		return
+	}
+	vr.mu.Lock()
+	if vr.shutdown {
+		vr.mu.Unlock()
+		return
+	}
+	vr.disabled = true
+	managers := make([]*vectorindex.Manager, 0, len(vr.roots))
+	for root, e := range vr.roots {
+		managers = append(managers, e.mgr)
+		delete(vr.roots, root)
+	}
+	closeEmbedder := vr.closeEmbedder
+	// Drop the wiring: factory/ready must read as "nothing wired" so
+	// FactoryReady() reports false (the project-switch deferral path) and a
+	// stray awaitReady waiter (blocked on the OLD channel) still unblocks —
+	// it re-checks the disabled flag above on its next call.
+	vr.factory = nil
+	vr.ready = nil
+	vr.closeEmbedder = nil
+	vr.mu.Unlock()
+
+	for _, mgr := range managers {
+		mgr.Shutdown()
+	}
+	if closeEmbedder != nil {
+		if err := closeEmbedder(); err != nil {
+			vr.f.log().Warn("failed to close vector embedder on disable", "error", err)
+		}
+	}
+}
+
+// Disabled reports whether the registry is parked by Disable (vector_index.
+// enabled: false). Exposed for status surfaces.
+func (vr *VectorRoots) Disabled() bool {
+	if vr == nil {
+		return false
+	}
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+	return vr.disabled
+}
+
+// ReloadPolicy applies an indexing-policy change (exclude_patterns /
+// index_submodules / respect_gitignore / respect_aiignore) while indexing
+// stays enabled: every live manager is released — each one baked the
+// previous policy into its Indexer at SwitchProject — and the focus root's
+// manager is rebuilt immediately so the next (incremental) pass applies the
+// new policy and evicts files the new exclude set covers. Non-focus roots
+// pick the policy up when next routed to (their managers are built from the
+// live config by the factory). Roots whose Shutdown is still draining are
+// parked in the closing set exactly like an eviction, so a concurrent search
+// cannot rebuild a second manager over the same chromem storage.
+func (vr *VectorRoots) ReloadPolicy(ctx context.Context) {
+	if vr == nil {
+		return
+	}
+	vr.mu.Lock()
+	if vr.shutdown || vr.disabled {
+		vr.mu.Unlock()
+		return
+	}
+	focus := vr.focus
+	type closingEntry struct {
+		root   string
+		closed chan struct{}
+	}
+	released := make([]*vectorindex.Manager, 0, len(vr.roots))
+	closing := make([]closingEntry, 0, len(vr.roots))
+	for root, e := range vr.roots {
+		released = append(released, e.mgr)
+		delete(vr.roots, root)
+		closed := make(chan struct{})
+		if vr.closing == nil {
+			vr.closing = make(map[string]chan struct{})
+		}
+		vr.closing[root] = closed
+		closing = append(closing, closingEntry{root: root, closed: closed})
+	}
+	vr.mu.Unlock()
+
+	for i, mgr := range released {
+		mgr.Shutdown()
+		e := closing[i]
+		vr.mu.Lock()
+		if ch, ok := vr.closing[e.root]; ok && ch == e.closed {
+			delete(vr.closing, e.root)
+		}
+		close(e.closed)
+		vr.mu.Unlock()
+	}
+	if len(released) > 0 {
+		vr.f.log().Info("vector roots: released live managers for an indexing-policy change", "count", len(released))
+	}
+	// Rebuild the focus root so the UI streams the fresh pass and the new
+	// policy takes effect without waiting for the next routed search. The
+	// factory snapshots the live config, so the rebuilt manager carries the
+	// policy that was just persisted.
+	if focus != "" {
+		if err := vr.ApplyFocus(ctx, focus); err != nil {
+			vr.f.log().Warn("vector roots: focus rebuild after policy change failed", "root", focus, "error", err)
 		}
 	}
 }

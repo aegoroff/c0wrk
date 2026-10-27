@@ -20,6 +20,7 @@ import (
 	"github.com/v0lka/c0wrk/core/workspace"
 	"github.com/v0lka/sp4rk/llm"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 
 	"github.com/v0lka/sp4rk/safeio"
@@ -448,6 +449,134 @@ type VectorIndexConfig struct {
 	// concrete Intel device itself; any other value fails embedder
 	// creation). Negative values are rejected at load time by validate().
 	DeviceID int `yaml:"device_id"`
+
+	// Enabled is the master switch for the whole vector-index subsystem.
+	// When it resolves to false, no index pass runs (initial, incremental
+	// or manual reindex), the workspace watcher does not feed the indexer,
+	// and search reports an absent index rather than stale results. It is
+	// a pointer-bool so an unset key (a config written before the knob
+	// existed, or no vector_index block at all) resolves to true — the
+	// historical always-on behaviour — while an explicit false turns the
+	// subsystem off. See IndexingEnabled.
+	Enabled *bool `yaml:"enabled"`
+
+	// ExcludePatterns is an ordered list of additional gitignore-style
+	// glob patterns (doublestar syntax: `*`, `**`, `?`, `[...]`, `{a,b}`)
+	// matched against workspace-RELATIVE slash-separated paths. Patterns
+	// layer ON TOP of .gitignore/.aiignore (when those are respected) and
+	// are subtractive only — they exclude more, never un-ignore a file the
+	// ignore files skip. Use them for workspace-level excludes that do not
+	// belong in the project's committed ignore files. Every pattern's
+	// syntax is validated at load time by validate() (see
+	// VectorIndexMaxExcludePatterns / VectorIndexMaxExcludePatternLength);
+	// an empty entry or a `!`-prefixed entry is rejected — negation is a
+	// gitignore concept this exclude-only list deliberately does not
+	// support.
+	ExcludePatterns []string `yaml:"exclude_patterns"`
+
+	// IndexSubmodules controls whether git submodules under the workspace
+	// root are walked and indexed. It is a pointer-bool whose nil (unset)
+	// resolves to FALSE: submodules are separate repositories with their
+	// own ignore files, their own remotes and often their own scale, so by
+	// default they stay out of the index and an explicit opt-in is required
+	// to include them. See ShouldIndexSubmodules.
+	IndexSubmodules *bool `yaml:"index_submodules"`
+
+	// RespectGitIgnore / RespectAIIgnore toggle the two ignore-file
+	// channels of the index walk. Both are pointer-bools whose nil (unset)
+	// resolves to true — the historical behaviour excludes files matched
+	// by .gitignore and/or .aiignore rules (root and nested). Turning one
+	// off makes the walker visit files that channel skips (subject to the
+	// other channel, ExcludePatterns, and the hard size/chunk limits, which
+	// always apply). See ShouldRespectGitIgnore / ShouldRespectAIIgnore.
+	RespectGitIgnore *bool `yaml:"respect_gitignore"`
+	RespectAIIgnore  *bool `yaml:"respect_aiignore"`
+}
+
+// Indexing-policy limits enforced by validate() on
+// VectorIndexConfig.ExcludePatterns. They bound accidental blowups (a
+// pasted-in file of thousands of patterns, a glob with an embedded
+// minified blob), not legitimate use: a curated exclude list is a handful
+// of entries.
+const (
+	// VectorIndexMaxExcludePatterns is the maximum number of
+	// vector_index.exclude_patterns entries.
+	VectorIndexMaxExcludePatterns = 256
+	// VectorIndexMaxExcludePatternLength is the maximum length in bytes of
+	// a single vector_index.exclude_patterns entry.
+	VectorIndexMaxExcludePatternLength = 512
+)
+
+// IndexingEnabled reports whether the vector-index subsystem is on. A nil
+// Enabled (unset key, or a config written before the knob existed) resolves
+// to true — the historical always-on behaviour.
+func (c VectorIndexConfig) IndexingEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// ShouldIndexSubmodules reports whether git submodules under the workspace
+// root are walked and indexed. A nil IndexSubmodules (unset key) resolves to
+// false — submodules are NOT indexed by default and require an explicit
+// opt-in.
+func (c VectorIndexConfig) ShouldIndexSubmodules() bool {
+	return c.IndexSubmodules != nil && *c.IndexSubmodules
+}
+
+// ShouldRespectGitIgnore reports whether .gitignore rules exclude files from
+// the index walk. A nil RespectGitIgnore (unset key) resolves to true — the
+// historical behaviour.
+func (c VectorIndexConfig) ShouldRespectGitIgnore() bool {
+	return c.RespectGitIgnore == nil || *c.RespectGitIgnore
+}
+
+// ShouldRespectAIIgnore reports whether .aiignore rules exclude files from
+// the index walk. A nil RespectAIIgnore (unset key) resolves to true — the
+// historical behaviour.
+func (c VectorIndexConfig) ShouldRespectAIIgnore() bool {
+	return c.RespectAIIgnore == nil || *c.RespectAIIgnore
+}
+
+// ValidateVectorIndexExcludePatterns applies the load-time rules for
+// vector_index.exclude_patterns to an arbitrary candidate list: the
+// count/length caps, non-empty entries, no `!`-negation (the list is
+// exclude-only), and valid doublestar glob syntax. It is the single source
+// of those rules — validate() runs it on every config load and the
+// settings-save RPC runs it on the incoming list BEFORE any mutation, so a
+// rejected request and a rejected config file report identical errors.
+func ValidateVectorIndexExcludePatterns(patterns []string) error {
+	if len(patterns) > VectorIndexMaxExcludePatterns {
+		return fmt.Errorf(
+			"vector_index.exclude_patterns has %d entries; the maximum is %d",
+			len(patterns), VectorIndexMaxExcludePatterns,
+		)
+	}
+	for i, pattern := range patterns {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf(
+				"vector_index.exclude_patterns[%d] must be a non-empty glob pattern",
+				i,
+			)
+		}
+		if strings.HasPrefix(pattern, "!") {
+			return fmt.Errorf(
+				"vector_index.exclude_patterns[%d] %q starts with '!': negation is not supported — the list is exclude-only and can never un-ignore a file",
+				i, pattern,
+			)
+		}
+		if len(pattern) > VectorIndexMaxExcludePatternLength {
+			return fmt.Errorf(
+				"vector_index.exclude_patterns[%d] is %d bytes long; the maximum is %d",
+				i, len(pattern), VectorIndexMaxExcludePatternLength,
+			)
+		}
+		if !doublestar.ValidatePattern(pattern) {
+			return fmt.Errorf(
+				"vector_index.exclude_patterns[%d] %q is not a valid glob pattern (doublestar syntax: *, **, ?, [...], {a,b})",
+				i, pattern,
+			)
+		}
+	}
+	return nil
 }
 
 // VectorIndexContentFilterConfig is the YAML surface of the pre-chunk content
@@ -3678,6 +3807,16 @@ func validate(cfg *Config) error {
 				*budget, maxMemoryLimitMiB,
 			)
 		}
+	}
+
+	// Validate vector_index.exclude_patterns: every entry must be a valid
+	// doublestar glob (gitignore-style syntax minus negation), non-empty,
+	// and within the count/length limits. A malformed pattern would
+	// otherwise fail silently at match time — every walk skips the rule —
+	// so it fails fast at load instead (and at the settings-save RPC, via
+	// the same ValidateVectorIndexExcludePatterns helper).
+	if err := ValidateVectorIndexExcludePatterns(cfg.VectorIndex.ExcludePatterns); err != nil {
+		return err
 	}
 
 	// Validate runtime.memory_soft_limit_mb. The field is a tri-state int:

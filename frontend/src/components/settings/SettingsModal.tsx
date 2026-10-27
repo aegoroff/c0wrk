@@ -24,12 +24,11 @@ import { WebviewGpuPolicySettings } from './WebviewGpuPolicySettings'
 import { LLMSettings } from './LLMSettings'
 import { ModelProfilesSettings } from './ModelProfilesSettings'
 import { SearchSettings } from './SearchSettings'
-import { VectorIndexSettings } from './VectorIndexSettings'
 import { CapabilitiesSettings } from './CapabilitiesSettings'
 import { SecuritySettings } from './SecuritySettings'
 import { UpdateSettings } from './UpdateSettings'
 import { ExperimentalSettings } from './ExperimentalSettings'
-import { Settings, Palette, Brain, Search, Shield, Info, Component, AlertTriangle, X, Gauge, Database, Globe } from 'lucide-react'
+import { Settings, Palette, Brain, Search, Shield, Info, Component, AlertTriangle, X, Gauge, Globe } from 'lucide-react'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { hasDefaultModel } from '@/api/config'
 // The canonical app mark — the very same SVG Wails derives the bundled
@@ -306,13 +305,6 @@ export function SettingsModal() {
                   <WebAccessSettings onConfigChanged={refreshBanner} />
                 </div>
               )}
-              <div className="border-t border-border pt-4">
-                <h3 className="flex items-center gap-2 text-sm font-medium mb-3">
-                  <Database className="h-4 w-4 text-muted-foreground" />
-                  Vector Index
-                </h3>
-                <VectorIndexSettings />
-              </div>
             </div>
           </TabsContent>
 
